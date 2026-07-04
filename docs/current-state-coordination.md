@@ -112,8 +112,8 @@ confidence
 source_refs
 ```
 
-The shipped phase vocabulary matches the policy enum. `idle` is target
-vocabulary for future activity summaries.
+The shipped phase vocabulary matches the policy enum. `idle` and `expired` are
+context or status labels, not activity phases.
 
 The important fields are not only current edits. `next_plan` is often more
 valuable than `files_editing`, because it allows other actors to avoid future
@@ -137,8 +137,8 @@ Heartbeat updates keep active work fresh. Missing heartbeats should not be
 treated as success. They should move the state toward `unknown`, `idle`, or
 `expired` depending on policy.
 
-The default reservation TTL is 15 minutes. Heartbeats can extend an active reservation,
-but not beyond a 60-minute rolling maximum from `declared_at`.
+Reservation, claim, claimable-reservation, heartbeat, and retention defaults are
+canonicalized in [Canonical Freshness Defaults](#canonical-freshness-defaults).
 
 ## Protocol
 
@@ -211,9 +211,9 @@ reservation must reread the target. Manual native-tool or CLI flows then call
 the claim uses the stored reservation purpose, and clients do not provide a new
 claim purpose. Native edit hooks and sandbox `write-targets` authorization can
 lazy-claim the claimable reservation when the write is retried. Claiming creates
-active reservation scope and the active same-reservation claim. The default
-claimable reservation TTL is 120 seconds. If a claimable reservation expires
-without being claimed, the server may promote the next eligible FIFO waiter.
+active reservation scope and the active same-reservation claim. Claimable
+reservation expiry uses [Canonical Freshness Defaults](#canonical-freshness-defaults);
+after expiry, the server may promote the next eligible FIFO waiter.
 
 Resume is notification-driven rather than process-driven. The state server
 records a pending notification with the stored purpose and a monotonic
@@ -466,15 +466,17 @@ The chosen IDE direction is a soft save check. The VS Code integration can check
 the state server before a save when the editor exposes the needed pre-save hook,
 then warn without taking ownership of the human's decision.
 
-The extension should:
+The shipped VS Code extension:
 
-- report opened files, selected files, dirty buffers, save attempts, and save
-  completions where the editor API exposes them
-- call `stateful human save-check` for save attempts
-- warn the user when a save conflicts with an active agent claim or write fence
-- allow the user to continue the save explicitly
-- report completed human writes with `stateful human observe`
-- fail open with a warning if the state server cannot be reached
+- posts low-confidence open/presence and dirty observations
+- calls `stateful human save-check` for save attempts
+- warns the user when a save conflicts with an active agent claim or write fence
+- allows the user to continue the save explicitly
+- posts high-confidence save observations after completed saves
+- fails open with a warning if the state server cannot be reached
+
+Selected-file telemetry and broader arbitrary filesystem/editor watching remain
+future work.
 
 This is not a hard lock. Autosave, external processes, other editors, git
 operations, and editor-specific save paths can bypass the extension. The state
@@ -492,16 +494,16 @@ To resume writing, the agent must acknowledge reconciliation:
 
 ```text
 state.reconcile.ack / state_reconcile_ack
-stateful reconcile ack --resource <path> --files-reread <path> \
-  --summary <text> --decision adopt|reapply|ask_user|abandon \
-  --reservation-id <reservation_id>
+stateful reconcile ack --reservation-id <reservation_id> \
+  --files-reread <path> --summary <text> \
+  --decision adopt|reapply|ask_user|abandon
 ```
 
 The acknowledgement must include:
 
+- the active reservation id
 - the affected file read after the human write
 - a summary of the human change
-- whether the change conflicts with the agent's previous plan
 - the next direction: `adopt`, `reapply`, `ask_user`, or `abandon`
 
 `adopt` means the agent accepts the human change and continues from it.
@@ -532,11 +534,14 @@ non-Bash read/search/diff path: allow
 ```
 
 At the OMP adapter boundary, a stateful hook deny or unavailable result is
-returned as block, not warning, regardless of OMP yolo metadata. Built-in Bash
-passthrough is limited to strict trusted Stateful sandbox/process commands, and
-repo-external command-shaped work must pass Stateful external grant checks.
-Arbitrary raw OMP Bash plus Python/JavaScript/JS/Ruby/Julia eval-tool sandbox
-invocations are denied.
+returned as block, not warning, regardless of OMP yolo metadata. After OMP
+runtime identity and discovery succeed, authorization failures can surface as
+structured block JSON. If runtime identity/discovery subprocesses fail first, the
+OMP extension maps the non-zero failure to a hard block. Built-in Bash passthrough
+is limited to strict trusted Stateful sandbox/process commands, and repo-external
+command-shaped work must pass Stateful external grant checks. Arbitrary raw OMP
+Bash plus Python/JavaScript/JS/Ruby/Julia eval-tool sandbox invocations are
+denied.
 
 When the state server is unavailable:
 
@@ -628,10 +633,9 @@ V1 defaults to strict enforcement. Supported writes and reconciliation fail
 closed when state cannot be trusted. Usability comes from
 clear denial messages and diagnostics, not from silent grace periods.
 
-The shipped retention policy prunes event and audit history older than 14 days.
+The shipped retention policy follows the canonical freshness/defaults below.
 Expired state may be shown as handoff evidence until it leaves the retention
-window, but retention does not extend live write authority. Pruning preserves
-active current-state rows, pending notifications, and outbox sync evidence.
+window, but retention does not extend live write authority.
 
 The v1 hard block policy is:
 
@@ -656,11 +660,14 @@ the caller asks to queue on conflict. Queue promotion happens only after
 explicit release, session or activity finalization, or claim expiry. Soft
 repo-relative conflicts remain warning context in v1.
 
-Explicit overrides and phase-aware authorization are target policy and are not
-implemented in the current server. When implemented, an explicit override can
-allow a direct write authorization exception for the current agent and resource,
-but it must not reorder existing waiters, steal a claimable reservation, or move
-the overriding agent to the head of a queue.
+Explicit overrides are target policy and are not implemented in the current
+server. When implemented, an explicit override can allow a direct write
+authorization exception for the current agent and resource, but it must not
+reorder existing waiters, steal a claimable reservation, or move the overriding
+agent to the head of a queue.
+
+Phase-aware authorization is shipped: enforcement denies blocked or finalized
+phases, and awareness warns for those phase denials.
 
 A v1 task reservation must be active, unexpired, belong to the same agent, and
 include matching exact file or directory scope. Abstract task, test, port, or
@@ -678,23 +685,23 @@ task/port/migration -> prompt context and warning only
 Delete operations require exact file scope. Rename and move operations require
 exact file scope for both source and destination.
 
-Reservation freshness defaults:
+### Canonical Freshness Defaults
+
+Canonical freshness/defaults:
 
 ```text
 default reservation TTL: 15 minutes
 default claim TTL: 5 minutes
 default claimable reservation TTL: 120 seconds
+retention pruning window: 14 days for old events and expired/delivered notifications
 heartbeat extension: shipped for explicit heartbeats and implicit authorize-time
 heartbeat events on active unexpired reservation rows
 maximum rolling reservation lifetime: 60 minutes from declared_at
-target phase gating: blocked is visible but not write-authorizing
-target finalization statuses: done/failed/blocked
+activity phases: exploring | editing | testing | blocked | done | failed
+context/status labels, not phases: idle | expired
+phase-aware authorization: blocked/finalized phases deny in enforcement and warn
+in awareness; expiration/finalization ends write authority
 ```
-
-The shipped server does not persist or populate activity phase in store-backed
-authorization. Blocked-phase and finalized-session deny reasons are target
-policy behavior; current finalization completes active reservations, so later writes
-fail because no active task reservation remains.
 
 The shipped hook path records target existence and content hash when an exact
 file claim is acquired with `root`, denies hook-originated native file writes

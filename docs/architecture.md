@@ -27,10 +27,10 @@ stateful server --coordination-mode enforcement|awareness
 ```
 
 `enforcement` is the default shipped guardrail. `awareness` keeps presence and
-context rendering, but softens reservation/scope/claim coordination denials into
-warnings so the presence-first path can be measured without queue/claim blocking.
-Freshness, human-write, unsafe-command, and write-fence denials remain hard when
-those checks apply.
+context rendering, but softens reservation/scope/claim/phase coordination denials
+into warnings so the presence-first path can be measured without queue/claim
+blocking. Freshness, human-write, unsafe-command, and write-fence denials remain
+hard when those checks apply.
 
 Human coordination is implemented through `human observe`, `human save-check`,
 and `reconcile ack`, with an advisory VS Code save gate under
@@ -95,12 +95,10 @@ expiration, outbox replay, and audit queries need indexed reads. The event log
 remains append-only inside SQLite so shipped coordination events can be
 inspected and event-backed state can be replayed where supported.
 
-The shipped retention policy prunes event and audit history older than 14 days
-from the state server maintenance loop. This keeps handoff evidence available
-without turning current-state coordination into long-term memory. Pruning covers
-old events, reconciliations, conflicts, human observations, and expired
-notifications; it does not prune active current-state rows or outbox sync
-evidence.
+The shipped retention and freshness defaults are summarized canonically in
+[Current-State Coordination](current-state-coordination.md#canonical-freshness-defaults). The
+state server prunes old event history and expired or delivered notifications; it
+does not prune active current-state rows or outbox sync evidence.
 
 The v1 runtime database lives under user-level `GlobalPaths` in global server
 mode: `$STATEFUL_HOME/state.db`, or `$HOME/.stateful_core/state.db` when
@@ -186,15 +184,11 @@ stateful binary available by absolute path or PATH lookup
 Codex global hooks, repo-local compatibility hooks, and managed Codex hooks
 share the Codex lifecycle model. The isolated OMP `stateful` profile uses OMP
 extension entry points and does not expose `UserPromptSubmit`. Its
-`session-start` hook derives the active Stateful `agent_id` from
-`ctx.sessionManager`: `getSessionId()` supplies the required session UUID and
-`getLeafId()`, when present, supplies the active branch. The resulting id is
-`omp-${sessionId}-${leafId}` with a leaf id and `omp-${sessionId}` without one.
-If `getSessionId()` is unavailable or invalid, Stateful actions fail closed. OMP
-does not read event/ctx agent or session identity fields and does not maintain an
-agent-facing current-session file fallback; native tools receive the derived
-identity from the extension and state operations
-scope conflicts by `workspace_id`. Later managed
+`session-start` hook resolves OMP runtime identity as specified in
+[Hooks and identity](usage-reference.md#hooks-and-identity). Without valid
+runtime identity, Stateful actions fail closed. Native tools receive the
+extension-provided identity, and state operations scope conflicts by
+`workspace_id`. Later managed
 Codex hooks should move the same
 thin hook adapters to administrator-controlled paths and configure them from
 `requirements.toml`.
@@ -232,8 +226,11 @@ validation, hooks, reservation/claim checks, and grant limits still apply. Set
 purpose, declared scope, examples, max uses, and expiry rather than raw command
 text, and matching calls reuse the grant until it expires or reaches its use
 limit. When auto-approval is enabled, no prompt is shown.
-Other stateful allows translate to OMP allow. Stateful deny or unavailable server
-translates to a hard block, even when OMP yolo metadata is present.
+Other stateful allows translate to OMP allow. After OMP runtime identity and
+discovery succeed, Stateful authorization failures can return structured block
+JSON. If runtime identity/discovery subprocesses fail before that point, the OMP
+extension maps the non-zero failure to a hard block. OMP yolo metadata never
+turns those blocks into warnings.
 
 Hook scripts should resolve paths from the git root. Envelope-enforced routes
 include `protocol_version`; a major protocol mismatch fails closed on those
@@ -255,14 +252,16 @@ Currently implemented trigger sources:
 - Native Stateful tool calls from the agent
 - CLI and state server calls
 - CLI/watch human observation through `/v1/human/observe`
+- VS Code low-confidence open/presence and dirty observations through
+  `/v1/human/observe`
+- VS Code high-confidence save observations through `/v1/human/observe`
 - CLI and VS Code human save checks through `/v1/human/save-check`
 - Reconciliation acknowledgements through `/v1/reconcile/ack`
 
 Target and future trigger sources:
 
 - Native Codex/OMP subagent start/stop and tool activity with separate attribution
-- richer filesystem/IDE observation for open, dirty, selected, and save-complete
-  human activity signals
+- selected-file IDE telemetry and broader arbitrary filesystem/editor watching
 
 Each trigger should carry the active agent id, actor identity when known,
 workspace, branch, timestamp, and source reference.
@@ -355,9 +354,7 @@ state_reservation_claim (state.reservation.claim)
 state_reservation_cancel (state.reservation.cancel)
 state_claim_acquire (state.claim.acquire)
 state_claim_release (state.claim.release)
-state_activity_observe (state.activity.observe)
 state_activity_finalize (state.activity.finalize)
-state_conflicts_check (state.conflicts.check)
 state_current_read (state.current.read)
 state_events_read (state.events.read)
 state_context_render (state.context.render)
@@ -474,7 +471,7 @@ The state server is responsible for:
 - running background and lazy expiration for stale activity, reservation, claims,
   claimable reservations, write fences, and human observations
 - extending active reservation TTL from explicit heartbeats and authorize-time
-  implicit heartbeat events within a 60-minute rolling maximum
+  implicit heartbeat events within the canonical rolling maximum
 - evaluating conflict policy
 - promoting FIFO wait queue requests into claimable reservations after explicit
   claim release, session/activity finalization, or claim expiry, and emitting
@@ -491,12 +488,12 @@ The state server is responsible for:
 
 The shipped server supports `enforcement` and `awareness` coordination modes.
 Enforcement blocks supported writes without active reservation scope and
-same-reservation claims. Awareness softens only reservation/scope/claim
-coordination denials to warnings. Stale edits, unreconciled human writes,
-same-file write fence conflicts, git index/stage/commit serialization,
-destructive operations, and unsafe raw commands remain hard enforcement in both
-modes. V1 does not treat claims as hard distributed locks beyond those
-write-boundary guardrails.
+same-reservation claims, and it denies blocked or finalized activity phases.
+Awareness softens reservation/scope/claim/phase coordination denials to warnings.
+Stale edits, unreconciled human writes, same-file write fence conflicts, git
+index/stage/commit serialization, destructive operations, and unsafe raw
+commands remain hard enforcement in both modes. V1 does not treat claims as hard
+distributed locks beyond those write-boundary guardrails.
 
 ## Policy Engine
 
@@ -538,7 +535,7 @@ The shipped policy engine owns:
 
 The policy direction narrows broad reservation blocking toward rendered presence
 plus freshness plus thin fences. Shipped awareness mode is the comparison rail:
-reservation/scope/claim denials become warnings, while freshness, human-write,
+reservation/scope/claim/phase denials become warnings, while freshness, human-write,
 write-fence, destructive-operation, and unsafe-command denials remain hard when
 those checks apply.
 
@@ -562,9 +559,9 @@ conflicting save and that save is later observed as high-confidence human work,
 agent writes to that file are denied until the agent refreshes state and
 acknowledges reconciliation.
 
-Richer IDE observation remains future work: opened, dirty, selected, and
-save-complete telemetry should feed the same HTTP API when the IDE exposes those
-events.
+The VS Code extension also posts low-confidence open/presence and dirty signals
+and high-confidence save observations. Selected-file telemetry and broader
+arbitrary filesystem/editor watching remain future work.
 
 ## Human Write Reconciliation
 
@@ -585,13 +582,13 @@ During this blocked state, the agent may still:
 To resume writing, the agent must reread the affected file and acknowledge:
 
 ```text
-state.reconcile.ack(files_reread, human_change_summary, decision, optional conflict_with_plan)
+state.reconcile.ack(reservation_id, files_reread, human_change_summary, decision)
 ```
 
 The CLI form is:
 
 ```text
-stateful reconcile ack --resource <path> --files-reread <path> --summary <text> --decision adopt|reapply|ask_user|abandon --reservation-id <id> [--conflict-with-plan]
+stateful reconcile ack --reservation-id <id> --files-reread <path> --summary <text> --decision adopt|reapply|ask_user|abandon
 ```
 
 The HTTP route requires non-empty `files_reread`, an active reservation id whose
@@ -615,10 +612,10 @@ Initial shipped policy:
   action in enforcement mode: deny
 - reservation without matching file or directory scope before supported write
   action in awareness mode: warn, unless another hard safety denial applies
-- expired reservation or reservation beyond its 60-minute rolling window:
+- expired reservation or reservation beyond the canonical rolling lifetime:
   enforcement mode denies as missing active reservation; awareness mode warns
-- blocked phase or finalized agent flow before supported write action: target
-  phase-aware deny behavior
+- blocked phase or finalized agent flow before supported write action: deny in
+  enforcement, warn in awareness
 - directory reservation and directory claim authorize only `write_directory` for
   the exact directory resource; they do not authorize `write_file`, delete,
   rename, or move actions on child paths
@@ -669,10 +666,10 @@ specific resource override, for example: "Allow override for `src/auth.ts`."
 The user owns the judgment and responsibility for that exception.
 
 Overrides apply only to active claim conflicts. They do not bypass missing
-reservation, expired reservation, target blocked/finalized state, file or directory scope
-matching, delete exact-scope rules, or rename/move exact-scope rules. Overrides
-are scoped to the current agent, current turn, and specific resource when the
-target override policy is implemented.
+reservation, expired reservation, blocked/finalized activity phase, file or
+directory scope matching, delete exact-scope rules, or rename/move exact-scope
+rules. Overrides are scoped to the current agent, current turn, and specific
+resource when the target override policy is implemented.
 
 Overrides do not act as queue priority. They cannot reorder FIFO waiters,
 transfer a reservation, or let a later waiter take a resource ahead of the
@@ -762,8 +759,9 @@ The system should prefer explicit uncertainty:
 - interrupted agent -> keep last state until TTL expires
 - hook failure -> warn and fail closed only for high-risk writes
 - OMP stateful hook deny or unavailable result -> block, never warn because of
-  yolo metadata; repo-external command-shaped work must still pass Stateful
-  external grant checks
+  yolo metadata. After runtime identity/discovery succeeds, authorize failures
+  can produce structured block JSON; identity/discovery subprocess failures are
+  mapped by the OMP extension to a hard block.
 - state server unavailable -> deny supported writes that cannot prove active
   reservation
 - state server unavailable -> deny Codex raw Bash, arbitrary OMP raw Bash, and

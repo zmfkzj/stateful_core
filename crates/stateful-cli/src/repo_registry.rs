@@ -314,7 +314,9 @@ pub fn tool_list_for_repo(
         .unclassified_tools
         .iter()
         .filter(|tool| {
-            !allowed_tools.iter().any(|allowed_tool| allowed_tool == *tool)
+            !allowed_tools
+                .iter()
+                .any(|allowed_tool| allowed_tool == *tool)
                 && !entry
                     .denied_tools
                     .iter()
@@ -361,10 +363,7 @@ pub fn record_unclassified_tool_for_repo(
     if !effective_allowed_tools(entry)
         .iter()
         .any(|allowed| allowed == &tool_name)
-        && !entry
-            .denied_tools
-            .iter()
-            .any(|denied| denied == &tool_name)
+        && !entry.denied_tools.iter().any(|denied| denied == &tool_name)
         && !entry
             .unclassified_tools
             .iter()

@@ -4,21 +4,22 @@ This document defines the v1 current-state coordination model, including the def
 
 ## State Kinds
 
-The model is intentionally narrow:
+The shipped live/current-state model is intentionally narrow:
 
-- `session`
+- `agent`
 - `activity`
 - `reservation`
 - `claim`
 - `write_fence`
 - `human_observation`
-- `reconciliation`
-- `conflict`
-- `finalization`
-- `override`
+- `wait_queue`
+- `notification`
+- `outbox`
 
-These state kinds describe active coordination, not general-purpose memory or
-all durable agent facts.
+Target-only policy artifacts described later include durable `conflict` and
+`override` records. Reconciliation is shipped as an acknowledgement API, an
+event, and updates to `human_observation` rows rather than as a current-state
+table.
 
 ## Goal, Turn, Task, and Reservation Boundaries
 
@@ -324,9 +325,12 @@ action: write_directory target: src/auth/ -> deny
 action: write_file target: src/auth.ts -> deny
 ```
 
-`write_directory` is the only action backed by directory reservation and a matching
-directory claim. The resulting directory claim fences the entire subtree because
-command-shaped `--write-dir` execution can write anywhere below that directory.
+`write_directory` is the only action backed by directory reservation and a
+matching directory claim. The `sandbox run --fs write-targets --write-dir
+<repo-dir>` target is repo-relative and requires that exact directory
+reservation/claim coverage. The resulting directory claim fences the entire
+subtree because command-shaped execution can write anywhere below that
+directory.
 
 Multi-file writes are allowed only when every file target has exact file scope
 and every directory target has exact directory scope. Delete and rename/move
@@ -547,8 +551,10 @@ active same-reservation file claim. Native edit hooks and `sandbox run --fs
 write-targets` release their authorized same-reservation claims after the write
 transaction completes; subsequent writes must reread and reacquire a claim or
 claim a claimable reservation. Command-shaped source writes must use exact
-`--write-target` or `--create-target` entries, not the `tmp/` artifact directory
-scope.
+`--write-target <file>`, `--create-target <file>`, or repo-relative
+`--write-dir <repo-dir>` entries, not the `tmp/` artifact directory scope.
+`--write-dir` requires matching `write_directory` reservation and
+same-reservation claim coverage.
 
 ## Finalization Record
 
@@ -580,11 +586,9 @@ The shipped `/v1/reconcile/ack` API and `stateful reconcile ack` command record:
 agent_id
 workspace_id
 reservation_id
-resources
 files_reread
 human_change_summary
 decision: adopt | reapply | ask_user | abandon
-conflict_with_plan
 ```
 
 The native command-policy tool names are `state.reconcile.ack` and
@@ -592,18 +596,19 @@ The native command-policy tool names are `state.reconcile.ack` and
 shape is:
 
 ```text
-stateful reconcile ack --resource <path> --files-reread <path> \
+stateful reconcile ack --files-reread <path> \
   --summary <text> --decision adopt|reapply|ask_user|abandon \
   --reservation-id <reservation_id>
 ```
 
-The server requires `files_reread` and a reservation id whose active exact file
-intent covers every reread file. Only `adopt` and `reapply` clear
-unreconciled-human-write blocks. `ask_user` records that the agent needs user
-direction and keeps writes blocked. `abandon` records that the agent will not
-resume the affected work and also leaves the block uncleared. Clearing the block
-does not authorize writes by itself; active, unexpired matching reservation and,
-in enforcement mode, same-reservation claim authority are still required.
+The server requires a reservation id, non-empty `files_reread`, and active exact
+file intent covering every reread file under that reservation. Only `adopt` and
+`reapply` clear unreconciled-human-write blocks. `ask_user` records that the
+agent needs user direction and keeps writes blocked. `abandon` records that the
+agent will not resume the affected work and also leaves the block uncleared.
+Clearing the block does not authorize writes by itself; active, unexpired
+matching reservation and, in enforcement mode, same-reservation claim authority
+are still required.
 
 ## Events
 
@@ -685,7 +690,7 @@ Freshness is required for all active coordination records.
 - Missing heartbeats do not imply success.
 - Shipped finalization completes active reservations and appends a terminal activity
   phase, defaulting to `done` unless the request supplies another phase.
-- Turn end expires unused overrides.
+- Target override behavior expires unused overrides at turn end.
 - Expired records remain historical evidence but stop blocking new work.
 - Reads should distinguish fresh, stale, and expired state.
 
@@ -697,8 +702,8 @@ claims, reservations, or write authorization.
 
 The current implementation expires live coordination rows through the state
 server maintenance loop and lazily when policy reads detect stale state. The
-maintenance loop also prunes old events, reconciliations, conflicts, human
-observations, and expired notifications. It preserves active current-state rows,
+maintenance loop also prunes old `events` rows and `notifications` rows whose
+status is `expired` or `delivered`. It preserves active current-state rows,
 pending notifications, and outbox sync evidence.
 
 Projects may configure a longer retention window once runtime config loading for
@@ -767,7 +772,7 @@ surfaces are:
 stateful human observe <path> --kind save|change|delete|presence|dirty \
   --confidence high|low --source <source> --summary <text>
 stateful human save-check <path>...
-stateful reconcile ack --resource <path> --files-reread <path> \
+stateful reconcile ack --files-reread <path> \
   --summary <text> --decision adopt|reapply|ask_user|abandon \
   --reservation-id <reservation_id>
 ```
@@ -792,12 +797,12 @@ stateful reconcile ack --resource <path> --files-reread <path> \
 
 ## Views
 
-Expected materialized views:
+Target materialized views:
 
 - active agents by workspace
 - active claims by resource
 - planned edits by workspace
-- conflicts by agent
+- conflict summaries by agent
 - finalization summaries by agent
 - prompt context package for Codex hooks and native Stateful tools
 
@@ -843,6 +848,9 @@ source_refs
 in both modes and includes supporting `evidence` text only in `detailed` mode.
 `brief` mode is capped at 8 total bullets. `detailed` mode is capped at 20 total
 bullets. `next_action` is required for `block` and `warn`.
+
+Active write-fence warning items must set a `next_action` that names both the
+fenced path and the fence-owning agent.
 
 The renderer can place supplied expired and finalized records only under
 `Stale/Expired`, but the shipped store-backed route currently emits live

@@ -704,8 +704,6 @@ fn parses_reconcile_ack() {
         "stateful",
         "reconcile",
         "ack",
-        "--resource",
-        "src/auth.ts",
         "--files-reread",
         "src/auth.ts",
         "--summary",
@@ -721,26 +719,43 @@ fn parses_reconcile_ack() {
 
     match cli.command {
         Command::Reconcile(ReconcileCommand::Ack {
-            resources,
             files_reread,
             summary,
             decision,
             reservation_id,
             agent_id,
             workspace_id,
-            conflict_with_plan,
         }) => {
-            assert_eq!(resources, vec!["src/auth.ts"]);
             assert_eq!(files_reread, vec!["src/auth.ts"]);
             assert_eq!(summary, "Adopted human auth edit.");
             assert_eq!(decision, "adopt");
-            assert_eq!(reservation_id.as_deref(), Some("reservation-1"));
+            assert_eq!(reservation_id, "reservation-1");
             assert_eq!(agent_id, "agent-1");
             assert_eq!(workspace_id, None);
-            assert!(!conflict_with_plan);
         }
         other => panic!("expected reconcile ack command, got {other:?}"),
     }
+}
+
+#[test]
+fn rejects_reconcile_ack_without_reservation_id() {
+    let error = Cli::try_parse_from([
+        "stateful",
+        "reconcile",
+        "ack",
+        "--files-reread",
+        "src/auth.ts",
+        "--summary",
+        "Adopted human auth edit.",
+        "--decision",
+        "adopt",
+    ])
+    .expect_err("reconcile ack should require --reservation-id");
+
+    assert!(
+        error.to_string().contains("--reservation-id"),
+        "error should name missing reservation id: {error}"
+    );
 }
 
 #[test]

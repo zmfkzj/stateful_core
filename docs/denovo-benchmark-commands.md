@@ -35,7 +35,7 @@ datasets/denovo/shards/denovoswe_public_shard_b.jsonl  rows 1226-2450
 datasets/denovo/shards/denovoswe_public_shard_c.jsonl  rows 2451-3675
 ```
 
-Do not reuse older `target/stateful-bench/denovo/extracts/.../results.jsonl`
+Do not reuse older historical `target/stateful-bench/denovo/extracts/.../results.jsonl`
 paths as "full" dataset inputs. The r33-r35 attempts used a 6-row extracted
 file, not the public full JSONL. The aborted r36 attempt duplicated the full
 3675-row input three times instead of sharding it.
@@ -76,20 +76,20 @@ file, not the public full JSONL. The aborted r36 attempt duplicated the full
   `OMP_BIN`, `TMUX`, and `TMUX_SOCKET`.
 - For Docker-backed OMP agent runs through Docker Desktop or Colima, set
   `DOCKER_HOST` to the Unix socket used by the Docker CLI before launching.
-- For Docker-backed OMP agent runs, keep `DENOVO_OUTPUT_ROOT` on a host path
-  mounted into the Docker daemon. With Colima, prefer `$REPO_ROOT/target/...` or
-  another `/Users/...` path. Avoid `/private/tmp/...`: `stateful-bench` may
-  create `omp-homes/<instance>/home` on the host, but Docker can still fail with
-  `invalid mount config for type "bind": bind source path does not exist`
-  because the daemon cannot see that tree.
+- DeNovo code defaults write run outputs to `.stateful_bench/denovo/runs` and
+  patch extracts to `.stateful_bench/denovo/extracts`. The commands below
+  override the run root to `$REPO_ROOT/target/stateful_bench_runs/denovo/runs`
+  so Docker/Colima can bind a host-mounted scratch path. Avoid historical
+  `target/stateful-bench/denovo/...` paths.
 - Change run IDs and isolated OMP home directories before reusing commands.
 - For Docker-isolated OMP runs, build or tag the agent image from
   `crates/stateful-bench/docker/denovo-omp-agent.Dockerfile`. The image includes
   Bun-installed `omp`, the Linux `stateful` binary, and `bubblewrap` for
   stateful sandbox tool execution inside the agent container.
-- Use `--prompt-version v2` for new official-style runs. Keep
-  `--prompt-version v1` only when continuing or comparing against historical
-  v1 runs.
+- Use `--prompt-version v2` for new official-style runs. Clap still defaults
+  `denovo run --prompt-version` to `v1` for compatibility, so keep the flag
+  explicit. Use `--prompt-version v1` only when continuing or comparing against
+  historical v1 runs.
 - Treat `--eval-iters` as evaluator repetition only. It does not replace the
   three independent agent trials needed for stable benchmark comparisons.
 
@@ -147,6 +147,10 @@ RUN_SERIES=rNN-denovo
 TRIAL=1
 RUN_ID=$RUN_SERIES-t$TRIAL
 ```
+
+`DENOVO_OUTPUT_ROOT` is a documented scratch override for these examples, not
+the CLI default. Without `--output-dir`, DeNovo uses `.stateful_bench/denovo/runs`
+for run output; patch extraction defaults to `.stateful_bench/denovo/extracts`.
 
 ## OMP CLI Default
 
@@ -357,8 +361,9 @@ Relaunch pitfalls observed while debugging single-instance Docker OMP runs:
   does not exist` for an `omp-homes/<instance>/home` path, first verify whether
   the benchmark output root is under `/private/tmp` or another path not mounted
   into the Docker daemon. The host directory can exist while Colima still cannot
-  bind it. Move `DENOVO_OUTPUT_ROOT` to `$REPO_ROOT/target/stateful_bench_runs`
-  or another `/Users/...` path and relaunch with fresh run IDs.
+  bind it. Move `DENOVO_OUTPUT_ROOT` to the documented scratch override under
+  `$REPO_ROOT/target/stateful_bench_runs` or another `/Users/...` path and
+  relaunch with fresh run IDs.
 - Rebuild or retag the Docker OMP agent image after changing the Dockerfile. If
   a Docker OMP run still shows `bubblewrap` namespace failures, confirm the
   command includes `--agent-docker-sandbox off`; otherwise nested OMP sandboxing
@@ -491,10 +496,11 @@ python3 crates/stateful-bench/scripts/denovo_progress_report.py --run-prefix "$R
 python3 crates/stateful-bench/scripts/denovo_progress_report.py --run-prefix "$RUN_SERIES-t3-shard-" --expected-instances-per-condition 3675
 ```
 
-For per-instance failure analysis, inspect:
+For per-instance failure analysis, inspect the configured run output root, for
+example:
 
 ```text
-target/stateful-bench/denovo/runs/<run-id>/conditions/<condition>/omp-cli/instances/<instance-id>/eval-result.json
+$DENOVO_OUTPUT_ROOT/<run-id>/conditions/<condition>/omp-cli/instances/<instance-id>/eval-result.json
 ```
 
 Stop sessions:

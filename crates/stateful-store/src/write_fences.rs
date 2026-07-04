@@ -299,6 +299,9 @@ impl Store {
                     action.clone(),
                     format!("write in flight by {agent_id}"),
                 )
+                .with_next_action(format!(
+                    "Wait for the in-flight write on {relative_path} by {agent_id} to finish before writing."
+                ))
                 .with_agent(agent_id)
                 .with_workspace(workspace_id)
                 .with_evidence_kind(CurrentEvidenceKind::ClaimOnly)

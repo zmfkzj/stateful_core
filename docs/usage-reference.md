@@ -174,8 +174,15 @@ stateful server join http://127.0.0.1:43873 --token <token> --enable-repo
 
 `stateful server join` rejects non-loopback plain `http://` URLs before writing
 runtime discovery or Codex config. Use an SSH tunnel and join the loopback
-endpoint instead. If the host uses `stateful server start --workspace-id <id>`,
-run the printed join command as-is; it includes the matching workspace id.
+endpoint instead. If you intentionally accept sending the bearer token in
+cleartext over non-loopback HTTP on a trusted network, add the explicit opt-in:
+
+```bash
+stateful server join http://<host>:43873 --token <token> --allow-plain-http
+```
+
+If the host uses `stateful server start --workspace-id <id>`, run the printed
+join command as-is; it includes the matching workspace id.
 
 ## Manual Coordination Commands
 
@@ -250,17 +257,19 @@ Human coordination commands:
 ```bash
 stateful human observe <path> [--kind save] [--confidence high] [--source watcher:save] [--summary <text>]
 stateful human save-check <paths...>
-stateful reconcile ack --reservation-id <reservation_id> --resource <path> --files-reread <path> --summary <text> --decision adopt|reapply|ask_user|abandon
+stateful reconcile ack --reservation-id <reservation_id> --files-reread <path> --summary <text> --decision adopt|reapply|ask_user|abandon
 ```
 
-`human observe` records an explicit human activity signal. `human save-check`
-returns advisory conflict warnings for the requested paths; the VS Code save
-gate uses the same check and warns instead of blocking the save. After a denial
-for unreconciled human writes, reread the file and use the active
-`state_reconcile_ack` / `state.reconcile.ack` tool with `reservation_id`, or an
-exposed runtime alias such as `stateful_reconcile_ack`, when available; otherwise
-use `stateful reconcile ack --reservation-id <reservation_id>` from the CLI
-before retrying an adopt/reapply write.
+`human observe` records an explicit human activity signal. The CLI accepts string
+values for `--kind` and `--confidence`; unsupported values fail at the
+server/API layer. `human save-check` returns advisory conflict warnings for the
+requested paths; the VS Code save gate uses the same check and warns instead of
+blocking the save. After a denial for unreconciled human writes, reread the file
+and use the active `state_reconcile_ack` / `state.reconcile.ack` tool with
+`reservation_id`, or an exposed runtime alias such as `stateful_reconcile_ack`,
+when available; otherwise use
+`stateful reconcile ack --reservation-id <reservation_id>` from the CLI before
+retrying an adopt/reapply write.
 
 ## CLI Overview
 
@@ -275,6 +284,7 @@ Common commands:
 - `stateful status`, `stateful doctor`, `stateful current`, `stateful events`
 - `stateful reservation declare|request|claim|cancel`
 - `stateful human observe|save-check`
+- `stateful watch run [--repo <path>]`
 - `stateful reconcile ack`
 - `stateful notifications poll`
 - `stateful resume next`
@@ -444,8 +454,9 @@ The HTTP server exposes `/health`, `/v1/current`, `/v1/events`,
 `/v1/runtime/identity`, `/v1/human/observe`, `/v1/human/save-check`, and POST
 endpoints for agent registration, heartbeats, reservation declaration,
 reservation request, reservation claim, reservation cancel, claims, activity
-observation/finalization, authorization, conflict checks, context rendering,
-reconciliation ack, notifications, resume, and outbox sync.
+observation/finalization, authorization, context rendering, reconciliation ack,
+notifications, resume, and outbox sync. Conflict evaluation is part of those
+shipped policy endpoints, not a separate documented conflict-check route.
 
 Integrations that expose native Stateful tools use agent-friendly tool names.
 Agent identity tools use native names directly; other tools map to dotted
@@ -527,12 +538,8 @@ working-tree tarball so ignored runtime and benchmark artifacts are not bundled.
   when both are set. The referenced server must expose the current runtime
   capabilities.
 - Legacy agent-facing identity environment variables were removed. Active Codex
-  and OMP integrations inject `agent_id` and `workspace_id` into hooks and
-  native tools; OMP derives `agent_id` from `ctx.sessionManager.getSessionId()`
-  plus `getLeafId()` when present and fails closed when the session id is
-  unavailable or invalid. Agents should not set environment variables, use
-  process ids, repair runtime session files, or provide event/ctx agent and
-  session fields to select coordination identity.
+  and OMP integrations inject identity into hooks and native tools; see
+  [Hooks And Identity](#hooks-and-identity) for the canonical rules.
 - `STATEFUL_HOOK_TRUSTED_SANDBOX` is a legacy integration signal and does not
   authorize Bash. Bash authorization goes through a trusted
   `<absolute-stateful-binary> sandbox run` wrapper command.
@@ -564,6 +571,11 @@ working-tree tarball so ignored runtime and benchmark artifacts are not bundled.
   the target container's `/workspace`; OMP Docker runs use a separate agent
   container as the sandbox boundary before smoke compile in the live target
   container. See the ProgramBench guide for details.
+
+`stateful sandbox run-nested-codex-benchmark` is a visible benchmark-only helper
+for the feature-gated nested Codex benchmark harness on supported sandboxes. It
+is not a general operator sandbox; use `stateful sandbox run` for normal
+commands.
 
 For DeNovoSWE, new official-style run commands should pass `--prompt-version v2`;
 the CLI's default remains compatible with historical behavior. See

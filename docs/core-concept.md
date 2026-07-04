@@ -78,8 +78,8 @@ Examples:
 - An agent plans to edit `src/auth.ts`.
 - A file has an active advisory claim.
 - An agent is testing after a change.
-- A file changed after an agent acquired its exact file claim, or a future
-  observer/IDE integration reports nearby human editing activity.
+- A file changed after an agent acquired its exact file claim, or an IDE/human
+  observer reports nearby human activity.
 - A session finalized as `done`, `failed`, or `blocked`.
 
 Current state must be compact enough to render into an agent prompt or
@@ -87,9 +87,10 @@ Current state must be compact enough to render into an agent prompt or
 important tool calls.
 
 The shipped v1 prototype observes Codex and OMP sessions, supported tool
-effects, native Stateful tool calls, exact file claim freshness, and explicit
-reconciliation acknowledgements. Human observation is high-value target work,
-but v1 does not automatically watch human editor buffers or filesystem saves.
+effects, native Stateful tool calls, exact file claim freshness, explicit
+reconciliation acknowledgements, low-confidence VS Code open/presence and dirty
+signals, and high-confidence save observations. Selected-file telemetry and
+broader arbitrary filesystem/editor watching remain future work.
 
 ## Freshness
 
@@ -97,20 +98,19 @@ Current state decays quickly. Every active claim needs a freshness model:
 
 - `last_updated_at` records the latest observation.
 - `expires_at` defines when the claim stops being current truth.
-- `phase` shows whether the actor is exploring, editing, testing, blocked, done,
-  failed, idle, or expired.
+- `phase` shows whether the actor is `exploring`, `editing`, `testing`,
+  `blocked`, `done`, or `failed`.
+  `idle` and `expired` are context/status labels, not activity phases.
 - heartbeat updates keep active work alive.
 
 Expired state can remain useful as historical evidence, but it should not block
 new work as if it were still active.
 
-V1 reservation freshness uses a 15-minute default TTL. Heartbeats can extend active
-reservations while the phase is `exploring`, `editing`, or `testing`, but never
-beyond 60 minutes from declaration. Blocked or finalized work is visible but does
-not authorize writes. Active claims expire after 300 seconds without heartbeat,
-and claimable reservations expire after 120 seconds, so long-running test/build
-work must keep heartbeating and reacquire authority before any post-60-minute
-write.
+Reservation, claim, heartbeat, and retention defaults are canonicalized in
+[Current-State Coordination](current-state-coordination.md#canonical-freshness-defaults). Blocked
+or finalized work is visible but does not authorize writes, so long-running
+test/build work must keep heartbeating and reacquire authority before writing
+after its reservation window.
 
 ## Coordination Protocol
 

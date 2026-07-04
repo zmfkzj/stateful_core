@@ -73,11 +73,12 @@ policy from scratch.
 
 ## Official-Style Defaults
 
-Use these defaults unless a run is explicitly labeled as a compatibility or
-debug run:
+Use these official-style settings unless a run is explicitly labeled as a
+compatibility or debug run. Pass the prompt version explicitly in command lines;
+the CLI default remains `v1` for compatibility.
 
 - `--mode batch` for scored runs.
-- `--prompt-version v2`, the official recipe default with the finish gate.
+- `--prompt-version v2`, the official recipe prompt with the finish gate.
 - `--benchmark-temperature 1`.
 - `--benchmark-model-context-window 256000`, matching the paper's 262,144 token
   evaluation context as closely as this adapter supports.
@@ -113,6 +114,12 @@ debug run:
 
 Historical runs may use `--prompt-version v1`; do not mix v1 and v2 results in
 the same comparison table.
+
+DeNovo code defaults write run outputs under `.stateful_bench/denovo/runs` and
+patch extracts under `.stateful_bench/denovo/extracts`. Docker or host-mounted
+scratch runs may override the run root to
+`$REPO_ROOT/target/stateful_bench_runs/...`; older
+`target/stateful-bench/denovo/...` paths are historical and should not be reused.
 
 ## Prompt Policy
 
@@ -295,8 +302,9 @@ Lifecycle troubleshooting checklist:
 - If Docker reports `invalid mount config for type "bind": bind source path
   does not exist` for an `omp-homes/<instance>/home` path that exists on the
   host, the Docker daemon cannot see that host path. This is common with Colima
-  when `DENOVO_OUTPUT_ROOT` is under `/private/tmp` or another unmounted host
-  tree. Relaunch with the benchmark output under a Docker-mounted path such as
+  when the output root is under `/private/tmp` or another unmounted host tree.
+  Relaunch with `DENOVO_OUTPUT_ROOT` overriding the code default to a
+  Docker-mounted scratch path such as
   `$REPO_ROOT/target/stateful_bench_runs/...` or another `/Users/...` path, then
   use fresh run IDs and OMP homes.
 

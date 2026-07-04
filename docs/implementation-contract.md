@@ -49,13 +49,9 @@ activation, the `stateful-command-policy` manual owns detailed procedure, and
 hooks remain the boundary. `stateful enable` opts the current repo into
 enforcement.
 For OMP, the extension/native tool bridge derives the active Stateful `agent_id`
-from `ctx.sessionManager`: `getSessionId()` supplies the required session UUID
-and `getLeafId()`, when present, supplies the active branch. The generated id is
-`omp-${sessionId}-${leafId}` with a leaf id and `omp-${sessionId}` without one.
-If `getSessionId()` is unavailable or invalid, OMP Stateful actions fail closed.
-Agent-facing OMP identity does not read event/ctx agent or session fields and
-does not depend on current-session files, session environment variables, process
-ids, or runtime file repair.
+from `ctx.sessionManager` and fails closed when it cannot provide a valid
+session id; `docs/usage-reference.md#hooks-and-identity` is the canonical OMP
+identity derivation.
 Codex hooks use Codex's hook `session_id` parameter as the Stateful `agent_id`;
 this is a hook payload parameter, not an environment-variable fallback.
 
@@ -69,17 +65,17 @@ one implementation and avoids policy drift.
 ## Protocol Version
 
 The `stateful.v1` envelope is the target request shape for side-effecting
-protocol calls. The current implementation enforces it for `/v1/authorize` and
-the reservation declare/request/claim/cancel endpoints. Session, claim, activity
-finalize, context, notification, resume, outbox, and read endpoints still use
-their current flat request bodies.
+protocol calls. The current implementation enforces it for `/v1/authorize`,
+`/v1/human/observe`, and the reservation declare/request/claim/cancel
+endpoints. Session, claim, activity finalize, context, notification, resume,
+outbox, and read endpoints still use their current flat request bodies.
 
 Envelope-shaped requests include:
 
 ```text
 protocol_version: stateful.v1
 request_id
-session
+agent
 workspace
 source
 payload
@@ -95,7 +91,7 @@ endpoint accepts or requires the envelope until those routes are migrated.
 protocol_version
 request_id
 observed_at
-identity:
+agent:
   agent_id
   turn_id
   actor_id
@@ -118,9 +114,9 @@ payload:
   endpoint-specific object
 ```
 
-Adapters may omit unknown nullable identity fields, but the server must record
-which fields were absent. Missing identity can lower confidence or reduce a
-soft-conflict check, but it cannot create a stronger denial than the policy
+Adapters may omit unknown nullable agent fields, but the server must record
+which fields were absent. Missing agent identity can lower confidence or reduce
+a soft-conflict check, but it cannot create a stronger denial than the policy
 allows.
 
 ## HTTP API
@@ -160,9 +156,11 @@ observations become unreconciled human writes unless they occur while an active
 same-file write fence attributes the save to an agent write. `/v1/human/save-check`
 is advisory for human tools: it returns `decision: "clear"` or `decision: "warn"`
 with claim/write-fence conflicts, and clients fail open for human saves when the
-server is unavailable. `/v1/reconcile/ack` records a reconciliation decision and
-clears unreconciled human-write blocks only for `adopt` or `reapply`, only after
-non-empty reread files are covered by the caller's active exact file reservation.
+server is unavailable. `/v1/reconcile/ack` accepts `agent_id`, `workspace_id`,
+required `reservation_id`, `decision`, non-empty `files_reread`, and
+`human_change_summary`; it clears unreconciled human-write blocks only for
+`adopt` or `reapply`, only after reread files are covered by the caller's active
+exact file reservation.
 `/v1/notifications/poll` returns pending coordination notifications for a
 target agent and marks returned notifications as delivered so a later poll does
 not redeliver the same notification. `/v1/notifications/stream` returns an SSE
@@ -189,10 +187,9 @@ Native Stateful tool integrations that expose the full state surface map
 directly onto these endpoints. Native tool handlers do not implement policy
 branches; they validate tool arguments, receive the active `agent_id` and
 `workspace_id` from the runtime integration, call the HTTP API, and return the
-server result. For OMP, the bridge first derives that `agent_id` from
-`ctx.sessionManager.getSessionId()` plus the current
-`ctx.sessionManager.getLeafId()` when present, failing closed when the session id
-is unavailable or invalid. The shipped OMP extension registers lazy resume
+server result. For OMP, the bridge uses that `ctx.sessionManager`-derived
+`agent_id` and fails closed when it is unavailable. The shipped OMP extension
+registers lazy resume
 helpers, not the full `state_*` tool surface, so OMP agents must use the active
 tool list: use `state_*` tools only when exposed; otherwise rely on native
 `edit`/`write` auto-declare, lazy resume, or a write boundary with an existing
@@ -201,9 +198,9 @@ tool list: use `state_*` tools only when exposed; otherwise rely on native
 no-op result when the same-agent claim is already gone, while the direct HTTP
 route still returns `404`.
 
-Current envelope enforcement is limited to `/v1/authorize` and
-`/v1/reservation/declare`, `/v1/reservation/request`, `/v1/reservation/claim`, and
-`/v1/reservation/cancel`. Reservation declare requires non-empty `purpose` and non-empty
+Current envelope enforcement covers `/v1/authorize`, `/v1/human/observe`, and
+`/v1/reservation/declare`, `/v1/reservation/request`, `/v1/reservation/claim`,
+and `/v1/reservation/cancel`. Reservation declare requires non-empty `purpose` and non-empty
 `files_planned`; empty arrays and empty or normalized-empty paths fail with
 `missing_scope`. `files_planned` is a task-level target set and may contain every
 known file or directory the task expects to mutate; clients redeclare when that
@@ -309,7 +306,10 @@ Ordinary read work should use agent-native read/search/diff tools when available
 command-shaped inspection uses `<absolute-stateful-binary> sandbox run --fs
 read-only --network disabled --command <cmd>`; the read-only profile rejects
 `--network enabled`. Command-shaped repo writes use `--fs write-targets` with
-explicit `--write-target <file>` / `--create-target <file>` values and target authorization.
+explicit `--write-target <file>`, `--create-target <file>`, or
+`--write-dir <repo-dir>` values. `--write-dir` is a repo-relative
+`write_directory` target and requires matching directory reservation and
+same-reservation claim coverage.
 OMP built-in Bash may run only strict trusted `stateful sandbox run ...` and
 `stateful sandbox process find ...` commands after Stateful preflight.
 Arbitrary raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool execution is
@@ -421,22 +421,19 @@ Repo-local runtime state remains available as a compatibility fallback:
 .stateful_core/state.db
 ```
 
-Minimum tables:
+Shipped tables from `Store::migrate`:
 
 ```text
 schema_migrations
 events
-sessions
+agents
 activities
 reservations
 claims
 write_fences
+human_observations
 wait_queue
 notifications
-conflicts
-overrides
-reconciliations
-human_observations
 outbox
 ```
 
@@ -448,7 +445,7 @@ directly and append their audit events in the same transaction. If the audit
 append or event-backed materialization fails, the surrounding mutation rolls
 back.
 
-Required indexes:
+Required indexes from `Store::migrate`:
 
 ```text
 events(workspace_id, created_at)
@@ -458,24 +455,29 @@ agents(workspace_id, agent_id)
 activities(workspace_id, expires_at)
 activities(agent_id, workspace_id, expires_at)
 reservations(agent_id, status, expires_at)
+reservations(status, expires_at)
 claims(workspace_id, relative_path, status)
+claims(workspace_id, absolute_path, status, expires_at)
 claims(repo_id, relative_path, status, expires_at)
+claims(reservation_id, workspace_id, relative_path, status)
+claims(status, expires_at)
 write_fences(workspace_id, relative_path, released_at, expires_at)
 write_fences(agent_id, workspace_id, released_at, expires_at)
+human_observations(workspace_id, relative_path, kind, confidence, reconciled_at)
 wait_queue(workspace_id, relative_path, status)
 wait_queue(agent_id, status)
+wait_queue(status, reservation_expires_at)
+UNIQUE wait_queue(request_id) WHERE request_id IS NOT NULL
 notifications(target_agent_id, status)
 notifications(target_agent_id, workspace_id, status, sequence)
-conflicts(agent_id, checked_at)
-reconciliations(agent_id, created_at)
-human_observations(workspace_id, relative_path, kind, confidence, reconciled_at)
+notifications(status, expires_at)
 outbox(agent_id, sequence, sync_status)
 ```
 
-The shipped schema may retain legacy or target-model index names such as
-`idx_events_session_created_at` and columns such as `events.sequence` or
-`claims.absolute_path`; current v1 authorization and event queries must not rely
-on target-model columns until those columns are populated.
+Migration keeps older databases usable by renaming legacy `sessions` identity
+columns to `agent_id`, copying old `sessions` rows into `agents`, dropping the
+dead `sessions`, `conflicts`, `overrides`, and `reconciliations` tables, and
+backfilling required legacy columns before indexed reads rely on them.
 
 SQLite outbox setup and migration must add or backfill required legacy columns
 before creating the canonical `outbox(agent_id, sequence, sync_status)` index.
@@ -501,8 +503,8 @@ presence/dirty human observations, and eligible FIFO waiter promotion. The
 background and lazy paths must be transactionally equivalent.
 
 The same maintenance loop prunes old historical evidence after the built-in
-14-day retention window. Pruning deletes old events, reconciliations, conflicts,
-human observations, and expired notifications. It must not delete active
+14-day retention window. Pruning deletes old `events` rows and `notifications`
+rows whose status is `expired` or `delivered`. It must not delete active
 current-state rows, pending notifications, active write fences, or outbox sync
 evidence.
 
@@ -557,9 +559,11 @@ preserved.
 `stateful server join ...` commands. Binding to `0.0.0.0` makes the runtime
 LAN-reachable, but printed join commands target loopback so remote machines use
 an SSH tunnel before joining. `stateful server join` rejects non-loopback plain
-`http://` base URLs before runtime validation or config writes, validates the
-host runtime, writes global runtime discovery for the host server, and only
-enables the current repo when `--enable-repo` is supplied.
+`http://` base URLs before runtime validation or config writes unless
+`--allow-plain-http` is explicitly passed; that opt-in sends the bearer token in
+cleartext. Join validates the host runtime, writes global runtime discovery for
+the host server, and only enables the current repo when `--enable-repo` is
+supplied.
 
 ## Local HTTP Trust
 
@@ -570,8 +574,10 @@ The token is a local trust guard, not a hard security boundary. It prevents
 casual spoofing by unrelated local processes but does not replace OS-level
 process isolation or managed hooks.
 
-CLI join never sends the bearer token to a non-loopback plain `http://` base
-URL. Use an SSH tunnel and join the loopback endpoint for remote runtimes.
+By default, CLI join never sends the bearer token to a non-loopback plain
+`http://` base URL. Use an SSH tunnel and join the loopback endpoint for remote
+runtimes, or pass `--allow-plain-http` only when cleartext token exposure is
+acceptable.
 
 If the token is missing or invalid, write, reconciliation, reservation, and claim
 paths fail closed. Read-only paths may return a minimal unauthorized error.
@@ -648,15 +654,16 @@ stateful server start [--foreground] [--host <host>] [--port <port>] [--token <t
 stateful server restart
 stateful server stop
 stateful server status
-stateful server join <base-url> --token <token> [--workspace-id <id>] [--enable-repo]
+stateful server join <base-url> --token <token> [--workspace-id <id>] [--enable-repo] [--allow-plain-http]
 stateful status
 stateful current
 stateful events
 stateful doctor
 stateful human observe <path> [--kind save|change|delete|presence|dirty] [--confidence high|low] [--summary <text>]
 stateful human save-check <paths...>
-stateful reconcile ack --resource <path> --files-reread <path> --summary <text> --decision adopt|reapply|ask_user|abandon --reservation-id <id> [--conflict-with-plan]
-stateful sandbox run --fs read-only|write-targets|build|git|github-pr ...
+stateful reconcile ack --files-reread <path> --summary <text> --decision adopt|reapply|ask_user|abandon --reservation-id <id>
+stateful sandbox run --fs write-targets [--write-target <file>|--create-target <file>|--write-dir <repo-dir>] ...
+stateful sandbox run --fs read-only|build|git|github-pr ...
 stateful sandbox process find <selector>
 stateful reservation declare [--agent-id <id>] [--workspace-id <id>] --purpose <purpose> <paths...>
 stateful notifications poll [--agent-id <id>] [--workspace-id <id>]
@@ -698,9 +705,11 @@ coordination denials while keeping hard denials for stale observations,
 unreconciled human writes, same-file write fences, and unsafe commands when
 those checks apply. Detached `stateful server restart` reuses the coordination
 mode recorded in the runtime file. `stateful human observe` posts an enveloped
-watcher-style observation to `/v1/human/observe`; `stateful human save-check`
-calls the advisory `/v1/human/save-check`; `stateful reconcile ack` calls
-`/v1/reconcile/ack` and requires the reservation id that covers the reread files.
+watcher-style observation to `/v1/human/observe`; the shown `--kind` and
+`--confidence` values are server/API-validated values, while Clap accepts
+strings. `stateful human save-check` calls the advisory `/v1/human/save-check`;
+`stateful reconcile ack` calls `/v1/reconcile/ack` and requires the reservation
+id that covers the reread files.
 
 `stateful server start`
 without `--foreground` uses the detached lazy lifecycle. Bare legacy
@@ -714,15 +723,17 @@ and SQLite migration inspection are future doctor extensions.
 
 ## Verification
 
-Before publishing or releasing a build, run:
+Before publishing or releasing a build, run the same verification gates as
+`.github/workflows/rust.yml`:
 
 ```text
 cargo fmt --all --check
-cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+env -u STATEFUL_CODEX_RUN_ID -u CODEX_THREAD_ID cargo test --workspace
+cargo test -p stateful-cli --features codex-benchmark --test hook
+python3 -m venv .venv && . .venv/bin/activate && python -m pip install pytest && python -m pytest crates/stateful-bench/scripts/tests
 ```
 
-Run workspace tests from a clean shell when possible so test behavior is not
-influenced by active agent runtime state.
 `stateful doctor` remains the local installation health check after installing
 or enabling a repository.
 
@@ -747,10 +758,12 @@ event_retention_days: 14
 ```
 
 The current implementation writes these keys as target repo-level defaults but
-does not load them at runtime. Reservation, claim, reservation, directory-scope, and
-retention windows are built-in Rust constants today. The shipped server uses
-the built-in 14-day retention window for historical pruning; configurable
-runtime loading is future hardening work.
+does not load them at runtime. The built-in Rust windows are active
+reservation/activity refresh at 900 seconds, active reservation maximum at 3600
+seconds, active claim at 300 seconds, claimable reservation/notification at 120
+seconds, write fence at 300 seconds plus a 5-second release-observation grace,
+and historical event plus eligible notification retention at 14 days.
+Configurable runtime loading is future hardening work.
 
 Command-shaped tests and checks run through the trusted `stateful sandbox run`
 wrapper. Build and test artifact writes are scoped with
@@ -778,7 +791,7 @@ Implemented v1 behavior must have tests for:
 - nested Codex benchmark sandbox hook authorization only when the
   `codex-benchmark` cargo feature is enabled
 - native edit hook authorization plus Bash sandbox fixtures
-- prompt renderer golden output for shipped store-backed rendering
+- prompt renderer assertion and output coverage for shipped store-backed rendering
 - heartbeat refresh of activities, capped active reservation TTL, and active claims
   still covered by active reservation
 - background and lazy expiration of stale claims, active reservations, claimable

@@ -498,12 +498,24 @@ fn write_fences_conflict_release_and_render_live_context() {
     let live = store
         .live_current_state(Some("src/auth.ts"))
         .expect("live current state should load");
-    assert!(live.items.iter().any(|item| {
-        item.kind == CurrentItemKind::Claim
-            && item.severity == stateful_core::CurrentSeverity::Warn
-            && item.resource == "src/auth.ts"
-            && item.summary.contains("write in flight")
-    }));
+    let fence_warning = live
+        .items
+        .iter()
+        .find(|item| {
+            item.kind == CurrentItemKind::Claim
+                && item.severity == stateful_core::CurrentSeverity::Warn
+                && item.resource == "src/auth.ts"
+                && item.summary.contains("write in flight")
+        })
+        .expect("live context should include active write-fence warning");
+    let next_action = fence_warning
+        .next_action
+        .as_deref()
+        .expect("write-fence warning should include next_action");
+    assert!(
+        next_action.contains("src/auth.ts") && next_action.contains("s1"),
+        "next_action should mention path and fence owner: {next_action}"
+    );
 
     assert_eq!(
         store

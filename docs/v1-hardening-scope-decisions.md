@@ -150,12 +150,12 @@ expiration, reservation lookup, queue promotion, and decision-to-event mapping.
 Pull human write observation into scope through an IDE save gate, not a broad
 filesystem watcher.
 
-The first IDE integration should check the state server before a save when the
-editor exposes a pre-save hook. It should surface warnings or blocks for active
-agent claims, pending reservations, and unresolved human-write reconciliation
-requirements.
+The shipped save-check API and advisory VS Code save gate check the state server
+before save when the editor exposes a pre-save hook. They surface warnings or
+blocks for active agent claims, pending reservations, and unresolved human-write
+reconciliation requirements.
 
-Filesystem watcher inference remains out of scope for this pass.
+Broad filesystem watcher inference remains out of scope for this pass.
 
 ## Repo File Edits
 
@@ -186,14 +186,13 @@ with lazy expiration kept as the safety net on read/write paths. Expiration
 paths expire stale claims, stale active reservations, and stale
 claimable reservations, then promote eligible FIFO waiters and create notifications.
 
-Implement the full rolling maximum model for active task reservation.
-The default rolling maximum for active task reservations is 60 minutes unless a narrower profile or future
-policy overrides it.
+The full rolling maximum model for active task reservations is shipped. Use
+`state-model.md` Freshness Rules for canonical freshness windows and heartbeat
+caps instead of restating constants here.
 
-Retention pruning removes historical evidence older than the built-in 14-day
-window from events, reconciliations, conflicts, human observations, and expired
-notifications. It preserves active current-state rows, pending notifications,
-and outbox sync evidence.
+Retention pruning is shipped. Use `state-model.md` Retention Rules and the
+implementation contract for canonical retention scope and preserved state; this
+scope ledger does not restate the window or pruned-table list.
 
 ## Runtime And Security Hardening
 
@@ -250,10 +249,10 @@ distribution story for hook-capable agents:
 5. Done: implement explicit `reservation/request`, `reservation/claim`, and
    `reservation/cancel`.
 6. Done: enforce sandbox-run write-target policy semantics.
-7. Remaining: add IDE save gate API and harden native edit hook target
-   extraction.
-8. Done: add background expiration, retention pruning, and active-reservation rolling
+7. Done: add IDE save-check API and advisory VS Code save gate.
+8. Remaining: harden native edit hook target extraction.
+9. Done: add background expiration, retention pruning, and active-reservation rolling
    maximum.
-9. Remaining: reject stale or malformed runtime discovery files more aggressively.
-10. Remaining: expand doctor diagnostics.
-11. Remaining: add managed hook and plugin deployment UX.
+10. Remaining: reject stale or malformed runtime discovery files more aggressively.
+11. Remaining: expand doctor diagnostics.
+12. Remaining: add managed hook and plugin deployment UX.

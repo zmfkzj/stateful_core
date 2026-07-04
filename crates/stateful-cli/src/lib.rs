@@ -241,8 +241,6 @@ pub enum HumanCommand {
 #[derive(Debug, Subcommand)]
 pub enum ReconcileCommand {
     Ack {
-        #[arg(long = "resource", required = true)]
-        resources: Vec<String>,
         #[arg(long = "files-reread", required = true)]
         files_reread: Vec<String>,
         #[arg(long)]
@@ -250,13 +248,11 @@ pub enum ReconcileCommand {
         #[arg(long, value_parser = ["adopt", "reapply", "ask_user", "abandon"])]
         decision: String,
         #[arg(long = "reservation-id")]
-        reservation_id: Option<String>,
+        reservation_id: String,
         #[arg(long = "agent-id", default_value = "cli-reconcile")]
         agent_id: String,
         #[arg(long)]
         workspace_id: Option<String>,
-        #[arg(long)]
-        conflict_with_plan: bool,
     },
 }
 
@@ -1033,14 +1029,12 @@ pub fn run() -> anyhow::Result<()> {
             print_http_response(response)?;
         }
         Command::Reconcile(ReconcileCommand::Ack {
-            resources,
             files_reread,
             summary,
             decision,
             reservation_id,
             agent_id,
             workspace_id,
-            conflict_with_plan,
         }) => {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
             let (_, workspace_id) = resolve_agent_workspace(
@@ -1059,8 +1053,6 @@ pub fn run() -> anyhow::Result<()> {
                     "decision": decision,
                     "files_reread": files_reread,
                     "human_change_summary": summary,
-                    "resources": resources,
-                    "conflict_with_plan": conflict_with_plan
                 }),
             )?;
             print_http_response(response)?;

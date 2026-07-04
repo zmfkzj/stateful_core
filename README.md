@@ -35,8 +35,9 @@ benchmark evidence now includes three-arm forced-overlap plumbing/smoke results;
 ProgramBench quality scoring remains blocked on this macOS arm64 host and needs
 a Linux amd64-compatible eval rerun before quality comparisons.
 
-Human coordination is explicit and advisory: `stateful watch`, `human observe`,
-`human save-check`, `reconcile ack`, and the VS Code save gate surface conflicts.
+Human coordination is explicit and advisory: `stateful watch run`,
+`human observe`, `human save-check`, `reconcile ack`, and the VS Code save gate
+surface conflicts.
 
 APIs, configuration files, and command behavior may change while the project is
 pre-release. The current security and support scope is documented in
@@ -195,17 +196,9 @@ tools path or the manual reservation/claim path before making writes.
 ## Day-To-Day Coordination
 
 In normal `stateful codex` or OMP `stateful` profile use, lifecycle hooks bind
-the active `agent_id` and `workspace_id` for state operations. OMP derives its
-Stateful `agent_id` only from `ctx.sessionManager`: `getSessionId()` supplies the
-required session UUID and `getLeafId()`, when present, supplies the active branch.
-Stateful uses `omp-${sessionId}-${leafId}` when a leaf id exists and
-`omp-${sessionId}` otherwise. If `getSessionId()` is unavailable or invalid, OMP
-Stateful actions fail closed instead of reading event/ctx identity fields or
-inventing process, environment, or current-session-file identity. Codex hooks map
-Codex's hook `session_id` parameter to Stateful `agent_id`. There is no
-environment-variable fallback path for agents to maintain. Hook messages tell
-the agent when an explicit
-coordination step is needed.
+the active `agent_id` and `workspace_id` for state operations. See the detailed
+canonical identity rules in
+[Hooks And Identity](docs/usage-reference.md#hooks-and-identity).
 
 Manual CLI use outside an active agent session can declare scope, keep the
 returned reservation id, and inspect the current state:
@@ -222,9 +215,10 @@ mode.
 Human-side coordination is explicit:
 
 ```bash
+stateful watch run [--repo <path>]
 stateful human observe <path> [--summary <text>]
 stateful human save-check <paths...>
-stateful reconcile ack --reservation-id <reservation_id> --resource <path> --files-reread <path> --summary <text> --decision adopt|reapply|ask_user|abandon
+stateful reconcile ack --reservation-id <reservation_id> --files-reread <path> --summary <text> --decision adopt|reapply|ask_user|abandon
 ```
 
 The VS Code extension is an advisory save gate: it warns on server-reported
@@ -335,9 +329,10 @@ observe session or tool activity
 -> notify reserved sessions so they can resume
 ```
 
-The state server owns policy, persistence, TTLs, and conflict checks. Codex/OMP
-hooks observe and gate important agent actions. Native Stateful tools give
-agents a structured way to read and update coordination state. See
+The state server owns policy, persistence, TTLs, and authorization conflict
+evaluation; Codex/OMP hooks observe and gate important agent actions. Native
+Stateful tools give agents a structured way to read and update coordination
+state. See
 [Architecture](docs/architecture.md) and
 [Implementation contract](docs/implementation-contract.md) for the concrete API,
 hook, runtime, storage, and test contracts.
@@ -357,8 +352,8 @@ stateful server join http://127.0.0.1:43873 --token <token> --enable-repo
 ```
 
 `stateful server join` rejects non-loopback plain `http://` URLs unless explicitly
-allowed. See [Usage reference](docs/usage-reference.md#lan-runtime-sharing) for
-the full flow.
+allowed with `--allow-plain-http`; that opt-in sends the bearer token in cleartext.
+See [Usage reference](docs/usage-reference.md#lan-runtime-sharing) for the full flow.
 
 ## Generated Local Files
 
@@ -401,6 +396,10 @@ coordination experiments, forced-overlap scripts
 and OMP CLI workflows, and ProgramBench condition runs with official
 ProgramBench evaluation and efficiency reporting.
 
+The visible `stateful sandbox run-nested-codex-benchmark` command is only for the
+feature-gated nested Codex benchmark harness on supported sandboxes; it is not a
+general operator sandbox. Use `stateful sandbox run` for normal operator commands.
+
 Benchmark artifacts live under `.stateful_bench/` and are intentionally ignored.
 Checked-in benchmark summaries live under [docs/benchmarks](docs/benchmarks/):
 the forced-overlap result verifies three-arm runner/compare plumbing without a
@@ -424,12 +423,14 @@ Run the Rust test suite:
 cargo test --workspace
 ```
 
-Run formatting, linting, and tests:
+Run the CI gates from `.github/workflows/rust.yml` before publishing:
 
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+env -u STATEFUL_CODEX_RUN_ID -u CODEX_THREAD_ID cargo test --workspace
+cargo test -p stateful-cli --features codex-benchmark --test hook
+python3 -m venv .venv && . .venv/bin/activate && python -m pip install pytest && python -m pytest crates/stateful-bench/scripts/tests
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution expectations and
