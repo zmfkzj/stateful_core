@@ -384,7 +384,7 @@ fn pre_tool_use_allows_sandbox_external_without_write_scope() {
 }
 
 #[test]
-fn pre_tool_use_allows_sandbox_external_sequence() {
+fn pre_tool_use_allows_sandbox_external_repeated_command() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
         "agent_id": "s1",
@@ -392,7 +392,7 @@ fn pre_tool_use_allows_sandbox_external_sequence() {
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
         "tool_input": {
-            "command": format!("{stateful} sandbox run --fs external --purpose 'launch benchmark' --write-dir /tmp/stateful-bench --sequence-shell /bin/zsh --sequence 'set -euo pipefail' --sequence 'printf ok > /tmp/stateful-bench/out'")
+            "command": format!("{stateful} sandbox run --fs external --purpose 'launch benchmark' --write-dir /tmp/stateful-bench --command-shell /bin/zsh --command 'set -euo pipefail' --command 'printf ok > /tmp/stateful-bench/out'")
         }
     })
     .to_string();
@@ -403,7 +403,7 @@ fn pre_tool_use_allows_sandbox_external_sequence() {
 }
 
 #[test]
-fn pre_tool_use_denies_sandbox_sequence_with_command() {
+fn pre_tool_use_denies_sandbox_sequence_as_unsupported() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
         "agent_id": "s1",
@@ -411,21 +411,18 @@ fn pre_tool_use_denies_sandbox_sequence_with_command() {
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
         "tool_input": {
-            "command": format!("{stateful} sandbox run --command 'printf ok' --sequence 'printf later'")
+            "command": format!("{stateful} sandbox run --fs external --purpose 'launch benchmark' --sequence 'printf ok'")
         }
     })
     .to_string();
 
     let outcome = handle_pre_tool_use(&input).expect("hook input should parse");
 
-    assert_bash_denial_mentions(
-        outcome,
-        "stateful sandbox run accepts either --command or --sequence, not both",
-    );
+    assert_bash_denial_mentions(outcome, "unsupported stateful sandbox run argument `--sequence`");
 }
 
 #[test]
-fn pre_tool_use_denies_git_profile_sequence() {
+fn pre_tool_use_denies_git_profile_repeated_command() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
         "agent_id": "s1",
@@ -433,7 +430,7 @@ fn pre_tool_use_denies_git_profile_sequence() {
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
         "tool_input": {
-            "command": format!("{stateful} sandbox run --fs git --network disabled --sequence 'git status'")
+            "command": format!("{stateful} sandbox run --fs git --network disabled --command 'git status' --command 'git diff'")
         }
     })
     .to_string();
@@ -1446,9 +1443,9 @@ fn pre_tool_use_denies_invalid_sandbox_run_outer_wrappers() {
             "trusted stateful binary",
         ),
         (
-            "duplicate command",
-            format!("{stateful} sandbox run --command 'rg auth src' --command pwd"),
-            "exactly one --command",
+            "command shell without repeated command",
+            format!("{stateful} sandbox run --command-shell /bin/zsh --command 'rg auth src'"),
+            "--command-shell requires repeated --command",
         ),
         (
             "invalid fs",

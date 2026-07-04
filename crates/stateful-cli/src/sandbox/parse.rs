@@ -36,9 +36,8 @@ pub(crate) fn parse_sandbox_run_bash_invocation(
     let mut write_dirs = Vec::new();
     let mut connect_sockets = Vec::new();
     let mut allow_signal = false;
-    let mut inner_command = None;
-    let mut sequences = Vec::new();
-    let mut sequence_shell = None;
+    let mut commands = Vec::new();
+    let mut command_shell = None;
     let mut timeout_seconds = None;
     let mut stream_events = false;
     let mut index = 3;
@@ -130,27 +129,20 @@ pub(crate) fn parse_sandbox_run_bash_invocation(
                 allow_signal = true;
             }
             "--command" => {
-                if inner_command.is_some() {
-                    return Err("stateful sandbox run requires exactly one --command".to_string());
-                }
                 index += 1;
-                inner_command = Some(parse_sandbox_run_arg_value(&words, index, "--command")?);
+                commands.push(parse_sandbox_run_arg_value(&words, index, "--command")?);
             }
-            "--sequence" => {
-                index += 1;
-                sequences.push(parse_sandbox_run_arg_value(&words, index, "--sequence")?);
-            }
-            "--sequence-shell" => {
-                if sequence_shell.is_some() {
+            "--command-shell" => {
+                if command_shell.is_some() {
                     return Err(
-                        "stateful sandbox run accepts at most one --sequence-shell".to_string()
+                        "stateful sandbox run accepts at most one --command-shell".to_string()
                     );
                 }
                 index += 1;
-                sequence_shell = Some(parse_sandbox_run_arg_value(
+                command_shell = Some(parse_sandbox_run_arg_value(
                     &words,
                     index,
-                    "--sequence-shell",
+                    "--command-shell",
                 )?);
             }
             "--timeout-seconds" => {
@@ -171,7 +163,7 @@ pub(crate) fn parse_sandbox_run_bash_invocation(
         index += 1;
     }
 
-    let command = resolve_sandbox_run_command(inner_command, sequences, sequence_shell)?;
+    let command = resolve_sandbox_run_command(commands, command_shell)?;
 
     Ok(SandboxRunBashInvocation {
         executable: words[0].clone(),
@@ -198,56 +190,50 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn validate_sequence_shell(shell: &str) -> Result<(), String> {
+fn validate_command_shell(shell: &str) -> Result<(), String> {
     if !shell.starts_with('/')
         || shell.contains('\0')
         || shell.contains('\n')
         || shell.contains('\r')
     {
         return Err(
-            "stateful sandbox run --sequence-shell requires an absolute shell path".to_string(),
+            "stateful sandbox run --command-shell requires an absolute shell path".to_string(),
         );
     }
     Ok(())
 }
 
 pub(crate) fn resolve_sandbox_run_command(
-    command: Option<String>,
-    sequences: Vec<String>,
-    sequence_shell: Option<String>,
+    commands: Vec<String>,
+    command_shell: Option<String>,
 ) -> Result<String, String> {
-    if command.is_some() && !sequences.is_empty() {
-        return Err(
-            "stateful sandbox run accepts either --command or --sequence, not both".to_string(),
-        );
-    }
-    if sequences.is_empty() {
-        if sequence_shell.is_some() {
-            return Err("stateful sandbox run --sequence-shell requires --sequence".to_string());
+    if commands.is_empty() {
+        if command_shell.is_some() {
+            return Err("stateful sandbox run --command-shell requires --command".to_string());
         }
-        let Some(command) = command else {
-            return Err(
-                "stateful sandbox run requires exactly one --command or at least one --sequence"
-                    .to_string(),
-            );
-        };
+        return Err("stateful sandbox run requires at least one --command".to_string());
+    }
+
+    for command in &commands {
         if command.trim().is_empty() {
             return Err("stateful sandbox run requires a non-empty --command".to_string());
         }
-        return Ok(command);
     }
 
-    for step in &sequences {
-        if step.trim().is_empty() {
-            return Err("stateful sandbox run --sequence requires a non-empty value".to_string());
+    if commands.len() == 1 {
+        if command_shell.is_some() {
+            return Err(
+                "stateful sandbox run --command-shell requires repeated --command".to_string(),
+            );
         }
+        return Ok(commands.into_iter().next().expect("single command exists"));
     }
 
-    let shell = sequence_shell.unwrap_or_else(|| "/bin/sh".to_string());
-    validate_sequence_shell(&shell)?;
+    let shell = command_shell.unwrap_or_else(|| "/bin/sh".to_string());
+    validate_command_shell(&shell)?;
 
     let mut script = String::from("set -e\n");
-    for step in sequences {
+    for step in commands {
         script.push_str(&step);
         script.push('\n');
     }

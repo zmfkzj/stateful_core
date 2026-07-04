@@ -416,21 +416,21 @@ stateful sandbox run --fs github-pr --network enabled --command 'gh pr status'
 stateful sandbox run --fs external --purpose "inspect external tool version" --command 'some-external-tool --version'
 ```
 
-For multi-step sandboxed work, keep the outer wrapper single and use repeated `--sequence` flags:
+For multi-step sandboxed work, keep the outer wrapper single and use repeated `--command` flags:
 
 ```bash
 stateful sandbox run --fs external --network enabled \
   --purpose "launch benchmark" \
   --connect-socket /Users/arthur/.colima/default/docker.sock \
   --write-dir /Users/arthur/stateful_bench_runs \
-  --sequence-shell /bin/zsh \
-  --sequence 'set -euo pipefail' \
-  --sequence 'set -a; source /Users/arthur/.api.env; set +a' \
-  --sequence 'mkdir -p /Users/arthur/stateful_bench_runs/denovo/runs /Users/arthur/stateful_bench_runs/logs' \
-  --sequence 'tmux -S /Users/arthur/stateful_bench_runs/tmux-denovo.sock new-session -d -s run-1 "cd /Users/arthur/Code/stateful_core && cargo run --quiet -p stateful-bench -- --help > /Users/arthur/stateful_bench_runs/logs/run-1.log 2>&1"'
+  --command-shell /bin/zsh \
+  --command 'set -euo pipefail' \
+  --command 'set -a; source /Users/arthur/.api.env; set +a' \
+  --command 'mkdir -p /Users/arthur/stateful_bench_runs/denovo/runs /Users/arthur/stateful_bench_runs/logs' \
+  --command 'tmux -S /Users/arthur/stateful_bench_runs/tmux-denovo.sock new-session -d -s run-1 "cd /Users/arthur/Code/stateful_core && cargo run --quiet -p stateful-bench -- --help > /Users/arthur/stateful_bench_runs/logs/run-1.log 2>&1"'
 ```
 
-Do not write `stateful sandbox run ... && stateful sandbox run ...` through OMP built-in Bash; that is still an outer shell wrapper and remains blocked. The `git` and `github-pr` profiles reject `--sequence` because they intentionally validate a single direct `git` or `gh pr` command.
+Do not write `stateful sandbox run ... && stateful sandbox run ...` through OMP built-in Bash; that is still an outer shell wrapper and remains blocked. The `git` and `github-pr` profiles reject repeated `--command` because they intentionally validate a single direct `git` or `gh pr` command.
 
 Codex process inspection uses `stateful sandbox process find`:
 

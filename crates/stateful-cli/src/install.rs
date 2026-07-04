@@ -1646,9 +1646,9 @@ mod tests {
     }
 
     #[test]
-    fn omp_extension_allows_sandbox_run_sequence_preflight() {
+    fn omp_extension_allows_sandbox_run_repeated_command_preflight() {
         let temp_dir = std::env::temp_dir().join(format!(
-            "stateful-omp-extension-sequence-test-{}",
+            "stateful-omp-extension-command-test-{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&temp_dir);
@@ -1668,7 +1668,7 @@ mod tests {
             .expect("sandbox parser helpers should end before extension export");
         let helpers = &contents[helper_start..helper_end];
         let script = format!(
-            "function isTrustedStatefulCommand() {{ return true; }}\n{}\nconst decision = statefulBashPassthroughDecision(\"stateful sandbox run --fs read-only --network disabled --sequence 'printf ok'\", \"/repo\");\nconsole.log(JSON.stringify([decision.allow, decision.reason || '', decision.words.includes('--sequence')]));",
+            "function isTrustedStatefulCommand() {{ return true; }}\n{}\nconst decision = statefulBashPassthroughDecision(\"stateful sandbox run --fs read-only --network disabled --command-shell /bin/zsh --command 'printf ok' --command 'printf done'\", \"/repo\");\nconsole.log(JSON.stringify([decision.allow, decision.reason || '', decision.words.filter((word) => word === '--command').length, decision.words.includes('--command-shell')]));",
             helpers
         );
         let output = std::process::Command::new("node")
@@ -1684,16 +1684,16 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8(output.stdout).expect("stdout should be utf8"),
-            "[true,\"\",true]\n"
+            "[true,\"\",2,true]\n"
         );
 
         fs::remove_dir_all(&temp_dir).expect("temp dir should be removable");
     }
 
     #[test]
-    fn omp_extension_denies_git_profiles_with_sequence_preflight() {
+    fn omp_extension_denies_git_profiles_with_repeated_command_preflight() {
         let temp_dir = std::env::temp_dir().join(format!(
-            "stateful-omp-extension-git-sequence-test-{}",
+            "stateful-omp-extension-git-command-test-{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&temp_dir);
@@ -1713,7 +1713,7 @@ mod tests {
             .expect("sandbox parser helpers should end before extension export");
         let helpers = &contents[helper_start..helper_end];
         let script = format!(
-            "function isTrustedStatefulCommand() {{ return true; }}\n{}\nconst git = statefulBashPassthroughDecision(\"stateful sandbox run --fs git --network disabled --sequence 'git status'\", \"/repo\");\nconst pr = statefulBashPassthroughDecision(\"stateful sandbox run --fs github-pr --network enabled --sequence 'gh pr status'\", \"/repo\");\nconsole.log(JSON.stringify([[git.allow, git.reason || ''], [pr.allow, pr.reason || '']]));",
+            "function isTrustedStatefulCommand() {{ return true; }}\n{}\nconst git = statefulBashPassthroughDecision(\"stateful sandbox run --fs git --network disabled --command 'git status' --command 'git diff'\", \"/repo\");\nconst pr = statefulBashPassthroughDecision(\"stateful sandbox run --fs github-pr --network enabled --command 'gh pr status' --command 'gh pr view'\", \"/repo\");\nconsole.log(JSON.stringify([[git.allow, git.reason || ''], [pr.allow, pr.reason || '']]));",
             helpers
         );
         let output = std::process::Command::new("node")

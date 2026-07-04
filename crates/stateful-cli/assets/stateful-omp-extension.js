@@ -1029,9 +1029,8 @@ function parseStatefulSandboxRunWords(words) {
     network: undefined,
     agent_id: undefined,
     workspace_id: undefined,
-    command: "",
-    sequences: [],
-    sequence_shell: undefined,
+    commands: [],
+    command_shell: undefined,
   };
   for (let index = 3; index < words.length; index += 1) {
     const arg = words[index];
@@ -1052,32 +1051,28 @@ function parseStatefulSandboxRunWords(words) {
     else if (arg === "--allow-signal") params.allow_signal = true;
     else if (arg === "--agent-id") params.agent_id = nextValue("--agent-id");
     else if (arg === "--workspace-id") params.workspace_id = nextValue("--workspace-id");
-    else if (arg === "--command") params.command = nextValue("--command");
-    else if (arg === "--sequence") params.sequences.push(nextValue("--sequence"));
-    else if (arg === "--sequence-shell") {
-      if (params.sequence_shell !== undefined) throw new Error("stateful sandbox run accepts at most one --sequence-shell");
-      params.sequence_shell = nextValue("--sequence-shell");
+    else if (arg === "--command") params.commands.push(nextValue("--command"));
+    else if (arg === "--command-shell") {
+      if (params.command_shell !== undefined) throw new Error("stateful sandbox run accepts at most one --command-shell");
+      params.command_shell = nextValue("--command-shell");
     }
     else throw new Error("unsupported stateful sandbox run argument `" + arg + "`");
   }
-  const hasCommand = Boolean(params.command);
-  const hasSequence = params.sequences.length > 0;
-  if (hasCommand && hasSequence) {
-    return { allow: false, reason: "stateful sandbox run accepts either --command or --sequence, not both" };
+  const commandCount = params.commands.length;
+  const hasCommand = commandCount > 0;
+  if (!hasCommand) {
+    return { allow: false, reason: "stateful sandbox run requires at least one --command" };
   }
-  if (!hasCommand && !hasSequence) {
-    return { allow: false, reason: "stateful sandbox run requires exactly one --command or at least one --sequence" };
+  if (params.command_shell !== undefined && !/^\//.test(params.command_shell)) {
+    return { allow: false, reason: "stateful sandbox run --command-shell requires an absolute shell path" };
   }
-  if (params.sequence_shell !== undefined && !hasSequence) {
-    return { allow: false, reason: "stateful sandbox run --sequence-shell requires --sequence" };
+  if (params.command_shell !== undefined && commandCount === 1) {
+    return { allow: false, reason: "stateful sandbox run --command-shell requires repeated --command" };
   }
-  if (params.sequence_shell !== undefined && !/^\//.test(params.sequence_shell)) {
-    return { allow: false, reason: "stateful sandbox run --sequence-shell requires an absolute shell path" };
-  }
-  if (hasSequence && params.fs === "git") {
+  if (commandCount > 1 && params.fs === "git") {
     return { allow: false, reason: "git profile requires a single git command" };
   }
-  if (hasSequence && params.fs === "github-pr") {
+  if (commandCount > 1 && params.fs === "github-pr") {
     return { allow: false, reason: "github-pr profile requires a single gh pr command" };
   }
   if (params.fs === "external" && !params.purpose.trim()) {
