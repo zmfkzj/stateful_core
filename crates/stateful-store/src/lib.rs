@@ -1015,47 +1015,138 @@ impl Store {
     }
 
     pub fn recent_events(&self, limit: u64) -> StoreResult<Vec<EventRecord>> {
-        let mut statement = self.conn.prepare(
-            "SELECT
-                event_id,
-                event_type,
-                agent_id,
-                workspace_id,
-                repo_id,
-                worktree_id,
-                root,
-                branch,
-                payload_json,
-                created_at
-             FROM events
-             ORDER BY rowid DESC
-             LIMIT ?1",
-        )?;
-        let rows = statement.query_map([limit], |row| {
-            let payload_json: String = row.get(8)?;
-            let payload = serde_json::from_str(&payload_json).map_err(|err| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    8,
-                    rusqlite::types::Type::Text,
-                    Box::new(err),
-                )
-            })?;
-            Ok(EventRecord {
-                event_id: row.get(0)?,
-                event_type: row.get(1)?,
-                agent_id: row.get(2)?,
-                workspace_id: row.get(3)?,
-                repo_id: row.get(4)?,
-                worktree_id: row.get(5)?,
-                root: row.get(6)?,
-                branch: row.get(7)?,
-                payload,
-                created_at: row.get(9)?,
-            })
-        })?;
+        self.recent_events_filtered(None, None, limit)
+    }
 
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(StoreError::from)
+    pub fn recent_events_filtered(
+        &self,
+        workspace_id: Option<&str>,
+        since: Option<&str>,
+        limit: u64,
+    ) -> StoreResult<Vec<EventRecord>> {
+        let since = since
+            .map(|timestamp| {
+                parse_timestamp(timestamp)
+                    .map(format_timestamp)
+                    .ok_or_else(|| StoreError::InvalidTimestamp(timestamp.to_string()))
+            })
+            .transpose()?;
+
+        match (workspace_id, since.as_deref()) {
+            (Some(workspace_id), Some(since)) => {
+                let mut statement = self.conn.prepare(
+                    "SELECT
+                        event_id,
+                        event_type,
+                        agent_id,
+                        workspace_id,
+                        repo_id,
+                        worktree_id,
+                        root,
+                        branch,
+                        payload_json,
+                        created_at
+                     FROM events
+                     WHERE workspace_id = ?1 AND created_at > ?2
+                     ORDER BY created_at DESC, rowid DESC
+                     LIMIT ?3",
+                )?;
+                let rows = statement.query_map(
+                    params![workspace_id, since, limit],
+                    Self::event_record_from_row,
+                )?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+            }
+            (Some(workspace_id), None) => {
+                let mut statement = self.conn.prepare(
+                    "SELECT
+                        event_id,
+                        event_type,
+                        agent_id,
+                        workspace_id,
+                        repo_id,
+                        worktree_id,
+                        root,
+                        branch,
+                        payload_json,
+                        created_at
+                     FROM events
+                     WHERE workspace_id = ?1
+                     ORDER BY created_at DESC, rowid DESC
+                     LIMIT ?2",
+                )?;
+                let rows = statement.query_map(
+                    params![workspace_id, limit],
+                    Self::event_record_from_row,
+                )?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+            }
+            (None, Some(since)) => {
+                let mut statement = self.conn.prepare(
+                    "SELECT
+                        event_id,
+                        event_type,
+                        agent_id,
+                        workspace_id,
+                        repo_id,
+                        worktree_id,
+                        root,
+                        branch,
+                        payload_json,
+                        created_at
+                     FROM events
+                     WHERE created_at > ?1
+                     ORDER BY created_at DESC, rowid DESC
+                     LIMIT ?2",
+                )?;
+                let rows =
+                    statement.query_map(params![since, limit], Self::event_record_from_row)?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+            }
+            (None, None) => {
+                let mut statement = self.conn.prepare(
+                    "SELECT
+                        event_id,
+                        event_type,
+                        agent_id,
+                        workspace_id,
+                        repo_id,
+                        worktree_id,
+                        root,
+                        branch,
+                        payload_json,
+                        created_at
+                     FROM events
+                     ORDER BY created_at DESC, rowid DESC
+                     LIMIT ?1",
+                )?;
+                let rows = statement.query_map(params![limit], Self::event_record_from_row)?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+            }
+        }
+    }
+
+    fn event_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventRecord> {
+        let payload_json: String = row.get(8)?;
+        let payload = serde_json::from_str(&payload_json).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(
+                8,
+                rusqlite::types::Type::Text,
+                Box::new(err),
+            )
+        })?;
+        Ok(EventRecord {
+            event_id: row.get(0)?,
+            event_type: row.get(1)?,
+            agent_id: row.get(2)?,
+            workspace_id: row.get(3)?,
+            repo_id: row.get(4)?,
+            worktree_id: row.get(5)?,
+            root: row.get(6)?,
+            branch: row.get(7)?,
+            payload,
+            created_at: row.get(9)?,
+        })
     }
 
     pub fn append_outbox(&self, entry: OutboxEntry) -> StoreResult<()> {

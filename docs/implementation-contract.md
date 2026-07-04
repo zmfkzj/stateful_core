@@ -29,8 +29,10 @@ The prototype supports user-level installation with repo allowlist gating.
 hooks, native Stateful tool injection, built-in Bash preflight for strict
 trusted `stateful sandbox run ...` and `stateful sandbox process find ...`
 commands, OMP native `edit`/`write` pre-tool recovery that can auto-declare
-exact file scope, acquire same-reservation claims, and retry authorization when
-the only denial is missing reservation/scope without an explicit reservation id,
+exact file scope, acquire or reacquire same-reservation claims for the same
+active reservation, keep auto-claims across `stale_target_observation`
+reread/retry blocks, and retry authorization when the only denial is
+missing reservation/scope without an explicit reservation id,
 `lazy_edit_resume` for strict replay of queued/conflicting line-based OMP edits,
 `lazy_write_resume` for queued full OMP writes, both with captured-wait claims
 before re-authorization and stale-target guards,
@@ -126,7 +128,7 @@ The state server exposes local HTTP under `/v1`.
 ```text
 GET  /health
 GET  /v1/current
-GET  /v1/events
+GET  /v1/events?workspace_id=&since=&limit=
 POST /v1/session/register
 POST /v1/session/heartbeat
 POST /v1/reservation/declare
@@ -148,6 +150,10 @@ POST /v1/resume/next
 POST /v1/outbox/sync
 GET  /v1/runtime/identity
 ```
+
+`/v1/events` accepts optional `workspace_id`, `since`, and `limit` query
+parameters. `limit` defaults to 100 and is clamped to 1..100; successful
+responses return `{ "status": "ok", "events": [...] }`.
 
 `/v1/authorize` is the single policy entry point for supported tool actions.
 `/v1/human/observe` records human presence/save/change/delete observations from
@@ -274,10 +280,12 @@ equivalent independent fence coverage is implemented for that surface.
 
 PostToolUse observes completed native edits and sandbox `write-targets`
 transactions, records the result, and releases the same-reservation claims and
-write fences that authorized the completed write boundary. Released claims and
-fences leave the live context render and do not authorize a later write; the
-agent must reread and reacquire a claim, or lazy-claim a claimable reservation,
-before retrying. Remaining OMP `edit` denials are captured as live-agent lazy edit
+write fences that authorized the completed write boundary. Blocking pre-tool
+denials release auto-claims except `stale_target_observation`, which keeps them
+so the same agent can reread and retry. Released claims and fences leave the live
+context render and do not authorize a later write; the agent must reread and
+reacquire a claim, or lazy-claim a claimable reservation, before retrying.
+Remaining OMP `edit` denials are captured as live-agent lazy edit
 operations when the patch has safe repo-relative line targets. Remaining OMP
 `write` denials are captured as live-agent lazy write operations with the
 original full write content. Denials with a wait id reuse that id; other

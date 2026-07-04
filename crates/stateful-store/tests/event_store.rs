@@ -1564,6 +1564,35 @@ fn event_records_return_recent_audit_events() {
 }
 
 #[test]
+fn event_records_filter_by_workspace_since_and_limit() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+    let mut old_w1 = Event::agent_registered("old-w1", "w1").with_event_id("old-w1");
+    old_w1.created_at = "2026-07-04T00:00:00Z".to_string();
+    store.append(old_w1).expect("old w1 event should append");
+    let mut new_w2 = Event::agent_registered("new-w2", "w2").with_event_id("new-w2");
+    new_w2.created_at = "2026-07-04T00:03:00Z".to_string();
+    store.append(new_w2).expect("new w2 event should append");
+    let mut mid_w1 = Event::agent_registered("mid-w1", "w1").with_event_id("mid-w1");
+    mid_w1.created_at = "2026-07-04T00:01:00Z".to_string();
+    store.append(mid_w1).expect("mid w1 event should append");
+    let mut new_w1 = Event::agent_registered("new-w1", "w1").with_event_id("new-w1");
+    new_w1.created_at = "2026-07-04T00:02:00Z".to_string();
+    store.append(new_w1).expect("new w1 event should append");
+
+    let events = store
+        .recent_events_filtered(Some("w1"), Some("2026-07-04T00:00:30Z"), 2)
+        .expect("events should load");
+
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.event_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["new-w1", "mid-w1"]
+    );
+}
+
+#[test]
 fn event_records_preserve_repo_identity_when_present() {
     let store = Store::open_in_memory().expect("store should open");
     let event = Event::agent_registered("s1", "w1").with_workspace_identity(

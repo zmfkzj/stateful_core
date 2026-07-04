@@ -100,12 +100,13 @@ the CLI default remains `v1` for compatibility.
   appears as an immediate `omp exited 1`, empty patch, and zero subagent spawns.
 - For Docker-isolated OMP agent runs, build or tag the image from
   `crates/stateful-bench/docker/denovo-omp-agent.Dockerfile`; it includes
-  Bun-installed `omp`, the Linux `stateful` binary, and `bubblewrap`/`bwrap` for
-  the default `--agent-docker-sandbox on` path. Add `--agent-docker-image
-  <image>`. Pass `--agent-docker-sandbox off` when the Docker container itself
-  should be the sandbox boundary; `--agent-docker-stateful-binary <path>` only
-  needs to be set when the image's `stateful` binary is not at
-  `/usr/local/bin/stateful`.
+  Bun-installed `omp`, the Linux `stateful` binary, and `bubblewrap`/`bwrap`.
+  The Docker command builder grants `--cap-add SYS_ADMIN --security-opt
+  seccomp=unconfined` so bwrap can run inside the agent container. Add
+  `--agent-docker-image <image>`. `--agent-docker-sandbox off` only controls
+  `STATEFUL_OMP_SANDBOX` for OMP's own nested sandbox; it is not the bwrap
+  namespace fix. `--agent-docker-stateful-binary <path>` only needs to be set
+  when the image's `stateful` binary is not at `/usr/local/bin/stateful`.
 - A reduced `stateful:off/on,subagent:on` matrix with `--max-concurrent 6` is a
   subagent/concurrency behavior test. Keep the same 12-instance list, shard,
   model, prompt version, temperature, context window, max turns, evaluator
@@ -280,13 +281,17 @@ registration, no heartbeat, or missing finalization as lifecycle evidence
 failure, not as a model-quality result.
 
 Captured orchestration traces now keep the raw `orchestration-trace.json` for
-audit while condition and progress reports carry compact summary fields:
-`orchestration_event_types`, `orchestration_heartbeat_events`,
+audit while condition and progress reports carry compact summary fields. Trace
+capture requests `/v1/events?workspace_id=<id>&limit=100` when a workspace id is
+known, writes workspace-local events, and records per-instance
+`events_window_saturated` when the 100-event window is full. Report summary
+fields include `orchestration_event_types`, `orchestration_heartbeat_events`,
 `orchestration_heartbeat_windows`, `orchestration_heartbeat_max_gap_ms`,
 `orchestration_denial_events`, `orchestration_denial_paths`, and
-`orchestration_denial_messages`. Use those summary fields for paired run
-analysis; open the raw trace only when the summary points at a suspicious event
-type, path, or heartbeat gap.
+`orchestration_denial_messages`. Use those report summary fields for paired run
+analysis; open the raw trace only when the summary
+points at a suspicious event type, path, heartbeat gap, or saturated event
+window.
 
 
 Lifecycle troubleshooting checklist:

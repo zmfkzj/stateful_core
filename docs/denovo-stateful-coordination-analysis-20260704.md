@@ -27,33 +27,45 @@ confirmed with zero discrepancies.
 
 ## Executive Summary
 
-Three independent defects, not agent-model behavior, explain most of the
-anomalous coordination activity:
+Three independent defects present in the analyzed run, not agent-model behavior,
+explain most of the anomalous coordination activity:
 
-1. **The permitted bash path is unusable inside the benchmark container.**
+1. **The permitted bash path was unusable inside the benchmark container.**
    Every `stateful sandbox run` profile on Linux execs `bwrap`, and the
-   benchmark launches the agent container without the privileges bwrap
-   needs. Result: 218/218 bash tool calls failed (0 successes) across all
-   stateful-on rollouts.
-2. **The write-boundary recovery loop cannot complete.** On a denial
-   (notably `stale_target_observation`) the pre-tool hook releases the
-   auto-acquired claim, but no retry path can reacquire a claim for an
-   active auto-declared reservation, and the OMP extension exposes no
-   manual reservation/claim tools. Result: retry storms — 580 failed
+   benchmark launched the agent container without the privileges bwrap needed.
+   Result: 218/218 bash tool calls failed (0 successes) across all stateful-on
+   rollouts.
+2. **The write-boundary recovery loop could not complete.** On a denial
+   (notably `stale_target_observation`) the pre-tool hook released the
+   auto-acquired claim, but no retry path could reacquire a claim for an active
+   auto-declared reservation, and the OMP extension exposed no manual
+   reservation/claim tools. Result: retry storms — 580 failed
    edit/write/lazy-resume tool results across 30 rollouts — until the
-   repeated-denial guard fires.
-3. **Per-instance orchestration traces are not instance-local.** Trace
-   capture stores the server's unfiltered latest-100 global events, so
-   27 of 30 trace files contain events from up to 4 concurrent instances'
-   workspaces. Raw trace sums overstate per-instance activity (362 deduped
-   denials vs 107 official), while official summary counts are floor
-   values truncated by the 100-event window.
+   repeated-denial guard fired.
+3. **Per-instance orchestration traces were not instance-local.** Trace capture
+   stored the server's unfiltered latest-100 global events, so 27 of 30 trace
+   files contained events from up to 4 concurrent instances' workspaces. Raw
+   trace sums overstated per-instance activity (362 deduped denials vs 107
+   official), while official summary counts were floor values truncated by the
+   100-event window.
 
-A contributing factor: the benchmark agent profile advertises unrestricted
-tool access ("FULL access to all tools (edit, write, bash, ...)"), while
-policy plus the broken bwrap path make bash effectively unavailable, so
-agents burn turns probing (`--help`, `--version`, `--no-bwrap`, raw bash,
+A contributing factor in the analyzed run: the benchmark agent profile advertised
+unrestricted tool access ("FULL access to all tools (edit, write, bash, ...)"),
+while policy plus the broken bwrap path made bash effectively unavailable, so
+agents burned turns probing (`--help`, `--version`, `--no-bwrap`, raw bash,
 heredocs) instead of solving the task.
+
+## Implementation Status
+
+The current implementation has landed RC1-A, RC2-A/B, and RC3-B plus the trace
+capture update: Docker OMP runs add `--cap-add SYS_ADMIN --security-opt
+seccomp=unconfined`; OMP native `edit`/`write` can reacquire missing
+same-reservation claims and keep auto-claims on `stale_target_observation`; and
+`/v1/events` accepts `workspace_id`, `since`, and `limit` while trace capture
+requests `workspace_id` plus `limit=100` and records
+`events_window_saturated`. These fixes remove the known orchestration defects;
+the full rerun in the validation plan is still required before making
+stateful-on/off quality claims.
 
 ## Symptoms and Verified Measurements
 
@@ -133,9 +145,9 @@ All bash tool calls in stateful-on sessions failed: 218 calls, 218 errors,
 
 ## Root Causes
 
-### RC1: bwrap-based sandbox is unusable inside the benchmark container
+### RC1: bwrap-based sandbox was unusable inside the benchmark container
 
-Mechanism (all references in this repo):
+Mechanism in the analyzed run (references are to the analyzed revision):
 
 - Every Linux sandbox profile execs `bwrap`: shell profiles via
   `bubblewrap_command` (`crates/stateful-cli/src/sandbox.rs:3158-3178`,
@@ -151,10 +163,10 @@ Mechanism (all references in this repo):
   bypass is the internal nested-sandbox gate
   `STATEFUL_SANDBOX_RUN_ACTIVE` + `STATEFUL_ALLOW_NESTED_SANDBOX_RUN=1`
   (`crates/stateful-cli/src/sandbox.rs:929-936`).
-- The benchmark's agent container is started without namespace privileges:
-  `docker run --rm --network bridge --workdir /workspace` plus mounts and
-  env only (`crates/stateful-bench/scripts/denovo_codex_agent.py:924-956`;
-  confirmed in recorded `codex-command.json` — no `--privileged`,
+- The benchmark's agent container was started without namespace privileges in
+  the analyzed run: `docker run --rm --network bridge --workdir /workspace`
+  plus mounts and env only (`crates/stateful-bench/scripts/denovo_codex_agent.py`
+  at the time; confirmed in recorded `codex-command.json` — no `--privileged`,
   `--cap-add`, `--security-opt`, or userns options).
 - The image does install bubblewrap and verifies it at build time
   (`crates/stateful-bench/docker/denovo-omp-agent.Dockerfile:9-32`), so
@@ -165,11 +177,11 @@ Mechanism (all references in this repo):
   definition `crates/stateful-bench/src/denovo.rs:53-68,145-150`). It
   gates OMP's own sandbox, not stateful-cli's bwrap.
 
-Consequence: the only policy-permitted bash path fails 100% of the time,
-agents cannot run any verification (pytest, python -c, git status), and a
-large share of turns is spent probing alternative bash shapes.
+Consequence: the only policy-permitted bash path failed 100% of the time,
+agents could not run any verification (pytest, python -c, git status), and a
+large share of turns was spent probing alternative bash shapes.
 
-### RC2: write-boundary denial recovery cannot complete
+### RC2: write-boundary denial recovery could not complete
 
 Intended lifecycle (declare -> claim -> transact -> release):
 
@@ -181,93 +193,87 @@ Intended lifecycle (declare -> claim -> transact -> release):
 - On success, the claim is released in the post-tool hook after the
   transaction (`crates/stateful-cli/src/hook.rs:1043-1058,1091-1112`).
 
-Where it breaks:
+Where it broke in the analyzed run:
 
-1. When reauthorization blocks — the dominant case is
+1. When reauthorization blocked — the dominant case was
    `stale_target_observation` from server freshness validation
    (`crates/stateful-server/src/policy_service.rs:919-995,1354-1359`) —
-   the pre-hook **releases the auto-claim before returning the block**
+   the pre-hook **released the auto-claim before returning the block**
    (`crates/stateful-cli/src/hook.rs:588-603`).
-2. The agent rereads and retries as instructed, but now has an active
+2. The agent reread and retried as instructed, but then had an active
    reservation and **no claim**. Exact hook-file writes require an active
    same-reservation claim
    (`crates/stateful-server/src/policy_service.rs:731-759,440-459`), so
-   the retry fails with `missing_claim`.
-3. Nothing reacquires the claim: the server's claim-on-authorize path only
-   consults wait-queue reservations (`status = 'reserved'`)
+   the retry failed with `missing_claim`.
+3. Nothing reacquired the claim: the server's claim-on-authorize path only
+   consulted wait-queue reservations (`status = 'reserved'`)
    (`crates/stateful-server/src/policy_service.rs:1058-1084`,
    `crates/stateful-store/src/reservations.rs:620-655`), never the active
    reservation created by auto-declare
    (`crates/stateful-store/src/lib.rs:715-718`).
-4. `lazy_edit_resume`/`lazy_write_resume` claim only when the queued
-   operation has a `wait_id`
+4. `lazy_edit_resume`/`lazy_write_resume` claimed only when the queued
+   operation had a `wait_id`
    (`crates/stateful-cli/assets/stateful-omp-extension.js:1148-1161`);
-   auto-declared active reservations have none, so resume re-runs
-   authorization and fails the same way. When a wait_id exists but the
-   wait-queue entry expired (`CLAIMABLE_RESERVATION_TTL_SECONDS = 120`,
-   `crates/stateful-store/src/lib.rs:28-31`), was claimed, or was
-   finalized, `stateful reservation claim` returns HTTP 409
-   `reservation not found`
+   auto-declared active reservations had none, so resume reran authorization
+   and failed the same way. When a wait_id existed but the wait-queue entry
+   expired (`CLAIMABLE_RESERVATION_TTL_SECONDS = 120`,
+   `crates/stateful-store/src/lib.rs:28-31`), was claimed, or was finalized,
+   `stateful reservation claim` returned HTTP 409 `reservation not found`
    (`crates/stateful-server/src/policy_service.rs:1114-1122`,
    `crates/stateful-store/src/reservations.rs:793-797`) — the 26 observed
    409s.
-5. The extension registers only `lazy_edit_resume`, `lazy_write_resume`,
+5. The extension registered only `lazy_edit_resume`, `lazy_write_resume`,
    `lazy_bash_resume`
    (`crates/stateful-cli/assets/stateful-omp-extension.js:1170-1318`); this
-   OMP profile exposes no `state_reservation_*`/`state_claim_*` tools for
-   manual repair, and hook guidance assumes that absence, directing agents
-   to auto-declare/lazy resume instead
+   OMP profile exposed no `state_reservation_*`/`state_claim_*` tools for
+   manual repair, and hook guidance assumed that absence, directing agents to
+   auto-declare/lazy resume instead
    (`crates/stateful-cli/src/hook.rs:1870-1872`).
-6. Cross-agent retries are worse: active reservations are keyed by
+6. Cross-agent retries were worse: active reservations are keyed by
    `agent_id` + `workspace_id` (`crates/stateful-store/src/lib.rs:715-718`)
    and each OMP subagent gets a distinct derived agent id
    (`crates/stateful-cli/assets/stateful-omp-extension.js:123-128`), so a
-   different subagent retrying the same path sees `missing_reservation`.
-7. After repeated failures the hook's repeated-denial guard fires
+   different subagent retrying the same path saw `missing_reservation`.
+7. After repeated failures the hook's repeated-denial guard fired
    (`crates/stateful-cli/src/hook.rs:1450-1465`): "Use one writer:
    parent/main agent owns the edit; subagents report findings only."
 
-Consequence: the reread-and-retry instruction embedded in the denial is
-not actually satisfiable in this environment; agents loop through
-edit -> stale -> reread -> missing_claim -> lazy resume -> denial until
-the guard stops them. This inflates `missing_reservation`/`missing_claim`
-denials and uncached token usage.
+Consequence: the reread-and-retry instruction embedded in the denial was not
+actually satisfiable in that environment; agents looped through
+edit -> stale -> reread -> missing_claim -> lazy resume -> denial until the
+guard stopped them. This inflated `missing_reservation`/`missing_claim` denials
+and uncached token usage.
 
-### RC3: orchestration traces are captured from global server state
+### RC3: orchestration traces were captured from global server state
 
-Mechanism:
+Mechanism in the analyzed run:
 
-- Trace capture calls `GET /v1/current` and `GET /v1/events` with no
-  parameters (`crates/stateful-bench/scripts/denovo_codex_agent.py:
-  2248-2249`, URL construction `:2101-2111`).
-- The server's `/v1/events` handler ignores query state and returns
-  `store.recent_events(100)` — the latest 100 events across ALL
-  workspaces (`crates/stateful-server/src/lib.rs:203-208`,
-  `crates/stateful-store/src/lib.rs:1017-1033`: `ORDER BY rowid DESC
-  LIMIT ?1`).
-- The raw list is written to the trace unfiltered
-  (`denovo_codex_agent.py:2258-2259`). Only the summary fields filter by
-  the instance's `STATEFUL_WORKSPACE_ID`
-  (`summarize_orchestration_events`, `denovo_codex_agent.py:2179-2225`).
+- Trace capture called `GET /v1/current` and `GET /v1/events` with no
+  parameters (`crates/stateful-bench/scripts/denovo_codex_agent.py` at the time).
+- The server's `/v1/events` handler ignored query state and returned
+  `store.recent_events(100)` — the latest 100 events across ALL workspaces
+  (`crates/stateful-server/src/lib.rs`, `crates/stateful-store/src/lib.rs` at
+  the time).
+- The raw list was written to the trace unfiltered. Only the summary fields
+  filtered by the instance's `STATEFUL_WORKSPACE_ID`
+  (`summarize_orchestration_events`, `denovo_codex_agent.py` at the time).
 - The per-condition report aggregates those per-instance workspace-
   filtered summaries (`orchestration_trace_summary`,
   `crates/stateful-bench/src/denovo.rs:2043-2208`).
 
 Consequences:
 
-- Raw `events` arrays are a global latest-100 snapshot: with 4 concurrent
-  instances sharing one server, 27/30 traces contain foreign-workspace
-  events. Summing raw traces overstates per-instance activity (362 vs
-  107).
-- Official summary counts are truncated by the same 100-event window: an
-  instance whose workspace-filtered match count hits 100 (observed) has
-  saturated the window, so official denial/heartbeat/event counts are
-  **floor values**, not exact totals. Neither the raw sum nor the official
-  sum is an exact activity measure today.
+- Raw `events` arrays were global latest-100 snapshots: with 4 concurrent
+  instances sharing one server, 27/30 traces contained foreign-workspace events.
+  Summing raw traces overstates per-instance activity (362 vs 107).
+- Official summary counts were truncated by the same 100-event window: an
+  instance whose workspace-filtered match count hit 100 (observed) had saturated
+  the window, so official denial/heartbeat/event counts are **floor values**, not
+  exact totals, for this analyzed run.
 
 ## Solutions
 
-### RC1 fixes (pick one; A recommended)
+### RC1 fix options (RC1-A landed)
 
 | Option | Change | Tradeoff |
 |---|---|---|
@@ -275,7 +281,7 @@ Consequences:
 | B. Explicit container-direct mode in stateful-cli | Add a named opt-in (env/flag) that skips bwrap at the three dispatch sites `crates/stateful-cli/src/sandbox.rs:761-765,833-838,897-902`; benchmark sets it in `denovo_codex_agent.py:921-956` | Works without Docker privileges but removes Linux FS/process isolation for sandboxed commands; must be loud and opt-in |
 | C. Temporary: reuse nested-sandbox env gate | Set `STATEFUL_SANDBOX_RUN_ACTIVE=1` + `STATEFUL_ALLOW_NESTED_SANDBOX_RUN=1` in container env (`crates/stateful-cli/src/sandbox.rs:929-936`) | Zero code change, but semantically lies ("already inside a sandbox"); unblocker only |
 
-### RC2 fixes (A and/or B recommended; C optional)
+### RC2 fix options (RC2-A/B landed)
 
 | Option | Change | Tradeoff |
 |---|---|---|
@@ -289,13 +295,13 @@ also match active reservations owned by the same agent
 the denial text ("write boundary can claim") truthful for auto-declared
 reservations.
 
-### RC3 fixes (A + C recommended; B is the proper long-term fix)
+### RC3 fix options (RC3-B plus trace capture update landed)
 
 | Option | Change | Tradeoff |
 |---|---|---|
 | A. Filter at capture | In `write_orchestration_trace` (`denovo_codex_agent.py:2248-2259`), filter `events` by `STATEFUL_WORKSPACE_ID` before writing, and record `events_window_saturated = (len(raw) == 100)` | Instance-local traces immediately; still window-capped |
-| B. Server-side query params | Add `workspace_id`/`since`/`limit` params to `/v1/events` (`crates/stateful-server/src/lib.rs:203-208`) backed by a filtered store query beside `recent_events` (`crates/stateful-store/src/lib.rs:1017-1033`); benchmark passes its workspace id and pages | Exact per-workspace counts, removes the floor-value caveat; small server+store+client change |
-| C. Analysis hygiene rule | Document: never sum raw `orchestration-trace.json` events; always dedupe by `event_id` and filter by the instance `workspace_id`; prefer `denovo-report.generated.json` | No code; prevents mis-reporting while A/B land |
+| B. Server-side query params | Add `workspace_id`/`since`/`limit` params to `/v1/events` (`crates/stateful-server/src/lib.rs:203-208`) backed by a filtered store query beside `recent_events` (`crates/stateful-store/src/lib.rs:1017-1033`); benchmark passes its workspace id and limit | Exact per-workspace counts, removes the floor-value caveat when the window is not saturated; small server+store+client change |
+| C. Analysis hygiene rule | Document: never sum raw `orchestration-trace.json` events; always dedupe by `event_id` and filter by the instance `workspace_id`; prefer `denovo-report.generated.json` | No code; prevents mis-reporting for historical runs and any saturated event window |
 
 ### Contributing-factor fix
 

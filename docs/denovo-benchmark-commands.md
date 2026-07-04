@@ -210,11 +210,11 @@ matrix:
 
 For the same one-instance smoke shape with OMP running inside the benchmark
 Docker agent image, use an image built from
-`crates/stateful-bench/docker/denovo-omp-agent.Dockerfile`. Docker already
-isolates the agent workspace, so the sample disables the nested OMP sandbox to
-avoid bubblewrap namespace failures inside the container. It also passes the
-default in-image `stateful` path explicitly; omit
-`--agent-docker-stateful-binary` when the image uses the default:
+`crates/stateful-bench/docker/denovo-omp-agent.Dockerfile`. The Docker command
+builder grants `--cap-add SYS_ADMIN --security-opt seccomp=unconfined` so Linux
+bubblewrap can run for `stateful sandbox run` inside the agent container. The
+sample keeps `--agent-docker-sandbox off` only to disable OMP's nested sandbox
+env; omit `--agent-docker-stateful-binary` when the image uses the default:
 
 ```bash
 "$STATEFUL_BENCH_BIN" denovo run \
@@ -259,8 +259,9 @@ must state both `max-concurrent` and matrix type, for example `reduced
 stateful:on/off,subagent:on` versus the full four-axis matrix.
 
 Rebuild the Docker agent image before relaunching after local `stateful` or OMP
-integration changes. The examples below pass `--agent-docker-sandbox off`
-because Docker isolation is the sandbox boundary for the benchmark agent:
+integration changes. The Docker builder already grants SYS_ADMIN/seccomp for
+stateful-cli bubblewrap; the examples below keep `--agent-docker-sandbox off`
+only because Docker isolation is the boundary for OMP's own sandbox env:
 
 ```bash
 DOCKER_HOST="$DOCKER_HOST" docker build --pull --no-cache \
@@ -366,8 +367,9 @@ Relaunch pitfalls observed while debugging single-instance Docker OMP runs:
   relaunch with fresh run IDs.
 - Rebuild or retag the Docker OMP agent image after changing the Dockerfile. If
   a Docker OMP run still shows `bubblewrap` namespace failures, confirm the
-  command includes `--agent-docker-sandbox off`; otherwise nested OMP sandboxing
-  is still enabled inside the already-isolated container.
+  actual Docker command includes `--cap-add SYS_ADMIN --security-opt
+  seccomp=unconfined`; `--agent-docker-sandbox off` only disables OMP's nested
+  sandbox env and is not the bwrap fix.
 - If OMP exits in about one second with empty `patch.diff`, zero subagent
   spawns, and `omp exited 1`, first check provider auth propagation. In Docker
   OMP mode the isolated home does not inherit host OMP login state, and the
@@ -468,11 +470,15 @@ adapter `results.jsonl` files. Matrix runs may rewrite or reset raw
 misleading until the run has settled.
 
 Progress output includes compact orchestration trace summaries when stateful
-trace capture is available. Prefer the summary counters for first-pass analysis:
+trace capture is available. Trace capture calls
+`/v1/events?workspace_id=<id>&limit=100` when a workspace id is known, writes
+workspace-local raw trace events, and records per-instance
+`events_window_saturated` when the 100-event window is full. Prefer the summary
 `events`, `heartbeat`, and `denial` in the rendered table, plus JSON fields such
 as `orchestration_event_types`, `orchestration_denial_paths`, and
-`orchestration_heartbeat_max_gap_ms` with `--format json`. The raw
-`orchestration-trace.json` remains the audit artifact for detailed event order.
+`orchestration_heartbeat_max_gap_ms` with `--format json`. Inspect per-instance
+trace/result rows for `events_window_saturated`. The raw `orchestration-trace.json`
+remains the audit artifact for detailed event order.
 
 If `results.jsonl` shows `finish_reason: "benchmark-contamination"`, inspect
 `codex-command.json.benchmark_contamination`; `kind: "upstream-worktree"` means

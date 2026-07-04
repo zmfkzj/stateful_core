@@ -535,6 +535,7 @@ fn authorize_omp_targets(
         .unwrap_or_else(|| effective_workspace_id(runtime, identity));
     let mut reservation_id = input.reservation_id().map(str::to_string);
     let mut auto_declared = false;
+    let mut auto_claim_retried = false;
     let mut auto_claimed_paths = BTreeSet::new();
     let mut warnings = Vec::new();
 
@@ -585,6 +586,33 @@ fn authorize_omp_targets(
                     continue 'authorize;
                 }
 
+                if !auto_claim_retried
+                    && should_auto_claim_omp_tool_reservation(input, &decision, &targets)
+                {
+                    if let Some(claim_reservation_id) = reservation_id.as_deref() {
+                        if let Err(outcome) = claim_omp_pre_tool_reservation(
+                            input,
+                            runtime,
+                            identity,
+                            &workspace_id,
+                            claim_reservation_id,
+                            &targets,
+                        ) {
+                            release_omp_auto_claims(
+                                runtime,
+                                input,
+                                &workspace_id,
+                                &auto_claimed_paths,
+                            );
+                            return Ok(outcome);
+                        }
+                        auto_claimed_paths.extend(targets.iter().map(|target| target.path.clone()));
+                        auto_claim_retried = true;
+                        continue 'authorize;
+                    }
+                }
+
+                let keep_auto_claims = should_keep_omp_auto_claims(&decision);
                 let reason = if let Some(repo_root) = repo_root {
                     if repeated_denial_seen(
                         repo_root,
@@ -599,7 +627,9 @@ fn authorize_omp_targets(
                 } else {
                     authorization_denial_reason(decision)
                 };
-                release_omp_auto_claims(runtime, input, &workspace_id, &auto_claimed_paths);
+                if !keep_auto_claims {
+                    release_omp_auto_claims(runtime, input, &workspace_id, &auto_claimed_paths);
+                }
                 return Ok(OmpHookOutcome::Block { reason });
             }
         }
@@ -828,6 +858,23 @@ fn should_auto_declare_omp_tool_reservation(
     ) && targets.iter().all(|target| target.action == "write_file")
 }
 
+fn should_auto_claim_omp_tool_reservation(
+    input: &OmpPreToolUseInput,
+    decision: &AuthorizeDecision,
+    targets: &[PatchTarget],
+) -> bool {
+    matches!(
+        runtime_tool_name_leaf(&input.tool_name),
+        tool_name if tool_name.eq_ignore_ascii_case("edit")
+            || tool_name.eq_ignore_ascii_case("write")
+    ) && decision.reason_code == "missing_claim"
+        && targets.iter().all(|target| target.action == "write_file")
+}
+
+fn should_keep_omp_auto_claims(decision: &AuthorizeDecision) -> bool {
+    decision.reason_code == "stale_target_observation"
+}
+
 fn declare_and_claim_omp_pre_tool_reservation(
     input: &OmpPreToolUseInput,
     runtime: &ServerRuntime,
@@ -885,13 +932,38 @@ fn declare_and_claim_omp_pre_tool_reservation(
                 .to_string(),
         })?;
 
+    claim_omp_pre_tool_reservation(
+        input,
+        runtime,
+        identity,
+        workspace_id,
+        &reservation_id,
+        targets,
+    )?;
+
+    Ok(reservation_id)
+}
+
+fn claim_omp_pre_tool_reservation(
+    input: &OmpPreToolUseInput,
+    runtime: &ServerRuntime,
+    identity: Option<&RepoIdentity>,
+    workspace_id: &str,
+    reservation_id: &str,
+    targets: &[PatchTarget],
+) -> Result<(), OmpHookOutcome> {
+    let files_planned = targets
+        .iter()
+        .map(|target| target.path.clone())
+        .collect::<Vec<_>>();
+
     let response = post_json(
         runtime,
         "/v1/claim/acquire",
         &json!({
             "agent_id": input.agent_id.clone(),
             "workspace_id": workspace_id,
-            "reservation_id": reservation_id.clone(),
+            "reservation_id": reservation_id,
             "paths": files_planned,
             "root": identity.map(|identity| identity.root.as_str()).unwrap_or(""),
         }),
@@ -908,7 +980,7 @@ fn declare_and_claim_omp_pre_tool_reservation(
         });
     }
 
-    Ok(reservation_id)
+    Ok(())
 }
 
 fn extract_omp_edit_targets(input: &serde_json::Value) -> Vec<PatchTarget> {

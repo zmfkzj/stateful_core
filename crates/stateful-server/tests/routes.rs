@@ -5849,6 +5849,41 @@ async fn events_returns_recent_audit_events() {
 }
 
 #[tokio::test]
+async fn events_query_filters_by_workspace_since_and_limit() {
+    let store = Store::open_in_memory().expect("store should open");
+    let mut old_w1 = Event::agent_registered("old-w1", "w1").with_event_id("old-w1");
+    old_w1.created_at = "2026-07-04T00:00:00Z".to_string();
+    store.append(old_w1).expect("old w1 event should append");
+    let mut new_w2 = Event::agent_registered("new-w2", "w2").with_event_id("new-w2");
+    new_w2.created_at = "2026-07-04T00:03:00Z".to_string();
+    store.append(new_w2).expect("new w2 event should append");
+    let mut mid_w1 = Event::agent_registered("mid-w1", "w1").with_event_id("mid-w1");
+    mid_w1.created_at = "2026-07-04T00:01:00Z".to_string();
+    store.append(mid_w1).expect("mid w1 event should append");
+    let mut new_w1 = Event::agent_registered("new-w1", "w1").with_event_id("new-w1");
+    new_w1.created_at = "2026-07-04T00:02:00Z".to_string();
+    store.append(new_w1).expect("new w1 event should append");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let response = app
+        .oneshot(authorized_get(
+            "/v1/events?workspace_id=w1&since=2026-07-04T00:00:30Z&limit=2",
+        ))
+        .await
+        .expect("events request should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let json = response_json(response, 4096).await;
+    let event_ids = json["events"]
+        .as_array()
+        .expect("events should be an array")
+        .iter()
+        .map(|event| event["event_id"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert_eq!(event_ids, vec!["new-w1", "mid-w1"]);
+}
+
+#[tokio::test]
 async fn lease_acquire_records_audit_event() {
     let app = build_router(ServerConfig::new("secret-token"));
 

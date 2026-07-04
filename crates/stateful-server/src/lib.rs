@@ -200,12 +200,24 @@ async fn current(
     }
 }
 
-async fn events(State(config): State<ServerConfig>) -> (StatusCode, Json<Value>) {
+async fn events(
+    State(config): State<ServerConfig>,
+    Query(input): Query<EventsQuery>,
+) -> (StatusCode, Json<Value>) {
+    let limit = input.limit.unwrap_or(100).clamp(1, 100);
     let result = config
         .store
         .lock()
         .map_err(|_| "store lock poisoned".to_string())
-        .and_then(|store| store.recent_events(100).map_err(|error| error.to_string()));
+        .and_then(|store| {
+            store
+                .recent_events_filtered(
+                    input.workspace_id.as_deref(),
+                    input.since.as_deref(),
+                    limit,
+                )
+                .map_err(|error| error.to_string())
+        });
 
     match result {
         Ok(events) => (
@@ -1917,6 +1929,13 @@ fn has_valid_bearer_token(headers: &HeaderMap, expected_token: &str) -> bool {
 #[derive(Debug, Deserialize)]
 struct CurrentQuery {
     resource: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EventsQuery {
+    workspace_id: Option<String>,
+    since: Option<String>,
+    limit: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

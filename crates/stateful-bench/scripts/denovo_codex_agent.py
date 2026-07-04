@@ -925,6 +925,10 @@ def docker_omp_command_for_profile(
         docker_bin,
         "run",
         "--rm",
+        "--cap-add",
+        "SYS_ADMIN",
+        "--security-opt",
+        "seccomp=unconfined",
         "--network",
         "bridge",
         "--workdir",
@@ -2246,17 +2250,23 @@ def write_orchestration_trace(
         trace["patch_path"] = patch_path.relative_to(instance_dir.parent).as_posix()
     try:
         current = stateful_http_json(env, "/v1/current")
-        events_body = stateful_http_json(env, "/v1/events")
+        workspace_id = env.get("STATEFUL_WORKSPACE_ID")
+        events_query = {"limit": "100"}
+        if workspace_id:
+            trace["workspace_id"] = workspace_id
+            events_query["workspace_id"] = workspace_id
+        events_body = stateful_http_json(
+            env,
+            f"/v1/events?{urllib.parse.urlencode(events_query)}",
+        )
         events = events_body.get("events", [])
         if not isinstance(events, list):
             events = []
-        workspace_id = env.get("STATEFUL_WORKSPACE_ID")
-        if workspace_id:
-            trace["workspace_id"] = workspace_id
         trace.update(summarize_orchestration_events(events, stateful_agent_id, workspace_id))
         trace["trace_captured"] = True
         trace["current"] = current.get("current", current)
         trace["events"] = events
+        trace["events_window_saturated"] = len(events) >= int(events_query["limit"])
         if workspace_id:
             trace["context"] = stateful_http_json(
                 env,
@@ -2277,6 +2287,7 @@ def write_orchestration_trace(
         "claim_events": trace.get("claim_events", 0),
         "conflict_events": trace.get("conflict_events", 0),
         "event_count": trace.get("event_count", 0),
+        "events_window_saturated": trace.get("events_window_saturated", False),
         "event_types": trace.get("event_types", {}),
         "heartbeat_events": trace.get("heartbeat_events", 0),
         "heartbeat_windows": trace.get("heartbeat_windows", 0),

@@ -246,6 +246,21 @@ def test_prompt_and_command_builders(mod, tmp_path):
     assert "STATEFUL_SERVER_TOKEN=token-123" not in env_values
 
 
+def test_omp_docker_command_grants_bwrap_capabilities(mod, tmp_path):
+    command = mod.docker_omp_command_for_profile(
+        workspace=tmp_path / "workspace",
+        prompt_path=tmp_path / "instance" / "prompt.txt",
+        home=tmp_path / "home",
+        omp_bin="omp",
+        benchmark_model="deepseek-v4-flash",
+        docker_image="ghcr.io/stateful/omp-agent:latest",
+        base_env={"STATEFUL_SERVER_URL": "http://127.0.0.1:43873"},
+    )
+
+    assert ["--cap-add", "SYS_ADMIN"] in [command[index:index + 2] for index in range(len(command) - 1)]
+    assert ["--security-opt", "seccomp=unconfined"] in [command[index:index + 2] for index in range(len(command) - 1)]
+
+
 def test_omp_docker_command_can_disable_inner_sandbox(mod):
     command = mod.docker_omp_command_for_profile(
         workspace=Path("/tmp/workspace"),
@@ -798,6 +813,61 @@ def test_orchestration_summaries(mod):
     assert heartbeat["heartbeat_max_gap_ms"] == 46000
     assert heartbeat["denial_paths"]["src/pkg.py"] == 1
 
+
+
+def test_write_orchestration_trace_filters_workspace_events_and_records_saturation(mod, tmp_path, monkeypatch):
+    instance_dir = tmp_path / "runs" / "fake-a"
+    workspace_events = [
+        {
+            "event_id": f"workspace-a-{index}",
+            "event_type": "AgentHeartbeat",
+            "agent_id": "agent-a",
+            "workspace_id": "workspace-a",
+        }
+        for index in range(100)
+    ]
+    mixed_events = workspace_events + [
+        {
+            "event_id": "workspace-b-1",
+            "event_type": "ReservationDeclared",
+            "agent_id": "agent-b",
+            "workspace_id": "workspace-b",
+        }
+    ]
+    requests = []
+
+    def fake_stateful_http_json(env, path, payload=None, timeout=5.0):
+        requests.append((path, payload))
+        if path == "/v1/current":
+            return {"current": {"summary": "ok"}}
+        if path.startswith("/v1/events"):
+            if "workspace_id=workspace-a" in path:
+                return {"events": workspace_events}
+            return {"events": mixed_events}
+        if path == "/v1/context/render":
+            return {"status": "ok"}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(mod, "stateful_http_json", fake_stateful_http_json)
+
+    summary = mod.write_orchestration_trace(
+        instance_dir=instance_dir,
+        env={
+            "STATEFUL_SERVER_URL": "http://127.0.0.1:43873",
+            "STATEFUL_SERVER_TOKEN": "token",
+            "STATEFUL_WORKSPACE_ID": "workspace-a",
+        },
+        instance_id="fake-a",
+        stateful_agent_id="agent-a",
+        subagent_usage={},
+    )
+    trace = json.loads((instance_dir / "orchestration-trace.json").read_text(encoding="utf-8"))
+
+    assert summary["events_window_saturated"] is True
+    assert trace["events_window_saturated"] is True
+    assert trace["event_count"] == 100
+    assert {event["workspace_id"] for event in trace["events"]} == {"workspace-a"}
+    assert any(path.startswith("/v1/events?") and "workspace_id=workspace-a" in path and "limit=100" in path for path, _ in requests)
 
 def test_parse_defaults_validate_run_and_empty_stop(mod):
     base = [
