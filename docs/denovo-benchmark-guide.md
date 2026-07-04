@@ -165,8 +165,9 @@ The 12-instance Docker OMP command in
 `--max-concurrent 6`. Treat it as a declared behavior/concurrency run; report it
 separately from full four-axis or official-style stateful/no-state comparisons.
 
-For `subagent:on`, the generated DeNovo prompt appends only `orchestrate`.
-`subagent:off` does not add a custom subagent prompt. OMP runs also unpack
+For `subagent:on`, the generated DeNovo prompt appends exactly this two-line
+custom prompt block: `orchestrate` then `workflowz`. `subagent:off` does not add
+a custom subagent prompt. OMP runs also unpack
 bundled task agents into the isolated runtime home and enable
 `features.multi_agent=true`. The adapter still enforces the minimum native
 subagent spawn count for both Codex and OMP `subagent:on` runs. Treat that

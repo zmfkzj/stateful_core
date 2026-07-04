@@ -66,6 +66,9 @@ adapter lifecycle grace.
 Explicit `subagent:off`
 conditions still parse for diagnostic or backwards-compatible runs.
 
+For `subagent:on`, ProgramBench uses the same two-line custom prompt block:
+`orchestrate` then `workflowz`. `subagent:off` adds no custom prompt.
+
 For `stateful:on`, the adapter installs and enables Stateful where the agent
 runs: the host airlock for host CLI mode, or the separate OMP agent container
 when `--agent-docker-image` is set. The target ProgramBench container stays

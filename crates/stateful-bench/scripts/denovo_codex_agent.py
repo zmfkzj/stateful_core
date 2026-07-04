@@ -197,7 +197,7 @@ class StatefulRepoEnableCleanup:
 def native_subagent_prompt_instruction(subagent: str, subagent_min_count: int) -> str:
     if subagent != "on":
         return ""
-    return "orchestrate"
+    return "orchestrate\nworkflowz"
 
 
 def benchmark_isolation_prompt_instruction() -> str:

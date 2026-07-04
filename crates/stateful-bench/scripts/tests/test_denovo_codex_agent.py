@@ -182,8 +182,8 @@ def test_timeout_wrappers(mod):
     assert calls == [{"command": ["omp", "-p", "@/tmp/prompt.txt"], "cwd": "target/workspace", "stdin_is_devnull": True}]
 
 
-def test_native_subagent_prompt_instruction_is_orchestrate_only(mod):
-    assert mod.native_subagent_prompt_instruction("on", 3) == "orchestrate"
+def test_native_subagent_prompt_instruction_is_orchestrate_and_workflowz(mod):
+    assert mod.native_subagent_prompt_instruction("on", 3) == "orchestrate\nworkflowz"
     assert mod.native_subagent_prompt_instruction("off", 3) == ""
 
 
@@ -572,7 +572,8 @@ def test_prompt_requires_native_subagents_and_blocks_upstream_source(mod):
     assert "Native Codex/OMP subagent requirements" not in off
     assert "MUST use native subagents" not in off
     assert "tasks` array containing exactly 3 implementation subagents" not in off
-    assert "\norchestrate\n" in on
+    assert "\norchestrate\nworkflowz\n" in on
+    assert "workflowz" not in off
     assert "Native Codex/OMP subagent requirements" not in on
     assert "MUST use native subagents" not in on
     assert "tasks` array containing exactly 3 implementation subagents" not in on
