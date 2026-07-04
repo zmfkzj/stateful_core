@@ -613,6 +613,9 @@ The release configuration uses manifest-driven `release-please` with the Rust
 `cargo-workspace` plugin and a linked version group for the public crates:
 `stateful-core`, `stateful-store`, `stateful-server`, and `stateful-cli`. The
 benchmark crate is `publish = false` and is not a release component.
+Keep release PR title patterns parseable by `release-please`, including
+`${scope}`, `${component}`, and `${version}`, so merged release PRs can be
+parsed on later runs.
 
 The release workflow uses `GITHUB_TOKEN` by default. Configure a repository
 secret named `RELEASE_PLEASE_TOKEN` with a suitable personal access token when

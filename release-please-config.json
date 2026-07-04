@@ -4,7 +4,7 @@
   "bump-minor-pre-major": true,
   "bump-patch-for-minor-pre-major": true,
   "separate-pull-requests": false,
-  "group-pull-request-title-pattern": "chore: release stateful workspace",
+  "group-pull-request-title-pattern": "chore${scope}: release${component} ${version}",
   "packages": {
     "crates/stateful-core": {
       "component": "stateful-core"
