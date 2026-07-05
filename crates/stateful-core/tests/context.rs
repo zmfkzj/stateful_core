@@ -256,6 +256,7 @@ fn few_reservations_are_not_compressed() {
                 format!("Agent s2 declared reservation for src/file{i}.rs."),
             )
             .with_agent("s2")
+            .with_next_action(format!("Keep exact claim active for src/file{i}.rs."))
             .with_evidence_kind(CurrentEvidenceKind::DeclaredReservation)
         })
         .collect::<Vec<_>>();
@@ -265,24 +266,26 @@ fn few_reservations_are_not_compressed() {
 
     assert!(text.contains("src/file0.rs"));
     assert!(text.contains("src/file1.rs"));
+    assert!(text.contains("next: Keep exact claim active for src/file0.rs"));
+    assert!(text.contains("next: Keep exact claim active for src/file1.rs"));
     assert!(!text.contains("more"));
 }
 
 #[test]
-fn compressed_reservation_keeps_section_source_ref_and_next_action() {
+fn compressed_reservation_synthesizes_group_next_action() {
     let items = (0..4)
         .map(|i| {
             CurrentItem::new(
                 CurrentItemKind::Reservation,
                 CurrentSeverity::Info,
                 CurrentFreshness::Live,
-                format!("src/scope{i}.rs"),
+                format!("src/file{i}.rs"),
                 "Refactor parser.",
-                format!("This session declared reservation for src/scope{i}.rs."),
+                format!("This session declared reservation for src/file{i}.rs."),
             )
             .with_agent("s1")
             .with_source_ref(AGENT_CONTEXT_SCOPE_SOURCE_REF)
-            .with_next_action("Keep exact claims active.")
+            .with_next_action(format!("Keep exact claim active for src/file{i}.rs."))
             .with_evidence_kind(CurrentEvidenceKind::DeclaredReservation)
         })
         .collect::<Vec<_>>();
@@ -292,7 +295,8 @@ fn compressed_reservation_keeps_section_source_ref_and_next_action() {
 
     assert!(text.contains("Your Active Scope"));
     assert!(text.contains("+1 more"), "text `{text}` should collapse files");
-    assert!(text.contains("next: Keep exact claims active"));
+    assert!(!text.contains("next: Keep exact claim active for src/file0.rs"));
+    assert!(text.contains("next: Before writing any listed or folded file, keep or acquire exact same-reservation file claims and coordinate to avoid overlapping work"));
     assert!(!text.contains("Nearby Activity"));
 }
 

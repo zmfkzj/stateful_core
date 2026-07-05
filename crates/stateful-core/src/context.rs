@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub const AGENT_CONTEXT_SCOPE_SOURCE_REF: &str = "AgentContextScope";
 const RESERVATION_GROUP_THRESHOLD: usize = 4;
+const COMPRESSED_RESERVATION_NEXT_ACTION: &str = "Before writing any listed or folded file, keep or acquire exact same-reservation file claims and coordinate to avoid overlapping work.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderMode {
@@ -439,11 +440,9 @@ fn compress_reservation_groups(items: &[CurrentItem]) -> Vec<CurrentItem> {
         } else {
             format!("{shown}, +{extra} more")
         };
+        collapsed.next_action = Some(COMPRESSED_RESERVATION_NEXT_ACTION.to_string());
         collapsed.source_refs.clear();
         for grouped in indices.iter().map(|&idx| &items[idx]) {
-            if collapsed.next_action.is_none() {
-                collapsed.next_action = grouped.next_action.clone();
-            }
             for source_ref in &grouped.source_refs {
                 if !collapsed.source_refs.contains(source_ref) {
                     collapsed.source_refs.push(source_ref.clone());
