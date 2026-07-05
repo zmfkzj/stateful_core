@@ -3,6 +3,7 @@ mod claims;
 mod human;
 mod notifications;
 mod reservations;
+mod scope_overlap;
 mod write_fences;
 pub use human::{
     HumanObservationConfidence, HumanObservationInput, HumanObservationKind,
@@ -2394,6 +2395,21 @@ impl Store {
                     &event.agent_id,
                     &event.workspace_id,
                     ActivityPhase::Exploring,
+                )?;
+                let actor_resources: Vec<(String, bool)> = scopes
+                    .iter()
+                    .map(|scope| match scope {
+                        ReservationScope::File(path) => (normalize_relative_path(path), false),
+                        ReservationScope::Directory(path) => {
+                            (normalize_relative_path(path.trim_end_matches('/')), true)
+                        }
+                    })
+                    .collect();
+                self.notify_scope_overlap_for_declaration(
+                    &event.workspace_id,
+                    &event.agent_id,
+                    &purpose,
+                    &actor_resources,
                 )?;
             }
             EventType::ClaimAcquired

@@ -83,6 +83,16 @@ fn test_timestamp(timestamp: OffsetDateTime) -> String {
     )
 }
 
+fn scope_overlap_notifications(store: &Store, agent_id: &str) -> Vec<serde_json::Value> {
+    store
+        .pending_notifications_after(agent_id, "w1", 0)
+        .expect("notifications should load")
+        .into_iter()
+        .filter(|notification| notification.kind == "scope_overlap")
+        .map(|notification| notification.payload)
+        .collect()
+}
+
 #[test]
 fn append_event_materializes_session_in_same_transaction() {
     let store = Store::open_in_memory().expect("in-memory store should open");
@@ -294,6 +304,149 @@ fn reservation_declared_materializes_active_policy_state() {
         stateful_core::authorize_action(&state, AuthorizationInput::write_file("src/auth.ts"));
 
     assert_eq!(decision.decision, DecisionKind::Allow);
+}
+
+#[test]
+fn scope_overlap_notifies_existing_reservation_holder() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+    store
+        .append(Event::reservation_declared(
+            "s1",
+            "w1",
+            "Edit auth.",
+            ["src/auth.ts"],
+        ))
+        .expect("s1 declares");
+    store
+        .append(Event::reservation_declared(
+            "s2",
+            "w1",
+            "Also edit auth.",
+            ["src/auth.ts"],
+        ))
+        .expect("s2 declares");
+
+    let s1 = scope_overlap_notifications(&store, "s1");
+    assert_eq!(s1.len(), 1);
+    assert_eq!(s1[0]["relative_path"], "src/auth.ts");
+    assert_eq!(s1[0]["action"], "write_file");
+    assert_eq!(s1[0]["by_agent_id"], "s2");
+    assert_eq!(s1[0]["purpose"], "Also edit auth.");
+    assert_eq!(s1[0]["source"], "reservation_declared");
+    assert_eq!(s1[0]["overlaps_your"], "src/auth.ts");
+    assert_eq!(scope_overlap_notifications(&store, "s2").len(), 0);
+}
+
+#[test]
+fn scope_overlap_matches_file_within_declared_directory() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+    store
+        .append(Event::reservation_declared(
+            "s1",
+            "w1",
+            "Own the file.",
+            ["src/auth.ts"],
+        ))
+        .expect("s1 declares file");
+    store
+        .append(Event::reservation_declared("s2", "w1", "Own the dir.", ["src/"]))
+        .expect("s2 declares dir");
+
+    let s1 = scope_overlap_notifications(&store, "s1");
+    assert_eq!(s1.len(), 1);
+    assert_eq!(s1[0]["by_agent_id"], "s2");
+    assert_eq!(s1[0]["relative_path"], "src");
+    assert_eq!(s1[0]["action"], "write_directory");
+    assert_eq!(s1[0]["overlaps_your"], "src/auth.ts");
+}
+
+#[test]
+fn scope_overlap_matches_directory_over_file() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+    store
+        .append(Event::reservation_declared("s1", "w1", "Own the dir.", ["src/"]))
+        .expect("s1 declares dir");
+    store
+        .append(Event::reservation_declared(
+            "s2",
+            "w1",
+            "Own the file.",
+            ["src/auth.ts"],
+        ))
+        .expect("s2 declares file");
+
+    let s1 = scope_overlap_notifications(&store, "s1");
+    assert_eq!(s1.len(), 1);
+    assert_eq!(s1[0]["relative_path"], "src/auth.ts");
+    assert_eq!(s1[0]["action"], "write_file");
+    assert_eq!(s1[0]["overlaps_your"], "src");
+}
+
+#[test]
+fn scope_overlap_skips_non_overlapping_paths() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+    store
+        .append(Event::reservation_declared("s1", "w1", "A.", ["src/a.ts"]))
+        .expect("s1 declares");
+    store
+        .append(Event::reservation_declared("s2", "w1", "B.", ["src/b.ts"]))
+        .expect("s2 declares");
+
+    assert_eq!(scope_overlap_notifications(&store, "s1").len(), 0);
+}
+
+#[test]
+fn scope_overlap_excludes_self_redeclaration() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+    store
+        .append(Event::reservation_declared(
+            "s1",
+            "w1",
+            "First.",
+            ["src/auth.ts"],
+        ))
+        .expect("first declare");
+    store
+        .append(Event::reservation_declared(
+            "s1",
+            "w1",
+            "Second.",
+            ["src/auth.ts"],
+        ))
+        .expect("second declare");
+
+    assert_eq!(scope_overlap_notifications(&store, "s1").len(), 0);
+}
+
+#[test]
+fn scope_overlap_dedupes_repeat_declarations_within_window() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+    store
+        .append(Event::reservation_declared(
+            "s1",
+            "w1",
+            "Hold.",
+            ["src/auth.ts"],
+        ))
+        .expect("s1 declares");
+    store
+        .append(Event::reservation_declared(
+            "s2",
+            "w1",
+            "One.",
+            ["src/auth.ts"],
+        ))
+        .expect("s2 declares once");
+    store
+        .append(Event::reservation_declared(
+            "s2",
+            "w1",
+            "Two.",
+            ["src/auth.ts"],
+        ))
+        .expect("s2 declares twice");
+
+    assert_eq!(scope_overlap_notifications(&store, "s1").len(), 1);
 }
 
 #[test]

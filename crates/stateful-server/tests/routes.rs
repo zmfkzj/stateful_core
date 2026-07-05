@@ -4263,6 +4263,65 @@ async fn activity_finalize_reclaims_claims_and_notifications_poll_returns_resume
 }
 
 #[tokio::test]
+async fn overlapping_declaration_notifies_existing_holder_via_poll() {
+    let store = Store::open_in_memory().expect("store should open");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    let declare_s1 = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/reservation/declare",
+            "s1",
+            "w1",
+            serde_json::json!({
+                "purpose": "Own the auth file.",
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("s1 declaration should complete");
+    assert_eq!(declare_s1.status(), StatusCode::OK);
+
+    let declare_s2 = app
+        .clone()
+        .oneshot(protocol_request(
+            "/v1/reservation/declare",
+            "s2",
+            "w1",
+            serde_json::json!({
+                "purpose": "Also edit the auth file.",
+                "files_planned": ["src/auth.ts"]
+            }),
+        ))
+        .await
+        .expect("s2 declaration should complete");
+    assert_eq!(declare_s2.status(), StatusCode::OK);
+
+    let poll = app
+        .oneshot(json_request(
+            "/v1/notifications/poll",
+            serde_json::json!({
+                "agent_id": "s1",
+                "workspace_id": "w1"
+            }),
+        ))
+        .await
+        .expect("notification poll should complete");
+    assert_eq!(poll.status(), StatusCode::OK);
+
+    let json = response_json(poll, 4096).await;
+    let notifications = json["notifications"]
+        .as_array()
+        .expect("notifications should be an array");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(notifications.len(), 1);
+    let notification = &notifications[0];
+    assert_eq!(notification["kind"], "scope_overlap");
+    assert_eq!(notification["payload"]["by_agent_id"], "s2");
+    assert_eq!(notification["payload"]["relative_path"], "src/auth.ts");
+}
+
+#[tokio::test]
 async fn notifications_stream_emits_reservation_granted_sse() {
     let store = Store::open_in_memory().expect("store should open");
     let app = build_router(ServerConfig::with_store("secret-token", store));
