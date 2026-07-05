@@ -485,6 +485,7 @@ fn install_omp_yes_can_target_user_omp_profile_separate_from_stateful_home() {
         binary_path: "/opt/stateful/bin/stateful".to_string(),
         project_config_path: None,
         omp_agent_dir: Some(omp_agent_dir.clone()),
+        profile: None,
         update: false,
     })
     .expect("omp install should apply");
@@ -1113,6 +1114,7 @@ impl TestFixture {
             binary_path: "/opt/stateful/bin/stateful".to_string(),
             project_config_path: None,
             omp_agent_dir: Some(self.omp_agent_dir()),
+            profile: None,
             update: false,
         }
     }

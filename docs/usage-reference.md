@@ -53,10 +53,12 @@ stateful codex [--codex-bin <path>] [--sandbox passthrough] [--no-stateful] -- <
 
 ```bash
 stateful install --agent omp --yes
+stateful install --agent omp --profile work --yes
 ```
 
 Installs global stateful files and configures the isolated OMP `stateful` profile
-under `~/.omp/profiles/stateful/agent` by default. The installer merges
+under `~/.omp/profiles/stateful/agent` by default, or
+`~/.omp/profiles/<name>/agent` when `--profile <name>` is supplied. The installer merges
 `config.yml` instead of replacing it and rejects invalid YAML.
 
 The target OMP profile keys are:
@@ -277,7 +279,7 @@ Common commands:
 
 - `stateful install [--yes]`
 - `stateful install --agent codex [--yes] [--codex-config <path>] [--binary <path>]`
-- `stateful install --agent omp [--yes] [--update] [--binary <path>]`
+- `stateful install --agent omp [--yes] [--update] [--binary <path>] [--profile <name>]`
 - `stateful enable [--repo <path>]`, `stateful disable`, `stateful repos list`
 - `stateful tools list`, `stateful tools allow <tool>`, `stateful tools deny <tool>`
 - `stateful server start|restart|status|stop|join`

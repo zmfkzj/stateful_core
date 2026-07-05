@@ -25,7 +25,8 @@ The prototype supports user-level installation with repo allowlist gating.
 `skills/stateful-command-policy/` (`SKILL.md`, `omp-tools.md`,
 `sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`) and
 `skills/dispatching-parallel-agents/SKILL.md`. `stateful install
---agent omp --yes` configures the isolated OMP `stateful` profile with stateful
+--agent omp --yes` configures the isolated OMP `stateful` profile, or
+`--agent omp --profile <name> --yes` configures `~/.omp/profiles/<name>/agent`, with stateful
 hooks, native Stateful tool injection, built-in Bash preflight for strict
 trusted `stateful sandbox run ...` and `stateful sandbox process find ...`
 commands, OMP native `edit`/`write` pre-tool recovery that can auto-declare
@@ -654,6 +655,7 @@ The implementation should include a small CLI for setup and debugging:
 
 ```text
 stateful install [--yes]
+stateful install --agent omp [--profile <name>] [--yes]
 stateful enable [--repo <path>]
 stateful disable [--repo <path>]
 stateful repos list
@@ -690,8 +692,8 @@ are allowed for read-only/no-declared-scope use; supplied external write scopes
 are validated before the sandbox starts. On macOS, that external profile also
 permits `trustd` and DirectoryService Mach lookups needed by Go TLS certificate
 verification.
-`stateful
-install --agent omp --yes` enables built-in Bash only for strict trusted
+`stateful install --agent omp --yes` or
+`stateful install --agent omp --profile <name> --yes` enables built-in Bash only for strict trusted
 `stateful sandbox run ...` and `stateful sandbox process find ...` commands
 after Stateful preflight. Command execution and process inspection are not
 generated tool calls. External write/create/write-dir/socket/signal scope and

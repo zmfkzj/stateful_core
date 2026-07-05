@@ -79,6 +79,50 @@ pub struct Cli {
     pub command: Command,
 }
 
+impl Cli {
+    pub fn parse() -> Self {
+        let cli = <Self as Parser>::parse();
+        if let Err(error) = validate_install_profile_selection(&cli) {
+            <Self as clap::CommandFactory>::command()
+                .error(clap::error::ErrorKind::ValueValidation, error)
+                .exit();
+        }
+        cli
+    }
+
+    pub fn try_parse_from<I, T>(itr: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        let cli = <Self as Parser>::try_parse_from(itr)?;
+        validate_install_profile_selection(&cli).map_err(|error| {
+            <Self as clap::CommandFactory>::command()
+                .error(clap::error::ErrorKind::ValueValidation, error)
+        })?;
+        Ok(cli)
+    }
+}
+
+fn validate_install_profile_selection(cli: &Cli) -> Result<(), String> {
+    if let Command::Install {
+        agents,
+        profile: Some(_),
+        ..
+    } = &cli.command
+    {
+        if agents.as_slice() != [InstallAgent::Omp] {
+            return Err("--profile requires --agent omp".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn parse_omp_profile_name(value: &str) -> Result<String, String> {
+    install::validate_omp_profile_name(value)?;
+    Ok(value.to_string())
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
     Install {
@@ -90,6 +134,8 @@ pub enum Command {
         codex_config: Option<PathBuf>,
         #[arg(long)]
         binary: Option<String>,
+        #[arg(long, value_parser = parse_omp_profile_name)]
+        profile: Option<String>,
         #[arg(long)]
         update: bool,
     },
@@ -444,6 +490,7 @@ pub fn run() -> anyhow::Result<()> {
             agents,
             codex_config,
             binary,
+            profile,
             update,
         } => {
             let paths = GlobalPaths::from_env()?;
@@ -487,6 +534,7 @@ pub fn run() -> anyhow::Result<()> {
                     binary_path: binary_path.expect("agent install should resolve binary"),
                     project_config_path: None,
                     omp_agent_dir: None,
+                    profile,
                     update,
                 })?
             } else {

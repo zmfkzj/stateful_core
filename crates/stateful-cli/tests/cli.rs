@@ -1,4 +1,3 @@
-use clap::Parser;
 use stateful_cli::{
     Cli, CodexSandboxMode, Command, GlobalPaths, HookCommand, HookRuntime, InstallAgent,
     NotificationsCommand, OmpInstallOptions, ReconcileCommand, ReposCommand, ResumeCommand,
@@ -829,6 +828,7 @@ fn parses_install_yes_command() {
             ref agents,
             codex_config: None,
             binary: None,
+            profile: None,
             update: false,
         }
         if agents.is_empty()
@@ -857,6 +857,7 @@ fn parses_install_agent_codex_command() {
             ref agents,
             ref codex_config,
             ref binary,
+            profile: None,
             update: false,
         } if codex_config == &Some(PathBuf::from("codex-home/.codex/config.toml"))
             && binary.as_deref() == Some("/opt/stateful/bin/stateful")
@@ -881,6 +882,110 @@ fn parses_install_agent_omp_command() {
 }
 
 #[test]
+fn parses_install_profile_for_omp_agent() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "install",
+        "--agent",
+        "omp",
+        "--profile",
+        "work",
+        "--yes",
+    ])
+    .expect("install --agent omp --profile should parse");
+
+    assert!(matches!(
+        cli.command,
+        Command::Install {
+            yes: true,
+            ref agents,
+            ref profile,
+            ..
+        } if agents == &vec![InstallAgent::Omp] && profile.as_deref() == Some("work")
+    ));
+}
+
+#[test]
+fn rejects_install_profile_without_omp_agent() {
+    assert!(
+        Cli::try_parse_from(["stateful", "install", "--profile", "work", "--yes"]).is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "stateful",
+            "install",
+            "--agent",
+            "codex",
+            "--profile",
+            "work",
+            "--yes",
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn rejects_invalid_install_profile_names() {
+    for profile in ["", "/", "..", "team/work", "work\nprofile"] {
+        assert!(
+            Cli::try_parse_from([
+                "stateful",
+                "install",
+                "--agent",
+                "omp",
+                "--profile",
+                profile,
+                "--yes",
+            ])
+            .is_err(),
+            "{profile:?} should be rejected"
+        );
+    }
+}
+
+#[test]
+fn install_profile_writes_omp_files_under_named_profile_agent_dir() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should create");
+    let home = temp_dir.path().join("home");
+    let agent_dir = home
+        .join(".omp")
+        .join("profiles")
+        .join("work")
+        .join("agent");
+    let extension_path = agent_dir
+        .join("extensions")
+        .join("stateful-omp-extension.js");
+
+    apply_omp_install(OmpInstallOptions {
+        yes: true,
+        paths: GlobalPaths::new(home.clone()),
+        binary_path: "/usr/local/bin/stateful".to_string(),
+        project_config_path: None,
+        omp_agent_dir: Some(agent_dir.clone()),
+        profile: Some("work".to_string()),
+        update: true,
+    })
+    .expect("OMP install should write generated files under selected profile");
+
+    let config = fs::read_to_string(agent_dir.join("config.yml"))
+        .expect("generated OMP config should be readable");
+    let extension =
+        fs::read_to_string(&extension_path).expect("generated OMP extension should be readable");
+
+    assert!(config.contains(extension_path.to_string_lossy().as_ref()));
+    assert!(extension.contains("/usr/local/bin/stateful"));
+    assert!(
+        !home
+            .join(".omp")
+            .join("profiles")
+            .join("stateful")
+            .join("agent")
+            .exists()
+    );
+}
+
+
+#[test]
 fn omp_extension_uses_strict_agent_id_identity() {
     let temp_dir = tempfile::tempdir().expect("temp dir should create");
     let temp = temp_dir.path();
@@ -892,6 +997,7 @@ fn omp_extension_uses_strict_agent_id_identity() {
         binary_path: "/usr/local/bin/stateful".to_string(),
         project_config_path: None,
         omp_agent_dir: Some(agent_dir.clone()),
+        profile: None,
         update: true,
     })
     .expect("OMP install should write generated extension");

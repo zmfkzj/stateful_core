@@ -40,6 +40,7 @@ pub struct OmpInstallOptions {
     pub binary_path: String,
     pub project_config_path: Option<PathBuf>,
     pub omp_agent_dir: Option<PathBuf>,
+    pub profile: Option<String>,
     pub update: bool,
 }
 
@@ -1159,25 +1160,43 @@ fn omp_agent_dir(options: &OmpInstallOptions) -> anyhow::Result<PathBuf> {
         return Ok(agent_dir.clone());
     }
 
-    default_omp_agent_dir()
+    default_omp_agent_dir(options.profile.as_deref())
 }
 
-fn default_omp_agent_dir() -> anyhow::Result<PathBuf> {
+fn default_omp_agent_dir(profile: Option<&str>) -> anyhow::Result<PathBuf> {
     let home = std::env::var_os("HOME")
-        .ok_or_else(|| anyhow::anyhow!("HOME is not set; pass an OMP agent directory"))?;
+        .ok_or_else(|| anyhow::anyhow!("HOME is not set; pass an OMP profile name"))?;
     if home.is_empty() {
-        anyhow::bail!("HOME is set but empty; pass an OMP agent directory");
+        anyhow::bail!("HOME is set but empty; pass an OMP profile name");
     }
 
-    Ok(default_omp_agent_dir_from_home(PathBuf::from(home)))
+    default_omp_agent_dir_from_home(PathBuf::from(home), profile.unwrap_or("stateful"))
 }
 
-fn default_omp_agent_dir_from_home(home: impl AsRef<Path>) -> PathBuf {
-    home.as_ref()
+fn default_omp_agent_dir_from_home(
+    home: impl AsRef<Path>,
+    profile: &str,
+) -> anyhow::Result<PathBuf> {
+    validate_omp_profile_name(profile).map_err(anyhow::Error::msg)?;
+    Ok(home
+        .as_ref()
         .join(".omp")
         .join("profiles")
-        .join("stateful")
-        .join("agent")
+        .join(profile)
+        .join("agent"))
+}
+
+pub fn validate_omp_profile_name(profile: &str) -> Result<(), String> {
+    if profile.is_empty() {
+        return Err("OMP profile name must not be empty".to_string());
+    }
+    if profile == "." || profile == ".." {
+        return Err("OMP profile name must be a single profile directory name".to_string());
+    }
+    if profile.contains('/') || profile.contains('\\') || profile.chars().any(char::is_control) {
+        return Err("OMP profile name must be a single profile directory name".to_string());
+    }
+    Ok(())
 }
 
 fn write_or_create_text_file(config_path: &Path, contents: &str) -> anyhow::Result<()> {
@@ -1508,8 +1527,16 @@ mod tests {
     #[test]
     fn default_omp_agent_dir_uses_user_omp_profile() {
         assert_eq!(
-            default_omp_agent_dir_from_home("home"),
+            default_omp_agent_dir_from_home("home", "stateful").expect("profile should be valid"),
             PathBuf::from("home/.omp/profiles/stateful/agent")
+        );
+    }
+
+    #[test]
+    fn default_omp_agent_dir_uses_selected_omp_profile() {
+        assert_eq!(
+            default_omp_agent_dir_from_home("home", "work").expect("profile should be valid"),
+            PathBuf::from("home/.omp/profiles/work/agent")
         );
     }
 

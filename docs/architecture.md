@@ -138,7 +138,8 @@ The prototype supports user-level installation with repo allowlist gating.
 `skills/dispatching-parallel-agents/SKILL.md`.
 For OMP, `stateful install --agent omp --yes` writes OMP config containing the
 stateful extension under the OMP `stateful` profile agent directory
-(`~/.omp/profiles/stateful/agent`) and ensures the target keys
+(`~/.omp/profiles/stateful/agent`), or under `~/.omp/profiles/<name>/agent`
+when `--profile <name>` is supplied, and ensures the target keys
 `tools.approvalMode: yolo`, `stateful.autoApprove: true`,
 `bash.enabled: true`, `eval.py: false`, `eval.js: false`, `eval.rb: false`,
 and `eval.jl: false`. The installer removes `tools.approval` from the stateful

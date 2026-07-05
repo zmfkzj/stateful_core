@@ -166,8 +166,8 @@ stateful codex
 
 ### OMP
 
-Install OMP integration when you want the isolated OMP `stateful` profile,
-stateful hooks, native Stateful tool injection, built-in Bash preflight, OMP
+Install OMP integration when you want the isolated OMP `stateful` profile
+(or another profile selected with `--profile <name>`), stateful hooks, native Stateful tool injection, built-in Bash preflight, OMP
 edit/write auto-declare/claim for missing scope, lazy resume fallbacks, and
 `skills/stateful-command-policy/` (`SKILL.md`, `omp-tools.md`,
 `sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`):
