@@ -932,10 +932,18 @@ impl Store {
                     ),
                 )
             } else {
+                let queued_summary = match self.queue_position(&wait_id)? {
+                    Some(position) => format!(
+                        "Agent {agent_id} is queued (#{position}) for {action} on {relative_path}."
+                    ),
+                    None => {
+                        format!("Agent {agent_id} is queued for {action} on {relative_path}.")
+                    }
+                };
                 (
                     CurrentItemKind::WaitQueue,
                     CurrentSeverity::Warn,
-                    format!("Agent {agent_id} is queued for {action} on {relative_path}."),
+                    queued_summary,
                     format!(
                         "Wait for the active blocker to release before assuming {relative_path} is writable."
                     ),

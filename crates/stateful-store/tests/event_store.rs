@@ -1474,6 +1474,46 @@ fn live_current_state_reports_active_items_with_purpose() {
 }
 
 #[test]
+fn queued_wait_item_summary_includes_queue_position() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+    store
+        .append(Event::reservation_declared(
+            "s1",
+            "w1",
+            "Fix auth validation behavior.",
+            ["src/auth.ts"],
+        ))
+        .expect("reservation should append");
+    acquire_test_lease(&store, "s1", "w1", "src/auth.ts");
+    store
+        .enqueue_reservation_request(ReservationRequestInput {
+            request_id: "request-1",
+            agent_id: "s2",
+            workspace_id: "w1",
+            relative_path: "src/auth.ts",
+            action: "write_file",
+            purpose: "Update the same auth file after the active claim clears.",
+            blocking_agent_id: Some("s1"),
+        })
+        .expect("waiter should enqueue");
+
+    let live = store
+        .live_current_state(Some("src/auth.ts"))
+        .expect("live current state should load");
+    let waiter = live
+        .items
+        .iter()
+        .find(|item| item.kind == CurrentItemKind::WaitQueue)
+        .expect("wait queue item should exist");
+
+    assert!(
+        waiter.summary.contains("(#1)"),
+        "summary `{}` should include queue position",
+        waiter.summary
+    );
+}
+
+#[test]
 fn live_current_state_uses_lease_acquisition_purpose_after_intent_redeclare() {
     let store = Store::open_in_memory().expect("in-memory store should open");
 
