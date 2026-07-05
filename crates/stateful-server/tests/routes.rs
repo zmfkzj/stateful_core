@@ -3664,6 +3664,112 @@ async fn lease_acquire_rejects_active_reservation_conflict_without_breaking_clai
 }
 
 #[tokio::test]
+async fn reservation_claim_reports_non_claimable_wait_status_as_reason_code() {
+    let store = Store::open_in_memory().expect("store should open");
+    let queued = store
+        .enqueue_waiter(
+            "queued-owner",
+            "w1",
+            "src/queued.ts",
+            "write_file",
+            "Queued claim should stay distinguishable from missing.",
+            Some("blocker"),
+        )
+        .expect("queued waiter should enqueue");
+    let expired = store
+        .enqueue_waiter(
+            "expired-owner",
+            "w1",
+            "src/expired.ts",
+            "write_file",
+            "Expired claim should stay distinguishable from missing.",
+            Some("blocker"),
+        )
+        .expect("expired waiter should enqueue");
+    store
+        .promote_next_waiter("w1", "src/expired.ts")
+        .expect("expired waiter should reserve");
+    store
+        .expire_reservation(&expired.wait_id)
+        .expect("reserved waiter should expire");
+    let other_owner = store
+        .enqueue_waiter(
+            "owner",
+            "w1",
+            "src/owned.ts",
+            "write_file",
+            "Owner mismatch should stay distinguishable from missing.",
+            Some("blocker"),
+        )
+        .expect("owned waiter should enqueue");
+    store
+        .promote_next_waiter("w1", "src/owned.ts")
+        .expect("owned waiter should reserve");
+    let app = build_router(ServerConfig::with_store("secret-token", store));
+
+    for (name, agent_id, wait_id, expected_reason_code, expected_status) in [
+        (
+            "queued",
+            "queued-owner",
+            queued.wait_id,
+            "reservation_queued",
+            Some("queued"),
+        ),
+        (
+            "expired",
+            "expired-owner",
+            expired.wait_id,
+            "reservation_expired",
+            Some("expired"),
+        ),
+        (
+            "owner mismatch",
+            "not-owner",
+            other_owner.wait_id,
+            "reservation_owner_mismatch",
+            Some("reserved"),
+        ),
+        (
+            "missing",
+            "claimer",
+            "00000000-0000-0000-0000-000000000000".to_string(),
+            "reservation_not_found",
+            None,
+        ),
+    ] {
+        let claim = app
+            .clone()
+            .oneshot(protocol_request(
+                "/v1/reservation/claim",
+                agent_id,
+                "w1",
+                serde_json::json!({
+                    "wait_id": wait_id
+                }),
+            ))
+            .await
+            .expect("reservation claim should complete");
+        assert_eq!(claim.status(), StatusCode::CONFLICT, "{name}");
+        let json = response_json(claim, 2048).await;
+        assert_eq!(json["status"], "error", "{name}: {json}");
+        assert_eq!(
+            json["reason_code"], expected_reason_code,
+            "{name} should be machine-distinguishable from a missing reservation: {json}"
+        );
+        match expected_status {
+            Some(expected_status) => assert_eq!(
+                json["reservation_status"], expected_status,
+                "{name} should expose the stored wait status: {json}"
+            ),
+            None => assert!(
+                json["reservation_status"].is_null(),
+                "missing reservation should not fabricate a wait status: {json}"
+            ),
+        }
+    }
+}
+
+#[tokio::test]
 async fn reservation_claim_rolls_back_reservation_when_intent_event_append_fails() {
     let temp = tempfile::tempdir().expect("temp dir should create");
     let temp_root = temp.path();

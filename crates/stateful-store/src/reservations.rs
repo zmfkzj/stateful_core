@@ -790,6 +790,14 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    pub fn reservation_wait_by_id(
+        &self,
+        wait_id: impl AsRef<str>,
+    ) -> StoreResult<Option<WaitRecord>> {
+        self.expire_stale()?;
+        self.waiter(wait_id.as_ref())
+    }
+
     pub fn reservation_by_id(&self, wait_id: impl AsRef<str>) -> StoreResult<Option<WaitRecord>> {
         self.expire_stale()?;
         self.waiter(wait_id.as_ref())

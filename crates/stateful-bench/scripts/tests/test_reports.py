@@ -53,6 +53,40 @@ def test_progress_report_aggregates_in_progress_shards_from_results_jsonl(tmp_pa
     assert on["progress_rate"] == 0.25
     assert any(run["run_id"] == "r38-denovo-shard-b" and run["condition_id"] == "stateful-on_subagent-on" and run["rows"] == 0 for run in summary["runs"])
 
+def test_progress_report_aggregates_lifecycle_evidence_when_event_window_is_saturated(tmp_path):
+    mod = load_script("denovo_progress_report.py")
+    run_dir = tmp_path / "runs/r38-denovo-shard-a"
+    result_dir = run_dir / "conditions/stateful-on_subagent-on/codex-cli/_"
+    write_jsonl(result_dir / "results.jsonl", [
+        json.dumps({
+            "instance_id": "case-a",
+            "success": True,
+            "score": 1.0,
+            "finish_reason": "stop",
+            "orchestration_trace": {
+                "trace_captured": True,
+                "events_window_saturated": True,
+                "event_count": 100,
+                "event_types": {"AuthorizationDenied": 100},
+                "lifecycle_event_types": {
+                    "ActivityFinalized": 1,
+                    "AgentHeartbeat": 1,
+                    "AgentRegistered": 1,
+                },
+            },
+        }),
+    ])
+
+    summary = mod.collect_progress([run_dir], expected_instances_per_condition=1)
+    item = condition(summary, "stateful-on_subagent-on")
+
+    assert item["orchestration_event_types"] == {"AuthorizationDenied": 100}
+    assert item["orchestration_lifecycle_event_types"] == {
+        "ActivityFinalized": 1,
+        "AgentHeartbeat": 1,
+        "AgentRegistered": 1,
+    }
+
 
 def test_progress_report_prefers_cumulative_condition_report(tmp_path):
     mod = load_script("denovo_progress_report.py")

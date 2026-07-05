@@ -68,6 +68,40 @@ pub struct ClaimReservationOutcome {
 }
 
 #[derive(Debug, Clone)]
+pub struct ClaimReservationError {
+    pub reason_code: &'static str,
+    pub message: String,
+    pub reservation_status: Option<String>,
+}
+
+impl ClaimReservationError {
+    fn new(
+        reason_code: &'static str,
+        message: impl Into<String>,
+        reservation_status: Option<String>,
+    ) -> Self {
+        Self {
+            reason_code,
+            message: message.into(),
+            reservation_status,
+        }
+    }
+
+    fn claim_failed(message: impl Into<String>) -> Self {
+        Self::new("claim_failed", message, None)
+    }
+
+    fn from_reservation(
+        reason_code: &'static str,
+        message: impl Into<String>,
+        reservation: &WaitRecord,
+    ) -> Self {
+        Self::new(reason_code, message, Some(reservation.status.clone()))
+    }
+}
+
+
+#[derive(Debug, Clone)]
 pub struct RequestReservationInput {
     pub agent_id: String,
     pub workspace_id: String,
@@ -1115,17 +1149,57 @@ impl<'a> PolicyService<'a> {
         &self,
         input: ClaimReservationInput,
     ) -> Result<ClaimReservationOutcome, String> {
+        self.claim_intent_detailed(input)
+            .map_err(|error| error.message)
+    }
+
+    pub fn claim_intent_detailed(
+        &self,
+        input: ClaimReservationInput,
+    ) -> Result<ClaimReservationOutcome, ClaimReservationError> {
         let reservation = self
             .store
-            .reservation_by_id(&input.wait_id)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "reservation not found".to_string())?;
+            .reservation_wait_by_id(&input.wait_id)
+            .map_err(|error| ClaimReservationError::claim_failed(error.to_string()))?
+            .ok_or_else(|| {
+                ClaimReservationError::new("reservation_not_found", "reservation not found", None)
+            })?;
+        match reservation.status.as_str() {
+            "queued" => {
+                return Err(ClaimReservationError::from_reservation(
+                    "reservation_queued",
+                    "reservation is queued",
+                    &reservation,
+                ));
+            }
+            "expired" => {
+                return Err(ClaimReservationError::from_reservation(
+                    "reservation_expired",
+                    "reservation is expired",
+                    &reservation,
+                ));
+            }
+            _ => {}
+        }
         if reservation.agent_id != input.agent_id || reservation.workspace_id != input.workspace_id
         {
-            return Err("reservation owner mismatch".to_string());
+            return Err(ClaimReservationError::from_reservation(
+                "reservation_owner_mismatch",
+                "reservation owner mismatch",
+                &reservation,
+            ));
+        }
+        if reservation.status != "reserved" {
+            return Err(ClaimReservationError::from_reservation(
+                "claim_failed",
+                "reservation is not claimable",
+                &reservation,
+            ));
         }
         if normalized_relative_path_is_empty(&reservation.relative_path) {
-            return Err("reservation scope is required".to_string());
+            return Err(ClaimReservationError::claim_failed(
+                "reservation scope is required",
+            ));
         }
 
         let scope = if reservation.action == "write_directory" {
@@ -1155,7 +1229,8 @@ impl<'a> PolicyService<'a> {
             .as_deref()
             .filter(|root| !root.is_empty())
             .map(|root| claim_observation_for_path(root, &lease_path))
-            .transpose()?;
+            .transpose()
+            .map_err(ClaimReservationError::claim_failed)?;
         let claimed = self
             .store
             .claim_reservation_with_intent_and_lease(
@@ -1166,7 +1241,7 @@ impl<'a> PolicyService<'a> {
                 &lease_path,
                 claim_observation,
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| ClaimReservationError::claim_failed(error.to_string()))?;
 
         Ok(ClaimReservationOutcome {
             reservation: claimed,

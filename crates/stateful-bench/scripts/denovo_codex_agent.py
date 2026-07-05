@@ -2187,21 +2187,49 @@ def heartbeat_summary(events: list[dict[str, Any]]) -> dict[str, int | None]:
     }
 
 
+LIFECYCLE_EVENT_TYPES = {"ActivityFinalized", "AgentHeartbeat", "AgentRegistered"}
+
+
+def matching_orchestration_events(
+    events: list[dict[str, Any]],
+    agent_id: str | None,
+    workspace_id: str | None = None,
+) -> list[dict[str, Any]]:
+    if workspace_id:
+        return [event for event in events if event.get("workspace_id") == workspace_id]
+    return [event for event in events if not agent_id or event.get("agent_id") == agent_id]
+
+
+def lifecycle_event_counts(events: list[dict[str, Any]]) -> dict[str, int]:
+    counts = Counter(
+        str(event.get("event_type", ""))
+        for event in events
+        if event.get("event_type") in LIFECYCLE_EVENT_TYPES
+    )
+    return dict(sorted(counts.items()))
+
+
+def trace_lifecycle_event_counts(trace: Any) -> dict[str, int]:
+    if not isinstance(trace, dict):
+        return {}
+    explicit = trace.get("lifecycle_event_types")
+    if isinstance(explicit, dict):
+        return {
+            str(event_type): int(count or 0)
+            for event_type, count in sorted(explicit.items())
+        }
+    events = trace.get("events")
+    if not isinstance(events, list):
+        return {}
+    return lifecycle_event_counts([event for event in events if isinstance(event, dict)])
+
+
 def summarize_orchestration_events(
     events: list[dict[str, Any]],
     agent_id: str | None,
     workspace_id: str | None = None,
 ) -> dict[str, Any]:
-    if workspace_id:
-        matching = [
-            event for event in events if event.get("workspace_id") == workspace_id
-        ]
-    else:
-        matching = [
-            event
-            for event in events
-            if not agent_id or event.get("agent_id") == agent_id
-        ]
+    matching = matching_orchestration_events(events, agent_id, workspace_id)
     event_types = Counter(str(event.get("event_type", "")) for event in matching)
     denial_paths: Counter[str] = Counter()
     denial_messages: Counter[str] = Counter()
@@ -2245,6 +2273,12 @@ def write_orchestration_trace(
     patch_path: Path | None = None,
 ) -> dict[str, Any]:
     trace_path = instance_dir / "orchestration-trace.json"
+    existing_trace: Any = None
+    if trace_path.exists():
+        try:
+            existing_trace = json.loads(trace_path.read_text(encoding="utf-8"))
+        except Exception:
+            existing_trace = None
     relative_trace_path = trace_path.relative_to(instance_dir.parent).as_posix()
     trace: dict[str, Any] = {
         "instance_id": instance_id,
@@ -2270,6 +2304,13 @@ def write_orchestration_trace(
         if not isinstance(events, list):
             events = []
         trace.update(summarize_orchestration_events(events, stateful_agent_id, workspace_id))
+        lifecycle_types = Counter(trace_lifecycle_event_counts(existing_trace))
+        for event_type, count in lifecycle_event_counts(
+            matching_orchestration_events(events, stateful_agent_id, workspace_id)
+        ).items():
+            lifecycle_types[event_type] = max(lifecycle_types[event_type], count)
+        if lifecycle_types:
+            trace["lifecycle_event_types"] = dict(sorted(lifecycle_types.items()))
         trace["trace_captured"] = True
         trace["current"] = current.get("current", current)
         trace["events"] = events
@@ -2296,6 +2337,7 @@ def write_orchestration_trace(
         "event_count": trace.get("event_count", 0),
         "events_window_saturated": trace.get("events_window_saturated", False),
         "event_types": trace.get("event_types", {}),
+        "lifecycle_event_types": trace.get("lifecycle_event_types", {}),
         "heartbeat_events": trace.get("heartbeat_events", 0),
         "heartbeat_windows": trace.get("heartbeat_windows", 0),
         "heartbeat_max_gap_ms": trace.get("heartbeat_max_gap_ms"),

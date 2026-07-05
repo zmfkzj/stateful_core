@@ -1016,6 +1016,119 @@ def test_write_orchestration_trace_filters_workspace_events_and_records_saturati
     assert {event["workspace_id"] for event in trace["events"]} == {"workspace-a"}
     assert any(path.startswith("/v1/events?") and "workspace_id=workspace-a" in path and "limit=100" in path for path, _ in requests)
 
+def test_write_orchestration_trace_preserves_durable_lifecycle_evidence_when_window_saturated(mod, tmp_path, monkeypatch):
+    instance_dir = tmp_path / "runs" / "fake-a"
+    lifecycle_events = [
+        {"event_type": "AgentRegistered", "agent_id": "agent-a", "workspace_id": "workspace-a"},
+        {"event_type": "AgentHeartbeat", "agent_id": "agent-a", "workspace_id": "workspace-a"},
+        {"event_type": "ActivityFinalized", "agent_id": "agent-a", "workspace_id": "workspace-a"},
+    ]
+    trace_path = instance_dir / "orchestration-trace.json"
+    trace_path.parent.mkdir(parents=True)
+    trace_path.write_text(json.dumps({"trace_captured": True, "events": lifecycle_events}), encoding="utf-8")
+    saturated_events = [
+        {
+            "event_id": f"denial-{index}",
+            "event_type": "AuthorizationDenied",
+            "agent_id": "agent-a",
+            "workspace_id": "workspace-a",
+        }
+        for index in range(100)
+    ]
+
+    def fake_stateful_http_json(env, path, payload=None, timeout=5.0):
+        if path == "/v1/current":
+            return {"current": {"summary": "ok"}}
+        if path.startswith("/v1/events"):
+            return {"events": saturated_events}
+        if path == "/v1/context/render":
+            return {"status": "ok"}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(mod, "stateful_http_json", fake_stateful_http_json)
+
+    summary = mod.write_orchestration_trace(
+        instance_dir=instance_dir,
+        env={
+            "STATEFUL_SERVER_URL": "http://127.0.0.1:43873",
+            "STATEFUL_SERVER_TOKEN": "token",
+            "STATEFUL_WORKSPACE_ID": "workspace-a",
+        },
+        instance_id="fake-a",
+        stateful_agent_id="agent-a",
+        subagent_usage={},
+    )
+    trace = json.loads(trace_path.read_text(encoding="utf-8"))
+
+    expected_lifecycle = {"ActivityFinalized": 1, "AgentHeartbeat": 1, "AgentRegistered": 1}
+    assert summary["events_window_saturated"] is True
+    assert trace["event_types"] == {"AuthorizationDenied": 100}
+    assert trace["lifecycle_event_types"] == expected_lifecycle
+    assert summary["lifecycle_event_types"] == expected_lifecycle
+
+def test_write_orchestration_trace_does_not_double_lifecycle_events_already_in_trace(mod, tmp_path, monkeypatch):
+    instance_dir = tmp_path / "runs" / "fake-a"
+    lifecycle_events = [
+        {
+            "event_id": "lifecycle-registered",
+            "event_type": "AgentRegistered",
+            "agent_id": "agent-a",
+            "workspace_id": "workspace-a",
+        },
+        {
+            "event_id": "lifecycle-heartbeat",
+            "event_type": "AgentHeartbeat",
+            "agent_id": "agent-a",
+            "workspace_id": "workspace-a",
+        },
+        {
+            "event_id": "lifecycle-finalized",
+            "event_type": "ActivityFinalized",
+            "agent_id": "agent-a",
+            "workspace_id": "workspace-a",
+        },
+    ]
+    expected_lifecycle = {"ActivityFinalized": 1, "AgentHeartbeat": 1, "AgentRegistered": 1}
+    trace_path = instance_dir / "orchestration-trace.json"
+    trace_path.parent.mkdir(parents=True)
+    trace_path.write_text(
+        json.dumps(
+            {
+                "trace_captured": True,
+                "events": lifecycle_events,
+                "lifecycle_event_types": expected_lifecycle,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_stateful_http_json(env, path, payload=None, timeout=5.0):
+        if path == "/v1/current":
+            return {"current": {"summary": "ok"}}
+        if path.startswith("/v1/events"):
+            return {"events": lifecycle_events}
+        if path == "/v1/context/render":
+            return {"status": "ok"}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(mod, "stateful_http_json", fake_stateful_http_json)
+
+    summary = mod.write_orchestration_trace(
+        instance_dir=instance_dir,
+        env={
+            "STATEFUL_SERVER_URL": "http://127.0.0.1:43873",
+            "STATEFUL_SERVER_TOKEN": "token",
+            "STATEFUL_WORKSPACE_ID": "workspace-a",
+        },
+        instance_id="fake-a",
+        stateful_agent_id="agent-a",
+        subagent_usage={},
+    )
+    trace = json.loads(trace_path.read_text(encoding="utf-8"))
+
+    assert trace["lifecycle_event_types"] == expected_lifecycle
+    assert summary["lifecycle_event_types"] == expected_lifecycle
+
 def test_parse_defaults_validate_run_and_empty_stop(mod):
     base = [
         "--data-file", "data.jsonl", "--config", "configs/tasks/denovoswe.yaml", "--mode", "batch", "--output", "out",

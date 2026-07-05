@@ -35,10 +35,10 @@ active reservation, keep auto-claims across `stale_target_observation`
 reread/retry blocks, and retry authorization when the only denial is
 missing reservation/scope without an explicit reservation id,
 `lazy_edit_resume` for strict replay of queued/conflicting line-based OMP edits,
-`lazy_write_resume` for queued full OMP writes, both with captured-wait claims
-before re-authorization and stale-target guards,
-`lazy_bash_resume` for queued external Bash commands waiting on scoped grants,
-and approval entries that deny arbitrary raw Bash while setting
+`lazy_write_resume` for queued full OMP writes, both with captured-wait
+notification/resume lookup before claiming and re-authorization, stale-target
+guards, and `lazy_bash_resume` for queued external Bash commands waiting on
+scoped grants, plus approval entries that deny arbitrary raw Bash while setting
 Python/JavaScript/JS/Ruby/Julia eval tools to false. External
 write/create/write-dir/socket/signal scope and repo-external OMP native
 `edit`/`write` file targets auto-approve the scoped Stateful-owned OMP grant
@@ -183,12 +183,15 @@ session, including its stored purpose, after rereading the target, even if the
 reservation notification was already delivered or the client missed the poll or
 SSE response. `/v1/reservation/claim` is the explicit reservation claim path; it
 takes a `wait_id`, uses the stored reservation purpose, and creates active
-reservation scope plus an active claim for the reservation owner. `/v1/authorize`
-may lazy-claim a claimable reservation for hook and sandbox authorization sources
-after the client rereads and retries the write boundary; read-only conflict
-checks must not claim reservations. `/v1/claim/acquire` records the target
-existence and content hash when `root` is supplied; hook-originated native file
-writes compare that observation before authorization.
+reservation scope plus an active claim for the reservation owner. Unclaimable
+claim responses use `reason_code` `reservation_queued`,
+`reservation_expired`, `reservation_owner_mismatch`, or
+`reservation_not_found`; existing waits also include `reservation_status`.
+`/v1/authorize` may lazy-claim a claimable reservation for hook and sandbox
+authorization sources after the client rereads and retries the write boundary;
+read-only conflict checks must not claim reservations. `/v1/claim/acquire`
+records the target existence and content hash when `root` is supplied;
+hook-originated native file writes compare that observation before authorization.
 
 Native Stateful tool integrations that expose the full state surface map
 directly onto these endpoints. Native tool handlers do not implement policy
@@ -213,8 +216,10 @@ and `/v1/reservation/cancel`. Reservation declare requires non-empty `purpose` a
 known file or directory the task expects to mutate; clients redeclare when that
 set grows. Reservation request requires non-empty `purpose` and a non-empty
 `path`; empty or normalized-empty request paths fail with `missing_scope`.
-Reservation claim clients provide a `wait_id` only; they must not provide a purpose
-because the server uses the stored reservation purpose.
+Reservation claim clients provide a `wait_id` only; they must not provide a
+purpose because the server uses the stored reservation purpose. Unclaimable
+claim responses expose `reason_code` and, for existing waits,
+`reservation_status`.
 
 `state_claim_acquire` accepts `paths: string[]` and creates one active exact file
 or directory claim per path, after normalizing each entry against active
@@ -291,8 +296,9 @@ operations when the patch has safe repo-relative line targets. Remaining OMP
 `write` denials are captured as live-agent lazy write operations with the
 original full write content. Denials with a wait id reuse that id; other
 retryable lazy operations receive a generated live-agent operation id. For stored
-wait ids, `lazy_edit_resume` and `lazy_write_resume` first claim the queued
-reservation, then re-authorize the original edit or write. Generated no-wait
+wait ids, `lazy_edit_resume` and `lazy_write_resume` first check
+notifications/resume state for the saved wait id, then claim the queued
+reservation and re-authorize the original edit or write. Generated no-wait
 operation ids still require the agent to fix scope, receive and claim a
 claimable reservation, or recover from another fallback denial before resume.
 `lazy_edit_resume` verifies the file content still matches the queued base text,

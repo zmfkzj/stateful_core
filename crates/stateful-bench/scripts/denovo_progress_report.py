@@ -86,6 +86,7 @@ def empty_stats() -> dict[str, Any]:
         "orchestration_conflict_events": 0,
         "orchestration_event_count": 0,
         "orchestration_event_types": Counter(),
+        "orchestration_lifecycle_event_types": Counter(),
         "orchestration_heartbeat_events": 0,
         "orchestration_heartbeat_windows": 0,
         "orchestration_heartbeat_max_gap_ms": None,
@@ -125,6 +126,9 @@ def add_orchestration_trace(stats: dict[str, Any], trace: Any) -> None:
     stats["orchestration_denial_events"] += int_or_zero(trace.get("denial_events"))
     update_max_gap(stats, trace.get("heartbeat_max_gap_ms"))
     update_counter(stats["orchestration_event_types"], trace.get("event_types"))
+    update_counter(
+        stats["orchestration_lifecycle_event_types"], trace.get("lifecycle_event_types")
+    )
     update_counter(stats["orchestration_denial_paths"], trace.get("denial_paths"))
     update_counter(stats["orchestration_denial_messages"], trace.get("denial_messages"))
 
@@ -224,6 +228,10 @@ def add_summary(stats: dict[str, Any], summary: dict[str, Any]) -> None:
     )
     update_max_gap(stats, summary.get("orchestration_heartbeat_max_gap_ms"))
     update_counter(stats["orchestration_event_types"], summary.get("orchestration_event_types"))
+    update_counter(
+        stats["orchestration_lifecycle_event_types"],
+        summary.get("orchestration_lifecycle_event_types"),
+    )
     update_counter(stats["orchestration_denial_paths"], summary.get("orchestration_denial_paths"))
     update_counter(
         stats["orchestration_denial_messages"],
@@ -281,6 +289,9 @@ def finalized_stats(
         "orchestration_conflict_events": stats["orchestration_conflict_events"],
         "orchestration_event_count": stats["orchestration_event_count"],
         "orchestration_event_types": dict(sorted(stats["orchestration_event_types"].items())),
+        "orchestration_lifecycle_event_types": dict(
+            sorted(stats["orchestration_lifecycle_event_types"].items())
+        ),
         "orchestration_heartbeat_events": stats["orchestration_heartbeat_events"],
         "orchestration_heartbeat_windows": stats["orchestration_heartbeat_windows"],
         "orchestration_heartbeat_max_gap_ms": stats["orchestration_heartbeat_max_gap_ms"],
@@ -414,6 +425,7 @@ def summarize_report(
         key in report
         for key in (
             "orchestration_event_count",
+            "orchestration_lifecycle_event_types",
             "orchestration_heartbeat_events",
             "orchestration_heartbeat_windows",
             "orchestration_denial_events",
@@ -466,6 +478,10 @@ def summarize_report(
         "orchestration_event_count": report_trace_int_or_result("orchestration_event_count"),
         "orchestration_event_types": report_trace_value_or_result(
             "orchestration_event_types", {}
+        )
+        or {},
+        "orchestration_lifecycle_event_types": report_trace_value_or_result(
+            "orchestration_lifecycle_event_types", {}
         )
         or {},
         "orchestration_heartbeat_events": report_trace_int_or_result(

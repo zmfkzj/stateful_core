@@ -107,15 +107,16 @@ Installed OMP support:
 - `lazy_edit_resume` for strict replay of blocked, line-based OMP `edit` patches.
   The live extension stores the original patch after `missing_reservation`,
   `missing_claim`, or claim-conflict denials. If the lazy operation captured a
-  `wait_id`, resume first claims that queued reservation; generated no-wait
-  operation ids still require the agent to fix missing scope or claim externally.
-  Resume then re-authorizes the original edit, checks the file has not changed
-  since queue time, and applies the stored line-based patch.
-- `lazy_write_resume` for replay of blocked full OMP `write` content. It uses the
-  same queued wait id or generated operation id path: captured wait ids are
-  claimed before re-authorization, generated no-wait ids need the missing scope
-  or claim resolved externally, and replay fails if the target changed since the
-  write was queued.
+  `wait_id`, resume checks notifications/resume state for that saved id, claims
+  the queued reservation, then re-authorizes the original edit, checks the file
+  has not changed since queue time, and applies the stored line-based patch.
+  Generated no-wait operation ids still require the agent to fix missing scope or
+  claim externally.
+- `lazy_write_resume` for replay of blocked full OMP `write` content. It uses
+  the same queued wait id or generated operation id path: captured wait ids are
+  checked through notifications/resume state before claiming and re-authorization,
+  generated no-wait ids need the missing scope or claim resolved externally, and
+  replay fails if the target changed since the write was queued.
 
 
 ### Repo allowlist
@@ -228,7 +229,9 @@ Notes:
   write request. During queued-reservation compatibility, wait records expose
   the same id as both `wait_id` and `reservation_id`.
 - `claim` uses the stored reservation purpose; clients do not pass a new claim
-  purpose.
+  purpose. Unclaimable claim responses use `reason_code`
+  `reservation_queued`, `reservation_expired`, `reservation_owner_mismatch`, or
+  `reservation_not_found`; existing waits also include `reservation_status`.
 - Native edit hooks and sandbox `write-targets` authorization may lazy-claim a
   claimable request at the retry write boundary.
 - Operator TTLs: active reservations start at 15 minutes and heartbeat only up

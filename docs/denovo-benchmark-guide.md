@@ -291,13 +291,15 @@ audit while condition and progress reports carry compact summary fields. Trace
 capture requests `/v1/events?workspace_id=<id>&limit=100` when a workspace id is
 known, writes workspace-local events, and records per-instance
 `events_window_saturated` when the 100-event window is full. Report summary
-fields include `orchestration_event_types`, `orchestration_heartbeat_events`,
+fields include `orchestration_event_types`,
+`orchestration_lifecycle_event_types`, `orchestration_heartbeat_events`,
 `orchestration_heartbeat_windows`, `orchestration_heartbeat_max_gap_ms`,
 `orchestration_denial_events`, `orchestration_denial_paths`, and
-`orchestration_denial_messages`. Use those report summary fields for paired run
-analysis; open the raw trace only when the summary
-points at a suspicious event type, path, heartbeat gap, or saturated event
-window.
+`orchestration_denial_messages`. Trace/result rows keep
+`lifecycle_event_types` separate from the latest-window `event_types`; use the
+separate lifecycle fields when checking run validity. Use those report summary
+fields for paired run analysis; open the raw trace only when the summary points
+at a suspicious event type, path, heartbeat gap, or saturated event window.
 
 
 Lifecycle troubleshooting checklist:

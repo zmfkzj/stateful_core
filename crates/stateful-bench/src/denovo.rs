@@ -1970,6 +1970,8 @@ pub struct DeNovoConditionReport {
     pub orchestration_event_count: usize,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub orchestration_event_types: BTreeMap<String, usize>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub orchestration_lifecycle_event_types: BTreeMap<String, usize>,
     #[serde(default)]
     pub orchestration_heartbeat_events: usize,
     #[serde(default)]
@@ -2052,6 +2054,7 @@ struct DeNovoTraceSummary {
     conflict_events: usize,
     event_count: usize,
     event_types: BTreeMap<String, usize>,
+    lifecycle_event_types: BTreeMap<String, usize>,
     heartbeat_events: usize,
     heartbeat_windows: usize,
     heartbeat_max_gap_ms: Option<u64>,
@@ -2114,6 +2117,10 @@ fn orchestration_trace_summary(results: &[DeNovoOfficialResult]) -> DeNovoTraceS
         add_counts(
             &mut summary.event_types,
             value_count_map(trace.get("event_types")),
+        );
+        add_counts(
+            &mut summary.lifecycle_event_types,
+            value_count_map(trace.get("lifecycle_event_types")),
         );
         add_counts(
             &mut summary.denial_paths,
@@ -2263,6 +2270,7 @@ pub fn build_denovo_condition_report(
         orchestration_conflict_events: orchestration_trace.conflict_events,
         orchestration_event_count: orchestration_trace.event_count,
         orchestration_event_types: orchestration_trace.event_types,
+        orchestration_lifecycle_event_types: orchestration_trace.lifecycle_event_types,
         orchestration_heartbeat_events: orchestration_trace.heartbeat_events,
         orchestration_heartbeat_windows: orchestration_trace.heartbeat_windows,
         orchestration_heartbeat_max_gap_ms: orchestration_trace.heartbeat_max_gap_ms,

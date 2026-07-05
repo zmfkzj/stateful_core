@@ -262,9 +262,10 @@ lazy-resume cases. Agents call
 `lazy_edit_resume` for strict line-based patch replay, `lazy_write_resume` for
 captured write replay, or `lazy_bash_resume` to rerun a blocked external Bash
 command after approving its grant. If a lazy edit/write operation captured a
-`wait_id`, OMP first claims that queued reservation, then re-authorizes and
-applies with stale-target guards. Generated no-wait operation ids still require
-resolving the missing scope or claim externally before resume.
+`wait_id`, OMP first checks resume notifications for that saved id, then claims
+the queued reservation, re-authorizes, and applies with stale-target guards.
+Generated no-wait operation ids still require resolving the missing scope or
+claim externally before resume.
 
 Detailed queue states, claim expiry behavior, and promotion rules are documented
 in [State model](docs/state-model.md),
@@ -308,9 +309,10 @@ reservation/claim checks, and grant limits still apply. Set
 no explicit reservation id is supplied and
 the only denial is missing reservation/scope. Use `lazy_edit_resume` for
 queued/conflicting line-based OMP `edit` patches and `lazy_write_resume` for
-captured full OMP `write` replay; captured wait ids are claimed before
-re-authorization, while generated no-wait ids still require the missing scope or
-claim to be resolved externally. Use `lazy_bash_resume` to rerun a queued
+captured full OMP `write` replay; captured wait ids are checked through resume
+notifications before claiming and re-authorization, while generated no-wait ids
+still require the missing scope or claim to be resolved externally. Use
+`lazy_bash_resume` to rerun a queued
 external Bash command after the scoped grant is approved.
 
 See [Usage reference](docs/usage-reference.md) for detailed CLI, hook, sandbox,

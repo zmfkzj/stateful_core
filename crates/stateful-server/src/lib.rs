@@ -15,8 +15,9 @@ use axum::{
 };
 use policy_service::{
     AuthorizationOutcome, AuthorizeWriteInput, BaseObservation, CancelReservationInput,
-    CancelReservationOutcome, ClaimReservationInput, ClaimReservationOutcome, PolicyService,
-    RequestReservationInput, RequestReservationOutcome, WaitQueueInfo, claim_observation_for_path,
+    CancelReservationOutcome, ClaimReservationError, ClaimReservationInput, ClaimReservationOutcome,
+    PolicyService, RequestReservationInput, RequestReservationOutcome, WaitQueueInfo,
+    claim_observation_for_path,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -698,14 +699,17 @@ async fn reservation_claim(
 
     match claim_intent_with_policy_and_audit(&config.store, input) {
         Ok(outcome) => (StatusCode::OK, Json(claim_intent_json(outcome))),
-        Err(message) => (
-            StatusCode::CONFLICT,
-            Json(json!({
+        Err(error) => {
+            let mut value = json!({
                 "status": "error",
-                "reason_code": "claim_failed",
-                "message": message
-            })),
-        ),
+                "reason_code": error.reason_code,
+                "message": error.message
+            });
+            if let Some(status) = error.reservation_status {
+                value["reservation_status"] = json!(status);
+            }
+            (StatusCode::CONFLICT, Json(value))
+        }
     }
 }
 
@@ -1556,19 +1560,29 @@ fn authorize_heartbeat_event(input: &AuthorizeWriteInput) -> Option<Event> {
 fn claim_intent_with_policy_and_audit(
     store: &SharedStore,
     input: ClaimReservationInput,
-) -> Result<ClaimReservationOutcome, String> {
-    let store = store
-        .lock()
-        .map_err(|_| "store lock poisoned".to_string())?;
+) -> Result<ClaimReservationOutcome, ClaimReservationError> {
+    let store = store.lock().map_err(|_| ClaimReservationError {
+        reason_code: "claim_failed",
+        message: "store lock poisoned".to_string(),
+        reservation_status: None,
+    })?;
     store.transaction(
         |store| {
             let outcome =
-                PolicyService::new(store, CoordinationMode::Enforcement).claim_intent(input)?;
+                PolicyService::new(store, CoordinationMode::Enforcement).claim_intent_detailed(input)?;
             let audit = reservation_claimed_audit_event(&outcome);
-            store.append(audit).map_err(|error| error.to_string())?;
+            store.append(audit).map_err(|error| ClaimReservationError {
+                reason_code: "claim_failed",
+                message: error.to_string(),
+                reservation_status: None,
+            })?;
             Ok(outcome)
         },
-        |error| error.to_string(),
+        |error| ClaimReservationError {
+            reason_code: "claim_failed",
+            message: error.to_string(),
+            reservation_status: None,
+        },
     )
 }
 

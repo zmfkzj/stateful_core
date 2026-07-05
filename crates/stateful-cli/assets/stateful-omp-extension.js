@@ -691,9 +691,9 @@ function emptyToolOutputText(text) {
   return String(text);
 }
 
-function lazyToolResult(status, text, details) {
+function lazyToolResult(status, text, details, isError = status !== "applied") {
   return {
-    isError: status !== "applied",
+    isError,
     content: [{ type: "text", text: emptyToolOutputText(text) }],
     details,
   };
@@ -1140,6 +1140,58 @@ export default function statefulOmpExtension(pi) {
       if (!approved) return { block: true, reason: "user denied stateful external sandbox grant" };
     }
   });
+function statefulJson(args, operation, ctx) {
+  const options = { encoding: "utf8" };
+  const cwd = operation?.cwd || ctx?.cwd;
+  if (cwd) options.cwd = cwd;
+  const result = spawnSync(STATEFUL, args, options);
+  if (result.status !== 0) {
+    const detail = String(result.stderr || result.stdout || "").trim();
+    return { ok: false, message: detail };
+  }
+  try {
+    return { ok: true, json: JSON.parse(String(result.stdout || "{}")) };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function readyReservationFromJson(json, waitId) {
+  const reservation = json?.reservation;
+  const status = String(reservation?.status || "");
+  if (json?.resume_available && reservation?.wait_id === waitId && (status === "reserved" || status === "claimed")) {
+    return reservation;
+  }
+  for (const notification of json?.notifications || []) {
+    const payload = notification?.payload;
+    const payloadStatus = String(payload?.status || "reserved");
+    if (notification?.kind === "reservation_granted" && payload?.wait_id === waitId && (payloadStatus === "reserved" || payloadStatus === "claimed")) {
+      return payload;
+    }
+  }
+  return undefined;
+}
+
+function state_reservation_ready(operation, ctx) {
+  const waitId = String(operation?.wait_id || "").trim();
+  if (!waitId) return { ready: true };
+  const agentId = String(operation?.agent_id || "").trim();
+  if (!agentId) return { ready: false, message: "Stateful reservation is not ready; missing agent_id for wait_id " + waitId };
+  const workspaceId = firstString(operation?.workspace_id, detectWorkspaceId({}, ctx));
+  const baseArgs = ["--agent-id", agentId];
+  if (workspaceId) baseArgs.push("--workspace-id", workspaceId);
+  for (const command of [["resume", "next"], ["notifications", "poll"]]) {
+    const result = statefulJson([...command, ...baseArgs], operation, ctx);
+    if (!result.ok) continue;
+    const reservation = readyReservationFromJson(result.json, waitId);
+    if (reservation) {
+      operation.reservation_id = reservation.reservation_id || operation.reservation_id;
+      return { ready: true };
+    }
+  }
+  return { ready: false, message: "Stateful reservation is not ready for wait_id " + waitId + "; retry lazy resume after the reservation ready notification." };
+}
+
 function state_reservation_claim(operation, ctx) {
   const waitId = String(operation?.wait_id || "").trim();
   if (!waitId) return { ok: true };
@@ -1179,6 +1231,8 @@ function state_reservation_claim(operation, ctx) {
       if (!operation) {
         return lazyToolResult("failed", "lazy edit operation not found in this live OMP extension session", { operation_id: operationId });
       }
+      const ready = state_reservation_ready(operation, ctx);
+      if (!ready.ready) return lazyToolResult("failed", ready.message, { operation_id: operationId, targets: operation.targets }, false);
       const claim = state_reservation_claim(operation, ctx);
       if (!claim.ok) return lazyToolResult("failed", claim.message, { operation_id: operationId, targets: operation.targets });
       const authorization = runStatefulHook("pre-tool-use", {
@@ -1227,6 +1281,8 @@ function state_reservation_claim(operation, ctx) {
       if (!operation) {
         return lazyToolResult("failed", "lazy write operation not found in this live OMP extension session", { operation_id: operationId });
       }
+      const ready = state_reservation_ready(operation, ctx);
+      if (!ready.ready) return lazyToolResult("failed", ready.message, { operation_id: operationId, targets: operation.targets }, false);
       const claim = state_reservation_claim(operation, ctx);
       if (!claim.ok) return lazyToolResult("failed", claim.message, { operation_id: operationId, targets: operation.targets });
       const authorization = runStatefulHook("pre-tool-use", {

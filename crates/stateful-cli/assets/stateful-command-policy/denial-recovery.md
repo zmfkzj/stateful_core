@@ -41,7 +41,7 @@ If `state_claim_acquire` reports `claim_conflict`, do not retry acquisition or s
 - To wait for a path, call `state_reservation_request` with a stable `request_id`, denied `action`, `path`, and `purpose` when that tool is exposed.
 - Use the next-turn notification or exposed `state_notifications_poll` to learn when the reservation is claimable; polling marks returned notifications delivered. Use exposed `state_resume_next` as durable recovery for still-active claimable reservations if a notice was missed or already delivered.
 - When reserved, reread the target.
-- Native edits and write-target sandbox writes can lazy-claim the reservation at the next write boundary. Queued OMP lazy operations should resume with `lazy_edit_resume` or `lazy_write_resume`; manual native-tool/CLI flows should first call exposed `state_reservation_claim(reservation_id=<reservation_id>, wait_id=<wait_id>)` or an explicitly permitted `stateful reservation claim --reservation-id <reservation_id> --wait-id <wait_id>`.
+- Native edits and write-target sandbox writes can lazy-claim the reservation at the next write boundary. Queued OMP lazy operations should resume with `lazy_edit_resume` or `lazy_write_resume`; when a stored lazy operation has a `wait_id`, the helper waits/polls for that saved `wait_id` before claiming. Manual native-tool/CLI flows should claim only through exposed `state_reservation_claim(reservation_id=<reservation_id>, wait_id=<wait_id>)` or an explicitly permitted `stateful reservation claim --reservation-id <reservation_id> --wait-id <wait_id>`.
 
 If a denial already includes `wait_id`, `queue_position`, or reservation guidance, follow that wait queue protocol.
 

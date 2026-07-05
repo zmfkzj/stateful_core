@@ -209,11 +209,14 @@ reservation must reread the target. Manual native-tool or CLI flows then call
 `state_reservation_claim(reservation_id=<reservation_id>, wait_id=<wait_id>)` or
 `stateful reservation claim --reservation-id <reservation_id> --wait-id <wait_id>` before writing;
 the claim uses the stored reservation purpose, and clients do not provide a new
-claim purpose. Native edit hooks and sandbox `write-targets` authorization can
-lazy-claim the claimable reservation when the write is retried. Claiming creates
-active reservation scope and the active same-reservation claim. Claimable
-reservation expiry uses [Canonical Freshness Defaults](#canonical-freshness-defaults);
-after expiry, the server may promote the next eligible FIFO waiter.
+claim purpose. Unclaimable claim responses use `reason_code`
+`reservation_queued`, `reservation_expired`, `reservation_owner_mismatch`, or
+`reservation_not_found`; existing waits also include `reservation_status`.
+Native edit hooks and sandbox `write-targets` authorization can lazy-claim the
+claimable reservation when the write is retried. Claiming creates active
+reservation scope and the active same-reservation claim. Claimable reservation
+expiry uses [Canonical Freshness Defaults](#canonical-freshness-defaults); after
+expiry, the server may promote the next eligible FIFO waiter.
 
 Resume is notification-driven rather than process-driven. The state server
 records a pending notification with the stored purpose and a monotonic
@@ -228,7 +231,9 @@ On reconnect, `Last-Event-ID` / `last-event-id` acknowledges all notifications
 through that sequence, then the server replays later pending notifications.
 Callers that miss or discard a poll response or SSE event should use
 `stateful resume next` / `state_resume_next` to rediscover any still-active
-claimable reservation and its stored purpose. The state server does not wake a
+claimable reservation and its stored purpose. OMP lazy edit/write resume checks
+notifications/resume state for the saved `wait_id` before claiming. The state
+server does not wake a
 sleeping Codex process by itself; external orchestration can build on the
 notification and resume APIs.
 
@@ -317,8 +322,9 @@ The important design point for this rationale: supported writes pass through an
 authorization boundary before mutation, effects are observed afterward, and
 runtime adapters should classify tools only enough to call the state server.
 Lazy resume belongs at the retry boundary: a queued `wait_id` may become a
-claimable reservation, but enforcement-mode write authority exists only after the
-target is reread and an active same-reservation claim is created. Awareness mode
+claimable reservation, but OMP resume first checks notification/resume state for
+that saved id. Enforcement-mode write authority exists only after the target is
+reread and an active same-reservation claim is created. Awareness mode
 can warn instead of blocking at that broad coordination layer, while thin safety
 stops still apply.
 

@@ -481,10 +481,12 @@ trace capture is available. Trace capture calls
 workspace-local raw trace events, and records per-instance
 `events_window_saturated` when the 100-event window is full. Prefer the summary
 `events`, `heartbeat`, and `denial` in the rendered table, plus JSON fields such
-as `orchestration_event_types`, `orchestration_denial_paths`, and
-`orchestration_heartbeat_max_gap_ms` with `--format json`. Inspect per-instance
-trace/result rows for `events_window_saturated`. The raw `orchestration-trace.json`
-remains the audit artifact for detailed event order.
+as `orchestration_event_types`, `orchestration_lifecycle_event_types`,
+`orchestration_denial_paths`, and `orchestration_heartbeat_max_gap_ms` with
+`--format json`. Inspect per-instance trace/result rows for
+`events_window_saturated`; `lifecycle_event_types` stays separate from the
+latest-window `event_types`. The raw `orchestration-trace.json` remains the
+audit artifact for detailed event order.
 
 If `results.jsonl` shows `finish_reason: "benchmark-contamination"`, inspect
 `codex-command.json.benchmark_contamination`; `kind: "upstream-worktree"` means
