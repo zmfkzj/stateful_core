@@ -110,6 +110,60 @@ fn detailed_context_info_reservation_keeps_purpose() {
 }
 
 #[test]
+fn item_line_appends_age_when_present() {
+    let package = ContextPackage::from_items(vec![CurrentItem::new(
+        CurrentItemKind::Claim,
+        CurrentSeverity::Block,
+        CurrentFreshness::Live,
+        "src/auth.ts",
+        "Fix auth.",
+        "Agent s1 has an active write claim on src/auth.ts.",
+    )
+    .with_age_seconds(Some(7))]);
+
+    let text = render_prompt_text(&package, RenderMode::Brief);
+
+    assert!(text.contains("(7s ago)"), "text `{text}` should show age");
+    assert!(
+        text.contains("Agent s1 has an active write claim on src/auth.ts (7s ago).\n"),
+        "text `{text}` should put age before the final period"
+    );
+}
+
+#[test]
+fn item_line_omits_age_when_absent() {
+    let package = ContextPackage::from_items(vec![CurrentItem::new(
+        CurrentItemKind::Claim,
+        CurrentSeverity::Block,
+        CurrentFreshness::Live,
+        "src/auth.ts",
+        "Fix auth.",
+        "Agent s1 has an active write claim on src/auth.ts.",
+    )]);
+
+    let text = render_prompt_text(&package, RenderMode::Brief);
+
+    assert!(!text.contains("s ago)"), "text `{text}` should omit age");
+}
+
+#[test]
+fn item_line_omits_age_when_negative() {
+    let package = ContextPackage::from_items(vec![CurrentItem::new(
+        CurrentItemKind::Claim,
+        CurrentSeverity::Block,
+        CurrentFreshness::Live,
+        "src/auth.ts",
+        "Fix auth.",
+        "Agent s1 has an active write claim on src/auth.ts.",
+    )
+    .with_age_seconds(Some(-1))]);
+
+    let text = render_prompt_text(&package, RenderMode::Brief);
+
+    assert!(!text.contains("s ago)"), "text `{text}` should omit negative age");
+}
+
+#[test]
 fn structured_items_render_purpose_and_required_actions() {
     let package = ContextPackage::from_items(vec![
         CurrentItem::new(

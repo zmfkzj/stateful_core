@@ -471,6 +471,15 @@ impl Store {
             resource_filter.as_deref(),
         )?);
 
+        let now = now_timestamp();
+        for item in &mut items {
+            if item.age_seconds.is_none() {
+                if let Some(observed_at) = &item.observed_at {
+                    item.age_seconds = timestamp_diff_seconds(observed_at, &now);
+                }
+            }
+        }
+
         Ok(LiveCurrentState { summary, items })
     }
     fn live_intent_items(
@@ -2881,6 +2890,12 @@ fn timestamp_after(timestamp: &str, seconds: i64) -> StoreResult<String> {
     let base = parse_timestamp(timestamp)
         .ok_or_else(|| StoreError::InvalidTimestamp(timestamp.to_string()))?;
     Ok(format_timestamp(base + Duration::seconds(seconds)))
+}
+
+fn timestamp_diff_seconds(earlier: &str, later: &str) -> Option<i64> {
+    let earlier = parse_timestamp(earlier)?;
+    let later = parse_timestamp(later)?;
+    Some((later - earlier).whole_seconds())
 }
 
 fn parse_timestamp(timestamp: &str) -> Option<OffsetDateTime> {

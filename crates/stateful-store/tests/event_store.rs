@@ -1474,6 +1474,33 @@ fn live_current_state_reports_active_items_with_purpose() {
 }
 
 #[test]
+fn live_items_populate_age_seconds_from_observed_at() {
+    let store = Store::open_in_memory().expect("in-memory store should open");
+    store
+        .append(Event::reservation_declared(
+            "s1",
+            "w1",
+            "Fix auth validation behavior.",
+            ["src/auth.ts"],
+        ))
+        .expect("reservation should append");
+
+    let live = store
+        .live_current_state(Some("src/auth.ts"))
+        .expect("live current state should load");
+    let reservation = live
+        .items
+        .iter()
+        .find(|item| item.kind == CurrentItemKind::Reservation)
+        .expect("reservation item should exist");
+
+    assert!(
+        reservation.age_seconds.is_some_and(|age| age >= 0),
+        "age_seconds should be populated and non-negative"
+    );
+}
+
+#[test]
 fn queued_wait_item_summary_includes_queue_position() {
     let store = Store::open_in_memory().expect("in-memory store should open");
     store

@@ -480,11 +480,17 @@ fn render_section(
             break;
         }
         *rendered += 1;
+        let age_suffix = item
+            .age_seconds
+            .filter(|seconds| *seconds >= 0)
+            .map(|seconds| format!(" ({seconds}s ago)"))
+            .unwrap_or_default();
         output.push_str(&format!(
-            "- [{}] {}: {}.\n",
+            "- [{}] {}: {}{}.\n",
             item.severity.as_str(),
             item.resource,
-            trim_trailing_period(&item.summary)
+            trim_trailing_period(&item.summary),
+            age_suffix
         ));
         if item.severity != CurrentSeverity::Info || show_info_detail {
             output.push_str(&format!(
