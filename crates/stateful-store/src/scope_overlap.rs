@@ -17,12 +17,12 @@ impl Store {
             return Ok(());
         }
 
-        let candidates = self.scope_overlap_candidates(workspace_id, by_agent_id)?;
+        let now = now_timestamp();
+        let candidates = self.scope_overlap_candidates(workspace_id, by_agent_id, &now)?;
         if candidates.is_empty() {
             return Ok(());
         }
 
-        let now = now_timestamp();
         let since = timestamp_after(&now, -SCOPE_OVERLAP_DEDUP_SECONDS)?;
         let mut emitted = HashSet::new();
 
@@ -65,14 +65,15 @@ impl Store {
         &self,
         workspace_id: &str,
         by_agent_id: &str,
+        now: &str,
     ) -> StoreResult<Vec<(String, String, bool)>> {
         let mut statement = self.conn.prepare(
             "SELECT agent_id, scopes_json
              FROM reservations
-             WHERE workspace_id = ?1 AND status = 'active' AND agent_id != ?2",
+             WHERE workspace_id = ?1 AND status = 'active' AND agent_id != ?2 AND expires_at > ?3",
         )?;
         let rows = statement
-            .query_map(params![workspace_id, by_agent_id], |row| {
+            .query_map(params![workspace_id, by_agent_id, now], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?
             .collect::<Result<Vec<_>, _>>()?;

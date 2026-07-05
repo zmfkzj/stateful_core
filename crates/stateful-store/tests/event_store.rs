@@ -450,6 +450,43 @@ fn scope_overlap_dedupes_repeat_declarations_within_window() {
 }
 
 #[test]
+fn scope_overlap_skips_expired_reservation_rows_before_cleanup() {
+    let temp_root = tempfile::tempdir().expect("temp dir should create");
+    let db_path = temp_root.path().join("state.db");
+    {
+        let store = Store::open(&db_path).expect("file store should open");
+        store
+            .append(Event::reservation_declared(
+                "s1",
+                "w1",
+                "Expired holder.",
+                ["src/auth.ts"],
+            ))
+            .expect("s1 declares");
+    }
+
+    let conn = Connection::open(&db_path).expect("db should reopen");
+    conn.execute(
+        "UPDATE reservations SET expires_at = '1970-01-01T00:00:00Z' WHERE agent_id = 's1'",
+        [],
+    )
+    .expect("reservation should be made stale without cleanup");
+    drop(conn);
+
+    let store = Store::open(&db_path).expect("file store should reopen");
+    store
+        .append(Event::reservation_declared(
+            "s2",
+            "w1",
+            "Fresh overlap.",
+            ["src/auth.ts"],
+        ))
+        .expect("s2 declares");
+
+    assert_eq!(scope_overlap_notifications(&store, "s1").len(), 0);
+}
+
+#[test]
 fn reservation_declared_rejects_empty_or_normalized_empty_scopes() {
     for files in [Vec::<&str>::new(), vec!["./"], vec!["../"], vec!["/"]] {
         let store = Store::open_in_memory().expect("in-memory store should open");
