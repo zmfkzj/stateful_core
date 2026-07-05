@@ -106,6 +106,14 @@ async function loadExtension(t, fakeStateful, logPath) {
   return { handlers, tools };
 }
 
+async function loadModuleNamespace(t, fakeStateful) {
+  const dir = tempDir();
+  const source = fs.readFileSync(path.resolve('crates/stateful-cli/assets/stateful-omp-extension.js'), 'utf8');
+  const modulePath = path.join(dir, 'stateful-omp-extension.mjs');
+  fs.writeFileSync(modulePath, source.replace('__STATEFUL_BINARY_JSON__', JSON.stringify(fakeStateful)));
+  return await import(pathToFileURL(modulePath).href);
+}
+
 async function emitToolCall(handlers, event, ctx) {
   for (const handler of handlers.get('tool_call') || []) {
     const result = await handler(event, ctx);
@@ -118,6 +126,83 @@ function readLog(logPath) {
   if (!fs.existsSync(logPath)) return [];
   return fs.readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
 }
+
+test('scope_overlap SSE block delivers one FYI message and dedupes', async (t) => {
+  const dir = tempDir();
+  const fakeStateful = writeFakeStateful(dir);
+  const mod = await loadModuleNamespace(t, fakeStateful);
+  const { processReservationSseBlock, seenScopeOverlaps } = mod.__testables;
+  seenScopeOverlaps.clear();
+
+  const sent = [];
+  const pi = { sendMessage: (msg, opts) => sent.push({ msg, opts }) };
+  const stream = { agent_id: 's1', workspace_id: 'w1' };
+  const block = [
+    'event: scope_overlap',
+    'data: ' + JSON.stringify({
+      kind: 'scope_overlap',
+      payload: {
+        relative_path: 'src/auth.ts',
+        action: 'write_file',
+        by_agent_id: 's2',
+        purpose: 'Also edit auth.',
+        overlaps_your: 'src/auth.ts',
+      },
+    }),
+    'id: 7',
+  ].join('\n');
+
+  processReservationSseBlock(pi, block, stream);
+  processReservationSseBlock(pi, block, stream);
+
+  assert.equal(sent.length, 1, 'exactly one message despite two identical blocks');
+  assert.equal(sent[0].msg.customType, 'stateful_scope_overlap');
+  assert.equal(sent[0].opts.triggerTurn, false);
+  assert.equal(sent[0].opts.deliverAs, 'nextTurn');
+  assert.match(sent[0].msg.content, /s2/);
+  assert.match(sent[0].msg.content, /src\/auth\.ts/);
+});
+
+test('scope_overlap SSE block filters target agents by explicit target fields', async (t) => {
+  const dir = tempDir();
+  const fakeStateful = writeFakeStateful(dir);
+  const mod = await loadModuleNamespace(t, fakeStateful);
+  const { processReservationSseBlock, seenScopeOverlaps } = mod.__testables;
+  seenScopeOverlaps.clear();
+
+  const sent = [];
+  const pi = { sendMessage: (msg, opts) => sent.push({ msg, opts }) };
+  const stream = { agent_id: 's1', workspace_id: 'w1' };
+  const cases = [
+    [{}, true],
+    [{ target_agent_id: 's1' }, true],
+    [{ target_agent_id: 's2' }, false],
+    [{ agent_id: 's1' }, true],
+    [{ agent_id: 's2', payload: { agent_id: 's1' } }, false],
+    [{ payload: { agent_id: 's1' } }, true],
+  ];
+
+  for (const [index, [extra, shouldDeliver]] of cases.entries()) {
+    const before = sent.length;
+    const payload = {
+      relative_path: 'src/target-' + index + '.ts',
+      action: 'write_file',
+      by_agent_id: 's2',
+      ...(extra.payload || {}),
+    };
+    const block = [
+      'event: scope_overlap',
+      'data: ' + JSON.stringify({
+        kind: 'scope_overlap',
+        ...extra,
+        payload,
+      }),
+    ].join('\n');
+
+    processReservationSseBlock(pi, block, stream);
+    assert.equal(sent.length, before + (shouldDeliver ? 1 : 0));
+  }
+});
 
 test('lazy_write_resume waits for queued wait_id before claiming and applying saved write', async (t) => {
   const dir = tempDir();

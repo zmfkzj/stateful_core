@@ -177,6 +177,7 @@ let reservationStreamAbort;
 let reservationStreamKey = "";
 let reservationStreamLastEventId = "";
 const seenReservationWaitIds = new Set();
+const seenScopeOverlaps = new Set();
 
 function stopReservationStream() {
   if (reservationStreamAbort) {
@@ -227,12 +228,54 @@ function reservationMessage(notification) {
   return lines.join("\n");
 }
 
+function scopeOverlapMessage(notification) {
+  const payload = notification?.payload || {};
+  const path = payload.relative_path || "a shared path";
+  const byAgent = payload.by_agent_id || "another agent";
+  const action = payload.action || "write";
+  const lines = [
+    "Stateful overlap: agent " + byAgent + " declared " + action + " intent on " + path + " (overlaps your active scope).",
+  ];
+  if (payload.overlaps_your && payload.overlaps_your !== path) {
+    lines.push("your scope: " + payload.overlaps_your);
+  }
+  if (typeof payload.purpose === "string" && payload.purpose.trim().length > 0) {
+    lines.push("purpose: " + payload.purpose.trim());
+  }
+  lines.push("FYI only — coordinate or adjust the file split if needed. Do not redeclare or steal claims.");
+  return lines.join("\n");
+}
+
+function deliverScopeOverlapNotification(pi, notification, stream) {
+  if (!notificationTargetsStreamAgent(notification, stream)) return true;
+  const payload = notification?.payload || {};
+  if (!payload.relative_path) return true;
+  const key = (payload.by_agent_id || "") + "\u0000" + payload.relative_path;
+  if (seenScopeOverlaps.has(key)) return true;
+  if (typeof pi?.sendMessage !== "function") return false;
+  try {
+    pi.sendMessage(
+      {
+        customType: "stateful_scope_overlap",
+        content: scopeOverlapMessage(notification),
+        display: true,
+        details: notification,
+      },
+      { triggerTurn: false, deliverAs: "nextTurn" }
+    );
+    seenScopeOverlaps.add(key);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 function notificationTargetsStreamAgent(notification, stream) {
-  const targetAgentId = property(notification, "target_agent_id")
-    || property(notification, "agent_id")
-    || propertyPath(notification, "payload", "agent_id");
+  const targetAgentId = notification?.target_agent_id
+    || notification?.agent_id
+    || notification?.payload?.agent_id;
   if (!targetAgentId) return true;
-  return targetAgentId === property(stream, "agent_id");
+  return targetAgentId === stream?.agent_id;
 }
 
 
@@ -307,12 +350,22 @@ function processReservationSseBlock(pi, block, stream) {
     if (line.startsWith("event:")) event = line.slice(6).trim();
     if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
   }
-  if (event !== "reservation_granted" || data.length === 0) return;
+  if (data.length === 0) return;
+  let parsed;
   try {
-    if (deliverReservationNotification(pi, JSON.parse(data.join("\n")), stream) && id) {
+    parsed = JSON.parse(data.join("\n"));
+  } catch (_) {
+    return;
+  }
+  if (event === "reservation_granted") {
+    if (deliverReservationNotification(pi, parsed, stream) && id) {
       reservationStreamLastEventId = id;
     }
-  } catch (_) {}
+  } else if (event === "scope_overlap") {
+    if (deliverScopeOverlapNotification(pi, parsed, stream) && id) {
+      reservationStreamLastEventId = id;
+    }
+  }
 }
 
 function processReservationSseBuffer(pi, buffer, stream) {
@@ -1472,4 +1525,12 @@ function state_reservation_claim(operation, ctx) {
       cwd: ctx.cwd,
     });
   });
+};
+
+export const __testables = {
+  processReservationSseBlock,
+  deliverScopeOverlapNotification,
+  scopeOverlapMessage,
+  seenScopeOverlaps,
+  seenReservationWaitIds,
 };
