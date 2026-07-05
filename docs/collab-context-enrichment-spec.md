@@ -1,12 +1,12 @@
 # Collaboration Context Enrichment — Design Spec
 
-Status: Draft (approved for spec, pending implementation plan)
+Status: Implemented (Task 9 docs reconciliation)
 Date: 2026-07-05
 
 ## Problem
 
-Agents learn about peer work through four channels, and the effective one fires
-exactly once at the least-informative moment:
+Before this work, agents learned about peer work through four channels, and the
+effective one fired exactly once at the least-informative moment:
 
 | Channel | Timing | Content | Limit |
 |---|---|---|---|
@@ -15,17 +15,17 @@ exactly once at the least-informative moment:
 | SSE notification | Only for what you queued on | `reservation_granted` only | learns only what you waited for |
 | `state_context_render` | On demand | full state | policy discourages routine calls |
 
-Two grounding facts:
+Original grounding facts:
 
 1. Context is emitted once, at first prompt, then blocked forever by an on-disk
    marker (`crates/stateful-cli/src/hook.rs:1359-1364`,
    `.stateful_core/runtime/prompt_context/{agent_id}.sent` at `hook.rs:1496-1502`).
    The first-prompt snapshot is the last snapshot; peers who reserve afterward
    are invisible until a denial.
-2. The only notification producer is `reservation_granted`
-   (`crates/stateful-store/src/lib.rs:2652`), and the OMP extension handles only
+2. Before this work, the only notification producer was `reservation_granted`
+   (`crates/stateful-store/src/lib.rs:2652`), and the OMP extension handled only
    that event (`crates/stateful-cli/assets/stateful-omp-extension.js:310`). No
-   "a peer reserved near your scope" signal exists.
+   "a peer reserved near your scope" signal existed.
 
 Benchmark evidence: the 8 claim conflicts in recent DeNovo runs are all
 "collided without warning" cases — avoidable if seen before the collision.
@@ -110,8 +110,9 @@ notification rows in Rust (avoids schema change).
 
 ### Server
 
-`notification_sse_event` forwards kind as event name unchanged. `scope_overlap`
-carries **no `required_next_action`** (FYI, not action-forcing).
+No server product change was required: existing notification delivery forwards
+the notification kind as the SSE event name, and `scope_overlap` carries **no
+`required_next_action`** (FYI, not action-forcing).
 
 ### Consumer (OMP extension)
 
@@ -136,8 +137,9 @@ No SSE consumer; covered by `state_notifications_poll` + Component 2.
 Replace marker logic at `hook.rs:1359-1364`:
 
 - Marker content: `"rendered\n"` → coordination **fingerprint hash**.
-- Fingerprint = SHA-256 of sorted `kind|resource|agent_id|purpose|status` lines,
-  over **reservations + wait queue + human writes only**. Exclude claims / write
+- Fingerprint = sorted JSON tuples of `evidence_kind`, `resource`, `agent_id`, and
+  `purpose`, hashed with Rust's `DefaultHasher`, over declared reservations,
+  reservations, wait queue items, and observed writes only. Exclude claims / write
   fences (sub-second transient; post-tool auto-release ⇒ churn). Exclude
   `expires_at`/timestamps (heartbeat refreshes TTL ⇒ meaningless hash drift).
 - Flow:
@@ -200,7 +202,7 @@ benchmarks after 1–3 show remaining shortfall.
 ## Rollout order
 
 1. Component 3 (renderer) — independent, immediate value.
-2. Component 1 (scope_overlap) — store → server → extension.
+2. Component 1 (scope_overlap) — store → existing notification delivery → extension.
 3. Component 2 (fingerprint re-render).
 4. Docs/skill sync (stateful-command-policy skill, omp-tools.md, README) — as
    AGENTS.md follow-up checks.

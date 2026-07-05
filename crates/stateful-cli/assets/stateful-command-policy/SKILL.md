@@ -17,6 +17,7 @@ This is the procedural manual for Stateful hooks. Rules decide when the skill ap
 
 - Run or start the server in enforcement mode by default: `stateful server --coordination-mode enforcement` or `stateful server start --coordination-mode enforcement`.
 - `--coordination-mode awareness` changes reservation/claim/conflict denials into warnings for coordination practice, not permission to ignore coordination. Review rendered context and reread the target before writing.
+- `scope_overlap` is a non-denial awareness signal produced when another agent declares a reservation overlapping your active scope; coordinate or adjust the split instead of treating it as authorization to claim.
 - `unreconciled_human_write` still requires human-change reconciliation before overwrite in either mode.
 
 ## Default Write Flow

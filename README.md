@@ -212,6 +212,8 @@ Server coordination defaults to enforcement; use
 `stateful server start --coordination-mode awareness` for warn-only awareness
 mode.
 
+Agents also receive `scope_overlap` notifications when a peer declares overlapping scope, and Codex UserPromptSubmit context re-renders when the relevant reservation/wait/observed-write coordination fingerprint changes instead of only once per session.
+
 Human-side coordination is explicit:
 
 ```bash
