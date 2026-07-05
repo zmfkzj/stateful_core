@@ -322,9 +322,11 @@ command-shaped inspection uses `<absolute-stateful-binary> sandbox run --fs
 read-only --network disabled --command <cmd>`; the read-only profile rejects
 `--network enabled`. Command-shaped repo writes use `--fs write-targets` with
 explicit `--write-target <file>`, `--create-target <file>`, or
-`--write-dir <repo-dir>` values. `--write-dir` is a repo-relative
-`write_directory` target and requires matching directory reservation and
-same-reservation claim coverage.
+`--write-dir <repo-dir>` values. External-profile exact repo file targets
+auto-declare/claim after missing-reservation/scope denials when no explicit
+reservation is supplied. `--write-dir` is a repo-relative `write_directory`
+target and requires matching directory reservation and same-reservation claim
+coverage.
 OMP built-in Bash may run only strict trusted `stateful sandbox run ...` and
 `stateful sandbox process find ...` commands after Stateful preflight.
 Arbitrary raw Bash and Python/JavaScript/JS/Ruby/Julia eval-tool execution is
@@ -340,8 +342,11 @@ text, and matching calls reuse the grant until it expires or reaches its use
 limit. When auto-approval is enabled, no prompt is shown.
 The external sandbox profile requires
 purpose and command; read-only/no-declared-scope operations may
-omit targets, while supplied external write scopes are validated as absolute
-paths outside the repo. On macOS, external profile runs also allow
+omit targets. Repo-relative exact file scopes can auto-declare/claim after
+missing-reservation/scope denials when no explicit reservation is supplied;
+repo-relative `--write-dir` requires matching directory reservation and
+same-reservation claim coverage; supplied absolute external write scopes are
+validated as paths outside the repo. On macOS, external profile runs also allow
 trust/identity Mach lookups for `trustd` and DirectoryService so Go TLS clients
 such as `gh` can verify certificates. In OMP, it starts through built-in Bash
 after Stateful preflight; repo-external OMP native `edit`/`write` file targets

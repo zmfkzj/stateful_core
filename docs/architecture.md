@@ -317,8 +317,9 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
   Git uses `--fs git --network disabled`, GitHub PR operations use
   `--fs github-pr --network enabled`, and external operations use `--fs external`
   through the trusted stateful command path. A purpose and command are sufficient for
-  read-only/no-declared-scope external operations; absolute external targets
-  remain required when declaring external write scope. On macOS, external runs
+  read-only/no-declared-scope external operations; repo-relative exact file scopes
+  can auto-declare/claim, while repo-relative external directories still require
+  explicit reservation and same-reservation claims. On macOS, external runs
   allow `trustd` and DirectoryService Mach lookups for TLS certificate
   verification by Go tools.
 - check claims and planned edits for likely conflicts
@@ -415,9 +416,11 @@ classification, so `functions.bash` is Bash,
   strict trusted `stateful sandbox process find ...` command through built-in
   Bash in OMP. Command-shaped repo writes use `--fs write-targets` with explicit
   `--write-target <file>` / `--create-target <file>` values and target
-  authorization. External operations use `--fs external`; OMP external
-  write/create/write-dir/socket/signal scope asks for the scoped grant described
-  above.
+  authorization. External operations use `--fs external`; exact repo-relative
+  external file targets auto-declare/claim after missing-reservation/scope
+  denials, while repo-relative external directories still require explicit
+  reservation and same-reservation claims. OMP external write/create/write-dir/socket/signal scope asks
+  for the scoped grant described above.
   On
   macOS, the external profile permits `trustd` and DirectoryService Mach lookups
   so Go TLS clients such as `gh` can verify certificates.

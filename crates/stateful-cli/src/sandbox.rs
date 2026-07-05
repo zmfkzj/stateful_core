@@ -357,89 +357,138 @@ pub fn run_sandbox_in_repo(
                     request.workspace_id.as_deref(),
                     "sandbox external repo targets require --agent-id",
                 )?;
-                let authorize_context = SandboxAuthorizeContext {
-                    runtime,
-                    repo_root: &repo_root,
-                    paths,
-                    agent_id: &agent_context.agent_id,
-                    workspace_id: &agent_context.workspace_id,
-                    network: request.network,
-                    fs_profile: sandbox_fs_profile_name(request.fs),
-                    reservation_id: request.reservation_id.as_deref(),
-                };
-
-                for path in external_scope
+                let mut reservation_id = request.reservation_id.clone();
+                let repo_file_targets = external_scope
                     .repo_write_targets
                     .iter()
                     .chain(external_scope.repo_create_targets.iter())
-                {
-                    let response = authorize_sandbox_write(&authorize_context, "write_file", path)?;
-                    match classify_sandbox_authorize_response(path, response)? {
-                        SandboxAuthorizeDecision::Allow => allowed_write_targets.push(path.clone()),
-                        SandboxAuthorizeDecision::Warn(message) => {
-                            authorization_warnings.push(message);
-                            allowed_write_targets.push(path.clone());
-                        }
-                        SandboxAuthorizeDecision::Deny(body) => {
-                            denied_write_targets.push(serde_json::json!({
-                                "path": path,
-                                "authorization": body,
-                            }));
-                        }
-                    }
-                }
-                for path in &external_scope.repo_write_dirs {
-                    let authorization_path = sandbox_write_dir_display_path(path);
-                    let response = authorize_sandbox_write(
-                        &authorize_context,
-                        "write_directory",
-                        &authorization_path,
-                    )?;
-                    match classify_sandbox_authorize_response(path, response)? {
-                        SandboxAuthorizeDecision::Allow => {
-                            allowed_write_targets.push(sandbox_write_dir_display_path(path));
-                        }
-                        SandboxAuthorizeDecision::Warn(message) => {
-                            authorization_warnings.push(message);
-                            allowed_write_targets.push(sandbox_write_dir_display_path(path));
-                        }
-                        SandboxAuthorizeDecision::Deny(body) => {
-                            let body = enrich_sandbox_write_dir_denial(body);
-                            denied_write_targets.push(serde_json::json!({
-                                "path": sandbox_write_dir_display_path(path),
-                                "authorization": body,
-                            }));
-                        }
-                    }
-                }
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let can_auto_declare = reservation_id.is_none()
+                    && !repo_file_targets.is_empty()
+                    && external_scope.repo_write_dirs.is_empty();
+                let mut auto_declared = false;
 
-                release_after_run = Some(SandboxLeaseReleaseContext {
-                    agent_id: agent_context.agent_id.clone(),
-                    workspace_id: agent_context.workspace_id.clone(),
-                    paths: external_scope
-                        .repo_write_targets
-                        .iter()
-                        .chain(external_scope.repo_create_targets.iter())
-                        .cloned()
-                        .chain(
-                            external_scope
-                                .repo_write_dirs
-                                .iter()
-                                .map(|path| sandbox_write_dir_display_path(path)),
+                'authorize_repo_targets: loop {
+                    let authorize_context = SandboxAuthorizeContext {
+                        runtime,
+                        repo_root: &repo_root,
+                        paths,
+                        agent_id: &agent_context.agent_id,
+                        workspace_id: &agent_context.workspace_id,
+                        network: request.network,
+                        fs_profile: sandbox_fs_profile_name(request.fs),
+                        reservation_id: reservation_id.as_deref(),
+                    };
+                    let mut repo_allowed_write_targets = Vec::new();
+                    let mut repo_denied_write_targets = Vec::new();
+
+                    for path in &repo_file_targets {
+                        let purpose = request
+                            .purpose
+                            .as_deref()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| sandbox_authorize_purpose("write_file", path));
+                        let response = authorize_sandbox_write_with_purpose(
+                            &authorize_context,
+                            "write_file",
+                            path,
+                            &purpose,
+                        )?;
+                        match classify_sandbox_authorize_response(path, response)? {
+                            SandboxAuthorizeDecision::Allow => {
+                                repo_allowed_write_targets.push(path.clone());
+                            }
+                            SandboxAuthorizeDecision::Warn(message) => {
+                                authorization_warnings.push(message);
+                                repo_allowed_write_targets.push(path.clone());
+                            }
+                            SandboxAuthorizeDecision::Deny(body) => {
+                                if can_auto_declare
+                                    && !auto_declared
+                                    && sandbox_denial_allows_auto_declare(&body)
+                                {
+                                    reservation_id =
+                                        Some(declare_and_claim_sandbox_run_reservation(
+                                            &authorize_context,
+                                            &repo_file_targets,
+                                            &purpose,
+                                        )?);
+                                    auto_declared = true;
+                                    continue 'authorize_repo_targets;
+                                }
+                                repo_denied_write_targets.push(serde_json::json!({
+                                    "path": path,
+                                    "authorization": body,
+                                }));
+                            }
+                        }
+                    }
+                    for path in &external_scope.repo_write_dirs {
+                        let authorization_path = sandbox_write_dir_display_path(path);
+                        let purpose = request
+                            .purpose
+                            .as_deref()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| {
+                                sandbox_authorize_purpose("write_directory", &authorization_path)
+                            });
+                        let response = authorize_sandbox_write_with_purpose(
+                            &authorize_context,
+                            "write_directory",
+                            &authorization_path,
+                            &purpose,
+                        )?;
+                        match classify_sandbox_authorize_response(path, response)? {
+                            SandboxAuthorizeDecision::Allow => {
+                                repo_allowed_write_targets
+                                    .push(sandbox_write_dir_display_path(path));
+                            }
+                            SandboxAuthorizeDecision::Warn(message) => {
+                                authorization_warnings.push(message);
+                                repo_allowed_write_targets
+                                    .push(sandbox_write_dir_display_path(path));
+                            }
+                            SandboxAuthorizeDecision::Deny(body) => {
+                                let body = enrich_sandbox_write_dir_denial(body);
+                                repo_denied_write_targets.push(serde_json::json!({
+                                    "path": sandbox_write_dir_display_path(path),
+                                    "authorization": body,
+                                }));
+                            }
+                        }
+                    }
+
+                    release_after_run = Some(SandboxLeaseReleaseContext {
+                        agent_id: agent_context.agent_id.clone(),
+                        workspace_id: agent_context.workspace_id.clone(),
+                        paths: repo_file_targets
+                            .iter()
+                            .cloned()
+                            .chain(
+                                external_scope
+                                    .repo_write_dirs
+                                    .iter()
+                                    .map(|path| sandbox_write_dir_display_path(path)),
+                            )
+                            .collect(),
+                    });
+
+                    if !repo_denied_write_targets.is_empty() {
+                        denied_write_targets.extend(repo_denied_write_targets);
+                        let body = sandbox_authorization_denied_body(
+                            allowed_write_targets,
+                            denied_write_targets,
                         )
-                        .collect(),
-                });
-
-                if !denied_write_targets.is_empty() {
-                    let body = sandbox_authorization_denied_body(
-                        allowed_write_targets,
-                        denied_write_targets,
-                    )
-                    .to_string();
-                    if let Some(release_context) = &release_after_run {
-                        release_sandbox_write_claims(runtime, release_context);
+                        .to_string();
+                        if let Some(release_context) = &release_after_run {
+                            release_sandbox_write_claims(runtime, release_context);
+                        }
+                        return Err(SandboxAuthorizationDenied::new(body).into());
                     }
-                    return Err(SandboxAuthorizationDenied::new(body).into());
+
+                    allowed_write_targets.extend(repo_allowed_write_targets);
+                    break;
                 }
 
                 writable_paths.extend(prepare_sandbox_writable_paths(
@@ -2810,10 +2859,20 @@ pub(crate) fn authorize_sandbox_write(
     action: &str,
     path: &str,
 ) -> anyhow::Result<HttpResponse> {
+    let purpose = sandbox_authorize_purpose(action, path);
+    authorize_sandbox_write_with_purpose(context, action, path, &purpose)
+}
+
+fn authorize_sandbox_write_with_purpose(
+    context: &SandboxAuthorizeContext<'_>,
+    action: &str,
+    path: &str,
+    purpose: &str,
+) -> anyhow::Result<HttpResponse> {
     let mut payload = serde_json::json!({
         "action": action,
         "path": path,
-        "purpose": sandbox_authorize_purpose(action, path),
+        "purpose": purpose,
         "queue_on_conflict": true,
         "fs_profile": context.fs_profile,
         "network_policy": match context.network {
@@ -2904,6 +2963,84 @@ fn sandbox_authorize_purpose(action: &str, path: &str) -> String {
         "write_directory" => format!("Run sandbox command for write directory `{path}`."),
         _ => format!("Run sandbox command for write target `{path}`."),
     }
+}
+
+fn sandbox_denial_allows_auto_declare(body: &Value) -> bool {
+    matches!(
+        body.get("reason_code").and_then(Value::as_str),
+        Some("missing_reservation" | "scope_mismatch")
+    )
+}
+
+fn declare_and_claim_sandbox_run_reservation(
+    context: &SandboxAuthorizeContext<'_>,
+    files_planned: &[String],
+    purpose: &str,
+) -> anyhow::Result<String> {
+    let identity = repo_identity_for_enabled_repo(context.paths, context.repo_root).ok();
+    let identity_root = identity
+        .as_ref()
+        .map(|identity| identity.root.clone())
+        .unwrap_or_default();
+    let body = protocol_envelope(ProtocolEnvelopeArgs {
+        runtime: context.runtime,
+        request_id: uuid::Uuid::new_v4().to_string(),
+        agent_id: context.agent_id.to_string(),
+        workspace_id: context.workspace_id.to_string(),
+        identity,
+        source_kind: "cli",
+        event: "reservation_declare",
+        source_ref: "stateful.sandbox.run",
+        source_tool_name: None,
+        payload: serde_json::json!({
+            "purpose": purpose,
+            "files_planned": files_planned,
+        }),
+    });
+    let response = post_json(context.runtime, "/v1/reservation/declare", &body)?;
+    if !(200..300).contains(&response.status_code) {
+        anyhow::bail!(
+            "stateful sandbox run reservation declaration failed with HTTP {}: {}",
+            response.status_code,
+            response.body
+        );
+    }
+    let body = serde_json::from_str::<Value>(&response.body).map_err(|error| {
+        anyhow::anyhow!(
+            "stateful sandbox run reservation declaration response was not valid JSON: {error}"
+        )
+    })?;
+    let reservation_id = body
+        .get("reservation_id")
+        .and_then(Value::as_str)
+        .filter(|reservation_id| !reservation_id.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "stateful sandbox run reservation declaration response did not include reservation_id"
+            )
+        })?
+        .to_string();
+
+    let response = post_json(
+        context.runtime,
+        "/v1/claim/acquire",
+        &serde_json::json!({
+            "agent_id": context.agent_id,
+            "workspace_id": context.workspace_id,
+            "reservation_id": &reservation_id,
+            "paths": files_planned,
+            "root": identity_root,
+        }),
+    )?;
+    if !(200..300).contains(&response.status_code) {
+        anyhow::bail!(
+            "stateful sandbox run claim acquire failed with HTTP {}: {}",
+            response.status_code,
+            response.body
+        );
+    }
+
+    Ok(reservation_id)
 }
 
 pub(crate) enum SandboxAuthorizeDecision {

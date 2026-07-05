@@ -9,8 +9,8 @@ If the denial says `missing_reservation`, `missing_claim`, `Target is outside ac
 1. For OMP native `edit`/`write` without an explicit `reservation_id`, allow the extension to auto-declare the exact tool-visible file scope, acquire same-reservation claims, and retry authorization when this is the only denial.
 2. Otherwise re-read the target if it exists.
 3. If the active tool list exposes them, add the missing exact file or directory scopes to the task reservation with `state_reservation_declare(purpose=<task purpose>, files_planned=[...])`, then acquire exact same-reservation claims with `state_claim_acquire(reservation_id=<reservation_id>, paths=[...])`.
-4. If those tools are absent, do not invent them. Use OMP native `edit`/`write` auto-declare, lazy resume, or an already-authorized `reservation_id` write boundary; otherwise report that the command-shaped write cannot be authorized in this tool context.
-5. Use native edit tools for repo edits, or `sandbox run --fs write-targets` / OMP built-in Bash with a strict trusted `stateful sandbox run --fs write-targets ...` command and matching targets for command-shaped writes.
+4. If those tools are absent, do not invent them. Use OMP native `edit`/`write` auto-declare, external-profile exact repo file target auto-declare, lazy resume, or an already-authorized `reservation_id` write boundary; otherwise report that the command-shaped write cannot be authorized in this tool context.
+5. Use native edit tools for repo edits, `sandbox run --fs external` with exact repo file targets for external-to-repo imports, or `sandbox run --fs write-targets` / OMP built-in Bash with a strict trusted `stateful sandbox run --fs write-targets ...` command and matching targets for other command-shaped writes.
 
 Use file claims for file writes, deletes, renames, and moves. Directory claims only authorize directory writes.
 
@@ -65,7 +65,7 @@ Use external only when the command is outside the repo or needs external OS capa
 - Codex: `sandbox run --fs external --purpose ... --command ...`.
 - OMP: built-in Bash with strict trusted `stateful sandbox run --fs external ...`; write/create/write-dir/socket/signal scope and repo-external native `edit`/`write` file targets auto-approve by default through `stateful.autoApprove: true` and prompt only when `stateful.autoApprove: false` is configured.
 - Add absolute external targets, directories, sockets, or signal permission only when needed.
-- Repo-relative external write scopes require matching Stateful reservation and same-reservation claims.
+- Repo-relative external exact file scopes auto-declare and claim after a missing-reservation/scope denial when no `--reservation-id` is supplied; repo-relative external `--write-dir` still requires matching Stateful reservation and same-reservation claims.
 
 ## Other Denials
 
