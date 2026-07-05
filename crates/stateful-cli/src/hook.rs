@@ -1508,7 +1508,8 @@ fn coordination_fingerprint(items: &[serde_json::Value]) -> String {
             let resource = item.get("resource").and_then(|v| v.as_str()).unwrap_or("");
             let agent = item.get("agent_id").and_then(|v| v.as_str()).unwrap_or("");
             let purpose = item.get("purpose").and_then(|v| v.as_str()).unwrap_or("");
-            Some(format!("{evidence_kind}|{resource}|{agent}|{purpose}"))
+            let selected = [evidence_kind, resource, agent, purpose];
+            Some(serde_json::to_string(&selected).expect("fingerprint tuple should serialize"))
         })
         .collect();
     lines.sort();
@@ -3779,6 +3780,24 @@ mod fingerprint_tests {
         let a = vec![reservation_item("src/auth.ts", "t")];
         let mut b = a.clone();
         b.push(reservation_item("src/session.ts", "t"));
+        assert_ne!(coordination_fingerprint(&a), coordination_fingerprint(&b));
+    }
+
+    #[test]
+    fn fingerprint_distinguishes_delimiter_collisions() {
+        let a = vec![json!({
+            "evidence_kind": "reservation",
+            "resource": "src|auth.ts",
+            "agent_id": "s1",
+            "purpose": "Edit.",
+        })];
+        let b = vec![json!({
+            "evidence_kind": "reservation",
+            "resource": "src",
+            "agent_id": "auth.ts|s1",
+            "purpose": "Edit.",
+        })];
+
         assert_ne!(coordination_fingerprint(&a), coordination_fingerprint(&b));
     }
 

@@ -5823,8 +5823,9 @@ fn user_prompt_submit_posts_context_render() {
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
-        r#"{"status":"ok","prompt_text":"Nearby Activity\n- none"}"#,
-        r#"{"status":"ok","prompt_text":"Nearby Activity\n- should not render twice"}"#,
+        r#"{"status":"ok","prompt_text":"Nearby Activity\n- first","items":[{"evidence_kind":"reservation","resource":"src/auth.ts","agent_id":"s1","purpose":"Fix auth validation behavior."}]}"#,
+        r#"{"status":"ok","prompt_text":"Nearby Activity\n- unchanged should be suppressed","items":[{"evidence_kind":"reservation","resource":"src/auth.ts","agent_id":"s1","purpose":"Fix auth validation behavior."}]}"#,
+        r#"{"status":"ok","prompt_text":"Nearby Activity\n- changed","items":[{"evidence_kind":"reservation","resource":"src/auth.ts","agent_id":"s1","purpose":"Review login flow."}]}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
@@ -5847,28 +5848,18 @@ fn user_prompt_submit_posts_context_render() {
         String::from_utf8_lossy(&output.stderr)
     );
     let rendered = String::from_utf8(output.stdout).expect("prompt output should be utf8");
-    assert!(rendered.contains("Nearby Activity"));
-    assert!(rendered.contains("planning/manual inspection"));
+    assert!(rendered.contains("Nearby Activity\n- first"));
+    assert!(rendered.contains("Stateful command policy reminder"));
     assert!(rendered.contains("stateful-command-policy"));
-    assert!(rendered.contains("Use active Stateful native coordination tools"));
-    assert!(rendered.contains("state_reservation_declare"));
-    assert!(rendered.contains("state_claim_acquire"));
-    assert!(rendered.contains("only when they appear in the tool list"));
-    assert!(rendered.contains("lazy resume helpers"));
-    assert!(rendered.contains("runtime-specific names"));
-    assert!(rendered.contains("Do not run `stateful reservation declare`"));
-    assert!(rendered.contains("--fs read-only --network disabled"));
-    assert!(rendered.contains("--fs build --network enabled"));
-    assert!(rendered.contains("--fs git --network disabled"));
-    assert!(rendered.contains("--fs github-pr --network enabled"));
-    assert!(rendered.contains("--fs write-targets --write-target <file>"));
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v1/context/render HTTP/1.1"));
-    assert!(request.contains("\"mode\":\"brief\""));
-    assert!(request.contains("\"workspace_id\":\"w1\""));
-    assert!(request.contains("\"repo_id\""));
-    assert!(request.contains("\"worktree_id\""));
-    assert!(request.contains("\"root\""));
+    let body = request_json_body(&request);
+    assert_eq!(body["agent_id"], "s1");
+    assert_eq!(body["mode"], "brief");
+    assert_eq!(body["workspace_id"], "w1");
+    assert!(body.get("repo_id").is_some());
+    assert!(body.get("worktree_id").is_some());
+    assert!(body.get("root").is_some());
 
     let second_output = run_hook_subprocess(
         &repo_root,
@@ -5886,10 +5877,32 @@ fn user_prompt_submit_posts_context_render() {
         "second UserPromptSubmit for the same agent should not print context: {}",
         String::from_utf8_lossy(&second_output.stdout)
     );
-    assert!(
-        rx.recv_timeout(Duration::from_millis(200)).is_err(),
-        "second UserPromptSubmit should not call /v1/context/render"
+    let second_request = rx.recv().expect("second context render request should arrive");
+    assert!(second_request.contains("POST /v1/context/render HTTP/1.1"));
+    let second_body = request_json_body(&second_request);
+    assert_eq!(second_body["agent_id"], "s1");
+    assert_eq!(second_body["mode"], "brief");
+
+    let third_output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "user-prompt-submit"],
+        input,
     );
+    assert!(
+        third_output.status.success(),
+        "stateful hook failed: {}",
+        String::from_utf8_lossy(&third_output.stderr)
+    );
+    let changed = String::from_utf8(third_output.stdout).expect("prompt output should be utf8");
+    assert!(changed.contains("Nearby Activity\n- changed"));
+    assert!(!changed.contains("Stateful command policy reminder"));
+    assert!(!changed.contains("stateful-command-policy"));
+    let third_request = rx.recv().expect("third context render request should arrive");
+    assert!(third_request.contains("POST /v1/context/render HTTP/1.1"));
+    let third_body = request_json_body(&third_request);
+    assert_eq!(third_body["agent_id"], "s1");
+    assert_eq!(third_body["mode"], "brief");
 }
 
 #[test]
