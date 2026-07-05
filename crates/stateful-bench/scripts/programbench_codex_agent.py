@@ -369,6 +369,7 @@ def install_stateful_for_codex(args, airlock: str) -> None:
 
 
 def run_agent(args, prompt):
+    args.agent_time_measured_by_runner = True
     airlock = getattr(args, "airlock", "/tmp/programbench-airlock")
     env = airlock_env(airlock, args.stateful_binary if args.stateful else None)
     if hasattr(args, "airlock") and hasattr(args, "container_id"):
@@ -402,15 +403,19 @@ def run_agent(args, prompt):
         if args.model:
             command.extend(["--model", args.model])
         command.append(prompt)
+        agent_started_at_ms = now_ms()
         try:
-            return subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=args.timeout_seconds,
-                cwd=airlock,
-                env=env,
-            )
+            try:
+                return subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=args.timeout_seconds,
+                    cwd=airlock,
+                    env=env,
+                )
+            finally:
+                args.agent_running_time_ms = max(now_ms() - agent_started_at_ms, 0)
         finally:
             if hasattr(args, "condition_dir"):
                 try:
@@ -516,11 +521,18 @@ def run_main(
     exit_code = 1
     error = None
     cleanup_error = None
+    agent_started_at_ms = None
+    agent_finished_at_ms = None
 
     airlock_tmp = tempfile.TemporaryDirectory(prefix="programbench-airlock-")
     args.airlock = airlock_tmp.name
     try:
-        result = run_agent_func(args, prompt_for_args(args))
+        prompt = prompt_for_args(args)
+        agent_started_at_ms = now_ms()
+        try:
+            result = run_agent_func(args, prompt)
+        finally:
+            agent_finished_at_ms = now_ms()
         stdout = output_text(result.stdout)
         stderr = output_text(result.stderr)
         exit_code = int(result.returncode)
@@ -556,6 +568,14 @@ def run_main(
         exit_code = 1
         error = f"smoke compile failed: {smoke_compile_error}"
     finished_at_ms = now_ms()
+    agent_running_time_ms = getattr(args, "agent_running_time_ms", None)
+    if (
+        agent_running_time_ms is None
+        and not getattr(args, "agent_time_measured_by_runner", False)
+        and agent_started_at_ms is not None
+        and agent_finished_at_ms is not None
+    ):
+        agent_running_time_ms = max(agent_finished_at_ms - agent_started_at_ms, 0)
     metadata = {
         "instance_id": args.instance_id,
         "condition_id": args.condition_id,
@@ -568,6 +588,8 @@ def run_main(
         "error": error,
         "token_usage": token_usage_from_output(stdout),
     }
+    if agent_running_time_ms is not None:
+        metadata["agent_running_time_ms"] = agent_running_time_ms
     if archive_error is not None:
         metadata["archive_error"] = archive_error
     if workspace_copy_error is not None:

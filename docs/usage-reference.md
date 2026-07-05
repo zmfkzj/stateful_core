@@ -565,10 +565,15 @@ working-tree tarball so ignored runtime and benchmark artifacts are not bundled.
   `overlap_omp_agent.py`, and `overlap_harness.py`.
 - `denovo`: wrap AweAgent DeNovoSWE extract/evaluation workflows and run the
   official AweAgent agent recipe, a host Codex CLI adapter, or an OMP CLI adapter
-  while recording `stateful`, `subagent`, and `running_time_ms` comparison axes.
+  while recording `stateful` and `subagent` axes plus agent-only
+  (`agent_running_time_ms`, `score_per_agent_hour`) and elapsed
+  (`running_time_ms`, `score_per_hour`) timing fields.
 - `programbench`: run Codex or OMP agents on ProgramBench instances, evaluate the
   resulting `submission.tar.gz` artifacts with official ProgramBench tooling, and
-  report stateful/no-state quality plus time/token efficiency deltas.
+  report stateful/no-state quality plus agent-only and elapsed time/token
+  efficiency deltas.
+  Historical artifacts may omit agent-time fields; elapsed `score_per_hour`
+  remains available for compatibility and audit.
   ProgramBench host Codex/OMP runs use an empty temporary airlock seeded from
   the target container's `/workspace`; OMP Docker runs use a separate agent
   container as the sandbox boundary before smoke compile in the live target

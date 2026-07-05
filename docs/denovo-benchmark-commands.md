@@ -470,6 +470,11 @@ adapter `results.jsonl` files. Matrix runs may rewrite or reset raw
 `results.jsonl` files while conditions advance, so raw row counts can be
 misleading until the run has settled.
 
+Interpret `score_per_agent_hour` as the primary time-efficiency metric when
+present. `agent_running_time_ms` is measured agent subprocess time only;
+`running_time_ms` and `score_per_hour` remain elapsed harness/adapter
+compatibility/audit fields. Historical artifacts may omit agent-time fields.
+
 Progress output includes compact orchestration trace summaries when stateful
 trace capture is available. Trace capture calls
 `/v1/events?workspace_id=<id>&limit=100` when a workspace id is known, writes

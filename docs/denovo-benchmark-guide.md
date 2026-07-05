@@ -258,10 +258,15 @@ samples, report every trial plus mean and variance or standard deviation.
 
 ## Efficiency Metrics
 
-DeNovoSWE reports include wall time, token totals, uncached token totals, subagent
-usage, score per million tokens, score per million uncached tokens, and score
-per hour. Treat quality and efficiency separately: `average_score` establishes
-quality, while wall time, tokens, and score-per-cost metrics describe efficiency.
+DeNovoSWE reports include agent subprocess time (`agent_running_time_ms`),
+elapsed harness/adapter wall time (`running_time_ms`), token totals, uncached
+token totals, subagent usage, and score-per-cost metrics. Treat
+`score_per_agent_hour` as the primary time-efficiency metric when present.
+Elapsed `score_per_hour` remains a compatibility/audit metric and uses
+`running_time_ms`, which can include setup, evaluation, trace, patch harvesting,
+and report overhead. Historical artifacts may omit agent-time fields; do not
+convert elapsed wall time into agent-only time. `average_score` establishes
+quality; timing, tokens, and score-per-cost metrics describe efficiency.
 
 ## Docker OMP Stateful Lifecycle
 

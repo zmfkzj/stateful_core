@@ -1403,23 +1403,25 @@ pub fn run_denovo_extract(options: DeNovoExtractOptions) -> Result<DeNovoExtract
 
 pub fn render_denovo_report_markdown(reports: &[DeNovoConditionReport]) -> String {
     let mut output = String::from(
-        "# DeNovoSWE Report\n\n| Condition | Stateful | Subagent | Instances | Success rate | Average score | Running time ms | Input+output tokens | Uncached input+output tokens | Score per million tokens | Score per million uncached tokens | Score per hour |\n| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n",
+        "# DeNovoSWE Report\n\n| Condition | Stateful | Subagent | Instances | Success rate | Average score | Agent running time ms | Score per agent hour | Running time ms | Score per hour | Input+output tokens | Uncached input+output tokens | Score per million tokens | Score per million uncached tokens |\n| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n",
     );
     for report in reports {
         output.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             report.condition_id,
             axis_label(report.condition.stateful),
             axis_label(report.condition.subagent),
             report.total_instances,
             optional_float(report.success_rate),
             optional_float(report.average_score),
+            optional_u64(report.agent_running_time_ms),
+            optional_float(report.score_per_agent_hour),
             report.running_time_ms,
+            optional_float(report.score_per_hour),
             report.token_input_plus_output_tokens,
             report.token_uncached_input_plus_output_tokens,
             optional_float(report.score_per_million_input_plus_output_tokens),
-            optional_float(report.score_per_million_uncached_input_plus_output_tokens),
-            optional_float(report.score_per_hour)
+            optional_float(report.score_per_million_uncached_input_plus_output_tokens)
         ));
     }
     output
@@ -1441,7 +1443,23 @@ pub fn render_denovo_comparison_markdown(report: &DeNovoComparisonReport) -> Str
         optional_float(report.combined_interaction_score_delta)
     ));
     output.push_str(&format!(
-        "- Total running time ms: {}\n",
+        "- Stateful agent-time delta without subagent ms: {}\n",
+        optional_i64(report.stateful_agent_running_time_ms_delta_without_subagent)
+    ));
+    output.push_str(&format!(
+        "- Subagent agent-time delta without stateful ms: {}\n",
+        optional_i64(report.subagent_agent_running_time_ms_delta_without_stateful)
+    ));
+    output.push_str(&format!(
+        "- Combined interaction agent-time delta ms: {}\n",
+        optional_i64(report.combined_interaction_agent_running_time_ms_delta)
+    ));
+    output.push_str(&format!(
+        "- Total agent running time ms: {}\n",
+        optional_u64(report.total_agent_running_time_ms)
+    ));
+    output.push_str(&format!(
+        "- Total elapsed wall running time ms: {}\n",
         report.total_running_time_ms
     ));
     output.push_str(&format!(
@@ -1687,6 +1705,18 @@ fn optional_float(value: Option<f64>) -> String {
         .unwrap_or_else(|| "n/a".to_string())
 }
 
+fn optional_u64(value: Option<u64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn optional_i64(value: Option<i64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeNovoCondition {
     pub stateful: bool,
@@ -1814,6 +1844,8 @@ pub struct DeNovoOfficialResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eval_result: Option<DeNovoEvalResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_running_time_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -1914,6 +1946,10 @@ pub struct DeNovoConditionReport {
     pub almost_correct_rate: Option<f64>,
     pub running_time_ms: u64,
     pub average_running_time_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_running_time_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub average_agent_running_time_ms: Option<f64>,
     #[serde(default)]
     pub subagent_observed_instances: usize,
     #[serde(default)]
@@ -1975,6 +2011,8 @@ pub struct DeNovoConditionReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score_per_hour: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score_per_agent_hour: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aweagent_commit: Option<String>,
 }
 
@@ -1991,6 +2029,14 @@ pub struct DeNovoComparisonReport {
     pub subagent_score_delta_without_stateful: Option<f64>,
     pub combined_interaction_score_delta: Option<f64>,
     pub total_running_time_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_agent_running_time_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stateful_agent_running_time_ms_delta_without_subagent: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_agent_running_time_ms_delta_without_stateful: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combined_interaction_agent_running_time_ms_delta: Option<i64>,
     #[serde(default)]
     pub total_input_plus_output_tokens: u64,
     #[serde(default)]
@@ -2081,6 +2127,19 @@ fn orchestration_trace_summary(results: &[DeNovoOfficialResult]) -> DeNovoTraceS
     summary
 }
 
+fn observed_agent_running_time_ms(results: &[DeNovoOfficialResult]) -> Option<(u64, usize)> {
+    let mut sum = 0_u64;
+    let mut count = 0_usize;
+    for value in results
+        .iter()
+        .filter_map(|result| result.agent_running_time_ms)
+    {
+        sum = sum.saturating_add(value);
+        count += 1;
+    }
+    (count > 0).then_some((sum, count))
+}
+
 pub fn build_denovo_condition_report(
     run_id: impl Into<String>,
     condition: DeNovoCondition,
@@ -2168,6 +2227,7 @@ pub fn build_denovo_condition_report(
     let orchestration_trace = orchestration_trace_summary(&results);
     let condition_id = condition.id();
     let average_score = average(&scores);
+    let agent_running_time = observed_agent_running_time_ms(&results);
 
     DeNovoConditionReport {
         run_id: run_id.into(),
@@ -2190,6 +2250,9 @@ pub fn build_denovo_condition_report(
         } else {
             Some(round_three(running_time_ms as f64 / total_instances as f64))
         },
+        agent_running_time_ms: agent_running_time.map(|(sum, _)| sum),
+        average_agent_running_time_ms: agent_running_time
+            .map(|(sum, count)| round_three(sum as f64 / count as f64)),
         subagent_observed_instances,
         subagent_used_count,
         subagent_used_rate: ratio(subagent_used_count, subagent_observed_instances),
@@ -2232,6 +2295,8 @@ pub fn build_denovo_condition_report(
             token_uncached_input_plus_output_tokens,
         ),
         score_per_hour: score_per_hour(average_score, running_time_ms),
+        score_per_agent_hour: agent_running_time
+            .and_then(|(sum, _)| score_per_hour(average_score, sum)),
         aweagent_commit,
     }
 }
@@ -2241,6 +2306,12 @@ pub fn compare_denovo_reports(reports: Vec<DeNovoConditionReport>) -> DeNovoComp
         .iter()
         .map(|report| report.running_time_ms)
         .sum::<u64>();
+    let total_agent_running_time_ms = reports
+        .iter()
+        .filter_map(|report| report.agent_running_time_ms)
+        .fold(None, |total, value| {
+            Some(total.unwrap_or(0_u64).saturating_add(value))
+        });
     let total_input_plus_output_tokens = reports
         .iter()
         .map(|report| report.token_input_plus_output_tokens)
@@ -2279,6 +2350,10 @@ pub fn compare_denovo_reports(reports: Vec<DeNovoConditionReport>) -> DeNovoComp
     let on_off = score_for(&by_axes, true, false);
     let off_on = score_for(&by_axes, false, true);
     let on_on = score_for(&by_axes, true, true);
+    let off_off_agent_time = agent_time_for(&by_axes, false, false);
+    let on_off_agent_time = agent_time_for(&by_axes, true, false);
+    let off_on_agent_time = agent_time_for(&by_axes, false, true);
+    let on_on_agent_time = agent_time_for(&by_axes, true, true);
 
     DeNovoComparisonReport {
         conditions: reports,
@@ -2294,6 +2369,26 @@ pub fn compare_denovo_reports(reports: Vec<DeNovoConditionReport>) -> DeNovoComp
             _ => None,
         },
         total_running_time_ms,
+        total_agent_running_time_ms,
+        stateful_agent_running_time_ms_delta_without_subagent: agent_time_delta(
+            on_off_agent_time,
+            off_off_agent_time,
+        ),
+        subagent_agent_running_time_ms_delta_without_stateful: agent_time_delta(
+            off_on_agent_time,
+            off_off_agent_time,
+        ),
+        combined_interaction_agent_running_time_ms_delta: match (
+            on_on_agent_time,
+            on_off_agent_time,
+            off_on_agent_time,
+            off_off_agent_time,
+        ) {
+            (Some(on_on), Some(on_off), Some(off_on), Some(off_off)) => {
+                Some(on_on - on_off - off_on + off_off)
+            }
+            _ => None,
+        },
         total_input_plus_output_tokens,
         total_uncached_input_plus_output_tokens,
     }
@@ -2313,6 +2408,26 @@ fn score_for(
         return None;
     }
     report.average_score
+}
+
+fn agent_time_for(
+    conditions: &BTreeMap<(bool, bool), Vec<&DeNovoConditionReport>>,
+    stateful: bool,
+    subagent: bool,
+) -> Option<i64> {
+    let reports = conditions.get(&(stateful, subagent))?;
+    if reports.len() != 1 {
+        return None;
+    }
+    let report = reports[0];
+    if report.condition_id != report.condition.id() {
+        return None;
+    }
+    i64::try_from(report.agent_running_time_ms?).ok()
+}
+
+fn agent_time_delta(value: Option<i64>, baseline: Option<i64>) -> Option<i64> {
+    Some(value? - baseline?)
 }
 
 fn score_per_million(score: Option<f64>, tokens: u64) -> Option<f64> {

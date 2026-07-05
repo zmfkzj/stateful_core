@@ -184,7 +184,13 @@ comparisons, especially when running a single diagnostic instance.
 
 ## Efficiency Metrics
 
-Reports include wall time, token totals, uncached token totals, subagent usage,
-score per million tokens, and score per hour. Subagent usage is observed from
-adapter metadata and native `task` tool-call JSON events when available. Treat
-quality and efficiency separately.
+Reports include measured agent subprocess time (`agent_running_time_ms`),
+elapsed wrapper/adapter wall time (`running_time_ms`), token totals, uncached
+token totals, subagent usage, score per million tokens, and score per hour.
+Treat `score_per_agent_hour` as the primary time-efficiency metric when present.
+Elapsed `score_per_hour` remains a compatibility/audit metric and uses
+`running_time_ms`, which can include copy, smoke compile, eval, archive, and
+report overhead. Historical artifacts may omit agent-time fields; do not convert
+elapsed wall time into agent-only time. Subagent usage is observed from adapter
+metadata and native `task` tool-call JSON events when available. Treat quality
+and efficiency separately.

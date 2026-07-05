@@ -60,7 +60,28 @@ def test_progress_report_prefers_cumulative_condition_report(tmp_path):
     condition_dir = run_dir / "conditions/stateful-off_subagent-on"
     result_dir = condition_dir / "codex-cli/_"
     write_jsonl(result_dir / "results.jsonl", ['{"instance_id":"transient-current","success":false,"score":0.0,"finish_reason":"setup-error","orchestration_trace":{"trace_captured":true,"event_count":6,"event_types":{"SessionHeartbeat":4,"AuthorizationDenied":1,"ReservationDeclared":1},"heartbeat_events":4,"heartbeat_windows":2,"heartbeat_max_gap_ms":46000,"denial_events":1,"denial_paths":{"src/pkg.py":1},"denial_messages":{"Target existence changed since the supplied base observation.":1}}}'])
-    (condition_dir / "denovo-report.json").write_text('{"condition_id":"stateful-off_subagent-on","total_instances":3,"success_count":2,"average_score":0.75,"completed_instances":3,"scored_instances":3,"error_count":0,"subagent_observed_instances":3,"subagent_used_count":2,"subagent_used_rate":0.6666666667,"orchestration_trace_observed":3,"orchestration_trace_captured":2,"orchestration_reservation_events":5,"orchestration_claim_events":4,"orchestration_conflict_events":1,"running_time_ms":1234}', encoding="utf-8")
+    report = {
+        "condition_id": "stateful-off_subagent-on",
+        "total_instances": 3,
+        "success_count": 2,
+        "average_score": 0.75,
+        "completed_instances": 3,
+        "scored_instances": 3,
+        "error_count": 0,
+        "subagent_observed_instances": 3,
+        "subagent_used_count": 2,
+        "subagent_used_rate": 0.6666666667,
+        "orchestration_trace_observed": 3,
+        "orchestration_trace_captured": 2,
+        "orchestration_reservation_events": 5,
+        "orchestration_claim_events": 4,
+        "orchestration_conflict_events": 1,
+        "running_time_ms": 1234,
+        "agent_running_time_ms": 3456,
+        "average_agent_running_time_ms": 1152.0,
+        "score_per_agent_hour": 781.25,
+    }
+    (condition_dir / "denovo-report.json").write_text(json.dumps(report), encoding="utf-8")
 
     summary = mod.collect_progress([run_dir], expected_instances_per_condition=6)
     assert summary["total_result_rows"] == 3
@@ -79,6 +100,94 @@ def test_progress_report_prefers_cumulative_condition_report(tmp_path):
     assert item["orchestration_denial_paths"]["src/pkg.py"] == 1
     assert summary["runs"][0]["source"] == "denovo-report.json"
     assert summary["runs"][0]["rows"] == 3
+    assert summary["runs"][0]["agent_running_time_ms"] == 3456
+    assert summary["runs"][0]["average_agent_running_time_ms"] == 1152.0
+    assert summary["runs"][0]["score_per_agent_hour"] == 781.25
+    assert item["agent_running_time_ms"] == 3456
+    assert item["average_agent_running_time_ms"] == 1152.0
+    assert item["score_per_agent_hour"] == 781.25
+
+
+def test_progress_report_aggregates_explicit_agent_time_from_results_jsonl(tmp_path):
+    mod = load_script("denovo_progress_report.py")
+    run_dir = tmp_path / "runs/r38-denovo-shard-a"
+    result_dir = run_dir / "conditions/stateful-off_subagent-on/codex-cli/_"
+    write_jsonl(result_dir / "results.jsonl", [
+        json.dumps({"instance_id": "case-a", "success": True, "score": 1.0, "finish_reason": "stop", "agent_running_time_ms": 1000}),
+        json.dumps({"instance_id": "case-b", "success": False, "score": 0.5, "finish_reason": "context-limit", "agent_running_time_ms": 2000}),
+        json.dumps({"instance_id": "case-c", "success": False, "score": 0.0, "finish_reason": "codex-error", "codex_command": {"duration": 123.0}}),
+    ])
+
+    summary = mod.collect_progress([run_dir], expected_instances_per_condition=3)
+    run = summary["runs"][0]
+    item = condition(summary, "stateful-off_subagent-on")
+    for observed in (run, item):
+        assert observed["agent_running_time_ms"] == 3000
+        assert observed["average_agent_running_time_ms"] == 1500.0
+        assert observed["score_per_agent_hour"] == 600.0
+
+
+def test_progress_report_does_not_infer_agent_time_from_legacy_nested_command(tmp_path):
+    mod = load_script("denovo_progress_report.py")
+    run_dir = tmp_path / "runs/r38-denovo-shard-a"
+    result_dir = run_dir / "conditions/stateful-off_subagent-on/codex-cli/_"
+    write_jsonl(result_dir / "results.jsonl", [
+        json.dumps({"instance_id": "legacy-a", "success": True, "score": 1.0, "finish_reason": "stop", "codex_command": {"duration": 1.5}}),
+        json.dumps({"instance_id": "legacy-b", "success": False, "score": 0.0, "finish_reason": "codex-error", "codex_command": {"duration": 2.5}}),
+    ])
+
+    summary = mod.collect_progress([run_dir], expected_instances_per_condition=2)
+    run = summary["runs"][0]
+    item = condition(summary, "stateful-off_subagent-on")
+    for observed in (run, item):
+        assert observed.get("agent_running_time_ms") is None
+        assert observed.get("average_agent_running_time_ms") is None
+        assert observed.get("score_per_agent_hour") is None
+
+
+def test_progress_markdown_places_agent_time_before_elapsed_wall_time():
+    mod = load_script("denovo_progress_report.py")
+    timed = {
+        "rows": 2,
+        "success_count": 1,
+        "success_rate": 0.5,
+        "average_score": 0.75,
+        "setup_errors": 0,
+        "finish_reasons": {"stop": 1, "codex-error": 1},
+        "subagent_used_count": 1,
+        "subagent_observed": 2,
+        "subagent_used_rate": 0.5,
+        "orchestration_trace_observed": 0,
+        "orchestration_trace_captured": 0,
+        "orchestration_reservation_events": 0,
+        "orchestration_claim_events": 0,
+        "orchestration_conflict_events": 0,
+        "orchestration_event_count": 0,
+        "orchestration_heartbeat_events": 0,
+        "orchestration_denial_events": 0,
+        "agent_running_time_ms": 1234,
+        "score_per_agent_hour": 2188.0,
+        "running_time_ms": 4321,
+        "score_per_hour": 624.9,
+    }
+    summary = {
+        "run_count": 1,
+        "total_result_rows": 2,
+        "expected_instances_per_condition": 2,
+        "conditions": [dict(timed, condition_id="stateful-off_subagent-on", progress_rate=1.0)],
+        "runs": [dict(timed, run_id="r38-denovo-shard-a", condition_id="stateful-off_subagent-on", agent="codex-cli")],
+    }
+
+    markdown = mod.render_markdown(summary)
+    condition_header = next(line for line in markdown.splitlines() if line.startswith("| Condition |"))
+    run_header = next(line for line in markdown.splitlines() if line.startswith("| Run |"))
+    expected_order = "| Agent running time ms | Score per agent hour | Running time ms | Score per hour |"
+    assert expected_order in condition_header
+    assert expected_order in run_header
+    assert condition_header.index("Agent running time ms") < condition_header.index("Running time ms")
+    assert condition_header.index("Score per agent hour") < condition_header.index("Score per hour")
+    assert run_header.index("Agent running time ms") < run_header.index("Running time ms")
+    assert run_header.index("Score per agent hour") < run_header.index("Score per hour")
 
 
 def test_progress_report_treats_omitted_empty_trace_maps_as_empty(tmp_path):

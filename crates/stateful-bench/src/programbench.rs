@@ -240,6 +240,8 @@ pub struct ProgramBenchInstanceMetadata {
     pub started_at_ms: u64,
     pub finished_at_ms: u64,
     pub running_time_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_running_time_ms: Option<u64>,
     pub submission_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
@@ -308,6 +310,8 @@ pub struct ProgramBenchInstanceReport {
     pub score: Option<f64>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub running_time_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_running_time_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub token_input_plus_output_tokens: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -332,6 +336,10 @@ pub struct ProgramBenchConditionReport {
     pub timeout_count: usize,
     pub running_time_ms: u64,
     pub average_running_time_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_running_time_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub average_agent_running_time_ms: Option<f64>,
     #[serde(default)]
     pub token_observed_instances: usize,
     #[serde(default)]
@@ -366,6 +374,8 @@ pub struct ProgramBenchConditionReport {
     pub score_per_million_uncached_input_plus_output_tokens: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score_per_hour: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score_per_agent_hour: Option<f64>,
     pub score_source: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub instance_reports: Vec<ProgramBenchInstanceReport>,
@@ -397,9 +407,17 @@ pub struct ProgramBenchComparisonReport {
     pub combined_interaction_score_delta: Option<f64>,
     pub stateful_running_time_ms_delta_without_subagent: Option<i64>,
     pub subagent_running_time_ms_delta_without_stateful: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stateful_agent_running_time_ms_delta_without_subagent: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_agent_running_time_ms_delta_without_stateful: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combined_interaction_agent_running_time_ms_delta: Option<i64>,
     pub stateful_input_plus_output_tokens_delta_without_subagent: Option<i64>,
     pub subagent_input_plus_output_tokens_delta_without_stateful: Option<i64>,
     pub total_running_time_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_agent_running_time_ms: Option<u64>,
     #[serde(default)]
     pub total_input_plus_output_tokens: u64,
     #[serde(default)]
@@ -499,6 +517,7 @@ pub fn build_programbench_condition_report(
         .iter()
         .map(|usage| usage.uncached_input_plus_output_tokens())
         .sum::<u64>();
+    let agent_running_time = observed_agent_running_time_ms(metadata.instances.iter());
     let instance_reports = metadata
         .instances
         .iter()
@@ -511,6 +530,7 @@ pub fn build_programbench_condition_report(
                 instance_id: instance.instance_id.clone(),
                 score: instance_score(&score_by_instance, &instance.instance_id),
                 running_time_ms: instance.running_time_ms,
+                agent_running_time_ms: instance.agent_running_time_ms,
                 token_input_plus_output_tokens: token_usage
                     .map(|usage| usage.input_plus_output_tokens())
                     .unwrap_or(0),
@@ -538,6 +558,9 @@ pub fn build_programbench_condition_report(
         timeout_count,
         running_time_ms: metadata.running_time_ms,
         average_running_time_ms: average_u64(metadata.running_time_ms, attempted_instances),
+        agent_running_time_ms: agent_running_time.map(|(total, _)| total),
+        average_agent_running_time_ms: agent_running_time
+            .and_then(|(total, count)| average_u64(total, count)),
         token_observed_instances,
         token_usage_turns,
         token_input_tokens,
@@ -567,6 +590,8 @@ pub fn build_programbench_condition_report(
             token_uncached_input_plus_output_tokens,
         ),
         score_per_hour: score_per_hour(average_score, metadata.running_time_ms),
+        score_per_agent_hour: agent_running_time
+            .and_then(|(total, _)| score_per_hour(average_score, total)),
         instance_reports,
         score_source: "score-json".to_string(),
     })
@@ -587,6 +612,8 @@ pub fn compare_programbench_reports(
         .iter()
         .map(|report| report.token_uncached_input_plus_output_tokens)
         .sum::<u64>();
+    let total_agent_running_time_ms =
+        sum_optional_u64(reports.iter().map(|report| report.agent_running_time_ms));
     let mut by_axes: BTreeMap<(bool, bool), Vec<&ProgramBenchConditionReport>> = BTreeMap::new();
     let mut condition_id_mismatches = Vec::new();
     for report in &reports {
@@ -624,8 +651,7 @@ pub fn compare_programbench_reports(
     if let Some(mismatch) = subagent_mismatch {
         instance_set_mismatches.push(mismatch);
     }
-    let (combined_interaction_score_delta, combined_mismatch) =
-        common_interaction_score_delta(&by_axes);
+    let (combined_interaction, combined_mismatch) = common_interaction_deltas(&by_axes);
     if let Some(mismatch) = combined_mismatch {
         instance_set_mismatches.push(mismatch);
     }
@@ -638,16 +664,23 @@ pub fn compare_programbench_reports(
         instance_set_mismatches,
         stateful_score_delta_without_subagent: stateful_without_subagent.score_delta,
         subagent_score_delta_without_stateful: subagent_without_stateful.score_delta,
-        combined_interaction_score_delta,
+        combined_interaction_score_delta: combined_interaction.score_delta,
+        combined_interaction_agent_running_time_ms_delta: combined_interaction
+            .agent_running_time_ms_delta,
         stateful_running_time_ms_delta_without_subagent: stateful_without_subagent
             .running_time_ms_delta,
         subagent_running_time_ms_delta_without_stateful: subagent_without_stateful
             .running_time_ms_delta,
+        stateful_agent_running_time_ms_delta_without_subagent: stateful_without_subagent
+            .agent_running_time_ms_delta,
+        subagent_agent_running_time_ms_delta_without_stateful: subagent_without_stateful
+            .agent_running_time_ms_delta,
         stateful_input_plus_output_tokens_delta_without_subagent: stateful_without_subagent
             .input_plus_output_tokens_delta,
         subagent_input_plus_output_tokens_delta_without_stateful: subagent_without_stateful
             .input_plus_output_tokens_delta,
         total_running_time_ms,
+        total_agent_running_time_ms,
         total_input_plus_output_tokens,
         total_uncached_input_plus_output_tokens,
     }
@@ -655,7 +688,7 @@ pub fn compare_programbench_reports(
 
 pub fn render_programbench_report_markdown(report: &ProgramBenchConditionReport) -> String {
     format!(
-        "# ProgramBench Report\n\n| Condition | Stateful | Subagent | Instances | Evaluated | Partial score | Resolved | Running time ms | Input+output tokens | Uncached input+output tokens |\n| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n| {} | {} | {} | {} | {} | {} | {}/{} | {} | {} | {} |\n",
+        "# ProgramBench Report\n\n| Condition | Stateful | Subagent | Instances | Evaluated | Partial score | Resolved | Agent running time ms | Score per agent hour | Running time ms | Score per hour | Input+output tokens | Uncached input+output tokens |\n| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n| {} | {} | {} | {} | {} | {} | {}/{} | {} | {} | {} | {} | {} | {} |\n",
         report.condition_id,
         axis_label(report.condition.stateful),
         axis_label(report.condition.subagent),
@@ -664,7 +697,10 @@ pub fn render_programbench_report_markdown(report: &ProgramBenchConditionReport)
         optional_float(report.average_score),
         report.resolved_count,
         report.evaluated_instances,
+        optional_u64(report.agent_running_time_ms),
+        optional_float(report.score_per_agent_hour),
         report.running_time_ms,
+        optional_float(report.score_per_hour),
         report.token_input_plus_output_tokens,
         report.token_uncached_input_plus_output_tokens,
     )
@@ -672,11 +708,11 @@ pub fn render_programbench_report_markdown(report: &ProgramBenchConditionReport)
 
 pub fn render_programbench_comparison_markdown(report: &ProgramBenchComparisonReport) -> String {
     let mut output = String::from(
-        "# ProgramBench Comparison\n\n| Condition | Stateful | Subagent | Instances | Partial score | Resolved | Running time ms | Input+output tokens |\n| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |\n",
+        "# ProgramBench Comparison\n\n| Condition | Stateful | Subagent | Instances | Partial score | Resolved | Agent running time ms | Score per agent hour | Running time ms | Score per hour | Input+output tokens |\n| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n",
     );
     for condition_report in &report.reports {
         output.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {}/{} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {}/{} | {} | {} | {} | {} | {} |\n",
             condition_report.condition_id,
             axis_label(condition_report.condition.stateful),
             axis_label(condition_report.condition.subagent),
@@ -684,7 +720,10 @@ pub fn render_programbench_comparison_markdown(report: &ProgramBenchComparisonRe
             optional_float(condition_report.average_score),
             condition_report.resolved_count,
             condition_report.evaluated_instances,
+            optional_u64(condition_report.agent_running_time_ms),
+            optional_float(condition_report.score_per_agent_hour),
             condition_report.running_time_ms,
+            optional_float(condition_report.score_per_hour),
             condition_report.token_input_plus_output_tokens,
         ));
     }
@@ -692,6 +731,10 @@ pub fn render_programbench_comparison_markdown(report: &ProgramBenchComparisonRe
     output.push_str(&format!(
         "- Stateful score delta without subagent: {}\n",
         optional_float(report.stateful_score_delta_without_subagent)
+    ));
+    output.push_str(&format!(
+        "- Stateful agent running time ms delta without subagent: {}\n",
+        optional_i64(report.stateful_agent_running_time_ms_delta_without_subagent)
     ));
     output.push_str(&format!(
         "- Stateful running time ms delta without subagent: {}\n",
@@ -706,6 +749,10 @@ pub fn render_programbench_comparison_markdown(report: &ProgramBenchComparisonRe
         optional_float(report.subagent_score_delta_without_stateful)
     ));
     output.push_str(&format!(
+        "- Subagent agent running time ms delta without stateful: {}\n",
+        optional_i64(report.subagent_agent_running_time_ms_delta_without_stateful)
+    ));
+    output.push_str(&format!(
         "- Subagent running time ms delta without stateful: {}\n",
         optional_i64(report.subagent_running_time_ms_delta_without_stateful)
     ));
@@ -716,6 +763,10 @@ pub fn render_programbench_comparison_markdown(report: &ProgramBenchComparisonRe
     output.push_str(&format!(
         "- Combined interaction score delta: {}\n",
         optional_float(report.combined_interaction_score_delta)
+    ));
+    output.push_str(&format!(
+        "- Combined interaction agent running time ms delta: {}\n",
+        optional_i64(report.combined_interaction_agent_running_time_ms_delta)
     ));
     if !report.missing_axis_ids.is_empty() {
         output.push_str(&format!(
@@ -760,6 +811,7 @@ fn instance_score(
 struct CommonInstanceDeltas {
     score_delta: Option<f64>,
     running_time_ms_delta: Option<i64>,
+    agent_running_time_ms_delta: Option<i64>,
     input_plus_output_tokens_delta: Option<i64>,
 }
 
@@ -807,6 +859,8 @@ fn common_instance_deltas(
     let mut baseline_scores = Vec::new();
     let mut value_running_time_ms = 0_u64;
     let mut baseline_running_time_ms = 0_u64;
+    let mut value_agent_running_time_ms = Some(0_u64);
+    let mut baseline_agent_running_time_ms = Some(0_u64);
     let mut value_tokens = 0_u64;
     let mut baseline_tokens = 0_u64;
     for instance_id in common_ids {
@@ -824,6 +878,14 @@ fn common_instance_deltas(
         }
         value_running_time_ms += value_instance.running_time_ms;
         baseline_running_time_ms += baseline_instance.running_time_ms;
+        value_agent_running_time_ms = sum_optional_pair(
+            value_agent_running_time_ms,
+            value_instance.agent_running_time_ms,
+        );
+        baseline_agent_running_time_ms = sum_optional_pair(
+            baseline_agent_running_time_ms,
+            baseline_instance.agent_running_time_ms,
+        );
         value_tokens += value_instance.token_input_plus_output_tokens;
         baseline_tokens += baseline_instance.token_input_plus_output_tokens;
     }
@@ -835,26 +897,36 @@ fn common_instance_deltas(
                 Some(value_running_time_ms),
                 Some(baseline_running_time_ms),
             ),
+            agent_running_time_ms_delta: delta_i64(
+                value_agent_running_time_ms,
+                baseline_agent_running_time_ms,
+            ),
             input_plus_output_tokens_delta: delta_i64(Some(value_tokens), Some(baseline_tokens)),
         },
         diagnostic,
     )
 }
 
-fn common_interaction_score_delta(
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct CommonInteractionDeltas {
+    score_delta: Option<f64>,
+    agent_running_time_ms_delta: Option<i64>,
+}
+
+fn common_interaction_deltas(
     reports: &BTreeMap<(bool, bool), Vec<&ProgramBenchConditionReport>>,
-) -> (Option<f64>, Option<String>) {
+) -> (CommonInteractionDeltas, Option<String>) {
     let Some(off_off) = report_for(reports, false, false) else {
-        return (None, None);
+        return (CommonInteractionDeltas::default(), None);
     };
     let Some(on_off) = report_for(reports, true, false) else {
-        return (None, None);
+        return (CommonInteractionDeltas::default(), None);
     };
     let Some(off_on) = report_for(reports, false, true) else {
-        return (None, None);
+        return (CommonInteractionDeltas::default(), None);
     };
     let Some(on_on) = report_for(reports, true, true) else {
-        return (None, None);
+        return (CommonInteractionDeltas::default(), None);
     };
     let off_off_instances = instance_reports_by_id(off_off);
     let on_off_instances = instance_reports_by_id(on_off);
@@ -887,13 +959,17 @@ fn common_interaction_score_delta(
         None
     };
     if common_ids.is_empty() {
-        return (None, diagnostic);
+        return (CommonInteractionDeltas::default(), diagnostic);
     }
 
     let mut off_off_scores = Vec::new();
     let mut on_off_scores = Vec::new();
     let mut off_on_scores = Vec::new();
     let mut on_on_scores = Vec::new();
+    let mut off_off_agent_running_time_ms = Some(0_u64);
+    let mut on_off_agent_running_time_ms = Some(0_u64);
+    let mut off_on_agent_running_time_ms = Some(0_u64);
+    let mut on_on_agent_running_time_ms = Some(0_u64);
     for instance_id in common_ids {
         let off_off_instance = off_off_instances
             .get(instance_id)
@@ -918,6 +994,22 @@ fn common_interaction_score_delta(
             off_on_scores.push(off_on_score);
             on_on_scores.push(on_on_score);
         }
+        off_off_agent_running_time_ms = sum_optional_pair(
+            off_off_agent_running_time_ms,
+            off_off_instance.agent_running_time_ms,
+        );
+        on_off_agent_running_time_ms = sum_optional_pair(
+            on_off_agent_running_time_ms,
+            on_off_instance.agent_running_time_ms,
+        );
+        off_on_agent_running_time_ms = sum_optional_pair(
+            off_on_agent_running_time_ms,
+            off_on_instance.agent_running_time_ms,
+        );
+        on_on_agent_running_time_ms = sum_optional_pair(
+            on_on_agent_running_time_ms,
+            on_on_instance.agent_running_time_ms,
+        );
     }
 
     let score_delta = match (
@@ -931,8 +1023,25 @@ fn common_interaction_score_delta(
         }
         _ => None,
     };
+    let agent_running_time_ms_delta = match (
+        on_on_agent_running_time_ms,
+        on_off_agent_running_time_ms,
+        off_on_agent_running_time_ms,
+        off_off_agent_running_time_ms,
+    ) {
+        (Some(on_on), Some(on_off), Some(off_on), Some(off_off)) => {
+            Some(on_on as i64 - on_off as i64 - off_on as i64 + off_off as i64)
+        }
+        _ => None,
+    };
 
-    (score_delta, diagnostic)
+    (
+        CommonInteractionDeltas {
+            score_delta,
+            agent_running_time_ms_delta,
+        },
+        diagnostic,
+    )
 }
 
 fn instance_reports_by_id(
@@ -1011,6 +1120,30 @@ fn average_u64(total: u64, count: usize) -> Option<f64> {
     }
 }
 
+fn observed_agent_running_time_ms<'a>(
+    instances: impl Iterator<Item = &'a ProgramBenchInstanceMetadata>,
+) -> Option<(u64, usize)> {
+    let mut total = 0_u64;
+    let mut count = 0_usize;
+    for running_time_ms in instances.filter_map(|instance| instance.agent_running_time_ms) {
+        total = total.saturating_add(running_time_ms);
+        count += 1;
+    }
+    (count > 0).then_some((total, count))
+}
+
+fn sum_optional_u64(values: impl Iterator<Item = Option<u64>>) -> Option<u64> {
+    let mut total = 0_u64;
+    for value in values {
+        total = total.saturating_add(value?);
+    }
+    Some(total)
+}
+
+fn sum_optional_pair(total: Option<u64>, value: Option<u64>) -> Option<u64> {
+    Some(total?.saturating_add(value?))
+}
+
 fn is_zero(value: &u64) -> bool {
     *value == 0
 }
@@ -1022,6 +1155,12 @@ fn round_three(value: f64) -> f64 {
 fn optional_float(value: Option<f64>) -> String {
     value
         .map(|value| format!("{value:.3}"))
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn optional_u64(value: Option<u64>) -> String {
+    value
+        .map(|value| value.to_string())
         .unwrap_or_else(|| "n/a".to_string())
 }
 

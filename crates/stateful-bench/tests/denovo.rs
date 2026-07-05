@@ -6,8 +6,8 @@ use stateful_bench::{
     DeNovoExtractRecipeOptions, DeNovoMatrixRunOptions, DeNovoOfficialResult, DeNovoRunMode,
     DeNovoRunRecipeOptions, build_denovo_codex_adapter_command, build_denovo_condition_report,
     build_denovo_extract_recipe_command, build_denovo_run_recipe_command, compare_denovo_reports,
-    default_denovo_conditions, parse_denovo_condition, run_denovo_condition, run_denovo_extract,
-    run_denovo_matrix,
+    default_denovo_conditions, parse_denovo_condition, render_denovo_report_markdown,
+    run_denovo_condition, run_denovo_extract, run_denovo_matrix,
 };
 
 #[test]
@@ -211,10 +211,12 @@ fn denovo_report_aggregates_scores_pass_rates_errors_and_runtime() {
             config_path: Some("configs/tasks/denovoswe-stateful.yaml".into()),
             env: BTreeMap::new(),
         },
-        vec![serde_json::from_str::<DeNovoOfficialResult>(
-            r#"{"instance_id":"no-usage","success":false,"score":0.5}"#,
-        )
-        .expect("zero denominator result")],
+        vec![
+            serde_json::from_str::<DeNovoOfficialResult>(
+                r#"{"instance_id":"no-usage","success":false,"score":0.5}"#,
+            )
+            .expect("zero denominator result"),
+        ],
         0,
         None,
     );
@@ -227,6 +229,168 @@ fn denovo_report_aggregates_scores_pass_rates_errors_and_runtime() {
         None
     );
     assert_eq!(zero_denominator_report.score_per_hour, None);
+}
+
+#[test]
+fn denovo_condition_report_aggregates_observed_agent_time_separately_from_elapsed_runtime() {
+    let report = build_denovo_condition_report(
+        "denovo-dev",
+        DeNovoCondition::new(true, false),
+        vec![
+            serde_json::from_str::<DeNovoOfficialResult>(
+                r#"{"instance_id":"a","success":true,"score":1.0,"agent_running_time_ms":1000}"#,
+            )
+            .expect("result a"),
+            serde_json::from_str::<DeNovoOfficialResult>(
+                r#"{"instance_id":"b","success":false,"score":0.5,"agent_running_time_ms":3000}"#,
+            )
+            .expect("result b"),
+            serde_json::from_str::<DeNovoOfficialResult>(
+                r#"{"instance_id":"c","success":false,"score":0.0}"#,
+            )
+            .expect("result c"),
+        ],
+        9000,
+        None,
+    );
+
+    assert_eq!(report.agent_running_time_ms, Some(4000));
+    assert_eq!(report.average_agent_running_time_ms, Some(2000.0));
+    assert_eq!(report.score_per_agent_hour, Some(450.0));
+    assert_eq!(report.running_time_ms, 9000);
+    assert_eq!(report.score_per_hour, Some(200.0));
+}
+
+#[test]
+fn denovo_condition_report_leaves_agent_time_absent_for_historical_results() {
+    let result = serde_json::from_str::<DeNovoOfficialResult>(
+        r#"{"instance_id":"historical","success":true,"score":0.5}"#,
+    )
+    .expect("historical result");
+    assert_eq!(result.agent_running_time_ms, None);
+
+    let report = build_denovo_condition_report(
+        "denovo-dev",
+        DeNovoCondition::new(false, false),
+        vec![result],
+        7200,
+        None,
+    );
+
+    assert_eq!(report.agent_running_time_ms, None);
+    assert_eq!(report.average_agent_running_time_ms, None);
+    assert_eq!(report.score_per_agent_hour, None);
+    assert_eq!(report.running_time_ms, 7200);
+    assert_eq!(report.score_per_hour, Some(250.0));
+
+    let serialized = serde_json::to_value(&report).expect("report should serialize");
+    assert!(serialized.get("agent_running_time_ms").is_none());
+    assert!(serialized.get("average_agent_running_time_ms").is_none());
+    assert!(serialized.get("score_per_agent_hour").is_none());
+    assert_eq!(serialized["running_time_ms"], serde_json::json!(7200));
+    assert_eq!(serialized["score_per_hour"], serde_json::json!(250.0));
+}
+
+#[test]
+fn denovo_comparison_reports_agent_time_deltas_only_for_observed_pairs() {
+    let off_off =
+        build_denovo_condition_report(
+            "baseline",
+            DeNovoCondition::new(false, false),
+            vec![serde_json::from_str(
+            r#"{"instance_id":"a","success":true,"score":0.5,"agent_running_time_ms":1000}"#,
+        )
+        .expect("baseline result")],
+            100,
+            None,
+        );
+    let on_off =
+        build_denovo_condition_report(
+            "stateful",
+            DeNovoCondition::new(true, false),
+            vec![serde_json::from_str(
+            r#"{"instance_id":"a","success":true,"score":0.8,"agent_running_time_ms":1500}"#,
+        )
+        .expect("stateful result")],
+            200,
+            None,
+        );
+    let off_on = build_denovo_condition_report(
+        "subagent",
+        DeNovoCondition::new(false, true),
+        vec![
+            serde_json::from_str(r#"{"instance_id":"a","success":true,"score":0.7}"#)
+                .expect("subagent result"),
+        ],
+        300,
+        None,
+    );
+    let on_on =
+        build_denovo_condition_report(
+            "combined",
+            DeNovoCondition::new(true, true),
+            vec![serde_json::from_str(
+            r#"{"instance_id":"a","success":true,"score":0.9,"agent_running_time_ms":2400}"#,
+        )
+        .expect("combined result")],
+            400,
+            None,
+        );
+
+    let comparison = compare_denovo_reports(vec![off_off, on_off, off_on, on_on]);
+
+    assert_eq!(comparison.total_agent_running_time_ms, Some(4900));
+    assert_eq!(
+        comparison.stateful_agent_running_time_ms_delta_without_subagent,
+        Some(500)
+    );
+    assert_eq!(
+        comparison.subagent_agent_running_time_ms_delta_without_stateful,
+        None
+    );
+    assert_eq!(
+        comparison.combined_interaction_agent_running_time_ms_delta,
+        None
+    );
+    assert_eq!(comparison.total_running_time_ms, 1000);
+}
+
+#[test]
+fn denovo_markdown_places_agent_time_efficiency_before_elapsed_efficiency() {
+    let report =
+        build_denovo_condition_report(
+            "denovo-dev",
+            DeNovoCondition::new(true, true),
+            vec![serde_json::from_str::<DeNovoOfficialResult>(
+            r#"{"instance_id":"a","success":true,"score":0.5,"agent_running_time_ms":2000}"#,
+        )
+        .expect("result")],
+            3000,
+            None,
+        );
+
+    let markdown = render_denovo_report_markdown(&[report]);
+    let header = markdown
+        .lines()
+        .find(|line| line.starts_with("| Condition |"))
+        .expect("markdown table header");
+
+    let agent_time = header
+        .find("Agent running time ms")
+        .expect("agent running time column");
+    let score_per_agent_hour = header
+        .find("Score per agent hour")
+        .expect("score per agent hour column");
+    let elapsed_time = header
+        .find("Running time ms")
+        .expect("elapsed running time column");
+    let score_per_elapsed_hour = header
+        .find("Score per hour")
+        .expect("score per hour column");
+
+    assert!(agent_time < elapsed_time);
+    assert!(score_per_agent_hour < elapsed_time);
+    assert!(score_per_agent_hour < score_per_elapsed_hour);
 }
 
 #[test]

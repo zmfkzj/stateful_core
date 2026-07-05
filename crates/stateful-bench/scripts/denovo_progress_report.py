@@ -71,6 +71,10 @@ def empty_stats() -> dict[str, Any]:
         "success_count": 0,
         "score_sum": 0.0,
         "scored_count": 0,
+        "agent_running_time_ms": 0,
+        "agent_running_time_count": 0,
+        "running_time_ms": 0,
+        "running_time_count": 0,
         "setup_errors": 0,
         "finish_reasons": Counter(),
         "subagent_observed": 0,
@@ -135,6 +139,16 @@ def add_row(stats: dict[str, Any], row: dict[str, Any]) -> None:
         stats["score_sum"] += float(score)
         stats["scored_count"] += 1
 
+    agent_running_time_ms = observed_nonnegative_int(row.get("agent_running_time_ms"))
+    if agent_running_time_ms is not None:
+        stats["agent_running_time_ms"] += agent_running_time_ms
+        stats["agent_running_time_count"] += 1
+
+    running_time_ms = observed_nonnegative_int(row.get("running_time_ms"))
+    if running_time_ms is not None:
+        stats["running_time_ms"] += running_time_ms
+        stats["running_time_count"] += 1
+
     finish_reason = row.get("finish_reason") or "unknown"
     stats["finish_reasons"][str(finish_reason)] += 1
     if finish_reason == "setup-error":
@@ -159,6 +173,23 @@ def add_summary(stats: dict[str, Any], summary: dict[str, Any]) -> None:
     if isinstance(average_score, (int, float)) and not isinstance(average_score, bool):
         stats["score_sum"] += float(average_score) * scored_count
         stats["scored_count"] += scored_count
+
+    add_summary_running_time(
+        stats,
+        total_key="agent_running_time_ms",
+        count_key="agent_running_time_count",
+        total_value=summary.get("agent_running_time_ms"),
+        average_value=summary.get("average_agent_running_time_ms"),
+        rows=rows,
+    )
+    add_summary_running_time(
+        stats,
+        total_key="running_time_ms",
+        count_key="running_time_count",
+        total_value=summary.get("running_time_ms"),
+        average_value=None,
+        rows=rows,
+    )
 
     stats["setup_errors"] += int(summary.get("setup_errors") or 0)
     stats["finish_reasons"].update(summary.get("finish_reasons") or {})
@@ -207,12 +238,35 @@ def finalized_stats(
     rows = stats["rows"]
     scored_count = stats["scored_count"]
     subagent_observed = stats["subagent_observed"]
+    average_score = stats["score_sum"] / scored_count if scored_count else None
+    agent_running_time_count = stats["agent_running_time_count"]
+    agent_running_time_ms = (
+        stats["agent_running_time_ms"] if agent_running_time_count else None
+    )
+    running_time_ms = stats["running_time_ms"] if stats["running_time_count"] else None
     return {
         "rows": rows,
         "success_count": stats["success_count"],
         "success_rate": stats["success_count"] / rows if rows else None,
-        "average_score": stats["score_sum"] / scored_count if scored_count else None,
+        "average_score": average_score,
         "scored_count": scored_count,
+        "agent_running_time_ms": agent_running_time_ms,
+        "average_agent_running_time_ms": (
+            agent_running_time_ms / agent_running_time_count
+            if agent_running_time_count
+            else None
+        ),
+        "score_per_agent_hour": (
+            average_score * 3_600_000 / agent_running_time_ms
+            if average_score is not None and agent_running_time_ms
+            else None
+        ),
+        "running_time_ms": running_time_ms,
+        "score_per_hour": (
+            average_score * 3_600_000 / running_time_ms
+            if average_score is not None and running_time_ms
+            else None
+        ),
         "setup_errors": stats["setup_errors"],
         "finish_reasons": dict(sorted(stats["finish_reasons"].items())),
         "subagent_observed": subagent_observed,
@@ -283,6 +337,34 @@ def int_or_zero(value: Any) -> int:
     return 0
 
 
+def observed_nonnegative_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)) and value >= 0:
+        return int(value)
+    return None
+
+
+def add_summary_running_time(
+    stats: dict[str, Any],
+    *,
+    total_key: str,
+    count_key: str,
+    total_value: Any,
+    average_value: Any,
+    rows: int,
+) -> None:
+    total = observed_nonnegative_int(total_value)
+    if total is None:
+        return
+    average = numeric_or_none(average_value)
+    count = 0
+    if average is not None and average >= 0:
+        count = int(round(total / average)) if average > 0 else rows
+    stats[total_key] += total
+    stats[count_key] += count or rows or 1
+
+
 def summarize_report(
     run_dir: Path,
     report_path: Path,
@@ -321,6 +403,9 @@ def summarize_report(
     )
     result_summary = finalized_stats(result_stats, None)
 
+    def report_metric_or_result(key: str) -> Any:
+        return report.get(key) if key in report else result_summary.get(key)
+
     def report_int_or_result(key: str) -> int:
         return int_or_zero(report.get(key)) if key in report else int_or_zero(result_summary.get(key))
 
@@ -355,6 +440,17 @@ def summarize_report(
         "success_rate": success_count / rows if rows else None,
         "average_score": average_score,
         "scored_count": scored_count,
+        "agent_running_time_ms": observed_nonnegative_int(
+            report_metric_or_result("agent_running_time_ms")
+        ),
+        "average_agent_running_time_ms": numeric_or_none(
+            report_metric_or_result("average_agent_running_time_ms")
+        ),
+        "score_per_agent_hour": numeric_or_none(
+            report_metric_or_result("score_per_agent_hour")
+        ),
+        "running_time_ms": observed_nonnegative_int(report_metric_or_result("running_time_ms")),
+        "score_per_hour": numeric_or_none(report_metric_or_result("score_per_hour")),
         "setup_errors": setup_errors,
         "finish_reasons": finish_reasons,
         "subagent_observed": subagent_observed,
@@ -454,6 +550,12 @@ def format_decimal(value: Any) -> str:
     return f"{float(value):.3f}"
 
 
+def format_int_or_dash(value: Any) -> str:
+    if value is None:
+        return "-"
+    return str(int(value))
+
+
 def format_count_rate(count: int, total: int, rate: float | None) -> str:
     if rate is None:
         return f"{count}/{total}"
@@ -505,8 +607,8 @@ def render_markdown(summary: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "| Condition | Rows | Progress | Success | Avg score | Setup errors | Finish reasons | Subagent | Orchestration trace |",
-            "| --- | ---: | ---: | ---: | ---: | ---: | --- | ---: | --- |",
+            "| Condition | Rows | Progress | Success | Avg score | Agent running time ms | Score per agent hour | Running time ms | Score per hour | Setup errors | Finish reasons | Subagent | Orchestration trace |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | --- |",
         ]
     )
     for condition in summary["conditions"]:
@@ -519,12 +621,16 @@ def render_markdown(summary: dict[str, Any]) -> str:
             condition["subagent_used_rate"],
         )
         lines.append(
-            "| {condition_id} | {rows} | {progress} | {success} | {average_score} | {setup_errors} | {finish_reasons} | {subagent} | {trace} |".format(
+            "| {condition_id} | {rows} | {progress} | {success} | {average_score} | {agent_running_time_ms} | {score_per_agent_hour} | {running_time_ms} | {score_per_hour} | {setup_errors} | {finish_reasons} | {subagent} | {trace} |".format(
                 condition_id=condition["condition_id"],
                 rows=rows,
                 progress=progress,
                 success=success,
                 average_score=format_decimal(condition["average_score"]),
+                agent_running_time_ms=format_int_or_dash(condition.get("agent_running_time_ms")),
+                score_per_agent_hour=format_decimal(condition.get("score_per_agent_hour")),
+                running_time_ms=format_int_or_dash(condition.get("running_time_ms")),
+                score_per_hour=format_decimal(condition.get("score_per_hour")),
                 setup_errors=condition["setup_errors"],
                 finish_reasons=format_finish_reasons(condition["finish_reasons"]),
                 subagent=subagent,
@@ -535,21 +641,25 @@ def render_markdown(summary: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "| Run | Condition | Agent | Rows | Success | Avg score | Setup errors | Finish reasons | Orchestration trace |",
-            "| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |",
+            "| Run | Condition | Agent | Rows | Success | Avg score | Agent running time ms | Score per agent hour | Running time ms | Score per hour | Setup errors | Finish reasons | Orchestration trace |",
+            "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
         ]
     )
     for run in summary["runs"]:
         rows = run["rows"]
         success = format_count_rate(run["success_count"], rows, run["success_rate"])
         lines.append(
-            "| {run_id} | {condition_id} | {agent} | {rows} | {success} | {average_score} | {setup_errors} | {finish_reasons} | {trace} |".format(
+            "| {run_id} | {condition_id} | {agent} | {rows} | {success} | {average_score} | {agent_running_time_ms} | {score_per_agent_hour} | {running_time_ms} | {score_per_hour} | {setup_errors} | {finish_reasons} | {trace} |".format(
                 run_id=run["run_id"],
                 condition_id=run["condition_id"],
                 agent=run["agent"],
                 rows=rows,
                 success=success,
                 average_score=format_decimal(run["average_score"]),
+                agent_running_time_ms=format_int_or_dash(run.get("agent_running_time_ms")),
+                score_per_agent_hour=format_decimal(run.get("score_per_agent_hour")),
+                running_time_ms=format_int_or_dash(run.get("running_time_ms")),
+                score_per_hour=format_decimal(run.get("score_per_hour")),
                 setup_errors=run["setup_errors"],
                 finish_reasons=format_finish_reasons(run["finish_reasons"]),
                 trace=format_orchestration_trace(run),

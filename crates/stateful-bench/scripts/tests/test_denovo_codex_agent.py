@@ -657,7 +657,156 @@ def test_contamination_and_subagent_usage_detection(mod, tmp_path):
     assert omp_usage["subagent_requirement_met"] is True
 
 
-def test_omp_low_native_subagent_count_records_usage_without_failure(mod, tmp_path, monkeypatch):
+def test_omp_eval_result_row_records_agent_duration_from_command_not_eval(mod, tmp_path, monkeypatch):
+    import types
+
+    class FakeRuntimeConfig:
+        backend = "fake"
+
+        def model_copy(self, update):
+            copied = FakeRuntimeConfig()
+            for key, value in update.items():
+                setattr(copied, key, value)
+            return copied
+
+    class FakeRuntime:
+        def __init__(self, config):
+            self.config = config
+
+        def session(self, image):
+            class Session:
+                async def __aenter__(self):
+                    return object()
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return False
+
+            return Session()
+
+    class FakeEvaluator:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        async def evaluate(self, inst, patch, eval_runtime):
+            return SimpleNamespace(accepted=True, score=0.25, duration=98.765, details={"pass_rate": 0.25})
+
+    class FakePreAgentSetup:
+        def __init__(self, session, workdir):
+            pass
+
+        async def prepare(self, inst):
+            pass
+
+    class FakeTask:
+        def get_image(self, inst):
+            return "image"
+
+        async def prepare_session(self, inst, session):
+            pass
+
+    def module(name):
+        fake = types.ModuleType(name)
+        monkeypatch.setitem(sys.modules, name, fake)
+        return fake
+
+    module("aweagent")
+    module("aweagent.core")
+    module("aweagent.core.eval")
+    setup_module = module("aweagent.core.eval.setup")
+    setup_module.PreAgentSetup = FakePreAgentSetup
+    module("aweagent.core.task")
+    runner_module = module("aweagent.core.task.runner")
+    runner_module.runtime_registry = SimpleNamespace(get=lambda backend: FakeRuntime)
+    module("aweagent.tasks")
+    module("aweagent.tasks.denovo_swe")
+    evaluator_module = module("aweagent.tasks.denovo_swe.evaluator")
+    evaluator_module.DeNovoSWEEvaluator = FakeEvaluator
+
+    async def no_op(*args, **kwargs):
+        return False
+
+    async def export_workspace(session, workdir, workspace):
+        workspace.mkdir(parents=True)
+
+    def prepare_omp(env, **kwargs):
+        Path(env["PI_CODING_AGENT_DIR"]).mkdir(parents=True, exist_ok=True)
+
+    def run_omp(command, workspace, env, timeout_seconds):
+        session = Path(env["PI_CODING_AGENT_DIR"]) / "sessions/--workspace--"
+        session.mkdir(parents=True)
+        session.joinpath("session.jsonl").write_text(
+            json.dumps({"type": "message", "message": {"role": "assistant", "content": [{"type": "toolCall", "name": "task", "arguments": {"tasks": [{"assignment": "one"}]}}]}}) + "\n",
+            encoding="utf-8",
+        )
+        return mod.CodexExecutionSummary(returncode=0, token_usage={"turns": 1})
+
+
+    clock = iter([20.0, 22.345])
+    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    monkeypatch.setattr(mod, "preflight_runtime_image_available", no_op)
+    monkeypatch.setattr(mod, "ensure_runtime_image_available", no_op)
+    monkeypatch.setattr(mod, "export_session_workspace", export_workspace)
+    monkeypatch.setattr(mod, "prepare_omp_environment", prepare_omp)
+    monkeypatch.setattr(mod, "seed_omp_auth_credentials", lambda env: None)
+    monkeypatch.setattr(mod, "run_omp_with_timeout", run_omp)
+    monkeypatch.setattr(mod, "git_diff", lambda workspace: "")
+
+    args = Namespace(
+        min_free_disk_gb=0,
+        benchmark_max_turns=500,
+        max_steps=500,
+        prompt_version="v1",
+        subagent="on",
+        subagent_min_count=3,
+        stateful_binary="stateful",
+        agent_mode="no-state",
+        data_file=str(tmp_path / "tasks.jsonl"),
+        cli_runtime="omp",
+        omp_bin="omp",
+        benchmark_model="model",
+        benchmark_reasoning_effort="high",
+        agent_docker_image=None,
+        agent_docker_stateful_binary=None,
+        agent_docker_sandbox="none",
+        codex_timeout_seconds=10,
+        skip_eval=False,
+        del_done_images=False,
+        validate_run=False,
+        eval_iters=3,
+    )
+    inst = SimpleNamespace(
+        id="case-a",
+        repo="owner/repo",
+        image="base",
+        workdir="/workspace",
+        base_commit="abc123",
+        metadata={"document": "Do it"},
+    )
+
+    result = asyncio.run(
+        mod.run_one_instance_async(
+            args,
+            SimpleNamespace(runtime=FakeRuntimeConfig(), eval=SimpleNamespace(timeout=123)),
+            FakeTask(),
+            inst,
+            tmp_path / "out",
+        )
+    )
+
+    assert result.finish_reason == "stop", result
+    assert result.success is True
+    assert result.subagent_used is True
+    assert result.subagent_usage["subagent_requirement_met"] is False
+    assert result.subagent_usage["native_subagent"]["subagent_spawn_count"] == 1
+    results_path = tmp_path / "codex-cli/_/results.jsonl"
+    mod.append_result_jsonl(results_path, result)
+    row = json.loads(results_path.read_text(encoding="utf-8"))
+    assert isinstance(row["agent_running_time_ms"], int)
+    assert row["agent_running_time_ms"] == 2345
+    assert row["eval_result"]["duration"] == 98.765
+
+
+def test_omp_timeout_result_row_records_agent_duration_after_command_starts(mod, tmp_path, monkeypatch):
     import types
 
     class FakeRuntimeConfig:
@@ -725,21 +874,16 @@ def test_omp_low_native_subagent_count_records_usage_without_failure(mod, tmp_pa
         Path(env["PI_CODING_AGENT_DIR"]).mkdir(parents=True, exist_ok=True)
 
     def run_omp(command, workspace, env, timeout_seconds):
-        session = Path(env["PI_CODING_AGENT_DIR"]) / "sessions/--workspace--"
-        session.mkdir(parents=True)
-        session.joinpath("session.jsonl").write_text(
-            json.dumps({"type": "message", "message": {"role": "assistant", "content": [{"type": "toolCall", "name": "task", "arguments": {"tasks": [{"assignment": "one"}]}}]}}) + "\n",
-            encoding="utf-8",
-        )
-        return mod.CodexExecutionSummary(returncode=0, token_usage={"turns": 1})
+        raise mod.CodexTimeoutError(f"omp timed out after {timeout_seconds:g}s")
 
+    clock = iter([40.0, 41.234])
+    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=lambda: next(clock)))
     monkeypatch.setattr(mod, "preflight_runtime_image_available", no_op)
     monkeypatch.setattr(mod, "ensure_runtime_image_available", no_op)
     monkeypatch.setattr(mod, "export_session_workspace", export_workspace)
     monkeypatch.setattr(mod, "prepare_omp_environment", prepare_omp)
     monkeypatch.setattr(mod, "seed_omp_auth_credentials", lambda env: None)
     monkeypatch.setattr(mod, "run_omp_with_timeout", run_omp)
-    monkeypatch.setattr(mod, "git_diff", lambda workspace: "")
 
     args = Namespace(
         min_free_disk_gb=0,
@@ -759,9 +903,10 @@ def test_omp_low_native_subagent_count_records_usage_without_failure(mod, tmp_pa
         agent_docker_stateful_binary=None,
         agent_docker_sandbox="none",
         codex_timeout_seconds=10,
-        skip_eval=True,
+        skip_eval=False,
         del_done_images=False,
         validate_run=False,
+        eval_iters=3,
     )
     inst = SimpleNamespace(
         id="case-a",
@@ -775,19 +920,19 @@ def test_omp_low_native_subagent_count_records_usage_without_failure(mod, tmp_pa
     result = asyncio.run(
         mod.run_one_instance_async(
             args,
-            SimpleNamespace(runtime=FakeRuntimeConfig()),
+            SimpleNamespace(runtime=FakeRuntimeConfig(), eval=SimpleNamespace(timeout=123)),
             FakeTask(),
             inst,
             tmp_path / "out",
         )
     )
 
-    assert result.finish_reason == "skip-eval", result
-    assert result.success is True
-    assert result.subagent_used is True
-    assert result.subagent_usage["subagent_requirement_met"] is False
-    assert result.subagent_usage["native_subagent"]["subagent_spawn_count"] == 1
-
+    assert result.finish_reason == "omp-timeout", result
+    results_path = tmp_path / "codex-cli/_/results.jsonl"
+    mod.append_result_jsonl(results_path, result)
+    row = json.loads(results_path.read_text(encoding="utf-8"))
+    assert isinstance(row["agent_running_time_ms"], int)
+    assert row["agent_running_time_ms"] == 1234
 
 def test_orchestration_summaries(mod):
     summary = mod.summarize_orchestration_events([

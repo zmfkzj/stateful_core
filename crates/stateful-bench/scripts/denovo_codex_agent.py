@@ -165,6 +165,7 @@ class InstanceResult:
     subagent_usage: dict[str, Any] | None = None
     token_usage: dict[str, int] | None = None
     orchestration_trace: dict[str, Any] | None = None
+    agent_running_time_ms: int | None = None
 
 
 @dataclass
@@ -2079,6 +2080,8 @@ def instance_result_row(result: InstanceResult) -> dict[str, Any]:
         "finish_reason": result.finish_reason,
         "error": result.error,
     }
+    if result.agent_running_time_ms is not None:
+        row["agent_running_time_ms"] = result.agent_running_time_ms
     if result.eval_result is not None:
         row["eval_result"] = result.eval_result
     if result.subagent_used is not None:
@@ -2441,6 +2444,7 @@ async def run_one_instance_async(
     codex_env = None
     image = None
     target_upstream_proxy = None
+    started_at = None
 
     try:
         source_env = dict(os.environ)
@@ -2655,6 +2659,7 @@ async def run_one_instance_async(
             else None
         )
         duration = time.monotonic() - started_at
+        agent_running_time_ms = max(0, int(round(duration * 1000)))
         subagent_usage = native_subagent_usage(
             args.subagent,
             args.subagent_min_count,
@@ -2712,6 +2717,7 @@ async def run_one_instance_async(
                 subagent_usage=subagent_usage,
                 token_usage=token_usage,
                 orchestration_trace=orchestration_trace,
+                agent_running_time_ms=agent_running_time_ms,
             )
 
         if returncode != 0:
@@ -2732,6 +2738,7 @@ async def run_one_instance_async(
                 subagent_usage=subagent_usage,
                 token_usage=token_usage,
                 orchestration_trace=orchestration_trace,
+                agent_running_time_ms=agent_running_time_ms,
             )
 
 
@@ -2755,6 +2762,7 @@ async def run_one_instance_async(
                 subagent_usage=subagent_usage,
                 token_usage=token_usage,
                 orchestration_trace=orchestration_trace,
+                agent_running_time_ms=agent_running_time_ms,
             )
 
         eval_runtime = runtime_cls(
@@ -2780,8 +2788,13 @@ async def run_one_instance_async(
             subagent_usage=subagent_usage,
             token_usage=token_usage,
             orchestration_trace=orchestration_trace,
+            agent_running_time_ms=agent_running_time_ms,
         )
     except CodexTimeoutError:
+        agent_running_time_ms = None
+        if started_at is not None:
+            duration = time.monotonic() - started_at
+            agent_running_time_ms = max(0, int(round(duration * 1000)))
         return InstanceResult(
             inst.id,
             False,
@@ -2789,6 +2802,7 @@ async def run_one_instance_async(
             f"{args.cli_runtime}-timeout",
             f"{args.cli_runtime} timed out after {args.codex_timeout_seconds}s",
             None,
+            agent_running_time_ms=agent_running_time_ms,
         )
     except StatefulRepoEnableError as error:
         return InstanceResult(inst.id, False, None, "setup-error", str(error), None)

@@ -49,6 +49,7 @@ fn programbench_metadata_schema_uses_required_instance_fields() {
         started_at_ms: 1,
         finished_at_ms: 2,
         running_time_ms: 1,
+        agent_running_time_ms: None,
         submission_path: "submission.tar.gz".to_string(),
         exit_code: None,
         error: None,
@@ -2608,6 +2609,116 @@ fn programbench_report_aggregates_official_score_and_efficiency() {
 }
 
 #[test]
+fn programbench_report_aggregates_agent_time_efficiency_without_changing_elapsed_efficiency() {
+    let root = temp_root("stateful-bench-programbench-agent-time-report");
+    let condition_dir = root.join("conditions/stateful-on_subagent-on");
+    fs::create_dir_all(condition_dir.join("_stats")).expect("stats dir should exist");
+
+    let metadata = ProgramBenchConditionMetadata {
+        run_id: "pb-dev".to_string(),
+        condition_id: "stateful-on_subagent-on".to_string(),
+        condition: ProgramBenchCondition::new(true, true),
+        agent: ProgramBenchAgentKind::CodexCli,
+        started_at_ms: 10,
+        finished_at_ms: 8010,
+        running_time_ms: 8000,
+        instances: vec![
+            instance_metadata_with_agent_time(
+                "instance-a",
+                None,
+                Some(true),
+                token_usage(1, 10, 0, 2, 0),
+                Some(1200),
+            ),
+            instance_metadata_with_agent_time(
+                "instance-b",
+                None,
+                Some(false),
+                token_usage(1, 20, 0, 3, 0),
+                Some(800),
+            ),
+        ],
+    };
+    fs::write(
+        condition_dir.join("condition.json"),
+        serde_json::to_string_pretty(&metadata).expect("metadata should serialize"),
+    )
+    .expect("condition metadata should write");
+    fs::write(
+        condition_dir.join("_stats/score.json"),
+        r#"{
+          "instance-a": {"test-a": true, "test-b": true},
+          "instance-b": {"test-c": true, "test-d": false}
+        }"#,
+    )
+    .expect("score should write");
+
+    let report = build_programbench_condition_report(&condition_dir).expect("report should build");
+
+    assert_eq!(report.average_score, Some(0.75));
+    assert_eq!(report.running_time_ms, 8000);
+    assert_eq!(report.score_per_hour, Some(337.5));
+    assert_eq!(report.agent_running_time_ms, Some(2000));
+    assert_eq!(report.average_agent_running_time_ms, Some(1000.0));
+    assert_eq!(report.score_per_agent_hour, Some(1350.0));
+    let instance_a = report
+        .instance_reports
+        .iter()
+        .find(|instance| instance.instance_id == "instance-a")
+        .expect("instance-a should be reported");
+    assert_eq!(instance_a.running_time_ms, 1000);
+    assert_eq!(instance_a.agent_running_time_ms, Some(1200));
+
+    fs::remove_dir_all(root).expect("temp root should clean up");
+}
+
+#[test]
+fn programbench_report_does_not_infer_agent_time_from_historical_metadata() {
+    let root = temp_root("stateful-bench-programbench-historical-agent-time");
+    let condition_dir = root.join("conditions/stateful-on_subagent-on");
+    fs::create_dir_all(condition_dir.join("_stats")).expect("stats dir should exist");
+    fs::write(
+        condition_dir.join("condition.json"),
+        r#"{
+          "run_id": "pb-dev",
+          "condition_id": "stateful-on_subagent-on",
+          "condition": {"stateful": true, "subagent": true},
+          "agent": "codex-cli",
+          "started_at_ms": 10,
+          "finished_at_ms": 8010,
+          "running_time_ms": 8000,
+          "instances": [
+            {
+              "instance_id": "instance-a",
+              "condition_id": "stateful-on_subagent-on",
+              "agent": "codex-cli",
+              "started_at_ms": 10,
+              "finished_at_ms": 2010,
+              "running_time_ms": 2000,
+              "submission_path": "instance-a/submission.tar.gz"
+            }
+          ]
+        }"#,
+    )
+    .expect("condition metadata should write");
+    fs::write(
+        condition_dir.join("_stats/score.json"),
+        r#"{"instance-a": {"test-a": true}}"#,
+    )
+    .expect("score should write");
+
+    let report = build_programbench_condition_report(&condition_dir).expect("report should build");
+
+    assert_eq!(report.running_time_ms, 8000);
+    assert_eq!(report.score_per_hour, Some(450.0));
+    assert_eq!(report.agent_running_time_ms, None);
+    assert_eq!(report.average_agent_running_time_ms, None);
+    assert_eq!(report.score_per_agent_hour, None);
+
+    fs::remove_dir_all(root).expect("temp root should clean up");
+}
+
+#[test]
 fn programbench_report_does_not_resolve_rounded_partial_scores() {
     let root = temp_root("stateful-bench-programbench-rounding");
     let condition_dir = root.join("conditions/stateful-on_subagent-on");
@@ -2699,6 +2810,151 @@ fn programbench_compare_reports_score_time_and_token_deltas() {
     assert!(markdown.contains("Partial score"));
     assert!(markdown.contains("Resolved"));
     assert!(markdown.contains("| stateful-on_subagent-off | on | off | 2 | 0.750 | 0/2 |"));
+}
+
+#[test]
+fn programbench_compare_reports_includes_agent_time_totals_and_axis_deltas() {
+    let off_off = condition_report_with_agent_time(
+        "stateful-off_subagent-off",
+        false,
+        false,
+        0.5,
+        6000,
+        3000,
+        220,
+        140,
+        &[Some(1000), Some(2000)],
+    );
+    let on_off = condition_report_with_agent_time(
+        "stateful-on_subagent-off",
+        true,
+        false,
+        0.75,
+        4000,
+        1500,
+        167,
+        107,
+        &[Some(500), Some(1000)],
+    );
+    let off_on = condition_report_with_agent_time(
+        "stateful-off_subagent-on",
+        false,
+        true,
+        0.6,
+        5000,
+        2400,
+        200,
+        120,
+        &[Some(900), Some(1500)],
+    );
+    let on_on = condition_report_with_agent_time(
+        "stateful-on_subagent-on",
+        true,
+        true,
+        0.9,
+        3500,
+        2000,
+        150,
+        90,
+        &[Some(800), Some(1200)],
+    );
+
+    let comparison = compare_programbench_reports(vec![off_off, on_off, off_on, on_on]);
+
+    assert_eq!(comparison.total_running_time_ms, 18_500);
+    assert_eq!(comparison.total_agent_running_time_ms, Some(8900));
+    assert_eq!(
+        comparison.stateful_running_time_ms_delta_without_subagent,
+        Some(-2000)
+    );
+    assert_eq!(
+        comparison.stateful_agent_running_time_ms_delta_without_subagent,
+        Some(-1500)
+    );
+    assert_eq!(
+        comparison.subagent_agent_running_time_ms_delta_without_stateful,
+        Some(-600)
+    );
+}
+
+#[test]
+fn programbench_compare_reports_leaves_agent_time_deltas_absent_without_agent_time() {
+    let off_off = condition_report(
+        "stateful-off_subagent-off",
+        false,
+        false,
+        0.5,
+        6000,
+        220,
+        140,
+    );
+    let on_off = condition_report(
+        "stateful-on_subagent-off",
+        true,
+        false,
+        0.75,
+        4000,
+        167,
+        107,
+    );
+    let off_on = condition_report("stateful-off_subagent-on", false, true, 0.6, 5000, 200, 120);
+
+    let comparison = compare_programbench_reports(vec![off_off, on_off, off_on]);
+
+    assert_eq!(comparison.total_agent_running_time_ms, None);
+    assert_eq!(
+        comparison.stateful_agent_running_time_ms_delta_without_subagent,
+        None
+    );
+    assert_eq!(
+        comparison.subagent_agent_running_time_ms_delta_without_stateful,
+        None
+    );
+}
+
+#[test]
+fn programbench_markdown_renders_agent_time_columns_before_elapsed_columns() {
+    let report = condition_report_with_agent_time(
+        "stateful-on_subagent-on",
+        true,
+        true,
+        0.75,
+        8000,
+        2000,
+        167,
+        107,
+        &[Some(1200), Some(800)],
+    );
+
+    let markdown = report
+        .render(ReportFormat::Markdown)
+        .expect("condition markdown should render");
+
+    let agent_time_column = markdown
+        .find("Agent running time ms")
+        .expect("agent-time column should be present");
+    let elapsed_time_column = markdown
+        .find("Running time ms")
+        .expect("elapsed wall-time column should be present");
+    assert!(agent_time_column < elapsed_time_column);
+    let agent_efficiency_column = markdown
+        .find("Score per agent hour")
+        .expect("agent efficiency column should be present");
+    let elapsed_efficiency_column = markdown
+        .find("Score per hour")
+        .expect("elapsed efficiency column should be present");
+    assert!(agent_efficiency_column < elapsed_efficiency_column);
+
+    let comparison_markdown = compare_programbench_reports(vec![report])
+        .render(ReportFormat::Markdown)
+        .expect("comparison markdown should render");
+    let comparison_agent_time_column = comparison_markdown
+        .find("Agent running time ms")
+        .expect("comparison agent-time column should be present");
+    let comparison_elapsed_time_column = comparison_markdown
+        .find("Running time ms")
+        .expect("comparison elapsed wall-time column should be present");
+    assert!(comparison_agent_time_column < comparison_elapsed_time_column);
 }
 
 #[test]
@@ -2889,6 +3145,16 @@ fn instance_metadata(
     subagent_used: Option<bool>,
     token_usage: ProgramBenchTokenUsage,
 ) -> ProgramBenchInstanceMetadata {
+    instance_metadata_with_agent_time(instance_id, error, subagent_used, token_usage, None)
+}
+
+fn instance_metadata_with_agent_time(
+    instance_id: &str,
+    error: Option<&str>,
+    subagent_used: Option<bool>,
+    token_usage: ProgramBenchTokenUsage,
+    agent_running_time_ms: Option<u64>,
+) -> ProgramBenchInstanceMetadata {
     ProgramBenchInstanceMetadata {
         instance_id: instance_id.to_string(),
         condition_id: "stateful-on_subagent-on".to_string(),
@@ -2896,6 +3162,7 @@ fn instance_metadata(
         started_at_ms: 10,
         finished_at_ms: 1010,
         running_time_ms: 1000,
+        agent_running_time_ms,
         submission_path: format!("{instance_id}/submission.tar.gz"),
         exit_code: Some(if error.is_some() { 1 } else { 0 }),
         error: error.map(str::to_string),
@@ -2951,6 +3218,35 @@ fn condition_report(
     clippy::too_many_arguments,
     reason = "test fixture builder mirrors report fields"
 )]
+fn condition_report_with_agent_time(
+    condition_id: &str,
+    stateful: bool,
+    subagent: bool,
+    score: f64,
+    running_time_ms: u64,
+    agent_running_time_ms: u64,
+    input_plus_output: u64,
+    uncached_input_plus_output: u64,
+    instance_agent_running_time_ms: &[Option<u64>],
+) -> ProgramBenchConditionReport {
+    condition_report_with_instances_and_agent_time(
+        condition_id,
+        stateful,
+        subagent,
+        score,
+        running_time_ms,
+        input_plus_output,
+        uncached_input_plus_output,
+        &["instance-a", "instance-b"],
+        Some(agent_running_time_ms),
+        Some(instance_agent_running_time_ms),
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "test fixture builder mirrors report fields"
+)]
 fn condition_report_with_instances(
     condition_id: &str,
     stateful: bool,
@@ -2961,7 +3257,40 @@ fn condition_report_with_instances(
     uncached_input_plus_output: u64,
     instance_ids: &[&str],
 ) -> ProgramBenchConditionReport {
+    condition_report_with_instances_and_agent_time(
+        condition_id,
+        stateful,
+        subagent,
+        score,
+        running_time_ms,
+        input_plus_output,
+        uncached_input_plus_output,
+        instance_ids,
+        None,
+        None,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "test fixture builder mirrors report fields"
+)]
+fn condition_report_with_instances_and_agent_time(
+    condition_id: &str,
+    stateful: bool,
+    subagent: bool,
+    score: f64,
+    running_time_ms: u64,
+    input_plus_output: u64,
+    uncached_input_plus_output: u64,
+    instance_ids: &[&str],
+    agent_running_time_ms: Option<u64>,
+    instance_agent_running_time_ms: Option<&[Option<u64>]>,
+) -> ProgramBenchConditionReport {
     let instance_count = instance_ids.len();
+    if let Some(times) = instance_agent_running_time_ms {
+        assert_eq!(times.len(), instance_count);
+    }
     let first_running_time_ms = running_time_ms / instance_count as u64;
     let last_running_time_ms =
         running_time_ms - first_running_time_ms * (instance_count.saturating_sub(1) as u64);
@@ -2982,6 +3311,10 @@ fn condition_report_with_instances(
             } else {
                 first_running_time_ms
             },
+            agent_running_time_ms: instance_agent_running_time_ms
+                .and_then(|times| times.get(index))
+                .copied()
+                .flatten(),
             token_input_plus_output_tokens: if index + 1 == instance_count {
                 last_input_plus_output
             } else {
@@ -3011,6 +3344,9 @@ fn condition_report_with_instances(
         timeout_count: 0,
         running_time_ms,
         average_running_time_ms: Some(running_time_ms as f64 / instance_count as f64),
+        agent_running_time_ms,
+        average_agent_running_time_ms: agent_running_time_ms
+            .map(|value| value as f64 / instance_count as f64),
         token_observed_instances: instance_count,
         token_usage_turns: instance_count * 2,
         token_input_tokens: 0,
@@ -3033,6 +3369,8 @@ fn condition_report_with_instances(
         score_per_million_uncached_input_plus_output_tokens: Some(
             score * 1_000_000.0 / uncached_input_plus_output as f64,
         ),
+        score_per_agent_hour: agent_running_time_ms
+            .and_then(|value| (value > 0).then_some(score * 3_600_000.0 / value as f64)),
         score_per_hour: Some(score * 3_600_000.0 / running_time_ms as f64),
         score_source: "score-json".to_string(),
         instance_reports,
