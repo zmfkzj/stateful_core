@@ -1,6 +1,7 @@
 use stateful_core::{
-    ContextPackage, CurrentEvidenceKind, CurrentFreshness, CurrentItem, CurrentItemKind,
-    CurrentSeverity, ReconciliationDecision, RenderMode, render_prompt_text,
+    AGENT_CONTEXT_SCOPE_SOURCE_REF, ContextPackage, CurrentEvidenceKind, CurrentFreshness,
+    CurrentItem, CurrentItemKind, CurrentSeverity, ReconciliationDecision, RenderMode,
+    render_prompt_text,
 };
 
 #[test]
@@ -140,6 +141,43 @@ fn structured_items_render_purpose_and_required_actions() {
     assert!(text.contains("Nearby Activity"));
     assert!(!text.contains("purpose: Resume queued session cleanup after rereading"));
     assert!(!text.contains("next: Reread src/session.ts before continuing"));
+}
+
+#[test]
+fn active_scope_info_item_shows_next_action() {
+    let package = ContextPackage::from_items(vec![CurrentItem::new(
+        CurrentItemKind::Reservation,
+        CurrentSeverity::Info,
+        CurrentFreshness::Live,
+        "src/auth.ts",
+        "Fix auth validation.",
+        "This session declared reservation for src/auth.ts.",
+    )
+    .with_next_action("Keep an exact same-reservation file claim active.")
+    .with_agent("s1")
+    .with_source_ref(AGENT_CONTEXT_SCOPE_SOURCE_REF)]);
+
+    let text = render_prompt_text(&package, RenderMode::Brief);
+
+    assert!(text.contains("Your Active Scope"));
+    assert!(text.contains("next: Keep an exact same-reservation file claim active"));
+}
+
+#[test]
+fn block_item_shows_evidence_in_brief() {
+    let package = ContextPackage::from_items(vec![CurrentItem::new(
+        CurrentItemKind::WaitQueue,
+        CurrentSeverity::Block,
+        CurrentFreshness::Live,
+        "src/auth.ts",
+        "Queue requested write after blocker clears.",
+        "Agent s2 is queued for write_file on src/auth.ts.",
+    )
+    .with_evidence("Blocked by agent s1; wait_id wait-1.")]);
+
+    let text = render_prompt_text(&package, RenderMode::Brief);
+
+    assert!(text.contains("evidence: Blocked by agent s1; wait_id wait-1"));
 }
 
 #[test]

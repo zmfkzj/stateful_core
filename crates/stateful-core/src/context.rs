@@ -463,7 +463,7 @@ fn render_section(
     items: &[&CurrentItem],
     mode: RenderMode,
     max_total: usize,
-    show_info_purpose: bool,
+    show_info_detail: bool,
     rendered: &mut usize,
 ) {
     if items.is_empty() || *rendered >= max_total {
@@ -486,13 +486,13 @@ fn render_section(
             item.resource,
             trim_trailing_period(&item.summary)
         ));
-        if item.severity != CurrentSeverity::Info || show_info_purpose {
+        if item.severity != CurrentSeverity::Info || show_info_detail {
             output.push_str(&format!(
                 "  purpose: {}\n",
                 trim_trailing_period(&item.purpose)
             ));
         }
-        if item.severity != CurrentSeverity::Info {
+        if item.severity != CurrentSeverity::Info || show_info_detail {
             if let Some(next_action) = &item.next_action {
                 output.push_str(&format!("  next: {}\n", trim_trailing_period(next_action)));
             }
@@ -500,7 +500,7 @@ fn render_section(
         if let Some(evidence_kind) = item.evidence_kind {
             output.push_str(&format!("  evidence kind: {}\n", evidence_kind.as_str()));
         }
-        if matches!(mode, RenderMode::Detailed) {
+        if matches!(mode, RenderMode::Detailed) || item.severity == CurrentSeverity::Block {
             if let Some(evidence) = &item.evidence {
                 output.push_str(&format!("  evidence: {}\n", trim_trailing_period(evidence)));
             }
