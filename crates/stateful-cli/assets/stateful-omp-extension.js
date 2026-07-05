@@ -1085,9 +1085,30 @@ function parseStatefulSandboxRunWords(words) {
 }
 
 function parseStatefulProcessFindWords(words) {
-  if (words.length < 5 || words[1] !== "sandbox" || words[2] !== "process" || words[3] !== "find") {
+  if (words.length < 4 || words[1] !== "sandbox" || words[2] !== "process" || words[3] !== "find") {
     return { allow: false, reason: "Bash commands must use stateful sandbox process find" };
   }
+  let hasSelector = false;
+  for (let index = 4; index < words.length; index += 1) {
+    const arg = words[index];
+    const nextValue = (name) => {
+      index += 1;
+      if (index >= words.length || !words[index]) throw new Error("stateful sandbox process find " + name + " requires a value");
+      return words[index];
+    };
+    if (arg === "--json") continue;
+    if (["--name", "--contains", "--pid", "--parent-pid", "--ppid", "--process-group", "--pgid"].includes(arg)) {
+      nextValue(arg);
+      hasSelector = true;
+    } else if (arg === "--field") {
+      nextValue("--field");
+    } else if (arg === "--") {
+      throw new Error("stateful sandbox process find does not support argv mode");
+    } else {
+      throw new Error("unsupported stateful sandbox process find argument `" + arg + "`");
+    }
+  }
+  if (!hasSelector) return { allow: false, reason: "stateful sandbox process find requires at least one selector" };
   return { allow: true };
 }
 function statefulBashPassthroughDecision(command, cwd) {

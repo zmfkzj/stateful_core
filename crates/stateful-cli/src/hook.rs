@@ -447,7 +447,18 @@ fn omp_sandbox_run_action(command: &str) -> Option<OmpPreToolAction> {
 }
 
 fn omp_process_find_action(command: &str) -> Option<OmpPreToolAction> {
-    let invocation = parse_sandbox_process_find_bash_invocation(command).ok()?;
+    let words = split_simple_command_words(command).ok()?;
+    if words.len() < 4
+        || words[1] != "sandbox"
+        || words[2] != "process"
+        || words[3] != "find"
+    {
+        return None;
+    }
+    let invocation = match parse_sandbox_process_find_bash_invocation(command) {
+        Ok(invocation) => invocation,
+        Err(error) => return Some(OmpPreToolAction::Block { reason: error }),
+    };
     if !is_trusted_stateful_executable(&invocation.executable) {
         return Some(OmpPreToolAction::Block {
             reason: "stateful sandbox process find requires a trusted stateful binary".to_string(),

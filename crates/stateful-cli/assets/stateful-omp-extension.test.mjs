@@ -165,3 +165,21 @@ test('lazy_write_resume waits for queued wait_id before claiming and applying sa
   assert.ok(claimIndex > waitIndex, 'reservation claim must happen only after wait_id is reported reserved');
   assert.equal(calls[claimIndex].args[calls[claimIndex].args.indexOf('--wait-id') + 1], 'wait-queued');
 });
+
+test('bash process find without selector reports process-find validation error', async (t) => {
+  const dir = tempDir();
+  const workspace = path.join(dir, 'workspace');
+  fs.mkdirSync(workspace, { recursive: true });
+  const logPath = path.join(dir, 'stateful-calls.jsonl');
+  const fakeStateful = writeFakeStateful(dir);
+  const { handlers } = await loadExtension(t, fakeStateful, logPath);
+
+  const result = await emitToolCall(
+    handlers,
+    { toolName: 'bash', input: { command: `${fakeStateful} sandbox process find` } },
+    { cwd: workspace },
+  );
+
+  assert.equal(result.block, true);
+  assert.equal(result.reason, 'stateful sandbox process find requires at least one selector');
+});
