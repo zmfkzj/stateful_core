@@ -23,6 +23,9 @@ inside a separate agent container instead of on the host. The image must include
 `omp` and `stateful`; defaults are `--agent-docker-omp-bin omp`,
 `--agent-docker-stateful-binary /usr/local/bin/stateful`,
 `--agent-docker-home /home/stateful`, and `--agent-docker-sandbox off`.
+The adapter grants `--cap-add SYS_ADMIN --security-opt seccomp=unconfined
+--security-opt apparmor=unconfined --security-opt systempaths=unconfined` so
+`stateful sandbox run` can use bwrap inside that agent container.
 The Docker container is the sandbox boundary, so the adapter sets
 `STATEFUL_OMP_SANDBOX=off` for the in-container `docker exec` by default. When
 Stateful is enabled, the agent container inherits the parent Stateful runtime

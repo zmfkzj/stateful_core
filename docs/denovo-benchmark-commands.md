@@ -211,9 +211,10 @@ matrix:
 For the same one-instance smoke shape with OMP running inside the benchmark
 Docker agent image, use an image built from
 `crates/stateful-bench/docker/denovo-omp-agent.Dockerfile`. The Docker command
-builder grants `--cap-add SYS_ADMIN --security-opt seccomp=unconfined` so Linux
-bubblewrap can run for `stateful sandbox run` inside the agent container. The
-sample keeps `--agent-docker-sandbox off` only to disable OMP's nested sandbox
+builder grants `--cap-add SYS_ADMIN --security-opt seccomp=unconfined
+--security-opt apparmor=unconfined --security-opt systempaths=unconfined` so
+Linux bubblewrap can run for `stateful sandbox run` inside the agent container.
+The sample keeps `--agent-docker-sandbox off` only to disable OMP's nested sandbox
 env; omit `--agent-docker-stateful-binary` when the image uses the default:
 
 ```bash

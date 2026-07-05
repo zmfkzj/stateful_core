@@ -59,8 +59,8 @@ heredocs) instead of solving the task.
 
 The current implementation has landed RC1-A, RC2-A/B, and RC3-B plus the trace
 capture update: Docker OMP runs add `--cap-add SYS_ADMIN --security-opt
-seccomp=unconfined`; OMP native `edit`/`write` can reacquire missing
-same-reservation claims and keep auto-claims on `stale_target_observation`; and
+seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined`; OMP native `edit`/`write`
+can reacquire missing same-reservation claims and keep auto-claims on `stale_target_observation`; and
 `/v1/events` accepts `workspace_id`, `since`, and `limit` while trace capture
 requests `workspace_id` plus `limit=100` and records
 `events_window_saturated`. These fixes remove the known orchestration defects;

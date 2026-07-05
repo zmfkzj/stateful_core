@@ -102,7 +102,8 @@ the CLI default remains `v1` for compatibility.
   `crates/stateful-bench/docker/denovo-omp-agent.Dockerfile`; it includes
   Bun-installed `omp`, the Linux `stateful` binary, and `bubblewrap`/`bwrap`.
   The Docker command builder grants `--cap-add SYS_ADMIN --security-opt
-  seccomp=unconfined` so bwrap can run inside the agent container. Add
+  seccomp=unconfined --security-opt apparmor=unconfined --security-opt
+  systempaths=unconfined` so bwrap can run inside the agent container. Add
   `--agent-docker-image <image>`. `--agent-docker-sandbox off` only controls
   `STATEFUL_OMP_SANDBOX` for OMP's own nested sandbox; it is not the bwrap
   namespace fix. `--agent-docker-stateful-binary <path>` only needs to be set

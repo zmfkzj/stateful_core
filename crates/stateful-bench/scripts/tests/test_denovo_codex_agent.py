@@ -259,6 +259,8 @@ def test_omp_docker_command_grants_bwrap_capabilities(mod, tmp_path):
 
     assert ["--cap-add", "SYS_ADMIN"] in [command[index:index + 2] for index in range(len(command) - 1)]
     assert ["--security-opt", "seccomp=unconfined"] in [command[index:index + 2] for index in range(len(command) - 1)]
+    assert ["--security-opt", "apparmor=unconfined"] in [command[index:index + 2] for index in range(len(command) - 1)]
+    assert ["--security-opt", "systempaths=unconfined"] in [command[index:index + 2] for index in range(len(command) - 1)]
 
 
 def test_omp_docker_command_can_disable_inner_sandbox(mod):

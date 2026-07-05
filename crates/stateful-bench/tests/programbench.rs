@@ -1260,6 +1260,10 @@ print(json.dumps({
         docker_call_starts_with(call, &["docker", "run"])
             && docker_call_contains_arg(call, "stateful/omp-agent:test")
             && docker_call_has_sequence(call, &["sleep", "infinity"])
+            && docker_call_has_sequence(call, &["--cap-add", "SYS_ADMIN"])
+            && docker_call_has_sequence(call, &["--security-opt", "seccomp=unconfined"])
+            && docker_call_has_sequence(call, &["--security-opt", "apparmor=unconfined"])
+            && docker_call_has_sequence(call, &["--security-opt", "systempaths=unconfined"])
     }));
     assert!(docker_calls.iter().any(|call| call
         == &serde_json::json!([
