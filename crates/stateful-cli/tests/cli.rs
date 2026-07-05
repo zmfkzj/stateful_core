@@ -1128,6 +1128,7 @@ fn tools_list_prints_allowed_and_unclassified_tools() {
             "parallel_tool_calls",
             "lsp",
             "glob",
+            "goal",
             "ask",
             "ast_grep",
             "browser",

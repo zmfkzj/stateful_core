@@ -308,7 +308,7 @@ Hook adapters normalize namespaced runtime tool names to their leaf before
 policy classification: `functions.bash` follows Bash rules,
 `functions.python` / `functions.javascript` / `functions.js` /
 `functions.ruby` / `functions.julia` follow eval-tool rules, and
-`functions.read` / `functions.search` follow native read/search rules.
+`functions.read` / `functions.search` / `functions.goal` follow native non-writing rules.
 Codex raw Bash is denied by stateful hooks with sandbox guidance. Bash hook
 calls for repo-internal shell work use a single strict invocation of the trusted `stateful` binary running `stateful sandbox run ...` with one or more `--command <cmd>` flags. Repeated `--command` values are compiled into one sandbox-internal script; outer Bash wrappers with multiple commands, redirects, pipelines, substitutions, or environment assignments remain denied.
 Ordinary read work should use agent-native read/search/diff tools when available. Read-only

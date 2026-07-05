@@ -20,6 +20,7 @@ fn default_allowed_tools() -> Vec<String> {
         "parallel_tool_calls",
         "lsp",
         "glob",
+        "goal",
         "ask",
         "ast_grep",
         "browser",

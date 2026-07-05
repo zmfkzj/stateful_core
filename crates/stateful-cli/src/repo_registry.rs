@@ -25,6 +25,7 @@ const DEFAULT_OMP_ALLOWED_TOOLS: &[&str] = &[
     "parallel_tool_calls",
     "lsp",
     "glob",
+    "goal",
     "ask",
     "ast_grep",
     "browser",

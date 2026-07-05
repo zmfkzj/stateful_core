@@ -390,7 +390,7 @@ Runtime adapters normalize namespaced tool names to their leaf before
 classification, so `functions.bash` is Bash,
 `functions.python` / `functions.javascript` / `functions.js` /
 `functions.ruby` / `functions.julia` are eval tools, and `functions.read` /
-`functions.search` remain native read/search tools.
+`functions.search` / `functions.goal` remain native non-writing tools.
 
 - Native edit tools such as Codex `apply_patch`, `Edit`, and `Write` or OMP
   `edit` and `write`: enforce by inspecting hook-exposed targets. OMP `edit`

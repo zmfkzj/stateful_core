@@ -3737,6 +3737,7 @@ fn omp_allows_classified_read_only_and_non_file_writing_tools() {
         "find",
         "generate_image",
         "grep",
+        "goal",
         "irc",
         "job",
         "read",
