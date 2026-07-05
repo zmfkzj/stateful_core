@@ -1356,12 +1356,21 @@ pub fn handle_user_prompt_submit_in_repo(
     let runtime = discover_runtime_with_global(&repo_root, &paths)?;
     let identity = repo_identity(&paths, &repo_root)?;
     let input: UserPromptSubmitInput = serde_json::from_str(input)?;
-    if user_prompt_context_rendered(&repo_root, input.stateful_agent_id()) {
-        return Ok(String::new());
+    let agent_id = input.stateful_agent_id();
+    let response = render_context_response(&runtime, agent_id, Some(&identity), None)?;
+    let fingerprint = coordination_fingerprint(&response.items);
+    let previous = read_context_fingerprint(&repo_root, agent_id);
+    match context_emit_decision(previous.as_deref(), &fingerprint) {
+        ContextEmit::First => {
+            write_context_fingerprint(&repo_root, agent_id, &fingerprint);
+            Ok(with_stateful_command_policy_reminder(response.prompt_text))
+        }
+        ContextEmit::Unchanged => Ok(String::new()),
+        ContextEmit::Changed => {
+            write_context_fingerprint(&repo_root, agent_id, &fingerprint);
+            Ok(response.prompt_text)
+        }
     }
-    let prompt_text = handle_user_prompt_submit_with_runtime(&input, &runtime, Some(&identity))?;
-    mark_user_prompt_context_rendered(&repo_root, input.stateful_agent_id());
-    Ok(prompt_text)
 }
 
 pub fn handle_stop_in_repo(input: &str, repo_root: impl AsRef<Path>) -> anyhow::Result<()> {
@@ -1413,22 +1422,6 @@ fn handle_post_tool_use_with_runtime(
     Ok(())
 }
 
-fn handle_user_prompt_submit_with_runtime(
-    input: &UserPromptSubmitInput,
-    runtime: &ServerRuntime,
-    identity: Option<&RepoIdentity>,
-) -> anyhow::Result<String> {
-    let prompt_text = render_context_prompt_text(runtime, input.stateful_agent_id(), identity)?;
-    Ok(with_stateful_command_policy_reminder(prompt_text))
-}
-
-fn render_context_prompt_text(
-    runtime: &ServerRuntime,
-    agent_id: &str,
-    identity: Option<&RepoIdentity>,
-) -> anyhow::Result<String> {
-    Ok(render_context_response(runtime, agent_id, identity, None)?.prompt_text)
-}
 
 fn context_render_request_body(
     runtime: &ServerRuntime,
@@ -1481,16 +1474,62 @@ fn render_context_response(
     Ok(response)
 }
 
-fn user_prompt_context_rendered(repo_root: &Path, agent_id: &str) -> bool {
-    user_prompt_context_marker_path(repo_root, agent_id).exists()
+enum ContextEmit {
+    First,
+    Unchanged,
+    Changed,
 }
 
-fn mark_user_prompt_context_rendered(repo_root: &Path, agent_id: &str) {
+fn context_emit_decision(previous: Option<&str>, current: &str) -> ContextEmit {
+    match previous {
+        None => ContextEmit::First,
+        Some(prev) if prev == current => ContextEmit::Unchanged,
+        Some(_) => ContextEmit::Changed,
+    }
+}
+
+fn coordination_fingerprint(items: &[serde_json::Value]) -> String {
+    use std::hash::{Hash, Hasher};
+
+    const INCLUDE: [&str; 4] = [
+        "declared_reservation",
+        "reservation",
+        "wait_queue",
+        "observed_write",
+    ];
+
+    let mut lines: Vec<String> = items
+        .iter()
+        .filter_map(|item| {
+            let evidence_kind = item.get("evidence_kind").and_then(|v| v.as_str())?;
+            if !INCLUDE.contains(&evidence_kind) {
+                return None;
+            }
+            let resource = item.get("resource").and_then(|v| v.as_str()).unwrap_or("");
+            let agent = item.get("agent_id").and_then(|v| v.as_str()).unwrap_or("");
+            let purpose = item.get("purpose").and_then(|v| v.as_str()).unwrap_or("");
+            Some(format!("{evidence_kind}|{resource}|{agent}|{purpose}"))
+        })
+        .collect();
+    lines.sort();
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    lines.join("\n").hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn read_context_fingerprint(repo_root: &Path, agent_id: &str) -> Option<String> {
+    fs::read_to_string(user_prompt_context_marker_path(repo_root, agent_id))
+        .ok()
+        .map(|value| value.trim().to_string())
+}
+
+fn write_context_fingerprint(repo_root: &Path, agent_id: &str, fingerprint: &str) {
     let path = user_prompt_context_marker_path(repo_root, agent_id);
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let _ = fs::write(path, b"rendered\n");
+    let _ = fs::write(path, format!("{fingerprint}\n"));
 }
 
 fn user_prompt_context_marker_path(repo_root: &Path, agent_id: &str) -> PathBuf {
@@ -3398,6 +3437,8 @@ struct UserPromptSubmitInput {
 #[derive(Debug, Deserialize)]
 struct ContextRenderResponse {
     prompt_text: String,
+    #[serde(default)]
+    items: Vec<serde_json::Value>,
 }
 
 impl SessionStartInput {
@@ -3707,5 +3748,78 @@ mod tests {
 
         assert_eq!(targets, vec![PatchTarget::write("src/lib.rs")]);
         let _ = std::fs::remove_dir_all(&temp);
+    }
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn reservation_item(resource: &str, expires_at: &str) -> serde_json::Value {
+        json!({
+            "kind": "reservation",
+            "evidence_kind": "declared_reservation",
+            "resource": resource,
+            "agent_id": "s2",
+            "purpose": "Edit.",
+            "expires_at": expires_at,
+        })
+    }
+
+    #[test]
+    fn fingerprint_ignores_volatile_expiry() {
+        let a = vec![reservation_item("src/auth.ts", "2026-07-05T00:00:10Z")];
+        let b = vec![reservation_item("src/auth.ts", "2026-07-05T00:09:59Z")];
+        assert_eq!(coordination_fingerprint(&a), coordination_fingerprint(&b));
+    }
+
+    #[test]
+    fn fingerprint_changes_on_new_reservation() {
+        let a = vec![reservation_item("src/auth.ts", "t")];
+        let mut b = a.clone();
+        b.push(reservation_item("src/session.ts", "t"));
+        assert_ne!(coordination_fingerprint(&a), coordination_fingerprint(&b));
+    }
+
+    #[test]
+    fn fingerprint_excludes_claims_and_fences() {
+        let base = vec![reservation_item("src/auth.ts", "t")];
+        let mut with_claim = base.clone();
+        with_claim.push(json!({
+            "kind": "claim",
+            "evidence_kind": "claim_only",
+            "resource": "src/other.ts",
+            "agent_id": "s3",
+            "purpose": "Write.",
+        }));
+        assert_eq!(
+            coordination_fingerprint(&base),
+            coordination_fingerprint(&with_claim)
+        );
+    }
+
+    #[test]
+    fn emit_decision_transitions() {
+        let fp = "abc";
+        assert!(matches!(context_emit_decision(None, fp), ContextEmit::First));
+        assert!(matches!(
+            context_emit_decision(Some("abc"), fp),
+            ContextEmit::Unchanged
+        ));
+        assert!(matches!(
+            context_emit_decision(Some("stale"), fp),
+            ContextEmit::Changed
+        ));
+    }
+
+    #[test]
+    fn fingerprint_marker_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_context_fingerprint(dir.path(), "s1", "deadbeef");
+        assert_eq!(
+            read_context_fingerprint(dir.path(), "s1").as_deref(),
+            Some("deadbeef")
+        );
     }
 }
