@@ -246,11 +246,19 @@ function scopeOverlapMessage(notification) {
   return lines.join("\n");
 }
 
+function scopeOverlapKey(notification, stream) {
+  const payload = notification?.payload || {};
+  const workspace = notification?.workspace_id || stream?.workspace_id || "";
+  const notificationId = notification?.notification_id || notification?.id || "";
+  if (notificationId) return workspace + "\u0000" + notificationId;
+  return workspace + "\u0000" + (payload.by_agent_id || "") + "\u0000" + payload.relative_path;
+}
+
 function deliverScopeOverlapNotification(pi, notification, stream) {
   if (!notificationTargetsStreamAgent(notification, stream)) return true;
   const payload = notification?.payload || {};
   if (!payload.relative_path) return true;
-  const key = (payload.by_agent_id || "") + "\u0000" + payload.relative_path;
+  const key = scopeOverlapKey(notification, stream);
   if (seenScopeOverlaps.has(key)) return true;
   if (typeof pi?.sendMessage !== "function") return false;
   try {
@@ -388,6 +396,7 @@ function startReservationStream(pi, stream) {
   if (reservationStreamKey !== streamKey) {
     reservationStreamKey = streamKey;
     reservationStreamLastEventId = "";
+    seenScopeOverlaps.clear();
   }
   const controller = new AbortController();
   reservationStreamAbort = controller;

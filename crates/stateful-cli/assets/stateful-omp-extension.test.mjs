@@ -163,6 +163,39 @@ test('scope_overlap SSE block delivers one FYI message and dedupes', async (t) =
   assert.match(sent[0].msg.content, /src\/auth\.ts/);
 });
 
+test('scope_overlap SSE block dedupes by notification identity and workspace', async (t) => {
+  const dir = tempDir();
+  const fakeStateful = writeFakeStateful(dir);
+  const mod = await loadModuleNamespace(t, fakeStateful);
+  const { processReservationSseBlock, seenScopeOverlaps } = mod.__testables;
+  seenScopeOverlaps.clear();
+
+  const sent = [];
+  const pi = { sendMessage: (msg, opts) => sent.push({ msg, opts }) };
+  const stream = { agent_id: 's1', workspace_id: 'w1' };
+  const block = (notificationId, workspaceId = 'w1') => [
+    'event: scope_overlap',
+    'data: ' + JSON.stringify({
+      notification_id: notificationId,
+      workspace_id: workspaceId,
+      kind: 'scope_overlap',
+      payload: {
+        relative_path: 'src/auth.ts',
+        action: 'write_file',
+        by_agent_id: 's2',
+      },
+    }),
+    'id: ' + notificationId,
+  ].join('\n');
+
+  processReservationSseBlock(pi, block('n1'), stream);
+  processReservationSseBlock(pi, block('n1'), stream);
+  processReservationSseBlock(pi, block('n2'), stream);
+  processReservationSseBlock(pi, block(undefined, 'w2'), { ...stream, workspace_id: 'w2' });
+
+  assert.equal(sent.length, 3, 'same peer/path may re-notify for a new event or workspace');
+});
+
 test('scope_overlap SSE block filters target agents by explicit target fields', async (t) => {
   const dir = tempDir();
   const fakeStateful = writeFakeStateful(dir);

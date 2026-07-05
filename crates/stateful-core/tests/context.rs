@@ -301,6 +301,33 @@ fn compressed_reservation_synthesizes_group_next_action() {
 }
 
 #[test]
+fn compressed_peer_reservation_keeps_peer_coordination_next_action() {
+    let items = (0..4)
+        .map(|i| {
+            CurrentItem::new(
+                CurrentItemKind::Reservation,
+                CurrentSeverity::Info,
+                CurrentFreshness::Live,
+                format!("src/file{i}.rs"),
+                "Refactor parser.",
+                format!("Agent s2 declared reservation for src/file{i}.rs."),
+            )
+            .with_agent("s2")
+            .with_next_action(format!(
+                "Avoid overlapping edits to src/file{i}.rs unless coordinating with agent s2."
+            ))
+            .with_evidence_kind(CurrentEvidenceKind::DeclaredReservation)
+        })
+        .collect::<Vec<_>>();
+    let package = ContextPackage::from_items(items);
+
+    let text = render_prompt_text(&package, RenderMode::Detailed);
+
+    assert!(text.contains("next: Avoid overlapping edits to any listed or folded file unless coordinating with agent s2"));
+    assert!(!text.contains("same-reservation"), "text `{text}` should not show current-session claim guidance for peer scopes");
+}
+
+#[test]
 fn block_item_shows_evidence_in_brief() {
     let package = ContextPackage::from_items(vec![CurrentItem::new(
         CurrentItemKind::WaitQueue,

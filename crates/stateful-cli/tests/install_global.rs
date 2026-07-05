@@ -380,9 +380,8 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
             .contains("if (!notificationTargetsStreamAgent(notification, stream)) return true;")
     );
     assert!(extension.contains("return false;"));
-    assert!(extension.contains(
-        "deliverReservationNotification(pi, JSON.parse(data.join(\"\\n\")), stream) && id"
-    ));
+    assert!(extension.contains("deliverReservationNotification(pi, parsed, stream) && id"));
+    assert!(extension.contains("deliverScopeOverlapNotification(pi, parsed, stream) && id"));
     assert!(extension.contains("purpose: \" + purpose.trim()"));
     assert!(extension.contains("const purpose = payload.purpose"));
     assert!(extension.contains("typeof purpose === \"string\" && purpose.trim().length > 0"));

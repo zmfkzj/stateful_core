@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub const AGENT_CONTEXT_SCOPE_SOURCE_REF: &str = "AgentContextScope";
 const RESERVATION_GROUP_THRESHOLD: usize = 4;
-const COMPRESSED_RESERVATION_NEXT_ACTION: &str = "Before writing any listed or folded file, keep or acquire exact same-reservation file claims and coordinate to avoid overlapping work.";
+const COMPRESSED_CURRENT_RESERVATION_NEXT_ACTION: &str = "Before writing any listed or folded file, keep or acquire exact same-reservation file claims and coordinate to avoid overlapping work.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderMode {
@@ -440,7 +440,7 @@ fn compress_reservation_groups(items: &[CurrentItem]) -> Vec<CurrentItem> {
         } else {
             format!("{shown}, +{extra} more")
         };
-        collapsed.next_action = Some(COMPRESSED_RESERVATION_NEXT_ACTION.to_string());
+        collapsed.next_action = Some(compressed_reservation_next_action(&collapsed));
         collapsed.source_refs.clear();
         for grouped in indices.iter().map(|&idx| &items[idx]) {
             for source_ref in &grouped.source_refs {
@@ -462,6 +462,21 @@ fn compress_reservation_groups(items: &[CurrentItem]) -> Vec<CurrentItem> {
         out.push(collapsed);
     }
     out
+}
+
+fn compressed_reservation_next_action(item: &CurrentItem) -> String {
+    if is_current_agent_scope_item(item) {
+        return COMPRESSED_CURRENT_RESERVATION_NEXT_ACTION.to_string();
+    }
+    match item.agent_id.as_deref() {
+        Some(agent_id) => format!(
+            "Avoid overlapping edits to any listed or folded file unless coordinating with agent {agent_id}."
+        ),
+        None => {
+            "Avoid overlapping edits to any listed or folded file unless coordinating with the declaring session."
+                .to_string()
+        }
+    }
 }
 
 fn render_brief_summary(output: &mut String, items: &[CurrentItem]) {
