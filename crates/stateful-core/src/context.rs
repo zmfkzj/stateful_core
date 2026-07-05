@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const AGENT_CONTEXT_SCOPE_SOURCE_REF: &str = "AgentContextScope";
+const RESERVATION_GROUP_THRESHOLD: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderMode {
@@ -277,17 +278,17 @@ enum ContextStatus {
 
 pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String {
     let mut output = String::new();
+    let items = compress_reservation_groups(&package.items);
     let max_total = match mode {
         RenderMode::Brief => 8,
         RenderMode::Detailed => 20,
     };
     let mut rendered = 0usize;
     if matches!(mode, RenderMode::Brief) {
-        render_brief_summary(&mut output, &package.items);
+        render_brief_summary(&mut output, &items);
     }
 
-    let active_scope = package
-        .items
+    let active_scope = items
         .iter()
         .filter(|item| {
             item.freshness == CurrentFreshness::Live && is_current_agent_scope_item(item)
@@ -303,8 +304,7 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
         &mut rendered,
     );
 
-    let blocking = package
-        .items
+    let blocking = items
         .iter()
         .filter(|item| {
             item.freshness == CurrentFreshness::Live
@@ -326,8 +326,7 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
         render_required_next_action(&mut output, &blocking);
     }
 
-    let warnings = package
-        .items
+    let warnings = items
         .iter()
         .filter(|item| {
             item.freshness == CurrentFreshness::Live
@@ -345,8 +344,7 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
         &mut rendered,
     );
 
-    let nearby = package
-        .items
+    let nearby = items
         .iter()
         .filter(|item| {
             item.freshness == CurrentFreshness::Live
@@ -368,8 +366,7 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
         RenderMode::Brief => 3,
         RenderMode::Detailed => 10,
     };
-    let stale = package
-        .items
+    let stale = items
         .iter()
         .filter(|item| {
             item.freshness != CurrentFreshness::Live && !is_current_agent_scope_item(item)
@@ -387,6 +384,85 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
     );
 
     output
+}
+
+fn compress_reservation_groups(items: &[CurrentItem]) -> Vec<CurrentItem> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut groups: HashMap<(Option<String>, String), Vec<usize>> = HashMap::new();
+    for (idx, item) in items.iter().enumerate() {
+        if item.kind == CurrentItemKind::Reservation
+            && item.evidence_kind == Some(CurrentEvidenceKind::DeclaredReservation)
+            && item.freshness == CurrentFreshness::Live
+        {
+            groups
+                .entry((item.agent_id.clone(), item.purpose.clone()))
+                .or_default()
+                .push(idx);
+        }
+    }
+
+    let mut collapsed_indices = HashSet::new();
+    let mut representatives: HashMap<usize, &[usize]> = HashMap::new();
+    for indices in groups.values() {
+        if indices.len() >= RESERVATION_GROUP_THRESHOLD {
+            representatives.insert(indices[0], indices.as_slice());
+            collapsed_indices.extend(indices[1..].iter().copied());
+        }
+    }
+
+    let mut out = Vec::with_capacity(items.len());
+    for (idx, item) in items.iter().enumerate() {
+        if collapsed_indices.contains(&idx) {
+            continue;
+        }
+        let Some(indices) = representatives.get(&idx) else {
+            out.push(item.clone());
+            continue;
+        };
+
+        let resources = indices
+            .iter()
+            .map(|&idx| items[idx].resource.as_str())
+            .collect::<Vec<_>>();
+        let shown = resources
+            .iter()
+            .take(3)
+            .copied()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let extra = resources.len().saturating_sub(3);
+
+        let mut collapsed = item.clone();
+        collapsed.resource = if extra == 0 {
+            shown
+        } else {
+            format!("{shown}, +{extra} more")
+        };
+        collapsed.source_refs.clear();
+        for grouped in indices.iter().map(|&idx| &items[idx]) {
+            if collapsed.next_action.is_none() {
+                collapsed.next_action = grouped.next_action.clone();
+            }
+            for source_ref in &grouped.source_refs {
+                if !collapsed.source_refs.contains(source_ref) {
+                    collapsed.source_refs.push(source_ref.clone());
+                }
+            }
+        }
+        let count = resources.len();
+        collapsed.summary = if is_current_agent_scope_item(&collapsed) {
+            format!("This session declared reservation for {count} files")
+        } else {
+            let agent = collapsed
+                .agent_id
+                .clone()
+                .unwrap_or_else(|| "A session".to_string());
+            format!("{agent} declared reservation for {count} files")
+        };
+        out.push(collapsed);
+    }
+    out
 }
 
 fn render_brief_summary(output: &mut String, items: &[CurrentItem]) {
