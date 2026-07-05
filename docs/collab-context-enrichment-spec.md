@@ -47,7 +47,7 @@ Benchmark evidence: the 8 claim conflicts in recent DeNovo runs are all
 ## Architecture
 
 ```
-declare / claim ---overlap check---> notifications(kind=scope_overlap)
+declare ---overlap check---> notifications(kind=scope_overlap)
                                            |
                         SSE 1s poll -------+------- state_notifications_poll
                               |                            |
@@ -62,19 +62,26 @@ context renderer --owner/expiry/wait/next--> prompt + state_context_render
 
 ### Producer (store)
 
-Two triggers:
+Single trigger:
 
-- After `ReservationDeclared` handling (`lib.rs` `apply_event`, near `:2344`):
-  for each new scope, find owners of overlapping **active reservation scopes ∪
-  active claims** belonging to *other* agents; `append_notification` to each.
-- After `acquire_claim_with_observation_inner` success
-  (`crates/stateful-store/src/claims.rs:183`): notify owners of overlapping
-  active reservations held by other agents. (Claim-vs-claim overlap is
-  structurally impossible — already rejected as conflict.)
+- After `ReservationDeclared` handling (`materialize` ReservationDeclared arm,
+  `lib.rs:2344-2381`): for each newly declared scope, find owners of overlapping
+  **active reservation scopes** belonging to *other* agents; `append_notification`
+  to each.
 
-Overlap predicate reuses existing conflict semantics (exact file / directory
-prefix). Reservation scopes parsed from `scopes_json`, matched via
-`ReservationScope::allows_*`.
+The claim-acquire trigger was dropped after analysis: a claim only succeeds when
+no conflicting claim exists, so a successful claim's sole overlapping peer is a
+reservation holder — already notified at the actor's own declare within the 120s
+dedup window. Producing on claim added hot-path cost per edit for redundant
+output. Claim holders are still reached because acquiring a claim requires an
+active reservation by the same agent, which the declare-time reservation scan
+already sees.
+
+Overlap predicate is path-prefix (exact file match, file-within-directory, or
+directory-subtree). Reservation scopes are parsed from `scopes_json` and reduced
+to `(path, is_dir)`; `resource_paths_overlap` compares them. (`ReservationScope::allows_write*`
+is exact-match only and is intentionally not used — awareness needs subtree
+overlap, not write-authority.)
 
 ### Payload
 
@@ -184,7 +191,7 @@ benchmarks after 1–3 show remaining shortfall.
 
 | Target | File | Cases |
 |---|---|---|
-| overlap producer | `crates/stateful-store/tests/event_store.rs` | file/file, dir⊃file, file⊂dir overlap notify; self excluded; 120s dedup; claim-trigger; non-overlap no-notify |
+| overlap producer | `crates/stateful-store/tests/event_store.rs` | file/file, dir⊃file, file⊂dir overlap notify; self excluded; 120s dedup; non-overlap no-notify |
 | routes | `crates/stateful-server/tests/routes.rs` | holder poll sees scope_overlap after declare; SSE event kind; no required_next_action |
 | renderer | `crates/stateful-core/tests/context.rs` | active-scope info shows next; block evidence in brief; 4+ file grouping; queue_position string |
 | marker/fingerprint | `crates/stateful-cli/tests/hook.rs` | first emit; no-change→empty; reservation change→re-emit; claim churn→no-op; legacy marker upgrade |
