@@ -2536,7 +2536,11 @@ fn pre_tool_use_denies_edit_and_write_without_runtime() {
 
 #[test]
 fn omp_write_authorize_records_runtime_lineage_without_commit_policy_input() {
-    let (runtime, rx) = spawn_fake_stateful_server(r#"{"decision":"allow","message":"ok"}"#);
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{"status":"ok","reservation_id":"auto-reservation"}"#,
+        r#"{"status":"ok","claim_state":"acquired","paths":["docs/a.md"],"acquired":1,"already_held":0}"#,
+        r#"{"decision":"allow","message":"ok"}"#,
+    ]);
     let input = serde_json::json!({
         "runtime": "omp",
         "agent_id": "omp-parent",
@@ -2559,14 +2563,23 @@ fn omp_write_authorize_records_runtime_lineage_without_commit_policy_input() {
     )
     .expect("omp pre-tool should parse");
 
+    let declare = request_json_body(&rx.recv().expect("reservation declare should arrive first"));
+    assert_eq!(declare["source"]["event"], "reservation_declare");
+    assert_eq!(
+        declare["payload"]["files_planned"],
+        serde_json::json!(["docs/a.md"])
+    );
+    let claim = request_json_body(&rx.recv().expect("claim acquire should arrive second"));
+    assert_eq!(claim["reservation_id"], "auto-reservation");
+    assert_eq!(claim["paths"], serde_json::json!(["docs/a.md"]));
+    let body = request_json_body(&rx.recv().expect("authorize request should arrive third"));
     assert_eq!(outcome, OmpHookOutcome::Allow);
-    let request = rx.recv().expect("authorize request should arrive");
-    let body = request_json_body(&request);
     assert_eq!(body["source"]["kind"], "hook");
     assert_eq!(body["source"]["event"], "omp_pre_tool_use");
     assert_eq!(body["agent"]["agent_id"], "omp-parent");
     assert_eq!(body["payload"]["action"], "write_file");
     assert_eq!(body["payload"]["path"], "docs/a.md");
+    assert_eq!(body["payload"]["reservation_id"], "auto-reservation");
     assert!(body["payload"].get("commit_id").is_none());
     assert_eq!(body["metadata"]["runtime"], "omp");
     assert_eq!(body["metadata"]["commit_id"], "abc123");
@@ -2574,9 +2587,11 @@ fn omp_write_authorize_records_runtime_lineage_without_commit_policy_input() {
 
 #[test]
 fn omp_write_warns_without_auto_declare() {
-    let (runtime, rx) = spawn_fake_stateful_server(
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{"status":"ok","reservation_id":"auto-reservation"}"#,
+        r#"{"status":"ok","claim_state":"acquired","paths":["docs/a.md"],"acquired":1,"already_held":0}"#,
         r#"{"decision":"warn","reason_code":"missing_reservation","message":"Review context first.","required_next_action":"Reread before writing."}"#,
-    );
+    ]);
     let input = serde_json::json!({
         "runtime": "omp",
         "agent_id": "omp-parent",
@@ -2598,14 +2613,18 @@ fn omp_write_warns_without_auto_declare() {
     )
     .expect("omp pre-tool should parse");
 
+    let declare = request_json_body(&rx.recv().expect("reservation declare should arrive first"));
+    assert_eq!(declare["source"]["event"], "reservation_declare");
+    let claim = request_json_body(&rx.recv().expect("claim acquire should arrive second"));
+    assert_eq!(claim["reservation_id"], "auto-reservation");
+    assert_eq!(claim["paths"], serde_json::json!(["docs/a.md"]));
     assert_eq!(
         outcome,
         OmpHookOutcome::Warn {
             message: "stateful warning: Review context first.".to_string()
         }
     );
-    let request = rx.recv().expect("authorize request should arrive");
-    let body = request_json_body(&request);
+    let body = request_json_body(&rx.recv().expect("authorize request should arrive third"));
     assert_eq!(body["payload"]["action"], "write_file");
     assert_eq!(body["payload"]["path"], "docs/a.md");
     assert!(
@@ -2960,7 +2979,11 @@ fn run_hook_omp_pre_tool_use_prints_extension_decision() {
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(repo_root.join("docs")).expect("repo docs should create");
     enable_test_repo(&paths, &repo_root);
-    let (runtime, rx) = spawn_fake_stateful_server(r#"{"decision":"allow","message":"ok"}"#);
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{"status":"ok","reservation_id":"auto-reservation"}"#,
+        r#"{"status":"ok","claim_state":"acquired","paths":["docs/a.md"],"acquired":1,"already_held":0}"#,
+        r#"{"decision":"allow","message":"ok"}"#,
+    ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = serde_json::json!({
@@ -2982,7 +3005,17 @@ fn run_hook_omp_pre_tool_use_prints_extension_decision() {
     let stdout: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("OMP hook should print JSON");
     assert_eq!(stdout["decision"], "allow");
-    let body = request_json_body(&rx.recv().expect("authorize request should arrive"));
+    let declare = request_json_body(&rx.recv().expect("reservation declare should arrive first"));
+    assert_eq!(declare["source"]["event"], "reservation_declare");
+    assert_eq!(
+        declare["payload"]["files_planned"],
+        serde_json::json!(["docs/a.md"])
+    );
+    let claim = request_json_body(&rx.recv().expect("claim acquire should arrive second"));
+    assert_eq!(claim["agent_id"], "omp-parent");
+    assert_eq!(claim["reservation_id"], "auto-reservation");
+    assert_eq!(claim["paths"], serde_json::json!(["docs/a.md"]));
+    let body = request_json_body(&rx.recv().expect("authorize request should arrive third"));
     assert_eq!(body["agent"]["agent_id"], "omp-parent");
 }
 
@@ -3001,6 +3034,8 @@ fn run_hook_omp_env_runtime_derives_workspace_id_from_enabled_repo() {
         .expect("repo root should canonicalize");
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
         r#"{"status":"ok"}"#,
+        r#"{"status":"ok","reservation_id":"auto-reservation"}"#,
+        r#"{"status":"ok","claim_state":"acquired","paths":["docs/a.md"],"acquired":1,"already_held":0}"#,
         r#"{"decision":"allow","message":"ok"}"#,
     ]);
     let extra_env = [
@@ -3068,7 +3103,17 @@ fn run_hook_omp_env_runtime_derives_workspace_id_from_enabled_repo() {
     let stdout: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("OMP hook should print JSON");
     assert_eq!(stdout["decision"], "allow");
-    let authorize = request_json_body(&rx.recv().expect("authorize request should arrive"));
+    let declare = request_json_body(&rx.recv().expect("reservation declare should arrive first"));
+    assert_eq!(declare["source"]["event"], "reservation_declare");
+    assert_eq!(
+        declare["payload"]["files_planned"],
+        serde_json::json!(["docs/a.md"])
+    );
+    let claim = request_json_body(&rx.recv().expect("claim acquire should arrive second"));
+    assert_eq!(claim["agent_id"], "omp-parent");
+    assert_eq!(claim["reservation_id"], "auto-reservation");
+    assert_eq!(claim["paths"], serde_json::json!(["docs/a.md"]));
+    let authorize = request_json_body(&rx.recv().expect("authorize request should arrive third"));
     assert_eq!(authorize["agent"]["agent_id"], "omp-parent");
     assert_eq!(
         authorize["workspace"]["workspace_id"],
@@ -3083,7 +3128,11 @@ fn run_hook_omp_env_runtime_derives_workspace_id_from_enabled_repo() {
 
 #[test]
 fn omp_edit_extracts_hashline_file_targets() {
-    let (runtime, rx) = spawn_fake_stateful_server(r#"{"decision":"allow","message":"ok"}"#);
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        r#"{"status":"ok","reservation_id":"auto-reservation"}"#,
+        r#"{"status":"ok","claim_state":"acquired","paths":["docs/a.md"],"acquired":1,"already_held":0}"#,
+        r#"{"decision":"allow","message":"ok"}"#,
+    ]);
     let input = serde_json::json!({
         "agent_id": "omp-parent",
         "workspace_id": runtime.workspace_id,
@@ -3103,7 +3152,18 @@ fn omp_edit_extracts_hashline_file_targets() {
     .expect("omp edit should authorize");
 
     assert_eq!(outcome, OmpHookOutcome::Allow);
-    let body = request_json_body(&rx.recv().expect("authorize request should arrive"));
+    let declare = request_json_body(&rx.recv().expect("reservation declare should arrive first"));
+    assert_eq!(declare["source"]["event"], "reservation_declare");
+    assert_eq!(
+        declare["payload"]["files_planned"],
+        serde_json::json!(["docs/a.md"])
+    );
+    let claim = request_json_body(&rx.recv().expect("claim acquire should arrive second"));
+    assert_eq!(claim["agent_id"], "omp-parent");
+    assert_eq!(claim["reservation_id"], "auto-reservation");
+    assert_eq!(claim["paths"], serde_json::json!(["docs/a.md"]));
+    let body = request_json_body(&rx.recv().expect("authorize request should arrive third"));
+    assert_eq!(body["payload"]["reservation_id"], "auto-reservation");
     assert_eq!(body["payload"]["action"], "write_file");
     assert_eq!(body["payload"]["path"], "docs/a.md");
 }
@@ -3117,7 +3177,11 @@ fn omp_edit_authorize_includes_lazy_queue_metadata_when_scope_exists() {
     fs::write(repo_root.join("docs/a.md"), "old\n").expect("target file should write");
 
     let (runtime, rx) = spawn_fake_stateful_server_sequence_with_current(
-        vec![r#"{"decision":"allow","message":"ok"}"#],
+        vec![
+            r#"{"status":"ok","reservation_id":"auto-reservation"}"#,
+            r#"{"status":"ok","claim_state":"acquired","paths":["docs/a.md"],"acquired":1,"already_held":0}"#,
+            r#"{"decision":"allow","message":"ok"}"#,
+        ],
         Some(
             r#"{
                 "status": "ok",
@@ -3151,7 +3215,18 @@ fn omp_edit_authorize_includes_lazy_queue_metadata_when_scope_exists() {
     .expect("omp edit should authorize");
 
     assert_eq!(outcome, OmpHookOutcome::Allow);
-    let body = request_json_body(&rx.recv().expect("authorize request should arrive"));
+    let declare = request_json_body(&rx.recv().expect("reservation declare should arrive first"));
+    assert_eq!(declare["source"]["event"], "reservation_declare");
+    assert_eq!(
+        declare["payload"]["files_planned"],
+        serde_json::json!(["docs/a.md"])
+    );
+    let claim = request_json_body(&rx.recv().expect("claim acquire should arrive second"));
+    assert_eq!(claim["agent_id"], "omp-parent");
+    assert_eq!(claim["reservation_id"], "auto-reservation");
+    assert_eq!(claim["paths"], serde_json::json!(["docs/a.md"]));
+    let body = request_json_body(&rx.recv().expect("authorize request should arrive third"));
+    assert_eq!(body["payload"]["reservation_id"], "auto-reservation");
     assert_eq!(body["payload"]["action"], "write_file");
     assert_eq!(body["payload"]["path"], "docs/a.md");
     assert_eq!(body["payload"]["queue_on_conflict"], true);
@@ -3166,14 +3241,8 @@ fn omp_edit_authorize_includes_lazy_queue_metadata_when_scope_exists() {
 }
 
 #[test]
-fn omp_write_pre_tool_declares_missing_file_reservation_and_retries_authorize() {
+fn omp_write_pre_tool_predeclares_exact_file_reservation_before_authorize() {
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
-        r#"{
-            "decision": "deny",
-            "message": "Supported writes require active file or directory reservation.",
-            "reason_code": "missing_reservation",
-            "required_next_action": "Call state.reservation.declare with file scope before writing."
-        }"#,
         r#"{"status":"ok","reservation_id":"auto-reservation"}"#,
         r#"{"status":"ok","claim_state":"acquired","paths":["docs/a.md"],"acquired":1,"already_held":0}"#,
         r#"{"decision":"allow","message":"ok"}"#,
@@ -3194,38 +3263,27 @@ fn omp_write_pre_tool_declares_missing_file_reservation_and_retries_authorize() 
         Some(Path::new("/repo")),
         Some(Path::new("/repo")),
     )
-    .expect("omp write should auto-declare missing reservation before blocking");
+    .expect("omp write hook should run");
 
-    assert_eq!(outcome, OmpHookOutcome::Allow);
-    let first_authorize = request_json_body(&rx.recv().expect("first authorize should arrive"));
-    assert_eq!(first_authorize["payload"]["action"], "write_file");
-    assert_eq!(first_authorize["payload"]["path"], "docs/a.md");
-    let declare = request_json_body(&rx.recv().expect("reservation declare should arrive"));
+    let declare = request_json_body(&rx.recv().expect("reservation declare should arrive first"));
     assert_eq!(declare["source"]["event"], "reservation_declare");
     assert_eq!(
         declare["payload"]["files_planned"],
         serde_json::json!(["docs/a.md"])
     );
-    let claim = request_json_body(&rx.recv().expect("claim acquire should arrive"));
+    let claim = request_json_body(&rx.recv().expect("claim acquire should arrive second"));
     assert_eq!(claim["agent_id"], "omp-parent");
     assert_eq!(claim["reservation_id"], "auto-reservation");
     assert_eq!(claim["paths"], serde_json::json!(["docs/a.md"]));
-    let retry_authorize = request_json_body(&rx.recv().expect("retry authorize should arrive"));
-    assert_eq!(
-        retry_authorize["payload"]["reservation_id"],
-        "auto-reservation"
-    );
-    assert_eq!(retry_authorize["payload"]["path"], "docs/a.md");
+    let authorize = request_json_body(&rx.recv().expect("authorize should arrive third"));
+    assert_eq!(authorize["payload"]["reservation_id"], "auto-reservation");
+    assert_eq!(authorize["payload"]["path"], "docs/a.md");
+    assert_eq!(outcome, OmpHookOutcome::Allow);
 }
 
 #[test]
 fn omp_write_auto_declared_missing_claim_reacquires_and_retries_authorize() {
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
-        r#"{
-            "decision": "deny",
-            "message": "Supported writes require active file or directory reservation.",
-            "reason_code": "missing_reservation"
-        }"#,
         r#"{"status":"ok","reservation_id":"auto-reservation"}"#,
         r#"{"status":"ok","claim_state":"acquired","paths":["docs/a.md"],"acquired":1,"already_held":0}"#,
         r#"{
@@ -3255,16 +3313,32 @@ fn omp_write_auto_declared_missing_claim_reacquires_and_retries_authorize() {
     .expect("omp write should reacquire missing claim before allowing");
 
     assert_eq!(outcome, OmpHookOutcome::Allow);
-    let _first_authorize = rx.recv().expect("first authorize should arrive");
-    let _declare = rx.recv().expect("reservation declare should arrive");
-    let first_claim = request_json_body(&rx.recv().expect("first claim acquire should arrive"));
+    let declare = request_json_body(&rx.recv().expect("reservation declare should arrive first"));
+    assert_eq!(declare["source"]["event"], "reservation_declare");
+    assert_eq!(
+        declare["payload"]["files_planned"],
+        serde_json::json!(["docs/a.md"])
+    );
+    let first_claim =
+        request_json_body(&rx.recv().expect("first claim acquire should arrive second"));
     assert_eq!(first_claim["reservation_id"], "auto-reservation");
     assert_eq!(first_claim["paths"], serde_json::json!(["docs/a.md"]));
-    let _missing_claim_authorize = rx.recv().expect("missing-claim authorize should arrive");
-    let second_claim = request_json_body(&rx.recv().expect("second claim acquire should arrive"));
+    let missing_claim_authorize = request_json_body(
+        &rx.recv()
+            .expect("missing-claim authorize should arrive third"),
+    );
+    assert_eq!(
+        missing_claim_authorize["payload"]["reservation_id"],
+        "auto-reservation"
+    );
+    let second_claim = request_json_body(
+        &rx.recv()
+            .expect("second claim acquire should arrive fourth"),
+    );
     assert_eq!(second_claim["reservation_id"], "auto-reservation");
     assert_eq!(second_claim["paths"], serde_json::json!(["docs/a.md"]));
-    let final_authorize = request_json_body(&rx.recv().expect("final authorize should arrive"));
+    let final_authorize =
+        request_json_body(&rx.recv().expect("final authorize should arrive fifth"));
     assert_eq!(
         final_authorize["payload"]["reservation_id"],
         "auto-reservation"
@@ -3311,11 +3385,6 @@ fn omp_write_uses_tool_input_reservation_when_top_level_reservation_is_blank() {
 #[test]
 fn omp_write_releases_auto_claim_when_retry_authorization_blocks() {
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
-        r#"{
-            "decision": "deny",
-            "message": "Supported writes require active file or directory reservation.",
-            "reason_code": "missing_reservation"
-        }"#,
         r#"{"status":"ok","reservation_id":"auto-reservation"}"#,
         r#"{"status":"ok","claim_state":"acquired","paths":["docs/a.md"],"acquired":1,"already_held":0}"#,
         r#"{
@@ -3344,10 +3413,17 @@ fn omp_write_releases_auto_claim_when_retry_authorization_blocks() {
     .expect("omp write should parse");
 
     assert!(matches!(outcome, OmpHookOutcome::Block { .. }));
-    let _first_authorize = rx.recv().expect("first authorize should arrive");
-    let _declare = rx.recv().expect("reservation declare should arrive");
-    let _claim = rx.recv().expect("claim acquire should arrive");
-    let _retry_authorize = rx.recv().expect("retry authorize should arrive");
+    let declare = request_json_body(&rx.recv().expect("reservation declare should arrive first"));
+    assert_eq!(declare["source"]["event"], "reservation_declare");
+    let claim = request_json_body(&rx.recv().expect("claim acquire should arrive second"));
+    assert_eq!(claim["reservation_id"], "auto-reservation");
+    assert_eq!(claim["paths"], serde_json::json!(["docs/a.md"]));
+    let retry_authorize =
+        request_json_body(&rx.recv().expect("retry authorize should arrive third"));
+    assert_eq!(
+        retry_authorize["payload"]["reservation_id"],
+        "auto-reservation"
+    );
     let release = request_json_body(
         &rx.recv_timeout(Duration::from_secs(1))
             .expect("claim release should arrive"),
@@ -3360,11 +3436,6 @@ fn omp_write_releases_auto_claim_when_retry_authorization_blocks() {
 #[test]
 fn omp_write_stale_observation_after_auto_claim_blocks_without_releasing_claim() {
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
-        r#"{
-            "decision": "deny",
-            "message": "Supported writes require active file or directory reservation.",
-            "reason_code": "missing_reservation"
-        }"#,
         r#"{"status":"ok","reservation_id":"auto-reservation"}"#,
         r#"{"status":"ok","claim_state":"acquired","paths":["docs/a.md"],"acquired":1,"already_held":0}"#,
         r#"{
@@ -3372,7 +3443,6 @@ fn omp_write_stale_observation_after_auto_claim_blocks_without_releasing_claim()
             "message": "Target existence changed since the supplied base observation.",
             "reason_code": "stale_target_observation"
         }"#,
-        r#"{"status":"ok"}"#,
     ]);
     let input = serde_json::json!({
         "agent_id": "omp-parent",
@@ -3393,10 +3463,17 @@ fn omp_write_stale_observation_after_auto_claim_blocks_without_releasing_claim()
     .expect("omp write should parse");
 
     assert!(matches!(outcome, OmpHookOutcome::Block { .. }));
-    let _first_authorize = rx.recv().expect("first authorize should arrive");
-    let _declare = rx.recv().expect("reservation declare should arrive");
-    let _claim = rx.recv().expect("claim acquire should arrive");
-    let _retry_authorize = rx.recv().expect("retry authorize should arrive");
+    let declare = request_json_body(&rx.recv().expect("reservation declare should arrive first"));
+    assert_eq!(declare["source"]["event"], "reservation_declare");
+    let claim = request_json_body(&rx.recv().expect("claim acquire should arrive second"));
+    assert_eq!(claim["reservation_id"], "auto-reservation");
+    assert_eq!(claim["paths"], serde_json::json!(["docs/a.md"]));
+    let retry_authorize =
+        request_json_body(&rx.recv().expect("retry authorize should arrive third"));
+    assert_eq!(
+        retry_authorize["payload"]["reservation_id"],
+        "auto-reservation"
+    );
     assert!(
         rx.recv_timeout(Duration::from_millis(100)).is_err(),
         "stale observation should keep the auto-claim so reread/retry can succeed"
@@ -5667,6 +5744,8 @@ fn omp_stateful_lifecycle_posts_expected_server_requests() {
     enable_test_repo(&paths, &repo_root);
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
         r#"{"status":"ok"}"#,
+        r#"{"status":"ok","reservation_id":"auto-reservation"}"#,
+        r#"{"status":"ok","claim_state":"acquired","paths":["docs/a.md"],"acquired":1,"already_held":0}"#,
         r#"{"decision":"allow","message":"ok"}"#,
         r#"{"status":"ok"}"#,
         r#"{"status":"ok"}"#,
@@ -5734,7 +5813,21 @@ fn omp_stateful_lifecycle_posts_expected_server_requests() {
     let decision: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("OMP pre-tool output should be JSON");
     assert_eq!(decision["decision"], "allow");
-    let authorize = rx.recv().expect("authorize request should arrive");
+    let declare = rx.recv().expect("reservation declare should arrive first");
+    assert!(declare.contains("POST /v1/reservation/declare HTTP/1.1"));
+    let declare_body = request_json_body(&declare);
+    assert_eq!(declare_body["source"]["event"], "reservation_declare");
+    assert_eq!(
+        declare_body["payload"]["files_planned"],
+        serde_json::json!(["docs/a.md"])
+    );
+    let claim = rx.recv().expect("claim acquire should arrive second");
+    assert!(claim.contains("POST /v1/claim/acquire HTTP/1.1"));
+    let claim_body = request_json_body(&claim);
+    assert_eq!(claim_body["agent_id"], "omp-parent");
+    assert_eq!(claim_body["reservation_id"], "auto-reservation");
+    assert_eq!(claim_body["paths"], serde_json::json!(["docs/a.md"]));
+    let authorize = rx.recv().expect("authorize request should arrive third");
     assert!(authorize.contains("POST /v1/authorize HTTP/1.1"));
     let authorize_body = request_json_body(&authorize);
     assert_eq!(authorize_body["agent"]["agent_id"], "omp-parent");

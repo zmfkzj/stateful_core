@@ -29,11 +29,11 @@ The prototype supports user-level installation with repo allowlist gating.
 `--agent omp --profile <name> --yes` configures `~/.omp/profiles/<name>/agent`, with stateful
 hooks, native Stateful tool injection, built-in Bash preflight for strict
 trusted `stateful sandbox run ...` and `stateful sandbox process find ...`
-commands, OMP native `edit`/`write` pre-tool recovery that can auto-declare
-exact file scope, acquire or reacquire same-reservation claims for the same
-active reservation, keep auto-claims across `stale_target_observation`
-reread/retry blocks, and retry authorization when the only denial is
-missing reservation/scope without an explicit reservation id,
+commands, and OMP native `edit`/`write` pre-tool handling that predeclares
+exact simple repo file scope and acquires same-reservation claims before first
+authorization when no explicit reservation id is supplied, can reacquire
+same-reservation claims for the same active reservation, keeps auto-claims
+across `stale_target_observation` reread/retry blocks, and retries authorization as needed,
 `lazy_edit_resume` for strict replay of queued/conflicting line-based OMP edits,
 `lazy_write_resume` for queued full OMP writes, both with captured-wait
 notification/resume lookup before claiming and re-authorization, stale-target
@@ -202,7 +202,7 @@ server result. For OMP, the bridge uses that `ctx.sessionManager`-derived
 registers lazy resume
 helpers, not the full `state_*` tool surface, so OMP agents must use the active
 tool list: use `state_*` tools only when exposed; otherwise rely on native
-`edit`/`write` auto-declare, lazy resume, or a write boundary with an existing
+`edit`/`write` predeclare/claim, lazy resume, or a write boundary with an existing
 `reservation_id`. The single adapter-only exception is duplicate cleanup:
 `state_claim_release` maps a server `404 claim_not_found` into a successful
 no-op result when the same-agent claim is already gone, while the direct HTTP
@@ -255,10 +255,10 @@ actions affect multiple paths and need the target all-or-nothing scheduler.
 
 Native edit tools such as Codex `apply_patch`, `Edit`, and `Write` or OMP
 `edit` and `write` expose targets to hooks. OMP `edit` and `write` use
-auto-declare/claim as the default simple-write path: if `/v1/authorize` denies
-only because reservation/scope is missing and the tool call did not supply an
-explicit reservation id, the extension declares the exact file scope, acquires
-same-reservation claims, and retries authorization. Other native edit flows
+predeclare/claim as the default simple-write path: if the tool call has no
+explicit reservation id and exactly one simple tool-visible repo file target, the
+extension declares the exact file scope and acquires same-reservation claims
+before the first `/v1/authorize` call. Other native edit flows
 require task-level reservation covering the target and an active
 same-reservation file claim before hooks call `/v1/authorize` with the
 operation-specific action, including `write_file`, `delete_file`, and

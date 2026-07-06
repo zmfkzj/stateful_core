@@ -158,9 +158,9 @@ boundary.
 V1 only authorizes writes through tool paths with reliable target extraction.
 Repo file edits use hook-visible native edit tools such as Codex `apply_patch`,
 `Edit`, and `Write`, or OMP `edit` and `write`. OMP `edit` and `write`
-auto-declare/claim the exact tool-visible file scope for the default simple-write
-path when no explicit reservation id is supplied and the only denial is missing
-reservation/scope; other native edit paths require task-level reservation and a
+predeclare/claim the exact tool-visible file scope before first authorization
+for the default simple-write path when no explicit reservation id is supplied;
+other native edit paths require task-level reservation and a
 successful same-reservation file claim. The claim is released after the completed
 write transaction. Bash command text alone is never a repo-internal
 authorization source. Runtime tool names are classified by their leaf segment,

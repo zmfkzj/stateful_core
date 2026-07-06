@@ -548,6 +548,28 @@ fn authorize_omp_targets(
     let mut auto_claim_retried = false;
     let mut auto_claimed_paths = BTreeSet::new();
     let mut warnings = Vec::new();
+    if reservation_id.is_none() && should_predeclare_omp_tool_reservation(input, &targets) {
+        let first_target = targets
+            .first()
+            .expect("normalized targets should be non-empty");
+        let purpose = omp_hook_authorize_purpose(input, runtime, first_target, &workspace_id)
+            .unwrap_or_else(|| format!("Queue OMP {} for {}.", input.tool_name, first_target.path));
+        reservation_id = Some(
+            match declare_and_claim_omp_pre_tool_reservation(
+                input,
+                runtime,
+                identity,
+                &workspace_id,
+                &targets,
+                &purpose,
+            ) {
+                Ok(reservation_id) => reservation_id,
+                Err(outcome) => return Ok(outcome),
+            },
+        );
+        auto_claimed_paths = targets.iter().map(|target| target.path.clone()).collect();
+        auto_declared = true;
+    }
 
     'authorize: loop {
         for target in &targets {
@@ -851,6 +873,18 @@ fn post_omp_authorize_target(
     body["metadata"] = input.audit_metadata();
 
     post_authorize_decision(runtime, &body).map_err(|reason| OmpHookOutcome::Block { reason })
+}
+
+fn should_predeclare_omp_tool_reservation(
+    input: &OmpPreToolUseInput,
+    targets: &[PatchTarget],
+) -> bool {
+    matches!(
+        runtime_tool_name_leaf(&input.tool_name),
+        tool_name if tool_name.eq_ignore_ascii_case("edit")
+            || tool_name.eq_ignore_ascii_case("write")
+    ) && !targets.is_empty()
+        && targets.iter().all(|target| target.action == "write_file")
 }
 
 fn should_auto_declare_omp_tool_reservation(

@@ -50,9 +50,9 @@ source and explored a constrained read-only hook path. The current
 implementation supersedes that target: Codex raw Bash is denied with sandbox
 guidance, and OMP raw Bash is blocked unless it uses the trusted wrapper.
 Repo-external shell work must use `stateful sandbox run --fs external --purpose ...`.
-OMP native `edit`/`write` can auto-declare/claim the exact tool-visible file
-scope for the default simple-write path when no explicit reservation id is
-supplied and the only denial is missing reservation/scope. Other repo file edit
+OMP native `edit`/`write` predeclare/claim the exact tool-visible file scope
+before first authorization for the default simple-write path when no explicit
+reservation id is supplied. Other repo file edit
 authorization starts with native edit tools such as Codex `apply_patch` or Edit
 after exact reservation and a successful same-reservation file claim, where target paths can
 be checked before writing, or with `--fs write-targets` wrapper calls that

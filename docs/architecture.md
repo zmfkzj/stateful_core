@@ -321,7 +321,8 @@ These responsibilities apply to Codex hooks unless noted. OMP supports
   `--fs github-pr --network enabled`, and external operations use `--fs external`
   through the trusted stateful command path. A purpose and command are sufficient for
   read-only/no-declared-scope external operations; repo-relative exact file scopes
-  can auto-declare/claim, while repo-relative external directories still require
+  can auto-declare/claim after missing-reservation/scope denial, while
+  repo-relative external directories still require
   explicit reservation and same-reservation claims. On macOS, external runs
   allow `trustd` and DirectoryService Mach lookups for TLS certificate
   verification by Go tools.
@@ -398,9 +399,9 @@ classification, so `functions.bash` is Bash,
 
 - Native edit tools such as Codex `apply_patch`, `Edit`, and `Write` or OMP
   `edit` and `write`: enforce by inspecting hook-exposed targets. OMP `edit`
-  and `write` auto-declare/claim the exact tool-visible file scope for the
-  default simple-write path when no explicit reservation id is supplied and the
-  only denial is missing reservation/scope. Other native edit flows require the
+  and `write` predeclare/claim the exact tool-visible file scope before first
+  authorization for the default simple-write path when no explicit reservation
+  id is supplied. Other native edit flows require the
   target to be covered by a task-level reservation and active same-reservation
   claim. The completed write transaction releases the claim that authorized it.
 - Command execution: Codex raw Bash is denied with sandbox guidance. OMP built-in

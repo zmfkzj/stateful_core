@@ -168,7 +168,7 @@ stateful codex
 
 Install OMP integration when you want the isolated OMP `stateful` profile
 (or another profile selected with `--profile <name>`), stateful hooks, native Stateful tool injection, built-in Bash preflight, OMP
-edit/write auto-declare/claim for missing scope, lazy resume fallbacks, and
+edit/write predeclare/claim for simple repo files, lazy resume fallbacks, and
 `skills/stateful-command-policy/` (`SKILL.md`, `omp-tools.md`,
 `sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`):
 
@@ -227,10 +227,10 @@ The VS Code extension is an advisory save gate: it warns on server-reported
 human save conflicts and lets the human decide.
 
 Inside an active Codex or OMP session, use the active Stateful coordination tools
-directly instead of shelling out to `stateful reservation declare`. Simple OMP
-native `edit`/`write` calls can rely on auto-declare/claim when no explicit
-reservation id is supplied and the only denial is missing reservation/scope. The
-explicit multi-resource write flow remains:
+directly instead of shelling out to `stateful reservation declare`. Simple
+repo-internal OMP native `edit`/`write` calls with no explicit `reservation_id`
+predeclare the exact tool-visible file scope and acquire same-reservation claims
+before the first authorization. The explicit multi-resource write flow remains:
 
 ```text
 read current state -> declare task reservation with known file set -> keep reservation_id -> acquire exact same-reservation claims for reserved paths -> reread targets -> write with the same reservation_id
@@ -243,10 +243,11 @@ can be expanded when the task discovers another target. Claim acquisition uses
 reservation in one request. Each resulting claim still owns one exact file or
 directory resource and expires when the agent stops being fresh.
 
-For native OMP `edit` and `write`, this fallback is the default simple-write
-path: when no explicit reservation id is supplied and the only denial is missing
-reservation/scope, the extension declares the exact file scope, acquires
-same-reservation claims, and retries authorization. When another active claim
+For native OMP `edit` and `write`, this predeclare-first behavior is the default
+simple-write path: when no explicit reservation id is supplied and the
+tool-visible target is one simple repo file, the extension declares exact file
+scope and acquires same-reservation claims before the first authorization.
+When another active claim
 blocks a write, the writer can queue for that resource. When the resource is
 released or expires, the server reserves it for the next eligible waiter and
 stores a resume notification with a monotonic sequence for that target agent in
@@ -281,7 +282,7 @@ inside enabled Codex or OMP sessions when a stateful-native path exists.
 
 | Need | Use |
 | --- | --- |
-| Simple OMP repo file edit | Native `edit`/`write`; auto-declare/claim handles missing reservation/scope when no explicit reservation id is supplied |
+| Simple OMP repo file edit | Native `edit`/`write`; predeclare/claim exact simple file target before first authorization when no explicit reservation id is supplied |
 | Other repo file edit | Native edit/write tools after task-level reservation and exact same-reservation file claim |
 | Build or test command | `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>` |
 | Command-shaped repo write | `stateful sandbox run --fs write-targets --reservation-id <reservation_id> --write-target <file> --command <cmd>` |
@@ -309,9 +310,8 @@ scoped Stateful-owned OMP grant prompt by default through
 `stateful.autoApprove: true`, while sandbox scope validation, hooks,
 reservation/claim checks, and grant limits still apply. Set
 `stateful.autoApprove: false` to require the prompt. Repo-internal native OMP
-`edit` and `write` use auto-declare/claim as the default simple-write path when
-no explicit reservation id is supplied and
-the only denial is missing reservation/scope. Use `lazy_edit_resume` for
+`edit` and `write` predeclare/claim exact simple file targets before first
+authorization when no explicit reservation id is supplied. Use `lazy_edit_resume` for
 queued/conflicting line-based OMP `edit` patches and `lazy_write_resume` for
 captured full OMP `write` replay; captured wait ids are checked through resume
 notifications before claiming and re-authorization, while generated no-wait ids

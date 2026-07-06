@@ -377,9 +377,10 @@ the authorizing reservation block writes. A blocked writer can queue with
 resume payloads carry the stored request purpose, and the agent with the
 claimable reservation must reread the target.
 
-OMP native `edit` and `write` use auto-declare/claim as the default simple-write
-path when no explicit reservation id is supplied and the only denial is missing
-reservation/scope. Other repo file edits should use native edit tools with
+OMP native `edit` and `write` use predeclare/claim as the default simple-write
+path, declaring exact simple file scope before first authorization when no
+explicit reservation id is supplied. Other repo file edits should use native edit
+tools with
 hook-visible targets after task-level reservation covers the target and a
 successful same-reservation file claim. Hooks extract the native tool target,
 call `/v1/authorize` with the operation-specific action and `reservation_id`,
@@ -390,7 +391,7 @@ Choose the path by operation shape:
 
 | Operation | Use |
 | --- | --- |
-| Simple OMP repo file edit/write | Native `edit`/`write`; auto-declare/claim handles missing reservation/scope when no explicit `reservation_id` is supplied. |
+| Simple OMP repo file edit/write | Native `edit`/`write`; predeclare/claim exact simple file target before first authorization when no explicit `reservation_id` is supplied. |
 | Planned repo edit/delete/move or multi-file work | Declare a reservation, acquire exact same-reservation claims, then use native edit/write with that `reservation_id`. |
 | Script or generator mutates repo files | `stateful sandbox run --fs write-targets --reservation-id <reservation_id>` with exact `--write-target` / `--create-target` flags. |
 | Build, test, or package command | `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`. |
@@ -500,8 +501,8 @@ next action instead of rendering ambient context.
 The shipped OMP extension registers `lazy_edit_resume`, `lazy_write_resume`, and
 `lazy_bash_resume`; it does not register the full `state_*` coordination tool
 surface. OMP agents use the active tool list: call `state_*` tools only when they
-are exposed, otherwise rely on native `edit`/`write` auto-declare, lazy resume,
-or a write boundary with an existing `reservation_id`.
+are exposed, otherwise rely on native `edit`/`write` predeclare/claim, lazy
+resume, or a write boundary with an existing `reservation_id`.
 
 `state_claim_acquire` takes `reservation_id` and `paths: string[]`; each path
 must match active exact file or directory reservation scope under that
@@ -511,7 +512,7 @@ server requests with `path` are still accepted for compatibility.
 `state_claim_release` remains single-resource and takes `path: string`.
 
 `state_file_write` / `state.file.write` and `state_bash_write` /
-`state.bash.write` were removed. Use OMP native `edit`/`write` auto-declare/claim
+`state.bash.write` were removed. Use OMP native `edit`/`write` predeclare/claim
 for the default simple-write path. Other file edits require hook-visible native
 edit targets after task-level reservation and exact same-reservation claim.
 Command-shaped writes require `stateful sandbox run --fs write-targets

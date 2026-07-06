@@ -63,8 +63,8 @@ stateful sandbox run --fs build --network enabled --write-dir test-run --command
 Hook-mediated Bash must be a single strict invocation of the trusted absolute
 `stateful` binary running `<absolute-stateful-binary> sandbox run ... --command
 <cmd>`. The build profile writes disposable artifacts under
-`/tmp/stateful/<session>/<scratch-purpose>/`; OMP native `edit`/`write` can
-auto-declare/claim exact tool-visible file scope for the default simple-write
+`/tmp/stateful/<session>/<scratch-purpose>/`; OMP native `edit`/`write`
+predeclare/claim exact tool-visible file scope for the default simple-write
 path. Other source-tree edits use native edit tools with hook-visible targets,
 such as Codex `apply_patch` or Edit, after exact reservation declaration and a
 successful same-reservation file claim. The completed write transaction releases
@@ -159,9 +159,9 @@ Broad filesystem watcher inference remains out of scope for this pass.
 
 ## Repo File Edits
 
-OMP native `edit`/`write` can auto-declare/claim exact tool-visible file scope
-for the default simple-write path when no explicit reservation id is supplied and
-the only denial is missing reservation/scope. Other repo file edits should use
+OMP native `edit`/`write` predeclare/claim exact tool-visible file scope before
+first authorization for the default simple-write path when no explicit
+reservation id is supplied. Other repo file edits should use
 native edit tools with hook-visible targets, such as Codex `apply_patch` or
 Edit, after task-level reservation covers the target and a successful
 same-reservation file claim. Hooks normalize hook-exposed targets, call the same

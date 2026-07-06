@@ -6,10 +6,10 @@ Denials are the API. Read the denial, change the authorization path, and do not 
 
 If the denial says `missing_reservation`, `missing_claim`, `Target is outside active reservation scope`, or asks for exact scope:
 
-1. For OMP native `edit`/`write` without an explicit `reservation_id`, allow the extension to auto-declare the exact tool-visible file scope, acquire same-reservation claims, and retry authorization when this is the only denial.
+1. Simple repo-internal OMP native `edit`/`write` without an explicit `reservation_id` predeclare/claim exact tool-visible file scope before first authorization; if they only need same-reservation claim reacquire, retry through the same native boundary.
 2. Otherwise re-read the target if it exists.
 3. If the active tool list exposes them, add the missing exact file or directory scopes to the task reservation with `state_reservation_declare(purpose=<task purpose>, files_planned=[...])`, then acquire exact same-reservation claims with `state_claim_acquire(reservation_id=<reservation_id>, paths=[...])`.
-4. If those tools are absent, do not invent them. Use OMP native `edit`/`write` auto-declare, external-profile exact repo file target auto-declare, lazy resume, or an already-authorized `reservation_id` write boundary; otherwise report that the command-shaped write cannot be authorized in this tool context.
+4. If those tools are absent, do not invent them. Use OMP native `edit`/`write` predeclare/claim for simple repo files, external-profile exact repo file target auto-declare, lazy resume, or an already-authorized `reservation_id` write boundary; otherwise report that the command-shaped write cannot be authorized in this tool context.
 5. Use native edit tools for repo edits, `sandbox run --fs external` with exact repo file targets for external-to-repo imports, or `sandbox run --fs write-targets` / OMP built-in Bash with a strict trusted `stateful sandbox run --fs write-targets ...` command and matching targets for other command-shaped writes.
 
 Use file claims for file writes, deletes, renames, and moves. Directory claims only authorize directory writes.
@@ -52,7 +52,7 @@ For disposable repo `tmp/` directory claim conflicts, prefer a different session
 If raw Bash or eval-tool execution is blocked:
 
 - Use native Stateful coordination tools and native inspection first.
-- Use OMP native `edit`/`write` auto-declare/claim for the default simple-write path; use reservation and claims for other repo edits.
+- Use OMP native `edit`/`write` predeclare/claim for the default simple-write path; use reservation and claims for other repo edits.
 - Codex fallback command paths: read-only sandbox for read-only shell inspection, `stateful sandbox process find` for process checks, write-targets sandbox for command-shaped writes, and git profile for git.
 - OMP fallback command paths: built-in Bash with strict trusted `stateful sandbox run ...` or `stateful sandbox process find ...` commands. Bare `stateful` is trusted only after session-start or per-tool preflight hash-verifies the first PATH `stateful` binary against the installed Stateful binary; commands using the installed absolute binary path remain trusted.
 
