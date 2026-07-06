@@ -3658,6 +3658,7 @@ fn run_command_with_timeout_and_cancel(
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     isolate_sandbox_process_group(&mut command);
     let mut child = command.spawn()?;
+    let process_group = capture_sandbox_process_group(child.id());
     let stdout = child
         .stdout
         .take()
@@ -3680,19 +3681,28 @@ fn run_command_with_timeout_and_cancel(
         }
         if is_cancelled() {
             cancelled = true;
-            break terminate_sandbox_child(&mut child)?.ok_or_else(|| {
+            break terminate_sandbox_child(&mut child, process_group)?.ok_or_else(|| {
                 anyhow::anyhow!("cancelled and failed to terminate sandbox command")
             })?;
         }
         if Instant::now() >= deadline {
             timed_out = true;
-            break terminate_sandbox_child(&mut child)?.ok_or_else(|| {
+            break terminate_sandbox_child(&mut child, process_group)?.ok_or_else(|| {
                 anyhow::anyhow!("timed out and failed to terminate sandbox command")
             })?;
         }
         thread::sleep(Duration::from_millis(25));
     };
-    cleanup_sandbox_process_group(&mut child, timed_out || cancelled)?;
+    let already_terminated = timed_out || cancelled;
+    if already_terminated
+        || !wait_for_sandbox_readers_finished(
+            &stdout_reader,
+            &stderr_reader,
+            Duration::from_millis(25),
+        )
+    {
+        cleanup_sandbox_process_group(process_group, already_terminated)?;
+    }
 
     let stdout = stdout_reader
         .join()
@@ -3781,9 +3791,63 @@ fn isolate_sandbox_process_group(command: &mut Command) {
         command.process_group(0);
     }
 }
+// Fast commands close both pipes themselves; commands that leave background
+// descendants holding stdout/stderr open need process-group cleanup before join.
+fn wait_for_sandbox_readers_finished(
+    stdout_reader: &thread::JoinHandle<io::Result<Vec<u8>>>,
+    stderr_reader: &thread::JoinHandle<io::Result<Vec<u8>>>,
+    timeout: Duration,
+) -> bool {
+    let started = Instant::now();
+    loop {
+        if stdout_reader.is_finished() && stderr_reader.is_finished() {
+            return true;
+        }
+        if started.elapsed() >= timeout {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SandboxProcessGroup {
+    id: u32,
+    isolated: bool,
+}
+
+fn capture_sandbox_process_group(child_id: u32) -> SandboxProcessGroup {
+    #[cfg(target_os = "linux")]
+    {
+        let actual = process_group_id_for_pid(child_id).unwrap_or(child_id);
+        let current = current_process_group_id();
+        SandboxProcessGroup {
+            id: actual,
+            isolated: actual == child_id && current != Some(actual),
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        // macOS has no procfs to verify the spawned PGID here. Preserve the
+        // previous process_group(0)-based behavior on non-Linux Unix hosts.
+        SandboxProcessGroup {
+            id: child_id,
+            isolated: true,
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        SandboxProcessGroup {
+            id: child_id,
+            isolated: false,
+        }
+    }
+}
 
 fn cleanup_sandbox_process_group(
-    child: &mut std::process::Child,
+    process_group: SandboxProcessGroup,
     already_terminated: bool,
 ) -> anyhow::Result<()> {
     if already_terminated {
@@ -3792,23 +3856,27 @@ fn cleanup_sandbox_process_group(
 
     #[cfg(unix)]
     {
-        signal_sandbox_process_group(child, SIGTERM);
-        thread::sleep(Duration::from_millis(100));
-        signal_sandbox_process_group(child, SIGKILL);
+        if signal_sandbox_process_group(process_group, SIGTERM) {
+            thread::sleep(Duration::from_millis(100));
+            signal_sandbox_process_group(process_group, SIGKILL);
+        }
     }
 
     #[cfg(not(unix))]
     {
-        let _ = child;
+        let _ = process_group;
     }
 
     Ok(())
 }
 
-fn terminate_sandbox_child(child: &mut std::process::Child) -> anyhow::Result<Option<ExitStatus>> {
+fn terminate_sandbox_child(
+    child: &mut std::process::Child,
+    process_group: SandboxProcessGroup,
+) -> anyhow::Result<Option<ExitStatus>> {
     #[cfg(unix)]
     {
-        signal_sandbox_process_group(child, SIGTERM);
+        signal_sandbox_process_group(process_group, SIGTERM);
     }
     #[cfg(not(unix))]
     {
@@ -3817,12 +3885,12 @@ fn terminate_sandbox_child(child: &mut std::process::Child) -> anyhow::Result<Op
 
     if let Some(status) = wait_for_sandbox_child_exit(child, Duration::from_millis(500))? {
         #[cfg(unix)]
-        signal_sandbox_process_group(child, SIGKILL);
+        signal_sandbox_process_group(process_group, SIGKILL);
         return Ok(Some(status));
     }
 
     #[cfg(unix)]
-    signal_sandbox_process_group(child, SIGKILL);
+    signal_sandbox_process_group(process_group, SIGKILL);
     kill_direct_sandbox_child(child)?;
     wait_for_sandbox_child_exit(child, Duration::from_millis(500))
 }
@@ -3850,14 +3918,38 @@ fn wait_for_sandbox_child_exit(
     Ok(None)
 }
 
+#[cfg(target_os = "linux")]
+fn current_process_group_id() -> Option<u32> {
+    process_group_id_for_pid(std::process::id())
+}
+
+#[cfg(target_os = "linux")]
+fn process_group_id_for_pid(pid: u32) -> Option<u32> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    parse_proc_stat_process_group(&stat)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_proc_stat_process_group(stat: &str) -> Option<u32> {
+    let (_, fields) = stat.rsplit_once(") ")?;
+    let mut fields = fields.split_whitespace();
+    fields.next()?; // state
+    fields.next()?; // ppid
+    fields.next()?.parse().ok()
+}
+
 #[cfg(unix)]
-fn signal_sandbox_process_group(child: &std::process::Child, signal: i32) {
+fn signal_sandbox_process_group(process_group: SandboxProcessGroup, signal: i32) -> bool {
+    if !process_group.isolated {
+        return false;
+    }
+
     let signal = match signal {
         SIGTERM => "-TERM",
         SIGKILL => "-KILL",
-        _ => return,
+        _ => return false,
     };
-    let group = format!("-{}", child.id());
+    let group = format!("-{}", process_group.id);
     let status = Command::new("/bin/kill")
         .args([signal, "--", group.as_str()])
         .stdout(Stdio::null())
@@ -3870,6 +3962,7 @@ fn signal_sandbox_process_group(child: &std::process::Child, signal: i32) {
             .stderr(Stdio::null())
             .status();
     }
+    true
 }
 
 #[cfg(test)]
@@ -4473,6 +4566,31 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(3),
             "timeout cleanup should not wait for ignored-TERM descendants"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quick_successful_wrappers_do_not_pay_process_group_cleanup_delay() {
+        if std::env::var_os(STATEFUL_SANDBOX_RUN_ACTIVE_ENV).is_some() {
+            return;
+        }
+
+        let started = Instant::now();
+        for _ in 0..4 {
+            let output =
+                run_command_with_timeout(Command::new("/bin/true"), Duration::from_secs(10), false)
+                    .expect("quick sandbox command should exit successfully");
+
+            assert_eq!(output.status, "exited");
+            assert_eq!(output.exit_code, Some(0));
+            assert_eq!(output.stdout, "");
+            assert_eq!(output.stderr, "");
+        }
+
+        assert!(
+            started.elapsed() < Duration::from_millis(350),
+            "normal quick exits should not pay process-group signal grace delay"
         );
     }
 
