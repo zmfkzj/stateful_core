@@ -216,6 +216,9 @@ tool classification plus Bash sandbox-wrapper validation. If the state server
 is unavailable, the hook follows the availability policy: agent writes and
 reconciliation fail closed; read/search/diff remains allowed.
 
+Connection attempts to stale or unreachable runtime endpoints are bounded; they
+fail under that same availability policy rather than hanging hook startup.
+
 For OMP, built-in Bash owns sandbox command execution and process inspection
 only when the command is a single trusted `stateful sandbox run ...` or
 `stateful sandbox process find ...` invocation that passes Stateful preflight.

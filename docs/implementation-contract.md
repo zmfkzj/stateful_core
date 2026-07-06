@@ -585,6 +585,13 @@ cleartext. Join validates the host runtime, writes global runtime discovery for
 the host server, and only enables the current repo when `--enable-repo` is
 supplied.
 
+HTTP runtime discovery and identity checks use a bounded connect attempt.
+Endpoints loaded from stale `server.json` files or `STATEFUL_SERVER_URL`
+therefore fail promptly under the availability rules instead of stalling hook or
+native tool startup. Operators correct stale LAN discovery by restoring the
+tunnel and rerunning `stateful server join ...`, or by replacing the explicit
+override when `STATEFUL_SERVER_URL` and `STATEFUL_SERVER_TOKEN` are set.
+
 ## Local HTTP Trust
 
 The server binds to `127.0.0.1` by default. Requests, except `/health`, must

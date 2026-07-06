@@ -361,6 +361,11 @@ stateful server join http://127.0.0.1:43873 --token <token> --enable-repo
 allowed with `--allow-plain-http`; that opt-in sends the bearer token in cleartext.
 See [Usage reference](docs/usage-reference.md#lan-runtime-sharing) for the full flow.
 
+If a previously joined LAN runtime endpoint is stale or unreachable, Stateful
+commands fail with a bounded connect error instead of hanging. Restart the host
+runtime or rerun `stateful server join ...`, then check `stateful status` and
+`stateful doctor` to refresh and verify the local runtime files.
+
 ## Generated Local Files
 
 `stateful_core` generates local runtime and integration files. These paths may

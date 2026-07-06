@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{Read, Write},
-    net::{IpAddr, TcpStream},
+    net::{IpAddr, TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 
 const REQUIRED_RUNTIME_CAPABILITIES: &[&str] = &["authorize.write_directory"];
 static SECRET_JSON_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReservationDeclareArgs {
@@ -270,9 +272,8 @@ pub fn post_json(
         body,
     );
 
-    let mut stream = TcpStream::connect(endpoint.socket_addr)?;
+    let mut stream = connect_http_stream(&endpoint)?;
     stream.write_all(request.as_bytes())?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
 
     let response = read_http_response(&mut stream)?;
     parse_http_response(&response)
@@ -285,9 +286,8 @@ pub fn get_json(runtime: &ServerRuntime, path: &str) -> anyhow::Result<HttpRespo
         endpoint.host_header, runtime.token,
     );
 
-    let mut stream = TcpStream::connect(endpoint.socket_addr)?;
+    let mut stream = connect_http_stream(&endpoint)?;
     stream.write_all(request.as_bytes())?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
 
     let response = read_http_response(&mut stream)?;
     parse_http_response(&response)
@@ -746,6 +746,42 @@ fn parse_http_base_url(base_url: &str) -> anyhow::Result<ParsedBaseUrl> {
         socket_addr: authority.to_string(),
         host_header: authority.to_string(),
     })
+}
+
+fn connect_http_stream(endpoint: &ParsedBaseUrl) -> anyhow::Result<TcpStream> {
+    let mut last_error = None;
+    let mut resolved_any = false;
+    for address in endpoint.socket_addr.to_socket_addrs()? {
+        resolved_any = true;
+        match TcpStream::connect_timeout(&address, HTTP_CONNECT_TIMEOUT) {
+            Ok(stream) => {
+                stream.set_read_timeout(Some(HTTP_READ_TIMEOUT))?;
+                stream.set_write_timeout(Some(HTTP_READ_TIMEOUT))?;
+                return Ok(stream);
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    if !resolved_any {
+        anyhow::bail!(
+            "stateful runtime address {} resolved to no socket addresses",
+            endpoint.host_header
+        );
+    }
+
+    let Some(error) = last_error else {
+        anyhow::bail!(
+            "stateful runtime address {} resolved to no socket addresses",
+            endpoint.host_header
+        );
+    };
+    anyhow::bail!(
+        "failed to connect to stateful runtime {} within {}s: {}",
+        endpoint.host_header,
+        HTTP_CONNECT_TIMEOUT.as_secs(),
+        error
+    )
 }
 
 fn parse_http_response(response: &str) -> anyhow::Result<HttpResponse> {

@@ -187,6 +187,14 @@ stateful server join http://<host>:43873 --token <token> --allow-plain-http
 If the host uses `stateful server start --workspace-id <id>`, run the printed
 join command as-is; it includes the matching workspace id.
 
+If a remote hook or native tool starts with stale LAN runtime discovery, the
+unreachable endpoint fails promptly and write coordination fails closed instead
+of hanging indefinitely. Restart the SSH tunnel if needed, then rerun
+`stateful server join ...` against the current loopback endpoint to refresh
+`$STATEFUL_HOME/runtime/server.json`. If `STATEFUL_SERVER_URL` and
+`STATEFUL_SERVER_TOKEN` are exported, update or unset them as well; environment
+variables override runtime discovery.
+
 ## Manual Coordination Commands
 
 In active Codex or OMP sessions, prefer the active Stateful coordination tools

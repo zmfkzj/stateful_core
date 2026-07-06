@@ -5,6 +5,7 @@ use std::{
     process::Command,
     sync::mpsc,
     thread,
+    time::{Duration, Instant},
 };
 
 #[cfg(unix)]
@@ -375,6 +376,42 @@ fn get_json_sends_bearer_token_without_body() {
     assert!(request.contains("GET /v1/current HTTP/1.1"));
     assert!(request.contains("Authorization: Bearer secret-token"));
     assert!(!request.contains("Content-Length:"));
+}
+
+#[test]
+fn get_json_times_out_promptly_when_runtime_connect_blackholes() {
+    const BLACKHOLE_RUNTIME: &str = "http://10.255.255.1:81";
+
+    let runtime = ServerRuntime::new(BLACKHOLE_RUNTIME, "secret-token", "w1", 42);
+    let (result_tx, result_rx) = mpsc::channel();
+    let started_at = Instant::now();
+    let client = thread::spawn(move || {
+        result_tx
+            .send(get_json(&runtime, "/v1/current").map(|_| ()))
+            .expect("client result should send to test");
+    });
+
+    let prompt_bound = Duration::from_secs(3);
+    let result = result_rx
+        .recv_timeout(prompt_bound)
+        .expect("blackholed runtime connect should fail within the bounded connect timeout");
+    let elapsed = started_at.elapsed();
+    client.join().expect("client thread should finish");
+
+    let error = result.expect_err("blackholed runtime should not return an HTTP response");
+    let error_message = error.to_string();
+    assert!(
+        error_message.contains("failed to connect to stateful runtime 10.255.255.1:81 within "),
+        "expected bounded connect error, got: {error:#}"
+    );
+    assert!(
+        error_message.contains("connection timed out"),
+        "expected timed-out connect source, got: {error:#}"
+    );
+    assert!(
+        elapsed < prompt_bound,
+        "blackholed runtime connect took too long to fail: {elapsed:?}"
+    );
 }
 
 #[test]
