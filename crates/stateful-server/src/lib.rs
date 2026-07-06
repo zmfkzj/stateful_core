@@ -205,7 +205,7 @@ async fn events(
     State(config): State<ServerConfig>,
     Query(input): Query<EventsQuery>,
 ) -> (StatusCode, Json<Value>) {
-    let limit = input.limit.unwrap_or(100).clamp(1, 100);
+    let limit = input.limit.unwrap_or(100).clamp(1, 1000);
     let result = config
         .store
         .lock()

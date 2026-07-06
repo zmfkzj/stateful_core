@@ -971,7 +971,7 @@ def test_write_orchestration_trace_filters_workspace_events_and_records_saturati
             "agent_id": "agent-a",
             "workspace_id": "workspace-a",
         }
-        for index in range(100)
+        for index in range(1000)
     ]
     mixed_events = workspace_events + [
         {
@@ -1012,9 +1012,9 @@ def test_write_orchestration_trace_filters_workspace_events_and_records_saturati
 
     assert summary["events_window_saturated"] is True
     assert trace["events_window_saturated"] is True
-    assert trace["event_count"] == 100
+    assert trace["event_count"] == 1000
     assert {event["workspace_id"] for event in trace["events"]} == {"workspace-a"}
-    assert any(path.startswith("/v1/events?") and "workspace_id=workspace-a" in path and "limit=100" in path for path, _ in requests)
+    assert any(path.startswith("/v1/events?") and "workspace_id=workspace-a" in path and "limit=1000" in path for path, _ in requests)
 
 def test_write_orchestration_trace_preserves_durable_lifecycle_evidence_when_window_saturated(mod, tmp_path, monkeypatch):
     instance_dir = tmp_path / "runs" / "fake-a"
@@ -1033,7 +1033,7 @@ def test_write_orchestration_trace_preserves_durable_lifecycle_evidence_when_win
             "agent_id": "agent-a",
             "workspace_id": "workspace-a",
         }
-        for index in range(100)
+        for index in range(1000)
     ]
 
     def fake_stateful_http_json(env, path, payload=None, timeout=5.0):
@@ -1062,7 +1062,7 @@ def test_write_orchestration_trace_preserves_durable_lifecycle_evidence_when_win
 
     expected_lifecycle = {"ActivityFinalized": 1, "AgentHeartbeat": 1, "AgentRegistered": 1}
     assert summary["events_window_saturated"] is True
-    assert trace["event_types"] == {"AuthorizationDenied": 100}
+    assert trace["event_types"] == {"AuthorizationDenied": 1000}
     assert trace["lifecycle_event_types"] == expected_lifecycle
     assert summary["lifecycle_event_types"] == expected_lifecycle
 

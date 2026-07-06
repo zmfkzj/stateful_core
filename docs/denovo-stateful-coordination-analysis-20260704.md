@@ -62,7 +62,7 @@ capture update: Docker OMP runs add `--cap-add SYS_ADMIN --security-opt
 seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined`; OMP native `edit`/`write`
 can reacquire missing same-reservation claims and keep auto-claims on `stale_target_observation`; and
 `/v1/events` accepts `workspace_id`, `since`, and `limit` while trace capture
-requests `workspace_id` plus `limit=100` and records
+requests `workspace_id` plus `limit=1000` and records
 `events_window_saturated`. These fixes remove the known orchestration defects;
 the full rerun in the validation plan is still required before making
 stateful-on/off quality claims.
@@ -299,7 +299,7 @@ reservations.
 
 | Option | Change | Tradeoff |
 |---|---|---|
-| A. Filter at capture | In `write_orchestration_trace` (`denovo_codex_agent.py:2248-2259`), filter `events` by `STATEFUL_WORKSPACE_ID` before writing, and record `events_window_saturated = (len(raw) == 100)` | Instance-local traces immediately; still window-capped |
+| A. Filter at capture | In `write_orchestration_trace` (`denovo_codex_agent.py:2248-2259`), filter `events` by `STATEFUL_WORKSPACE_ID` before writing, and record `events_window_saturated = (len(raw) == 1000)` | Instance-local traces immediately; still window-capped |
 | B. Server-side query params | Add `workspace_id`/`since`/`limit` params to `/v1/events` (`crates/stateful-server/src/lib.rs:203-208`) backed by a filtered store query beside `recent_events` (`crates/stateful-store/src/lib.rs:1017-1033`); benchmark passes its workspace id and limit | Exact per-workspace counts, removes the floor-value caveat when the window is not saturated; small server+store+client change |
 | C. Analysis hygiene rule | Document: never sum raw `orchestration-trace.json` events; always dedupe by `event_id` and filter by the instance `workspace_id`; prefer `denovo-report.generated.json` | No code; prevents mis-reporting for historical runs and any saturated event window |
 

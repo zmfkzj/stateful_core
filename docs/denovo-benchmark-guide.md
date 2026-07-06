@@ -288,9 +288,9 @@ failure, not as a model-quality result.
 
 Captured orchestration traces now keep the raw `orchestration-trace.json` for
 audit while condition and progress reports carry compact summary fields. Trace
-capture requests `/v1/events?workspace_id=<id>&limit=100` when a workspace id is
+capture requests `/v1/events?workspace_id=<id>&limit=1000` when a workspace id is
 known, writes workspace-local events, and records per-instance
-`events_window_saturated` when the 100-event window is full. Report summary
+`events_window_saturated` when the 1000-event window is full. Report summary
 fields include `orchestration_event_types`,
 `orchestration_lifecycle_event_types`, `orchestration_heartbeat_events`,
 `orchestration_heartbeat_windows`, `orchestration_heartbeat_max_gap_ms`,

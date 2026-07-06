@@ -2292,7 +2292,7 @@ def write_orchestration_trace(
     try:
         current = stateful_http_json(env, "/v1/current")
         workspace_id = env.get("STATEFUL_WORKSPACE_ID")
-        events_query = {"limit": "100"}
+        events_query = {"limit": "1000"}
         if workspace_id:
             trace["workspace_id"] = workspace_id
             events_query["workspace_id"] = workspace_id

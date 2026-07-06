@@ -477,9 +477,9 @@ compatibility/audit fields. Historical artifacts may omit agent-time fields.
 
 Progress output includes compact orchestration trace summaries when stateful
 trace capture is available. Trace capture calls
-`/v1/events?workspace_id=<id>&limit=100` when a workspace id is known, writes
+`/v1/events?workspace_id=<id>&limit=1000` when a workspace id is known, writes
 workspace-local raw trace events, and records per-instance
-`events_window_saturated` when the 100-event window is full. Prefer the summary
+`events_window_saturated` when the 1000-event window is full. Prefer the summary
 `events`, `heartbeat`, and `denial` in the rendered table, plus JSON fields such
 as `orchestration_event_types`, `orchestration_lifecycle_event_types`,
 `orchestration_denial_paths`, and `orchestration_heartbeat_max_gap_ms` with
