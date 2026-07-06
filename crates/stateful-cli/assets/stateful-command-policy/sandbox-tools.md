@@ -17,6 +17,8 @@ For OMP entries below, strict trusted bare `stateful` means session-start or per
 | External write/socket/signal scope | `sandbox run --fs external` with explicit scope | built-in Bash with strict trusted `stateful sandbox run --fs external ...`; repo-external native `edit`/`write` file targets also auto-approve by default through `stateful.autoApprove: true` and prompt only when `stateful.autoApprove: false` is configured | repo-internal profiles for external writes |
 | Nested Codex benchmark | `sandbox run-nested-codex-benchmark ...` | not a generic OMP command path | generic relaxed profiles or nested wrapping |
 
+Process inspection uses explicit selectors: `stateful sandbox process find --contains <text>`, `--name <comm>`, `--pid <pid>`, `--ppid <pid>`, or `--pgid <pid>`. Use `stateful sandbox process find --help` for usage; do not pass `--purpose`, `--match`, or positional search terms.
+
 ## Git And PR Rules
 
 - Use the git profile for `status`, `diff`, `log`, `add`, `commit`, `switch`/`checkout`, `merge`, `rebase`, `tag`, and `push`.

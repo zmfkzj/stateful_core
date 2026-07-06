@@ -448,11 +448,7 @@ fn omp_sandbox_run_action(command: &str) -> Option<OmpPreToolAction> {
 
 fn omp_process_find_action(command: &str) -> Option<OmpPreToolAction> {
     let words = split_simple_command_words(command).ok()?;
-    if words.len() < 4
-        || words[1] != "sandbox"
-        || words[2] != "process"
-        || words[3] != "find"
-    {
+    if words.len() < 4 || words[1] != "sandbox" || words[2] != "process" || words[3] != "find" {
         return None;
     }
     let invocation = match parse_sandbox_process_find_bash_invocation(command) {
@@ -464,10 +460,12 @@ fn omp_process_find_action(command: &str) -> Option<OmpPreToolAction> {
             reason: "stateful sandbox process find requires a trusted stateful binary".to_string(),
         });
     }
-    if let Err(error) = validate_process_find_request(&invocation.request) {
-        return Some(OmpPreToolAction::Block {
-            reason: error.to_string(),
-        });
+    if !invocation.help {
+        if let Err(error) = validate_process_find_request(&invocation.request) {
+            return Some(OmpPreToolAction::Block {
+                reason: error.to_string(),
+            });
+        }
     }
     Some(OmpPreToolAction::Allow)
 }
@@ -2066,8 +2064,10 @@ fn authorize_sandbox_process_find_bash(command: &str) -> HookOutcome {
             "stateful sandbox process find requires a trusted stateful binary",
         );
     }
-    if let Err(error) = validate_process_find_request(&invocation.request) {
-        return bash_policy_deny(error.to_string());
+    if !invocation.help {
+        if let Err(error) = validate_process_find_request(&invocation.request) {
+            return bash_policy_deny(error.to_string());
+        }
     }
 
     HookOutcome::Allow

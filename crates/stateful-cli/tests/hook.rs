@@ -3496,7 +3496,7 @@ fn omp_raw_bash_allows_trusted_external_sandbox_run_for_extension_preflight() {
 }
 
 #[test]
-fn omp_raw_bash_denies_process_find_help_as_process_find_validation() {
+fn omp_raw_bash_allows_process_find_help() {
     let stateful = trusted_stateful_path();
     let input = serde_json::json!({
         "agent_id": "omp-parent",
@@ -3509,22 +3509,15 @@ fn omp_raw_bash_denies_process_find_help_as_process_find_validation() {
     })
     .to_string();
 
-    let OmpHookOutcome::Block { reason } = handle_omp_pre_tool_use_with_runtime(
-        &input,
-        None,
-        Some(Path::new("/repo")),
-        Some(Path::new("/repo")),
-    )
-    .expect("process find help should be classified") else {
-        panic!("process find help should be denied");
-    };
-    assert!(
-        reason.contains("unsupported stateful sandbox process find argument"),
-        "reason `{reason}` should preserve process-find validation"
-    );
-    assert!(
-        !reason.contains("OMP raw bash is denied"),
-        "reason `{reason}` should not fall back to generic raw Bash denial"
+    assert_eq!(
+        handle_omp_pre_tool_use_with_runtime(
+            &input,
+            None,
+            Some(Path::new("/repo")),
+            Some(Path::new("/repo")),
+        )
+        .expect("process find help should be classified"),
+        OmpHookOutcome::Allow
     );
 }
 

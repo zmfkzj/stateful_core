@@ -113,6 +113,7 @@ pub(crate) struct SandboxRunBashInvocation {
 pub(crate) struct SandboxProcessFindBashInvocation {
     pub(crate) executable: String,
     pub(crate) request: SandboxProcessFindRequest,
+    pub(crate) help: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

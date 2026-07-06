@@ -271,10 +271,14 @@ pub(crate) fn parse_sandbox_process_find_bash_invocation(
         process_groups: Vec::new(),
         fields: Vec::new(),
     };
+    let mut help = false;
     let mut index = 4;
     while index < words.len() {
         let arg = &words[index];
         match arg.as_str() {
+            "--help" | "-h" => {
+                help = true;
+            }
             "--" => {
                 return Err("stateful sandbox process find does not support argv mode".to_string());
             }
@@ -327,6 +331,7 @@ pub(crate) fn parse_sandbox_process_find_bash_invocation(
     Ok(SandboxProcessFindBashInvocation {
         executable: words[0].clone(),
         request,
+        help,
     })
 }
 
