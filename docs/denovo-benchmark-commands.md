@@ -181,6 +181,37 @@ unless deliberately testing another model:
   --eval-iters 1
 ```
 
+For a contention-likely slice, keep only multi-file instances and compare the
+two `subagent:on` conditions:
+
+```bash
+"$STATEFUL_BENCH_BIN" denovo run \
+  --agent omp-cli \
+  --aweagent-root "$AWEAGENT_ROOT" \
+  --python "$PYTHON" \
+  --data-file "$REPO_ROOT/datasets/denovo/shards/denovoswe_public_shard_a.jsonl" \
+  --output-dir "$DENOVO_OUTPUT_ROOT" \
+  --run-id "$RUN_ID-shard-a-contention-slice" \
+  --mode batch \
+  --condition stateful:off,subagent:on \
+  --condition stateful:on,subagent:on \
+  --min-measured-files 3 \
+  --omp-bin "$OMP_BIN" \
+  --stateful-binary "$STATEFUL_BIN" \
+  --benchmark-model deepseek-v4-flash \
+  --benchmark-reasoning-effort high \
+  --benchmark-model-context-window 256000 \
+  --benchmark-temperature 1 \
+  --benchmark-max-turns 500 \
+  --prompt-version v2 \
+  --eval-iters 1
+```
+
+Interpret this slice with the Phase 1 orchestration metrics. A `stateful:on`
+advantage is credible only when it has higher score than `stateful:off` and
+`true_collisions_prevented > 0`; otherwise the slice does not show coordination
+value.
+
 For a one-instance stateful smoke run, keep the same defaults and narrow the
 matrix:
 
