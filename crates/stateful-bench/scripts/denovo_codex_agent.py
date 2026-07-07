@@ -2233,9 +2233,34 @@ def summarize_orchestration_events(
     event_types = Counter(str(event.get("event_type", "")) for event in matching)
     denial_paths: Counter[str] = Counter()
     denial_messages: Counter[str] = Counter()
+    true_collisions_prevented = 0
+    self_inflicted_denials = 0
+    scope_overlap_warnings = 0
+    self_inflicted_reason_codes = {
+        "missing_reservation",
+        "missing_claim",
+        "stale_target_observation",
+        "missing_base_observation",
+        "scope_mismatch",
+    }
     for event in matching:
-        if event.get("event_type") != "AuthorizationDenied":
+        reason_code = event_field(event, "reason_code")
+        wait = event.get("wait")
+        blocking_agent_id = event_field(event, "blocking_agent_id")
+        if not blocking_agent_id and isinstance(wait, dict):
+            blocking_agent_id = wait.get("blocking_agent_id")
+        event_type = event.get("event_type")
+        if event_field(event, "kind") == "scope_overlap":
+            scope_overlap_warnings += 1
+        if (
+            (event_type == "active_claim_conflict")
+            or (event_type == "AuthorizationDenied" and reason_code == "active_claim_conflict")
+        ) and blocking_agent_id:
+            true_collisions_prevented += 1
+        if event_type != "AuthorizationDenied":
             continue
+        if reason_code in self_inflicted_reason_codes and not blocking_agent_id:
+            self_inflicted_denials += 1
         path = event_field(event, "path") or event_field(event, "resource") or event_field(event, "requested_path")
         message = event_field(event, "message") or event_field(event, "denial_reason")
         if path:
@@ -2258,6 +2283,9 @@ def summarize_orchestration_events(
             if event_type == "AuthorizationDenied" or "Conflict" in event_type
         ),
         "denial_events": event_types.get("AuthorizationDenied", 0),
+        "true_collisions_prevented": true_collisions_prevented,
+        "self_inflicted_denials": self_inflicted_denials,
+        "scope_overlap_warnings": scope_overlap_warnings,
         "denial_paths": top_counts(denial_paths, 10),
         "denial_messages": top_counts(denial_messages, 5),
         **heartbeat,
