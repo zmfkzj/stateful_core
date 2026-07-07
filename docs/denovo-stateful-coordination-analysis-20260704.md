@@ -67,6 +67,20 @@ requests `workspace_id` plus `limit=1000` and records
 the full rerun in the validation plan is still required before making
 stateful-on/off quality claims.
 
+## Phase 4 Gate Decision
+
+The cross-agent findings-sharing lever remains gated off. Current artifacts do
+not show measured re-derivation across subagents, such as repeated identical
+exploration or repeated same-file failures across sibling subagents. The
+available contention signal is limited to four true `active_claim_conflict`
+events across the 30 analyzed stateful-on rollouts, and the full rerun after the
+known orchestration fixes is still required before making stateful-on/off
+quality or coordination-value claims.
+
+Decision: do not implement `resource_finding` storage, server, extension, or
+context rendering until a rerun or contention slice shows re-derivation evidence
+that this feature would remove.
+
 ## Symptoms and Verified Measurements
 
 ### S1. Denials without peer contention
