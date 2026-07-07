@@ -182,6 +182,8 @@ pub enum DeNovoCommand {
         max_steps: Option<usize>,
         #[arg(long)]
         max_concurrent: Option<usize>,
+        #[arg(long)]
+        min_measured_files: Option<usize>,
         #[arg(long = "instance-id")]
         instance_id: Vec<String>,
         #[arg(long, default_value_t = 1)]
@@ -300,6 +302,7 @@ pub fn run_denovo_cli(command: DeNovoCommand) -> Result<()> {
             model,
             max_steps,
             max_concurrent,
+            min_measured_files,
             instance_id,
             eval_iters,
             prompt_version,
@@ -346,6 +349,7 @@ pub fn run_denovo_cli(command: DeNovoCommand) -> Result<()> {
                 codex_adapter_script,
                 mode,
                 instance_ids: instance_id,
+                min_measured_files,
                 llm_config,
                 model,
                 max_steps,
@@ -967,6 +971,7 @@ pub struct DeNovoMatrixRunOptions {
     pub model: Option<String>,
     pub max_steps: Option<usize>,
     pub max_concurrent: Option<usize>,
+    pub min_measured_files: Option<usize>,
     pub search_override: Option<bool>,
     pub skip_eval: bool,
     pub validate_run: bool,
@@ -1093,10 +1098,11 @@ fn flush_denovo_matrix_checkpoint(
     Ok(reports)
 }
 
-fn denovo_matrix_instance_ids(
+pub fn denovo_matrix_instance_ids(
     data_file: &Path,
     requested_instance_ids: &[String],
     mode: DeNovoRunMode,
+    min_measured_files: Option<usize>,
 ) -> Result<Vec<String>> {
     let rows = crate::read_jsonl::<Value>(data_file)?;
     let mut instance_ids = Vec::new();
@@ -1105,6 +1111,16 @@ fn denovo_matrix_instance_ids(
             .get("instance_id")
             .and_then(Value::as_str)
             .with_context(|| format!("DeNovoSWE data row {index} missing string instance_id"))?;
+        if let Some(min) = min_measured_files {
+            let files = row
+                .get("measured_files_total")
+                .or_else(|| row.get("included_files"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
+            if files < min {
+                continue;
+            }
+        }
         if requested_instance_ids.is_empty()
             || requested_instance_ids
                 .iter()
@@ -1129,8 +1145,12 @@ pub fn run_denovo_matrix(options: DeNovoMatrixRunOptions) -> Result<Vec<DeNovoCo
     };
     let started_at_ms = unix_ms();
     let started = Instant::now();
-    let matrix_instance_ids =
-        denovo_matrix_instance_ids(&options.data_file, &options.instance_ids, options.mode)?;
+    let matrix_instance_ids = denovo_matrix_instance_ids(
+        &options.data_file,
+        &options.instance_ids,
+        options.mode,
+        options.min_measured_files,
+    )?;
     let mut aggregates = conditions
         .iter()
         .cloned()

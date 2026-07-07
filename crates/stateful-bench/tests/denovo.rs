@@ -49,6 +49,33 @@ fn denovo_condition_parser_rejects_unknown_keys() {
 }
 
 #[test]
+fn instance_ids_filter_by_min_measured_files() {
+    let root = temp_root("stateful-bench-denovo-min-measured-files");
+    fs::create_dir_all(&root).expect("temp root should exist");
+    let file = root.join("denovo.jsonl");
+    fs::write(
+        &file,
+        [
+            r#"{"instance_id":"one_file","measured_files_total":1}"#,
+            r#"{"instance_id":"many_files","measured_files_total":4}"#,
+            "",
+        ]
+        .join("\n"),
+    )
+    .expect("data file should be written");
+
+    let ids = stateful_bench::denovo::denovo_matrix_instance_ids(
+        &file,
+        &[],
+        DeNovoRunMode::Batch,
+        Some(3),
+    )
+    .expect("ids should parse");
+
+    assert_eq!(ids, vec!["many_files".to_string()]);
+}
+
+#[test]
 fn default_denovo_conditions_cover_four_axis_combinations() {
     assert_eq!(
         default_denovo_conditions()
@@ -1471,6 +1498,7 @@ score = 1.0 if "stateful" in args.config else 0.5
         model: None,
         max_steps: None,
         max_concurrent: None,
+        min_measured_files: None,
         search_override: None,
         skip_eval: false,
         validate_run: false,
