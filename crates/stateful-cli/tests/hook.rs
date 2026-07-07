@@ -3434,7 +3434,7 @@ fn omp_write_releases_auto_claim_when_retry_authorization_blocks() {
 }
 
 #[test]
-fn omp_write_stale_observation_after_auto_claim_blocks_without_releasing_claim() {
+fn omp_write_stale_observation_after_auto_claim_retries_without_releasing_claim() {
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
         r#"{"status":"ok","reservation_id":"auto-reservation"}"#,
         r#"{"status":"ok","claim_state":"acquired","paths":["docs/a.md"],"acquired":1,"already_held":0}"#,
@@ -3443,6 +3443,7 @@ fn omp_write_stale_observation_after_auto_claim_blocks_without_releasing_claim()
             "message": "Target existence changed since the supplied base observation.",
             "reason_code": "stale_target_observation"
         }"#,
+        r#"{"decision":"allow","message":"ok"}"#,
     ]);
     let input = serde_json::json!({
         "agent_id": "omp-parent",
@@ -3462,21 +3463,27 @@ fn omp_write_stale_observation_after_auto_claim_blocks_without_releasing_claim()
     )
     .expect("omp write should parse");
 
-    assert!(matches!(outcome, OmpHookOutcome::Block { .. }));
+    assert!(matches!(outcome, OmpHookOutcome::Allow));
     let declare = request_json_body(&rx.recv().expect("reservation declare should arrive first"));
     assert_eq!(declare["source"]["event"], "reservation_declare");
     let claim = request_json_body(&rx.recv().expect("claim acquire should arrive second"));
     assert_eq!(claim["reservation_id"], "auto-reservation");
     assert_eq!(claim["paths"], serde_json::json!(["docs/a.md"]));
-    let retry_authorize =
-        request_json_body(&rx.recv().expect("retry authorize should arrive third"));
+    let first_authorize =
+        request_json_body(&rx.recv().expect("first authorize should arrive third"));
     assert_eq!(
-        retry_authorize["payload"]["reservation_id"],
+        first_authorize["payload"]["reservation_id"],
+        "auto-reservation"
+    );
+    let second_authorize =
+        request_json_body(&rx.recv().expect("second authorize should arrive fourth"));
+    assert_eq!(
+        second_authorize["payload"]["reservation_id"],
         "auto-reservation"
     );
     assert!(
         rx.recv_timeout(Duration::from_millis(100)).is_err(),
-        "stale observation should keep the auto-claim so reread/retry can succeed"
+        "retry should happen before any claim release"
     );
 }
 

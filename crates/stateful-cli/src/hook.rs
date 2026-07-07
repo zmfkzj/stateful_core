@@ -546,6 +546,7 @@ fn authorize_omp_targets(
     let mut reservation_id = input.reservation_id().map(str::to_string);
     let mut auto_declared = false;
     let mut auto_claim_retried = false;
+    let mut auto_refresh_retried = false;
     let mut auto_claimed_paths = BTreeSet::new();
     let mut warnings = Vec::new();
     if reservation_id.is_none() && should_predeclare_omp_tool_reservation(input, &targets) {
@@ -642,6 +643,14 @@ fn authorize_omp_targets(
                         auto_claim_retried = true;
                         continue 'authorize;
                     }
+                }
+
+                if !auto_refresh_retried
+                    && !auto_claimed_paths.is_empty()
+                    && should_auto_refresh_omp_base_observation(input, &decision, &targets)
+                {
+                    auto_refresh_retried = true;
+                    continue 'authorize;
                 }
 
                 let keep_auto_claims = should_keep_omp_auto_claims(&decision);
@@ -912,6 +921,19 @@ fn should_auto_claim_omp_tool_reservation(
         tool_name if tool_name.eq_ignore_ascii_case("edit")
             || tool_name.eq_ignore_ascii_case("write")
     ) && decision.reason_code == "missing_claim"
+        && targets.iter().all(|target| target.action == "write_file")
+}
+
+fn should_auto_refresh_omp_base_observation(
+    input: &OmpPreToolUseInput,
+    decision: &AuthorizeDecision,
+    targets: &[PatchTarget],
+) -> bool {
+    matches!(
+        runtime_tool_name_leaf(&input.tool_name),
+        tool_name if tool_name.eq_ignore_ascii_case("edit")
+            || tool_name.eq_ignore_ascii_case("write")
+    ) && decision.reason_code == "stale_target_observation"
         && targets.iter().all(|target| target.action == "write_file")
 }
 
