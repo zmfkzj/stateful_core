@@ -203,6 +203,7 @@ fn denovo_report_aggregates_scores_pass_rates_errors_and_runtime() {
         1
     );
 
+
     let zero_denominator_report = build_denovo_condition_report(
         "denovo-dev",
         DeNovoCondition {
@@ -229,6 +230,33 @@ fn denovo_report_aggregates_scores_pass_rates_errors_and_runtime() {
         None
     );
     assert_eq!(zero_denominator_report.score_per_hour, None);
+}
+
+#[test]
+fn denovo_report_aggregates_orchestration_trace_value_fields() {
+    let result = serde_json::from_str::<DeNovoOfficialResult>(
+        r#"{"instance_id":"a","success":true,"score":1.0,"orchestration_trace":{"trace_captured":true,"true_collisions_prevented":2,"self_inflicted_denials":5,"scope_overlap_warnings":3}}"#,
+    )
+    .expect("result");
+
+    let report = build_denovo_condition_report(
+        "denovo-dev",
+        DeNovoCondition::new(true, false),
+        vec![result],
+        1000,
+        None,
+    );
+
+    assert_eq!(report.orchestration_true_collisions_prevented, 2);
+    assert_eq!(report.orchestration_self_inflicted_denials, 5);
+    assert_eq!(report.orchestration_scope_overlap_warnings, 3);
+
+    let markdown = render_denovo_report_markdown(&[report]);
+    assert!(markdown.contains("True collisions prevented"));
+    assert!(markdown.contains("Self-inflicted denials"));
+    assert!(markdown.contains("Scope overlap warnings"));
+    assert!(markdown.contains("| stateful-on_subagent-off | on | off | 1 | 1.000 | 1.000"));
+    assert!(markdown.contains("| 2 | 5 | 3 |\n"));
 }
 
 #[test]

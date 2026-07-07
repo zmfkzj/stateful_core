@@ -1403,11 +1403,11 @@ pub fn run_denovo_extract(options: DeNovoExtractOptions) -> Result<DeNovoExtract
 
 pub fn render_denovo_report_markdown(reports: &[DeNovoConditionReport]) -> String {
     let mut output = String::from(
-        "# DeNovoSWE Report\n\n| Condition | Stateful | Subagent | Instances | Success rate | Average score | Agent running time ms | Score per agent hour | Running time ms | Score per hour | Input+output tokens | Uncached input+output tokens | Score per million tokens | Score per million uncached tokens |\n| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n",
+        "# DeNovoSWE Report\n\n| Condition | Stateful | Subagent | Instances | Success rate | Average score | Agent running time ms | Score per agent hour | Running time ms | Score per hour | Input+output tokens | Uncached input+output tokens | Score per million tokens | Score per million uncached tokens | True collisions prevented | Self-inflicted denials | Scope overlap warnings |\n| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n",
     );
     for report in reports {
         output.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             report.condition_id,
             axis_label(report.condition.stateful),
             axis_label(report.condition.subagent),
@@ -1421,7 +1421,10 @@ pub fn render_denovo_report_markdown(reports: &[DeNovoConditionReport]) -> Strin
             report.token_input_plus_output_tokens,
             report.token_uncached_input_plus_output_tokens,
             optional_float(report.score_per_million_input_plus_output_tokens),
-            optional_float(report.score_per_million_uncached_input_plus_output_tokens)
+            optional_float(report.score_per_million_uncached_input_plus_output_tokens),
+            report.orchestration_true_collisions_prevented,
+            report.orchestration_self_inflicted_denials,
+            report.orchestration_scope_overlap_warnings
         ));
     }
     output
@@ -1967,6 +1970,12 @@ pub struct DeNovoConditionReport {
     #[serde(default)]
     pub orchestration_conflict_events: usize,
     #[serde(default)]
+    pub orchestration_true_collisions_prevented: usize,
+    #[serde(default)]
+    pub orchestration_self_inflicted_denials: usize,
+    #[serde(default)]
+    pub orchestration_scope_overlap_warnings: usize,
+    #[serde(default)]
     pub orchestration_event_count: usize,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub orchestration_event_types: BTreeMap<String, usize>,
@@ -2052,6 +2061,9 @@ struct DeNovoTraceSummary {
     reservation_events: usize,
     claim_events: usize,
     conflict_events: usize,
+    true_collisions_prevented: usize,
+    self_inflicted_denials: usize,
+    scope_overlap_warnings: usize,
     event_count: usize,
     event_types: BTreeMap<String, usize>,
     lifecycle_event_types: BTreeMap<String, usize>,
@@ -2106,6 +2118,9 @@ fn orchestration_trace_summary(results: &[DeNovoOfficialResult]) -> DeNovoTraceS
         summary.reservation_events += value_usize(trace.get("reservation_events"));
         summary.claim_events += value_usize(trace.get("claim_events"));
         summary.conflict_events += value_usize(trace.get("conflict_events"));
+        summary.true_collisions_prevented += value_usize(trace.get("true_collisions_prevented"));
+        summary.self_inflicted_denials += value_usize(trace.get("self_inflicted_denials"));
+        summary.scope_overlap_warnings += value_usize(trace.get("scope_overlap_warnings"));
         summary.event_count += value_usize(trace.get("event_count"));
         summary.heartbeat_events += value_usize(trace.get("heartbeat_events"));
         summary.heartbeat_windows += value_usize(trace.get("heartbeat_windows"));
@@ -2268,6 +2283,9 @@ pub fn build_denovo_condition_report(
         orchestration_reservation_events: orchestration_trace.reservation_events,
         orchestration_claim_events: orchestration_trace.claim_events,
         orchestration_conflict_events: orchestration_trace.conflict_events,
+        orchestration_true_collisions_prevented: orchestration_trace.true_collisions_prevented,
+        orchestration_self_inflicted_denials: orchestration_trace.self_inflicted_denials,
+        orchestration_scope_overlap_warnings: orchestration_trace.scope_overlap_warnings,
         orchestration_event_count: orchestration_trace.event_count,
         orchestration_event_types: orchestration_trace.event_types,
         orchestration_lifecycle_event_types: orchestration_trace.lifecycle_event_types,
