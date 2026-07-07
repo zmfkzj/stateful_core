@@ -24,9 +24,11 @@ def test_summary_splits_friction_from_true_collision():
             {
                 "event_type": "AuthorizationDenied",
                 "workspace_id": "w1",
-                "reason_code": "active_claim_conflict",
-                "path": "b.py",
-                "wait": {"blocking_agent_id": "s2"},
+                "payload": {
+                    "reason_code": "active_claim_conflict",
+                    "path": "b.py",
+                    "wait": {"blocking_agent_id": "s2"},
+                },
             },
             {
                 "event_type": "ScopeOverlap",

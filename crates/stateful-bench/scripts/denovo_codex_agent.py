@@ -2245,7 +2245,7 @@ def summarize_orchestration_events(
     }
     for event in matching:
         reason_code = event_field(event, "reason_code")
-        wait = event.get("wait")
+        wait = event_field(event, "wait")
         blocking_agent_id = event_field(event, "blocking_agent_id")
         if not blocking_agent_id and isinstance(wait, dict):
             blocking_agent_id = wait.get("blocking_agent_id")
