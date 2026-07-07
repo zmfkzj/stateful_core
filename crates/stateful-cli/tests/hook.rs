@@ -3488,6 +3488,49 @@ fn omp_write_stale_observation_after_auto_claim_retries_without_releasing_claim(
 }
 
 #[test]
+fn omp_write_stale_without_auto_claim_still_blocks() {
+    let (runtime, rx) = spawn_fake_stateful_server(r#"{
+        "decision": "deny",
+        "message": "Target existence changed since the supplied base observation.",
+        "reason_code": "stale_target_observation"
+    }"#);
+    let input = serde_json::json!({
+        "agent_id": "omp-parent",
+        "reservation_id": "r-ext",
+        "workspace_id": runtime.workspace_id,
+        "cwd": "/repo",
+        "yolo": false,
+        "tool_name": "write",
+        "tool_input": { "path": "docs/a.md", "content": "hello" }
+    })
+    .to_string();
+
+    let outcome = handle_omp_pre_tool_use_with_runtime(
+        &input,
+        Some(&runtime),
+        Some(Path::new("/repo")),
+        Some(Path::new("/repo")),
+    )
+    .expect("omp write should parse");
+
+    let OmpHookOutcome::Block { reason } = outcome else {
+        panic!("stale without held auto-claim should block");
+    };
+    assert!(
+        reason.contains("stale_target_observation")
+            || reason.contains("Target existence changed since the supplied base observation."),
+        "unexpected block reason: {reason}"
+    );
+    let authorize = request_json_body(&rx.recv().expect("authorize should arrive"));
+    assert_eq!(authorize["payload"]["reservation_id"], "r-ext");
+    assert_eq!(authorize["payload"]["path"], "docs/a.md");
+    assert!(
+        rx.recv_timeout(Duration::from_millis(100)).is_err(),
+        "stale denial without held auto-claim must not retry"
+    );
+}
+
+#[test]
 fn omp_raw_bash_authorizes_trusted_write_target_sandbox_run() {
     let stateful = trusted_stateful_path();
     let (runtime, rx) = spawn_fake_stateful_server(r#"{"decision":"allow","message":"ok"}"#);
