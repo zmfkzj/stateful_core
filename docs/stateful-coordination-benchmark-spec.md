@@ -100,7 +100,7 @@ Reject mixed cases, including artifact read/write pairs lacking two writers. For
 
 **Proposed freeze rule.** Freeze selected graph bytes, resource declarations, selection output, prompts, and hashes before inference. No hidden target source/diff/golden/test artifact may shape agent-visible instructions, resources, or strata. ProgramBench's executable remains standard agent input. Private evaluator certification can exclude an invalid candidate only; planning quality is not a score.
 
-**Proposed standard run profile.** Build `crates/stateful-bench/docker/denovo-omp-agent.Dockerfile` at the repository root as `stateful-task-graph-omp:<source-revision>` and record immutable image ID/digest. Both adapters use that one agent image. Pin `omp-cli`, model `openai-codex/gpt-5.5`, reasoning `high`, workers `4`, aggregate turns `500`, and arm deadline `7,200` seconds.
+**Proposed standard run profile.** Build `crates/stateful-bench/docker/denovo-omp-agent.Dockerfile` at the repository root as `stateful-task-graph-omp:<source-revision>` and record immutable image ID/digest. Both adapters use that one agent image. Pin `omp-cli`, model `openai-codex/gpt-5.6-terra`, reasoning `high`, workers `4`, aggregate turns `500`, and arm deadline `7,200` seconds.
 
 - DeNovo uses prompt `v2`, temperature `1`, context `256000`, `eval-iters 1`, model-provider access, and ordinary public dependency/research egress through the configured target-source deny proxy.
 - ProgramBench uses target image tag `task_cleanroom_v6`. Its target container is `--network none`; OMP egress is allowlisted only to recorded model-provider endpoints and the ephemeral Stateful endpoint, never task-source/package internet.
