@@ -418,6 +418,7 @@ differentiated safety outcome, and the ProgramBench note records completed
 inference trials plus the official-eval blocker. Do not infer quality wins from
 either artifact.
 
+The proposed [Stateful Coordination Task-Graph Benchmark](docs/stateful-coordination-benchmark-spec.md) specifies a shared-checkout N-task protocol; current `subagent:on` and `--max-concurrent` runs do not implement that topology.
 For DeNovoSWE and ProgramBench setup, interpretation rules, and reusable command
 lines, read [DeNovoSWE Benchmark Guide](docs/denovo-benchmark-guide.md),
 [DeNovoSWE Benchmark Commands](docs/denovo-benchmark-commands.md), and

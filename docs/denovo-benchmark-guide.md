@@ -1,6 +1,6 @@
 # DeNovoSWE Benchmark Guide
 
-Last updated: 2026-07-03.
+Last updated: 2026-07-10.
 
 This guide records the protocol we use when running DeNovoSWE through
 `stateful-bench`. It follows the official AweAgent DeNovoSWE recipe/task
@@ -147,6 +147,7 @@ record the exact prompt addition, and do not use the result as a scored
 stateful/no-state comparison.
 
 ## Local Comparison Design
+The proposed [Stateful Coordination Task-Graph Benchmark](stateful-coordination-benchmark-spec.md) is a separate graph-mode protocol. This guide's `--max-concurrent` setting parallelizes independent DeNovo instances; it does not schedule graph nodes inside one instance.
 
 For stateful/no-state comparisons, prefer a paired matrix:
 
@@ -279,7 +280,7 @@ container workspace path `/workspace`.
 
 Use lifecycle events to distinguish a valid stateful-on Docker run from an OMP
 process that merely completed. A successful stateful-on Docker smoke run should
-show `SessionRegistered`, repeated `SessionHeartbeat`, and `ActivityFinalized`
+show `AgentRegistered`, repeated `AgentHeartbeat`, and `ActivityFinalized`
 events for the nested OMP session. The verified run
 `r110-denovo-one-omp-docker-stateful-onoff-subagent-on` completed the
 stateful-off/stateful-on subagent-on pair with that event sequence. Treat missing
@@ -304,8 +305,8 @@ at a suspicious event type, path, heartbeat gap, or saturated event window.
 
 Lifecycle troubleshooting checklist:
 
-- `SessionRegistered` alone is insufficient. Require subsequent nested
-  `SessionHeartbeat` events and `ActivityFinalized` before treating the
+- `AgentRegistered` alone is insufficient. Require subsequent nested
+  `AgentHeartbeat` events and `ActivityFinalized` before treating the
   stateful-on condition as a valid rollout.
 - If `codex-command.json` or `results.jsonl` shows `omp exited 1` with runtime
   under a few seconds, empty `patch.diff`, and zero subagent spawns, inspect

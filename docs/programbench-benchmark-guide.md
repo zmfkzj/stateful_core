@@ -59,6 +59,7 @@ and point `--programbench-bin` at that executable. The current evidence run used
 the official repository package with Python 3.11.
 
 ## Stateful Comparison Matrix
+The proposed [Stateful Coordination Task-Graph Benchmark](stateful-coordination-benchmark-spec.md) defines fixed-N graph execution. Current `subagent:on` appends the `orchestrate` instruction; Codex additionally enables multi-agent runtime support. It does not guarantee node count, assignment, dependency scheduling, or completion.
 
 By default, `stateful-bench programbench run` compares Stateful off versus on
 with subagents enabled:
