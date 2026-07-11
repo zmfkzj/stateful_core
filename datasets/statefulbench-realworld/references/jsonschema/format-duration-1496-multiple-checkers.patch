@@ -1,0 +1,57 @@
+diff --git a/jsonschema/_format.py b/jsonschema/_format.py
+--- a/jsonschema/_format.py
++++ b/jsonschema/_format.py
+@@ -43,6 +43,6 @@ class FormatChecker:
+     checkers: dict[
+         str,
+-        tuple[_FormatCheckCallable, _RaisesType],
++        tuple[tuple[_FormatCheckCallable, _RaisesType], ...],
+     ] = {}  # noqa: RUF012
+ 
+     def __init__(self, formats: typing.Iterable[str] | None = None):
+@@ -78,7 +78,9 @@ class FormatChecker:
+         """
+ 
+         def _checks(func: _F) -> _F:
+-            self.checkers[format] = (func, raises)
++            self.checkers[format] = (
++                *self.checkers.get(format, ()), (func, raises),
++            )
+             return func
+ 
+         return _checks
+@@ -103,7 +105,9 @@ class FormatChecker:
+         cls, format: str, raises: _RaisesType = (),
+     ) -> typing.Callable[[_F], _F]:
+         def _checks(func: _F) -> _F:
+-            cls.checkers[format] = (func, raises)
++            cls.checkers[format] = (
++                *cls.checkers.get(format, ()), (func, raises),
++            )
+             return func
+
+         return _checks
+@@ -132,13 +136,15 @@ class FormatChecker:
+         if format not in self.checkers:
+             return
+ 
+-        func, raises = self.checkers[format]
+-        result, cause = None, None
+-        try:
+-            result = func(instance)
+-        except raises as e:
+-            cause = e
+-        if not result:
+-            raise FormatError(f"{instance!r} is not a {format!r}", cause=cause)
++        for func, raises in self.checkers[format]:
++            result, cause = None, None
++            try:
++                result = func(instance)
++            except raises as e:
++                cause = e
++            if not result:
++                raise FormatError(
++                    f"{instance!r} is not a {format!r}", cause=cause,
++                )
+ 
+     def conforms(self, instance: object, format: str) -> bool:

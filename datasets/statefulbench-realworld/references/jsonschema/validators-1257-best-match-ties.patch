@@ -1,0 +1,15 @@
+diff --git a/jsonschema/exceptions.py b/jsonschema/exceptions.py
+--- a/jsonschema/exceptions.py
++++ b/jsonschema/exceptions.py
+@@ -475,6 +475,11 @@ def best_match(errors, key=relevance):
+         set of inputs from version to version if better heuristics are added.
+ 
+     """
++    if key is relevance:
++        def key(error):
++            score = relevance(error)
++            return score[:1] + score[2:]
++
+     best = max(errors, key=key, default=None)
+     if best is None:
+         return

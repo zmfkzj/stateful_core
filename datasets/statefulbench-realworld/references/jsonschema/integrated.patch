@@ -1,0 +1,272 @@
+--- a/jsonschema/_format.py
++++ b/jsonschema/_format.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ from contextlib import suppress
++import decimal
+ from datetime import date, datetime
+ from uuid import UUID
+ import ipaddress
+@@ -39,17 +40,29 @@
+             The known formats to validate. This argument can be used to
+             limit which formats will be used during validation.
+ 
++        regex:
++
++            An optional regular expression implementation used to validate
++            the ``regex`` format.
++
+     """
+ 
+     checkers: dict[
+         str,
+-        tuple[_FormatCheckCallable, _RaisesType],
++        tuple[tuple[_FormatCheckCallable, _RaisesType], ...],
+     ] = {}  # noqa: RUF012
+ 
+-    def __init__(self, formats: typing.Iterable[str] | None = None):
++    def __init__(
++        self,
++        formats: typing.Iterable[str] | None = None,
++        *,
++        regex: typing.Any | None = None,
++    ):
+         if formats is None:
+             formats = self.checkers.keys()
+         self.checkers = {k: self.checkers[k] for k in formats}
++        if regex is not None and "regex" in self.checkers:
++            self.checkers["regex"] = ((regex.compile, regex.error),)
+ 
+     def __repr__(self):
+         return f"<FormatChecker checkers={sorted(self.checkers)}>"
+@@ -78,7 +91,9 @@
+         """
+ 
+         def _checks(func: _F) -> _F:
+-            self.checkers[format] = (func, raises)
++            self.checkers[format] = (
++                *self.checkers.get(format, ()), (func, raises),
++            )
+             return func
+ 
+         return _checks
+@@ -103,7 +118,9 @@
+         cls, format: str, raises: _RaisesType = (),
+     ) -> typing.Callable[[_F], _F]:
+         def _checks(func: _F) -> _F:
+-            cls.checkers[format] = (func, raises)
++            cls.checkers[format] = (
++                *cls.checkers.get(format, ()), (func, raises),
++            )
+             return func
+ 
+         return _checks
+@@ -132,14 +149,24 @@
+         if format not in self.checkers:
+             return
+ 
+-        func, raises = self.checkers[format]
+-        result, cause = None, None
+-        try:
+-            result = func(instance)
+-        except raises as e:
+-            cause = e
+-        if not result:
+-            raise FormatError(f"{instance!r} is not a {format!r}", cause=cause)
++        for func, raises in self.checkers[format]:
++            checked_instance = instance
++            if (
++                format == "date-time"
++                and func is is_datetime
++                and isinstance(instance, str)
++                and instance.startswith("0000-")
++            ):
++                checked_instance = "2000" + instance[4:]
++            result, cause = None, None
++            try:
++                result = func(checked_instance)
++            except raises as e:
++                cause = e
++            if not result:
++                raise FormatError(
++                    f"{instance!r} is not a {format!r}", cause=cause,
++                )
+ 
+     def conforms(self, instance: object, format: str) -> bool:
+         """
+@@ -524,7 +551,7 @@
+     @_checks_drafts(
+         draft201909="duration",
+         draft202012="duration",
+-        raises=isoduration.DurationParsingException,
++        raises=(isoduration.DurationParsingException, decimal.Overflow),
+     )
+     def is_duration(instance: object) -> bool:
+         if not isinstance(instance, str):
+--- a/jsonschema/exceptions.py
++++ b/jsonschema/exceptions.py
+@@ -65,6 +65,8 @@
+         schema_path: Iterable[str | int] = (),
+         parent: _Error | None = None,
+         type_checker: _types.TypeChecker = _unset,  # type: ignore[assignment]
++        relative_schema_path: Iterable[str | int] | None = None,
++        reason: str | None = None,
+     ) -> None:
+         super().__init__(
+             message,
+@@ -80,13 +82,17 @@
+         )
+         self.message = message
+         self.path = self.relative_path = deque(path)
+-        self.schema_path = self.relative_schema_path = deque(schema_path)
++        self.schema_path = deque(schema_path)
++        self.relative_schema_path = deque(
++            schema_path if relative_schema_path is None else relative_schema_path,
++        )
+         self.context = list(context)
+         self.cause = self.__cause__ = cause
+         self.validator = validator
+         self.validator_value = validator_value
+         self.instance = instance
+         self.schema = schema
++        self.reason = reason
+         self.parent = parent
+         self._type_checker = type_checker
+ 
+@@ -143,9 +149,9 @@
+     def absolute_schema_path(self) -> Sequence[str | int]:
+         parent = self.parent
+         if parent is None:
+-            return self.relative_schema_path
++            return self.schema_path
+ 
+-        path = deque(self.relative_schema_path)
++        path = deque(self.schema_path)
+         path.extendleft(reversed(parent.absolute_schema_path))
+         return path
+ 
+@@ -177,7 +183,8 @@
+     def _contents(self):
+         attrs = (
+             "message", "cause", "context", "validator", "validator_value",
+-            "path", "schema_path", "instance", "schema", "parent",
++            "path", "schema_path", "relative_schema_path", "instance", "schema",
++            "parent", "reason",
+         )
+         return {attr: getattr(self, attr) for attr in attrs}
+ 
+@@ -321,6 +328,12 @@
+ 
+     def __init__(self, errors: Iterable[ValidationError] = ()):
+         self.errors: MutableMapping[str, ValidationError] = {}
++        self.all_errors: MutableMapping[
++            str, tuple[ValidationError, ...]
++        ] = {}
++        self.duplicate_item_contexts: MutableMapping[
++            str, list[tuple[int, int, Any]]
++        ] = defaultdict(list)
+         self._contents: Mapping[str, ErrorTree] = defaultdict(self.__class__)
+ 
+         for error in errors:
+@@ -328,8 +341,22 @@
+             for element in error.path:
+                 container = container[element]
+             container.errors[error.validator] = error
++            container.all_errors[error.validator] = (
++                *container.all_errors.get(error.validator, ()),
++                error,
++            )
+ 
+             container._instance = error.instance
++            if error.validator == "uniqueItems":
++                previous = []
++                for index, item in enumerate(error.instance):
++                    for previous_index, earlier in enumerate(previous):
++                        if _utils.equal(item, earlier):
++                            container.duplicate_item_contexts[error.validator].append(
++                                (previous_index, index, item),
++                            )
++                            break
++                    previous.append(item)
+ 
+     def __contains__(self, index: str | int):
+         """
+@@ -390,7 +417,7 @@
+         The total number of errors in the entire tree, including children.
+         """
+         child_errors = sum(len(tree) for _, tree in self._contents.items())
+-        return len(self.errors) + child_errors
++        return sum(map(len, self.all_errors.values())) + child_errors
+ 
+ 
+ def by_relevance(weak=WEAK_MATCHES, strong=STRONG_MATCHES):
+@@ -476,14 +503,27 @@
+         set of inputs from version to version if better heuristics are added.
+ 
+     """
++    if key is relevance:
++        def key(error):
++            score = relevance(error)
++            return score[:1] + score[2:] + (error.validator == "const",)
++
+     best = max(errors, key=key, default=None)
+     if best is None:
+         return
+ 
+     while best.context:
++        best_in_subschemas = []
++        for error in best.context:
++            index = error.schema_path[0]
++            if index == len(best_in_subschemas):
++                best_in_subschemas.append(error)
++            else:
++                previous = best_in_subschemas[index]
++                best_in_subschemas[index] = max(previous, error, key=key)
+         # Calculate the minimum via nsmallest, because we don't recurse if
+         # all nested errors have the same relevance (i.e. if min == max == all)
+-        smallest = heapq.nsmallest(2, best.context, key=key)
++        smallest = heapq.nsmallest(2, best_in_subschemas, key=key)
+         if len(smallest) == 2 and key(smallest[0]) == key(smallest[1]):  # noqa: PLR2004
+             return best
+         best = smallest[0]
+--- a/jsonschema/validators.py
++++ b/jsonschema/validators.py
+@@ -391,6 +391,8 @@
+                     )
+                     if k not in {"if", "$ref"}:
+                         error.schema_path.appendleft(k)
++                        if error.schema is _schema:
++                            error.relative_schema_path.appendleft(k)
+                     yield error
+ 
+         def descend(
+@@ -439,6 +441,8 @@
+                     )
+                     if k not in {"if", "$ref"}:
+                         error.schema_path.appendleft(k)
++                        if error.schema is schema:
++                            error.relative_schema_path.appendleft(k)
+                     if path is not None:
+                         error.path.appendleft(path)
+                     if schema_path is not None:
+--- a/jsonschema/tests/test_format.py
++++ b/jsonschema/tests/test_format.py
+@@ -34,7 +34,7 @@
+             FormatChecker.cls_checks("boom")(boom)
+         self.assertEqual(
+             FormatChecker.checkers,
+-            dict(original, boom=(boom, ())),
++            dict(original, boom=((boom, ()),)),
+         )
+ 
+     def test_it_can_register_checkers(self):
+@@ -42,7 +42,7 @@
+         checker.checks("boom")(boom)
+         self.assertEqual(
+             checker.checkers,
+-            dict(FormatChecker.checkers, boom=(boom, ())),
++            dict(FormatChecker.checkers, boom=((boom, ()),)),
+         )
+ 
+     def test_it_catches_registered_errors(self):

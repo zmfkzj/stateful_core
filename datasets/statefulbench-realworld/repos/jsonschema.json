@@ -1,0 +1,251 @@
+{
+  "repository": "python-jsonschema/jsonschema",
+  "issue_snapshot": "issues/jsonschema.json",
+  "tasks": [
+    {
+      "key": "format-duration-1511-overflow",
+      "kind": "bug",
+      "sources": [
+        "https://github.com/python-jsonschema/jsonschema/issues/1511"
+      ],
+      "source_hash": "09c946c39f2bd6337a936c682c50254212d3582a5c27c9d36616eab3669f84d5",
+      "prompt": "Prevent duration format validation from leaking decimal.Overflow. A duration parser overflow must be reported as a normal format failure with its cause, while valid and malformed durations retain their existing outcomes.",
+      "acceptance": [
+        "A valid duration such as P1D continues to conform.",
+        "A malformed duration produces FormatError with the parser exception as its cause.",
+        "A duration parser decimal.Overflow produces FormatError rather than escaping from FormatChecker.check.",
+        "The overflow FormatError retains the decimal.Overflow instance as its cause."
+      ],
+      "overlap_anchors": [
+        {
+          "path": "jsonschema/_format.py",
+          "symbol": "jsonschema._format.FormatChecker.check"
+        }
+      ],
+      "evaluator": "evaluators/jsonschema/format-duration-1511-overflow.py",
+      "reference_patch": "references/jsonschema/format-duration-1511-overflow.patch"
+    },
+    {
+      "key": "format-duration-1496-multiple-checkers",
+      "kind": "feature",
+      "sources": [
+        "https://github.com/python-jsonschema/jsonschema/issues/1496"
+      ],
+      "source_hash": "21e8f30ef83b40e2422927ce3169b9c6ab2fb6a635e2cdabfaf3b5bd45efeb7d",
+      "prompt": "Allow FormatChecker.checks to register multiple checkers for one format without overwriting earlier registrations. FormatChecker.check must run registered checkers in registration order and reject as soon as any checker fails.",
+      "acceptance": [
+        "Two checkers registered for one format both run, in registration order, for a conforming instance.",
+        "A failure from the first registered checker raises FormatError and does not run later checkers.",
+        "A failure from a later registered checker raises FormatError after earlier checkers succeed.",
+        "An unknown format continues to conform without invoking a checker."
+      ],
+      "overlap_anchors": [
+        {
+          "path": "jsonschema/_format.py",
+          "symbol": "jsonschema._format.FormatChecker.check"
+        }
+      ],
+      "evaluator": "evaluators/jsonschema/format-duration-1496-multiple-checkers.py",
+      "reference_patch": "references/jsonschema/format-duration-1496-multiple-checkers.patch"
+    },
+    {
+      "key": "format-date-1465-year-zero",
+      "kind": "bug",
+      "sources": [
+        "https://github.com/python-jsonschema/jsonschema/issues/1465"
+      ],
+      "source_hash": "1d65aa971a95f8e876917763f30a20fce7739fdf6cee04c6ea09c1072391bcab",
+      "prompt": "Fix issue #1465 in jsonschema._format.FormatChecker. Date-time format checking must accept RFC3339 timestamps whose four-digit year is 0000 without weakening calendar or timezone validation.",
+      "acceptance": [
+        "A normal leap-day RFC3339 timestamp such as 2024-02-29T12:34:56Z remains valid for the date-time format.",
+        "The RFC3339 boundary timestamp 0000-02-29T00:00:00Z conforms to the date-time format.",
+        "An impossible year-zero calendar date such as 0000-02-30T00:00:00Z remains invalid.",
+        "A date-time value without a timezone such as 0000-01-01T00:00:00 remains invalid.",
+        "A custom date-time checker receives its original year-zero instance."
+      ],
+      "overlap_anchors": [
+        {
+          "path": "jsonschema/_format.py",
+          "symbol": "jsonschema._format.FormatChecker"
+        }
+      ],
+      "evaluator": "evaluators/jsonschema/format-date-1465-year-zero.py",
+      "reference_patch": "references/jsonschema/format-date-1465-year-zero.patch"
+    },
+    {
+      "key": "format-date-1142-regex-injection",
+      "kind": "feature",
+      "sources": [
+        "https://github.com/python-jsonschema/jsonschema/issues/1142"
+      ],
+      "source_hash": "4beb542e09abc3d196998fa0093623ece2da45dc7baa15460b809b871420fcc0",
+      "prompt": "Implement the FormatChecker portion of issue #1142 in jsonschema._format.FormatChecker. Accept an optional regex implementation with compile and error attributes, and use it for the regex format check while preserving the built-in implementation by default.",
+      "acceptance": [
+        "Without an injected implementation, standard-library regular expressions such as ^[a-z]+$ remain valid for the regex format.",
+        "An injected implementation is called for normal regex-format validation.",
+        "An injected implementation can accept syntax unsupported by the standard library, such as \\p{L}+.",
+        "A syntax exception raised by the injected implementation becomes the cause of FormatError."
+      ],
+      "overlap_anchors": [
+        {
+          "path": "jsonschema/_format.py",
+          "symbol": "jsonschema._format.FormatChecker"
+        }
+      ],
+      "evaluator": "evaluators/jsonschema/format-date-1142-regex-injection.py",
+      "reference_patch": "references/jsonschema/format-date-1142-regex-injection.patch"
+    },
+    {
+      "key": "validation-error-191-schema-path",
+      "kind": "bug",
+      "sources": [
+        "https://github.com/python-jsonschema/jsonschema/issues/191"
+      ],
+      "source_hash": "27f716c2cb49a683300bcab0c5f59874f4e808260c974d2efe90fede42ec501e",
+      "prompt": "Fix Jsonschema issue #191 at jsonschema.exceptions.ValidationError. A generated error's schema is the local subschema, so relative_schema_path must be relative to that schema rather than the root schema. Keep schema_path and absolute_schema_path root-relative, including errors nested under applicator context.",
+      "acceptance": [
+        "For an additionalProperties failure in a deeply nested object, relative_schema_path is [additionalProperties] relative to error.schema while schema_path and absolute_schema_path retain the complete root path.",
+        "A root-schema additionalProperties failure retains [additionalProperties] for relative_schema_path, schema_path, and absolute_schema_path.",
+        "A child error in anyOf context reports local relative_schema_path [type], preserves schema_path [0, type], and has absolute_schema_path [anyOf, 0, type].",
+        "ValidationError rendering names the local schema location rather than a root path that cannot be applied to error.schema."
+      ],
+      "overlap_anchors": [
+        {
+          "path": "jsonschema/exceptions.py",
+          "symbol": "jsonschema.exceptions.ValidationError"
+        }
+      ],
+      "evaluator": "evaluators/jsonschema/validation-error-191-schema-path.py",
+      "reference_patch": "references/jsonschema/validation-error-191-schema-path.patch"
+    },
+    {
+      "key": "validation-error-1218-safe-reason",
+      "kind": "feature",
+      "sources": [
+        "https://github.com/python-jsonschema/jsonschema/issues/1218"
+      ],
+      "source_hash": "199cfcbf271d660b1e15d5393b5ef716b246bc4926924d4a86dbd05c4db605c4",
+      "prompt": "Implement Jsonschema issue #1218 at jsonschema.exceptions.ValidationError. Add an optional reason property for an explicitly supplied concise, instance-free explanation. An omitted reason must stay None rather than copying the potentially sensitive message; retain empty strings verbatim. Preserve legacy message, str(error), positional construction, Exception.args, and create_from behavior.",
+      "acceptance": [
+        "An explicitly supplied reason is exposed unchanged while the legacy message and its first Exception.args entry remain unchanged.",
+        "An explicitly supplied empty reason remains an empty string, while an omitted reason is None and is never populated from a sensitive message.",
+        "A normal type-validation failure still raises ValidationError and exposes reason as None.",
+        "ValidationError.create_from preserves both the optional reason and the original legacy message."
+      ],
+      "overlap_anchors": [
+        {
+          "path": "jsonschema/exceptions.py",
+          "symbol": "jsonschema.exceptions.ValidationError"
+        }
+      ],
+      "evaluator": "evaluators/jsonschema/validation-error-1218-safe-reason.py",
+      "reference_patch": "references/jsonschema/validation-error-1218-safe-reason.patch"
+    },
+    {
+      "key": "error-tree-442-multiple-validator-errors",
+      "kind": "bug",
+      "sources": [
+        "https://github.com/python-jsonschema/jsonschema/issues/442"
+      ],
+      "source_hash": "415c77619efc07eb93daed703eeccdb7eeb91536e8452d9f91a86a5af68297c4",
+      "prompt": "Fix issue #442 in jsonschema.exceptions.ErrorTree. Preserve every ValidationError at a tree node even when multiple errors have the same validator. Keep ErrorTree.errors backward-compatible as the representative latest error, expose every error through all_errors as a validator-to-tuple mapping, and count every preserved error in total_errors.",
+      "acceptance": [
+        "Two root-level ValidationErrors with validator anyOf are both retained in ErrorTree.all_errors[anyOf] in insertion order.",
+        "ErrorTree.errors remains a validator-to-representative-error mapping and keeps the latest error for a repeated validator.",
+        "Repeated validators at a nested instance path are retained in that child ErrorTree and total_errors counts both.",
+        "Distinct validators retain their representative errors."
+      ],
+      "overlap_anchors": [
+        {
+          "path": "jsonschema/exceptions.py",
+          "symbol": "jsonschema.exceptions.ErrorTree"
+        }
+      ],
+      "evaluator": "evaluators/jsonschema/error-tree-442-multiple-validator-errors.py",
+      "reference_patch": "references/jsonschema/error-tree-442-multiple-validator-errors.patch"
+    },
+    {
+      "key": "error-tree-1363-duplicate-item-context",
+      "kind": "feature",
+      "sources": [
+        "https://github.com/python-jsonschema/jsonschema/issues/1363"
+      ],
+      "source_hash": "7bb583eb7ce0336a13cdb81467788884f6b028a35651997b88422e9893bb9aa1",
+      "prompt": "Implement the ErrorTree.duplicate_item_contexts API in jsonschema.exceptions.ErrorTree, motivated by issue #1363. For each uniqueItems error at a tree node, map uniqueItems to ordered (first_index, duplicate_index, item) tuples using JSON Schema equality. Preserve context at nested ErrorTree nodes and leave valid unique arrays with no context.",
+      "acceptance": [
+        "A uniqueItems error for [red, blue, red] exposes (0, 2, red) through ErrorTree.duplicate_item_contexts[uniqueItems].",
+        "Repeated duplicate values report each later duplicate against its first occurrence in input order.",
+        "A nested uniqueItems error stores its context on the corresponding child ErrorTree and honors JSON Schema equality, including True versus 1.",
+        "A valid unique array produces an ErrorTree with an empty duplicate_item_contexts mapping."
+      ],
+      "overlap_anchors": [
+        {
+          "path": "jsonschema/exceptions.py",
+          "symbol": "jsonschema.exceptions.ErrorTree"
+        }
+      ],
+      "evaluator": "evaluators/jsonschema/error-tree-1363-duplicate-item-context.py",
+      "reference_patch": "references/jsonschema/error-tree-1363-duplicate-item-context.patch"
+    },
+    {
+      "key": "validators-1257-best-match-ties",
+      "kind": "bug",
+      "sources": [
+        "https://github.com/python-jsonschema/jsonschema/issues/1257"
+      ],
+      "source_hash": "f6dc3c52c7c92addf8f7f7dcf50ba652e06f57afaeb6359f312095fa872eb423",
+      "prompt": "Fix issue #1257 in jsonschema.exceptions.best_match. When equally relevant alternatives of an anyOf or oneOf fail at sibling instance paths, retain the applicator summary error rather than arbitrarily selecting a child merely by its path ordering. Preserve custom key behavior and the empty-input result.",
+      "acceptance": [
+        "For equally relevant anyOf alternatives that fail at sibling properties, best_match returns the anyOf summary ValidationError rather than one arbitrary type child.",
+        "For equivalent oneOf alternatives, best_match returns the oneOf summary ValidationError.",
+        "best_match returns None for an empty error iterable.",
+        "best_match continues accepting a caller-supplied key function."
+      ],
+      "overlap_anchors": [
+        {
+          "path": "jsonschema/exceptions.py",
+          "symbol": "jsonschema.exceptions.best_match"
+        }
+      ],
+      "evaluator": "evaluators/jsonschema/validators-1257-best-match-ties.py",
+      "reference_patch": "references/jsonschema/validators-1257-best-match-ties.patch"
+    },
+    {
+      "key": "validators-1002-anyof-actionable-error",
+      "kind": "feature",
+      "sources": [
+        "https://github.com/python-jsonschema/jsonschema/issues/1002"
+      ],
+      "source_hash": "ea1b14e71e449d40de95d35ab872cc0f3aa557855ca19584925c090b5ebd7cfd",
+      "prompt": "Implement enhancement #1002 in jsonschema.exceptions.best_match. For a versioned anyOf, rank each alternative's representative error before comparing alternatives, so a matching version branch's detailed error wins over an unrelated deeper error or a failed const discriminator from another version. Preserve the generic anyOf summary when alternatives remain equally relevant and preserve caller-supplied key behavior.",
+      "acceptance": [
+        "For the issue's versioned anyOf shape, best_match returns the v1 description type ValidationError rather than the generic anyOf summary.",
+        "The selected error has validator type, instance path [description], and instance value 0.",
+        "An unrelated deeper minProperties error from the v2 alternative and its failed version const discriminator do not displace the actionable v1 error.",
+        "Equal-relevance alternatives retain the anyOf summary error, and a caller-supplied key remains authoritative."
+      ],
+      "overlap_anchors": [
+        {
+          "path": "jsonschema/exceptions.py",
+          "symbol": "jsonschema.exceptions.best_match"
+        }
+      ],
+      "evaluator": "evaluators/jsonschema/validators-1002-anyof-actionable-error.py",
+      "reference_patch": "references/jsonschema/validators-1002-anyof-actionable-error.patch"
+    }
+  ],
+  "final_prompt": "You are the integration reviewer for the Jsonschema corpus. Run every listed evaluator against the shared checkout after all ten task patches are applied. Fix every evaluator failure while preserving all task contracts, resolve same-symbol edits without discarding either behavior, and finish only when every evaluator passes.",
+  "evaluators": [
+    "evaluators/jsonschema/format-duration-1511-overflow.py",
+    "evaluators/jsonschema/format-duration-1496-multiple-checkers.py",
+    "evaluators/jsonschema/format-date-1465-year-zero.py",
+    "evaluators/jsonschema/format-date-1142-regex-injection.py",
+    "evaluators/jsonschema/validation-error-191-schema-path.py",
+    "evaluators/jsonschema/validation-error-1218-safe-reason.py",
+    "evaluators/jsonschema/error-tree-442-multiple-validator-errors.py",
+    "evaluators/jsonschema/error-tree-1363-duplicate-item-context.py",
+    "evaluators/jsonschema/validators-1257-best-match-ties.py",
+    "evaluators/jsonschema/validators-1002-anyof-actionable-error.py"
+  ],
+  "integrated_reference_patch": "references/jsonschema/integrated.patch"
+}

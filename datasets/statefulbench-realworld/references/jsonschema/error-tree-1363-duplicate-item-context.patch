@@ -1,0 +1,30 @@
+diff --git a/jsonschema/exceptions.py b/jsonschema/exceptions.py
+index 2e5d4ca..f08dfa6 100644
+--- a/jsonschema/exceptions.py
++++ b/jsonschema/exceptions.py
+@@ -321,6 +321,9 @@ class ErrorTree:
+ 
+     def __init__(self, errors: Iterable[ValidationError] = ()):
+         self.errors: MutableMapping[str, ValidationError] = {}
++        self.duplicate_item_contexts: MutableMapping[
++            str, list[tuple[int, int, Any]]
++        ] = defaultdict(list)
+         self._contents: Mapping[str, ErrorTree] = defaultdict(self.__class__)
+ 
+         for error in errors:
+@@ -330,5 +333,15 @@ class ErrorTree:
+             container.errors[error.validator] = error
+ 
+             container._instance = error.instance
++            if error.validator == "uniqueItems":
++                previous = []
++                for index, item in enumerate(error.instance):
++                    for previous_index, earlier in enumerate(previous):
++                        if _utils.equal(item, earlier):
++                            container.duplicate_item_contexts[error.validator].append(
++                                (previous_index, index, item),
++                            )
++                            break
++                    previous.append(item)
+ 
+     def __contains__(self, index: str | int):

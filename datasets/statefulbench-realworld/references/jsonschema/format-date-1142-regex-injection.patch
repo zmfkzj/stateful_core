@@ -1,0 +1,34 @@
+diff --git a/jsonschema/_format.py b/jsonschema/_format.py
+--- a/jsonschema/_format.py
++++ b/jsonschema/_format.py
+@@ -39,6 +39,11 @@ class FormatChecker:
+             The known formats to validate. This argument can be used to
+             limit which formats will be used during validation.
+ 
++        regex:
++
++            An optional regular expression implementation used to validate
++            the ``regex`` format.
++
+     """
+ 
+     checkers: dict[
+@@ -46,10 +51,17 @@ class FormatChecker:
+         tuple[_FormatCheckCallable, _RaisesType],
+     ] = {}  # noqa: RUF012
+ 
+-    def __init__(self, formats: typing.Iterable[str] | None = None):
++    def __init__(
++        self,
++        formats: typing.Iterable[str] | None = None,
++        *,
++        regex: typing.Any | None = None,
++    ):
+         if formats is None:
+             formats = self.checkers.keys()
+         self.checkers = {k: self.checkers[k] for k in formats}
++        if regex is not None and "regex" in self.checkers:
++            self.checkers["regex"] = (regex.compile, regex.error)
+ 
+     def __repr__(self):
+         return f"<FormatChecker checkers={sorted(self.checkers)}>"
