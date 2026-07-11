@@ -1,40 +1,56 @@
 diff --git a/jsonschema/_format.py b/jsonschema/_format.py
+index 5efda86..4cd49f5 100644
 --- a/jsonschema/_format.py
 +++ b/jsonschema/_format.py
-@@ -43,6 +43,6 @@ class FormatChecker:
-     checkers: dict[
+@@ -45,11 +45,19 @@ class FormatChecker:
          str,
--        tuple[_FormatCheckCallable, _RaisesType],
-+        tuple[tuple[_FormatCheckCallable, _RaisesType], ...],
+         tuple[_FormatCheckCallable, _RaisesType],
      ] = {}  # noqa: RUF012
++    _checkers: dict[
++        str,
++        tuple[tuple[_FormatCheckCallable, _RaisesType], ...],
++    ] = {}  # noqa: RUF012
  
      def __init__(self, formats: typing.Iterable[str] | None = None):
-@@ -78,7 +78,9 @@ class FormatChecker:
+         if formats is None:
+             formats = self.checkers.keys()
+         self.checkers = {k: self.checkers[k] for k in formats}
++        self._checkers = {
++            k: type(self)._checkers.get(k, (checker,))
++            for k, checker in self.checkers.items()
++        }
+ 
+     def __repr__(self):
+         return f"<FormatChecker checkers={sorted(self.checkers)}>"
+@@ -78,6 +86,10 @@ class FormatChecker:
          """
  
          def _checks(func: _F) -> _F:
--            self.checkers[format] = (func, raises)
-+            self.checkers[format] = (
-+                *self.checkers.get(format, ()), (func, raises),
-+            )
++            checkers = self._checkers.get(format, ())
++            if not checkers and format in self.checkers:
++                checkers = (self.checkers[format],)
++            self._checkers[format] = (*checkers, (func, raises))
+             self.checkers[format] = (func, raises)
              return func
  
-         return _checks
-@@ -103,7 +105,9 @@ class FormatChecker:
+@@ -103,6 +115,10 @@ class FormatChecker:
          cls, format: str, raises: _RaisesType = (),
      ) -> typing.Callable[[_F], _F]:
          def _checks(func: _F) -> _F:
--            cls.checkers[format] = (func, raises)
-+            cls.checkers[format] = (
-+                *cls.checkers.get(format, ()), (func, raises),
-+            )
++            checkers = cls._checkers.get(format, ())
++            if not checkers and format in cls.checkers:
++                checkers = (cls.checkers[format],)
++            cls._checkers[format] = (*checkers, (func, raises))
+             cls.checkers[format] = (func, raises)
              return func
-
-         return _checks
-@@ -132,13 +136,15 @@ class FormatChecker:
-         if format not in self.checkers:
-             return
  
+@@ -129,17 +145,23 @@ class FormatChecker:
+                 if the instance does not conform to ``format``
+ 
+         """
+-        if format not in self.checkers:
+-            return
+-
 -        func, raises = self.checkers[format]
 -        result, cause = None, None
 -        try:
@@ -43,7 +59,14 @@ diff --git a/jsonschema/_format.py b/jsonschema/_format.py
 -            cause = e
 -        if not result:
 -            raise FormatError(f"{instance!r} is not a {format!r}", cause=cause)
-+        for func, raises in self.checkers[format]:
++        checkers = self._checkers.get(format)
++        if checkers is None:
++            checker = self.checkers.get(format)
++            if checker is None:
++                return
++            checkers = (checker,)
++
++        for func, raises in checkers:
 +            result, cause = None, None
 +            try:
 +                result = func(instance)
@@ -55,3 +78,4 @@ diff --git a/jsonschema/_format.py b/jsonschema/_format.py
 +                )
  
      def conforms(self, instance: object, format: str) -> bool:
+         """

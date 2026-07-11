@@ -1,4 +1,21 @@
+diff --git a/jsonschema/_keywords.py b/jsonschema/_keywords.py
+index f30f954..71e73d3 100644
+--- a/jsonschema/_keywords.py
++++ b/jsonschema/_keywords.py
+@@ -284,7 +284,10 @@ def type(validator, types, instance, schema):
+ 
+     if not any(validator.is_type(instance, type) for type in types):
+         reprs = ", ".join(repr(type) for type in types)
+-        yield ValidationError(f"{instance!r} is not of type {reprs}")
++        yield ValidationError(
++            f"{instance!r} is not of type {reprs}",
++            reason=f"Expected type {reprs}.",
++        )
+ 
+ 
+ def properties(validator, properties, instance, schema):
 diff --git a/jsonschema/exceptions.py b/jsonschema/exceptions.py
+index 2e5d4ca..948fa47 100644
 --- a/jsonschema/exceptions.py
 +++ b/jsonschema/exceptions.py
 @@ -65,6 +65,7 @@ class _Error(Exception):
@@ -17,7 +34,7 @@ diff --git a/jsonschema/exceptions.py b/jsonschema/exceptions.py
          self.parent = parent
          self._type_checker = type_checker
  
-@@ -177,5 +179,5 @@ class _Error(Exception):
+@@ -177,7 +179,7 @@ class _Error(Exception):
      def _contents(self):
          attrs = (
              "message", "cause", "context", "validator", "validator_value",
@@ -25,3 +42,4 @@ diff --git a/jsonschema/exceptions.py b/jsonschema/exceptions.py
 +            "path", "schema_path", "instance", "schema", "parent", "reason",
          )
          return {attr: getattr(self, attr) for attr in attrs}
+ 

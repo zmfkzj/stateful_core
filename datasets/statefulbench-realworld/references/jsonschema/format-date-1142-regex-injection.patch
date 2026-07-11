@@ -1,4 +1,5 @@
 diff --git a/jsonschema/_format.py b/jsonschema/_format.py
+index 5efda86..47e09e0 100644
 --- a/jsonschema/_format.py
 +++ b/jsonschema/_format.py
 @@ -39,6 +39,11 @@ class FormatChecker:
@@ -7,13 +8,13 @@ diff --git a/jsonschema/_format.py b/jsonschema/_format.py
  
 +        regex:
 +
-+            An optional regular expression implementation used to validate
-+            the ``regex`` format.
++            An optional regular expression implementation used by the
++            ``regex`` format and schema pattern keywords.
 +
      """
  
      checkers: dict[
-@@ -46,10 +51,17 @@ class FormatChecker:
+@@ -46,10 +51,18 @@ class FormatChecker:
          tuple[_FormatCheckCallable, _RaisesType],
      ] = {}  # noqa: RUF012
  
@@ -27,8 +28,76 @@ diff --git a/jsonschema/_format.py b/jsonschema/_format.py
          if formats is None:
              formats = self.checkers.keys()
          self.checkers = {k: self.checkers[k] for k in formats}
++        self._regex = re if regex is None else regex
 +        if regex is not None and "regex" in self.checkers:
-+            self.checkers["regex"] = (regex.compile, regex.error)
++            self.checkers["regex"] = (self._regex.compile, self._regex.error)
  
      def __repr__(self):
          return f"<FormatChecker checkers={sorted(self.checkers)}>"
+diff --git a/jsonschema/_keywords.py b/jsonschema/_keywords.py
+index f30f954..b030008 100644
+--- a/jsonschema/_keywords.py
++++ b/jsonschema/_keywords.py
+@@ -13,13 +13,19 @@ from jsonschema._utils import (
+ from jsonschema.exceptions import FormatError, ValidationError
+ 
+ 
++def _regex(validator):
++    if validator.format_checker is None:
++        return re
++    return validator.format_checker._regex
++
++
+ def patternProperties(validator, patternProperties, instance, schema):
+     if not validator.is_type(instance, "object"):
+         return
+ 
+     for pattern, subschema in patternProperties.items():
+         for k, v in instance.items():
+-            if re.search(pattern, k):
++            if _regex(validator).search(pattern, k):
+                 yield from validator.descend(
+                     v, subschema, path=k, schema_path=pattern,
+                 )
+@@ -37,7 +43,9 @@ def additionalProperties(validator, aP, instance, schema):
+     if not validator.is_type(instance, "object"):
+         return
+ 
+-    extras = set(find_additional_properties(instance, schema))
++    extras = set(
++        find_additional_properties(instance, schema, regex=_regex(validator)),
++    )
+ 
+     if validator.is_type(aP, "object"):
+         for extra in extras:
+@@ -215,7 +223,7 @@ def uniqueItems(validator, uI, instance, schema):
+ def pattern(validator, patrn, instance, schema):
+     if (
+         validator.is_type(instance, "string")
+-        and not re.search(patrn, instance)
++        and not _regex(validator).search(patrn, instance)
+     ):
+         yield ValidationError(f"{instance!r} does not match {patrn!r}")
+ 
+diff --git a/jsonschema/_utils.py b/jsonschema/_utils.py
+index 3177cae..852ab84 100644
+--- a/jsonschema/_utils.py
++++ b/jsonschema/_utils.py
+@@ -72,7 +72,7 @@ def format_as_index(container, indices):
+     return f"{container}[{']['.join(repr(index) for index in indices)}]"
+ 
+ 
+-def find_additional_properties(instance, schema):
++def find_additional_properties(instance, schema, regex=re):
+     """
+     Return the set of additional properties for the given ``instance``.
+ 
+@@ -85,7 +85,7 @@ def find_additional_properties(instance, schema):
+     patterns = "|".join(schema.get("patternProperties", {}))
+     for property in instance:
+         if property not in properties:
+-            if patterns and re.search(patterns, property):
++            if patterns and regex.search(patterns, property):
+                 continue
+             yield property
+ 

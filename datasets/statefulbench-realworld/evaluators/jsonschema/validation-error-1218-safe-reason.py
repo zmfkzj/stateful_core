@@ -37,21 +37,22 @@ def main() -> None:
     assert blank.reason == ""
     assert omitted.reason is None
 
-    # Error path: ordinary validator failures remain ValidationError instances
-    # and expose no derived value that could leak the failing instance.
+    # Keyword errors provide a concise reason that does not reveal the
+    # rejected instance, while retaining the legacy instance-containing message.
     try:
         Draft202012Validator({"type": "integer"}).validate("top-secret")
     except ValidationError as generated:
-        assert generated.reason is None
-        assert "top-secret" not in (generated.reason or "")
+        assert generated.reason == "Expected type 'integer'."
+        assert repr("top-secret") not in generated.reason
+        assert "top-secret" in generated.message
+        # Regression: copying a generated keyword error preserves its safe reason.
+        copied = ValidationError.create_from(generated)
+        assert copied.reason == generated.reason
+        assert copied.message == generated.message
+        assert copied.args[0] == generated.message
     else:
         raise AssertionError("a non-integer instance must fail validation")
 
-    # Regression: copying an error preserves the optional safe reason.
-    copied = ValidationError.create_from(error)
-    assert copied.reason == "Expected an integer."
-    assert copied.message == error.message
-    assert copied.args[0] == error.message
 
 
 if __name__ == "__main__":

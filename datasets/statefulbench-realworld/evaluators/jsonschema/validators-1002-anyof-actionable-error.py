@@ -16,6 +16,12 @@ def main() -> None:
     sys.path.insert(0, str(checkout))
 
     from jsonschema import Draft202012Validator, exceptions
+    boolean_error = exceptions.best_match(
+        Draft202012Validator({"anyOf": [False, False]}).iter_errors({}),
+    )
+    assert boolean_error is not None
+    assert boolean_error.validator == "anyOf"
+
 
     schema = {
         "anyOf": [

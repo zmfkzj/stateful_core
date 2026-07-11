@@ -48,6 +48,11 @@ def main() -> None:
     def second(instance):
         calls.append(("second", instance))
         return instance.endswith("!")
+    public = checker.checkers["composed"]
+    func, raises = public
+    assert func is second
+    assert public[0] is second
+    assert raises == ()
 
     checker.check("ok!", "composed")
     assert calls == [("first", "ok!"), ("second", "ok!")]

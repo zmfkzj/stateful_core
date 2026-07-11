@@ -12,18 +12,24 @@ diff --git a/jsonschema/exceptions.py b/jsonschema/exceptions.py
 +
      best = max(errors, key=key, default=None)
      if best is None:
-@@ -481,9 +486,18 @@ def best_match(errors, key=relevance):
+@@ -481,9 +486,24 @@ def best_match(errors, key=relevance):
          return
  
      while best.context:
-+        best_in_subschemas = []
-+        for error in best.context:
-+            index = error.schema_path[0]
-+            if index == len(best_in_subschemas):
-+                best_in_subschemas.append(error)
-+            else:
-+                previous = best_in_subschemas[index]
-+                best_in_subschemas[index] = max(previous, error, key=key)
++        if all(
++            error.schema_path and type(error.schema_path[0]) is int
++            for error in best.context
++        ):
++            best_in_subschemas = []
++            for error in best.context:
++                index = error.schema_path[0]
++                if index == len(best_in_subschemas):
++                    best_in_subschemas.append(error)
++                else:
++                    previous = best_in_subschemas[index]
++                    best_in_subschemas[index] = max(previous, error, key=key)
++        else:
++            best_in_subschemas = best.context
 +
          # Calculate the minimum via nsmallest, because we don't recurse if
          # all nested errors have the same relevance (i.e. if min == max == all)

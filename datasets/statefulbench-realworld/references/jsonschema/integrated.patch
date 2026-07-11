@@ -1,3 +1,5 @@
+diff --git a/jsonschema/_format.py b/jsonschema/_format.py
+index 5efda86..2f523f4 100644
 --- a/jsonschema/_format.py
 +++ b/jsonschema/_format.py
 @@ -1,6 +1,7 @@
@@ -8,22 +10,25 @@
  from datetime import date, datetime
  from uuid import UUID
  import ipaddress
-@@ -39,17 +40,29 @@
+@@ -39,17 +40,39 @@ class FormatChecker:
              The known formats to validate. This argument can be used to
              limit which formats will be used during validation.
  
 +        regex:
 +
-+            An optional regular expression implementation used to validate
-+            the ``regex`` format.
++            An optional regular expression implementation used by the
++            ``regex`` format and schema pattern keywords.
 +
      """
  
      checkers: dict[
          str,
--        tuple[_FormatCheckCallable, _RaisesType],
-+        tuple[tuple[_FormatCheckCallable, _RaisesType], ...],
+         tuple[_FormatCheckCallable, _RaisesType],
      ] = {}  # noqa: RUF012
++    _checkers: dict[
++        str,
++        tuple[tuple[_FormatCheckCallable, _RaisesType], ...],
++    ] = {}  # noqa: RUF012
  
 -    def __init__(self, formats: typing.Iterable[str] | None = None):
 +    def __init__(
@@ -35,37 +40,46 @@
          if formats is None:
              formats = self.checkers.keys()
          self.checkers = {k: self.checkers[k] for k in formats}
++        self._checkers = {
++            k: type(self)._checkers.get(k, (checker,))
++            for k, checker in self.checkers.items()
++        }
++        self._regex = re if regex is None else regex
 +        if regex is not None and "regex" in self.checkers:
-+            self.checkers["regex"] = ((regex.compile, regex.error),)
++            self.checkers["regex"] = (self._regex.compile, self._regex.error)
++            self._checkers["regex"] = (self.checkers["regex"],)
  
      def __repr__(self):
          return f"<FormatChecker checkers={sorted(self.checkers)}>"
-@@ -78,7 +91,9 @@
+@@ -78,6 +101,10 @@ class FormatChecker:
          """
  
          def _checks(func: _F) -> _F:
--            self.checkers[format] = (func, raises)
-+            self.checkers[format] = (
-+                *self.checkers.get(format, ()), (func, raises),
-+            )
++            checkers = self._checkers.get(format, ())
++            if not checkers and format in self.checkers:
++                checkers = (self.checkers[format],)
++            self._checkers[format] = (*checkers, (func, raises))
+             self.checkers[format] = (func, raises)
              return func
  
-         return _checks
-@@ -103,7 +118,9 @@
+@@ -103,6 +130,10 @@ class FormatChecker:
          cls, format: str, raises: _RaisesType = (),
      ) -> typing.Callable[[_F], _F]:
          def _checks(func: _F) -> _F:
--            cls.checkers[format] = (func, raises)
-+            cls.checkers[format] = (
-+                *cls.checkers.get(format, ()), (func, raises),
-+            )
++            checkers = cls._checkers.get(format, ())
++            if not checkers and format in cls.checkers:
++                checkers = (cls.checkers[format],)
++            cls._checkers[format] = (*checkers, (func, raises))
+             cls.checkers[format] = (func, raises)
              return func
  
-         return _checks
-@@ -132,14 +149,24 @@
-         if format not in self.checkers:
-             return
+@@ -129,17 +160,31 @@ class FormatChecker:
+                 if the instance does not conform to ``format``
  
+         """
+-        if format not in self.checkers:
+-            return
+-
 -        func, raises = self.checkers[format]
 -        result, cause = None, None
 -        try:
@@ -74,7 +88,14 @@
 -            cause = e
 -        if not result:
 -            raise FormatError(f"{instance!r} is not a {format!r}", cause=cause)
-+        for func, raises in self.checkers[format]:
++        checkers = self._checkers.get(format)
++        if checkers is None:
++            checker = self.checkers.get(format)
++            if checker is None:
++                return
++            checkers = (checker,)
++
++        for func, raises in checkers:
 +            checked_instance = instance
 +            if (
 +                format == "date-time"
@@ -95,7 +116,7 @@
  
      def conforms(self, instance: object, format: str) -> bool:
          """
-@@ -524,7 +551,7 @@
+@@ -524,7 +569,7 @@ with suppress(ImportError):
      @_checks_drafts(
          draft201909="duration",
          draft202012="duration",
@@ -104,9 +125,108 @@
      )
      def is_duration(instance: object) -> bool:
          if not isinstance(instance, str):
+diff --git a/jsonschema/_keywords.py b/jsonschema/_keywords.py
+index f30f954..1e3b206 100644
+--- a/jsonschema/_keywords.py
++++ b/jsonschema/_keywords.py
+@@ -13,13 +13,19 @@ from jsonschema._utils import (
+ from jsonschema.exceptions import FormatError, ValidationError
+ 
+ 
++def _regex(validator):
++    if validator.format_checker is None:
++        return re
++    return validator.format_checker._regex
++
++
+ def patternProperties(validator, patternProperties, instance, schema):
+     if not validator.is_type(instance, "object"):
+         return
+ 
+     for pattern, subschema in patternProperties.items():
+         for k, v in instance.items():
+-            if re.search(pattern, k):
++            if _regex(validator).search(pattern, k):
+                 yield from validator.descend(
+                     v, subschema, path=k, schema_path=pattern,
+                 )
+@@ -37,7 +43,9 @@ def additionalProperties(validator, aP, instance, schema):
+     if not validator.is_type(instance, "object"):
+         return
+ 
+-    extras = set(find_additional_properties(instance, schema))
++    extras = set(
++        find_additional_properties(instance, schema, regex=_regex(validator)),
++    )
+ 
+     if validator.is_type(aP, "object"):
+         for extra in extras:
+@@ -209,13 +217,24 @@ def uniqueItems(validator, uI, instance, schema):
+         and validator.is_type(instance, "array")
+         and not uniq(instance)
+     ):
+-        yield ValidationError(f"{instance!r} has non-unique elements")
++        duplicate_item_contexts = []
++        previous = []
++        for index, item in enumerate(instance):
++            for first_index, earlier in enumerate(previous):
++                if equal(item, earlier):
++                    duplicate_item_contexts.append((first_index, index, item))
++                    break
++            previous.append(item)
++
++        error = ValidationError(f"{instance!r} has non-unique elements")
++        error.duplicate_item_contexts = duplicate_item_contexts
++        yield error
+ 
+ 
+ def pattern(validator, patrn, instance, schema):
+     if (
+         validator.is_type(instance, "string")
+-        and not re.search(patrn, instance)
++        and not _regex(validator).search(patrn, instance)
+     ):
+         yield ValidationError(f"{instance!r} does not match {patrn!r}")
+ 
+@@ -284,7 +303,10 @@ def type(validator, types, instance, schema):
+ 
+     if not any(validator.is_type(instance, type) for type in types):
+         reprs = ", ".join(repr(type) for type in types)
+-        yield ValidationError(f"{instance!r} is not of type {reprs}")
++        yield ValidationError(
++            f"{instance!r} is not of type {reprs}",
++            reason=f"Expected type {reprs}.",
++        )
+ 
+ 
+ def properties(validator, properties, instance, schema):
+diff --git a/jsonschema/_utils.py b/jsonschema/_utils.py
+index 3177cae..852ab84 100644
+--- a/jsonschema/_utils.py
++++ b/jsonschema/_utils.py
+@@ -72,7 +72,7 @@ def format_as_index(container, indices):
+     return f"{container}[{']['.join(repr(index) for index in indices)}]"
+ 
+ 
+-def find_additional_properties(instance, schema):
++def find_additional_properties(instance, schema, regex=re):
+     """
+     Return the set of additional properties for the given ``instance``.
+ 
+@@ -85,7 +85,7 @@ def find_additional_properties(instance, schema):
+     patterns = "|".join(schema.get("patternProperties", {}))
+     for property in instance:
+         if property not in properties:
+-            if patterns and re.search(patterns, property):
++            if patterns and regex.search(patterns, property):
+                 continue
+             yield property
+ 
+diff --git a/jsonschema/exceptions.py b/jsonschema/exceptions.py
+index 2e5d4ca..57908d0 100644
 --- a/jsonschema/exceptions.py
 +++ b/jsonschema/exceptions.py
-@@ -65,6 +65,8 @@
+@@ -65,6 +65,8 @@ class _Error(Exception):
          schema_path: Iterable[str | int] = (),
          parent: _Error | None = None,
          type_checker: _types.TypeChecker = _unset,  # type: ignore[assignment]
@@ -115,7 +235,7 @@
      ) -> None:
          super().__init__(
              message,
-@@ -80,13 +82,17 @@
+@@ -80,13 +82,17 @@ class _Error(Exception):
          )
          self.message = message
          self.path = self.relative_path = deque(path)
@@ -134,7 +254,7 @@
          self.parent = parent
          self._type_checker = type_checker
  
-@@ -143,9 +149,9 @@
+@@ -143,9 +149,9 @@ class _Error(Exception):
      def absolute_schema_path(self) -> Sequence[str | int]:
          parent = self.parent
          if parent is None:
@@ -146,17 +266,17 @@
          path.extendleft(reversed(parent.absolute_schema_path))
          return path
  
-@@ -177,7 +183,8 @@
+@@ -177,7 +183,8 @@ class _Error(Exception):
      def _contents(self):
          attrs = (
              "message", "cause", "context", "validator", "validator_value",
 -            "path", "schema_path", "instance", "schema", "parent",
-+            "path", "schema_path", "relative_schema_path", "instance", "schema",
-+            "parent", "reason",
++            "path", "schema_path", "relative_schema_path", "instance", "schema", "parent",
++            "reason",
          )
          return {attr: getattr(self, attr) for attr in attrs}
  
-@@ -321,6 +328,12 @@
+@@ -321,6 +328,12 @@ class ErrorTree:
  
      def __init__(self, errors: Iterable[ValidationError] = ()):
          self.errors: MutableMapping[str, ValidationError] = {}
@@ -169,7 +289,7 @@
          self._contents: Mapping[str, ErrorTree] = defaultdict(self.__class__)
  
          for error in errors:
-@@ -328,8 +341,22 @@
+@@ -328,8 +341,17 @@ class ErrorTree:
              for element in error.path:
                  container = container[element]
              container.errors[error.validator] = error
@@ -179,20 +299,15 @@
 +            )
  
              container._instance = error.instance
-+            if error.validator == "uniqueItems":
-+                previous = []
-+                for index, item in enumerate(error.instance):
-+                    for previous_index, earlier in enumerate(previous):
-+                        if _utils.equal(item, earlier):
-+                            container.duplicate_item_contexts[error.validator].append(
-+                                (previous_index, index, item),
-+                            )
-+                            break
-+                    previous.append(item)
++            contexts = getattr(error, "duplicate_item_contexts", ())
++            if contexts:
++                container.duplicate_item_contexts[error.validator].extend(
++                    contexts,
++                )
  
      def __contains__(self, index: str | int):
          """
-@@ -390,7 +417,7 @@
+@@ -390,7 +412,7 @@ class ErrorTree:
          The total number of errors in the entire tree, including children.
          """
          child_errors = sum(len(tree) for _, tree in self._contents.items())
@@ -201,7 +316,7 @@
  
  
  def by_relevance(weak=WEAK_MATCHES, strong=STRONG_MATCHES):
-@@ -476,14 +503,27 @@
+@@ -476,14 +498,34 @@ def best_match(errors, key=relevance):
          set of inputs from version to version if better heuristics are added.
  
      """
@@ -215,14 +330,21 @@
          return
  
      while best.context:
-+        best_in_subschemas = []
-+        for error in best.context:
-+            index = error.schema_path[0]
-+            if index == len(best_in_subschemas):
-+                best_in_subschemas.append(error)
-+            else:
-+                previous = best_in_subschemas[index]
-+                best_in_subschemas[index] = max(previous, error, key=key)
++        if all(
++            error.schema_path and type(error.schema_path[0]) is int
++            for error in best.context
++        ):
++            best_in_subschemas = []
++            for error in best.context:
++                index = error.schema_path[0]
++                if index == len(best_in_subschemas):
++                    best_in_subschemas.append(error)
++                else:
++                    previous = best_in_subschemas[index]
++                    best_in_subschemas[index] = max(previous, error, key=key)
++        else:
++            best_in_subschemas = best.context
++
          # Calculate the minimum via nsmallest, because we don't recurse if
          # all nested errors have the same relevance (i.e. if min == max == all)
 -        smallest = heapq.nsmallest(2, best.context, key=key)
@@ -230,9 +352,11 @@
          if len(smallest) == 2 and key(smallest[0]) == key(smallest[1]):  # noqa: PLR2004
              return best
          best = smallest[0]
+diff --git a/jsonschema/validators.py b/jsonschema/validators.py
+index 98ddf6b..0ccbe96 100644
 --- a/jsonschema/validators.py
 +++ b/jsonschema/validators.py
-@@ -391,6 +391,8 @@
+@@ -391,6 +391,8 @@ def create(
                      )
                      if k not in {"if", "$ref"}:
                          error.schema_path.appendleft(k)
@@ -241,7 +365,7 @@
                      yield error
  
          def descend(
-@@ -439,6 +441,8 @@
+@@ -439,6 +441,8 @@ def create(
                      )
                      if k not in {"if", "$ref"}:
                          error.schema_path.appendleft(k)
@@ -250,23 +374,3 @@
                      if path is not None:
                          error.path.appendleft(path)
                      if schema_path is not None:
---- a/jsonschema/tests/test_format.py
-+++ b/jsonschema/tests/test_format.py
-@@ -34,7 +34,7 @@
-             FormatChecker.cls_checks("boom")(boom)
-         self.assertEqual(
-             FormatChecker.checkers,
--            dict(original, boom=(boom, ())),
-+            dict(original, boom=((boom, ()),)),
-         )
- 
-     def test_it_can_register_checkers(self):
-@@ -42,7 +42,7 @@
-         checker.checks("boom")(boom)
-         self.assertEqual(
-             checker.checkers,
--            dict(FormatChecker.checkers, boom=(boom, ())),
-+            dict(FormatChecker.checkers, boom=((boom, ()),)),
-         )
- 
-     def test_it_catches_registered_errors(self):
