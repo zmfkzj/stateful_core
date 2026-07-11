@@ -9,14 +9,19 @@
         "https://github.com/jschneier/django-storages/issues/1493"
       ],
       "source_hash": "9e6ae693d24213fe16960f65f0e381759eff509f2b314d005b7c616e52c06728",
-      "prompt": "Fix issue #1493 in storages.backends.s3.S3Storage.connection. When the signed connection has no explicit access key, secret key, security token, or session profile, construct boto3.Session without explicit None credential arguments so boto3's refreshable default provider chain remains authoritative. Preserve explicit credential and session-profile behavior, unsigned connection behavior, and the existing resource arguments.",
+      "prompt": "Fix issue #1493 in storages.backends.s3.S3Storage credential defaults. Let boto3's default provider chain read standard AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_SESSION_TOKEN environment variables itself: do not snapshot those environment values into explicit Session keyword arguments. Retain AWS_S3_ACCESS_KEY_ID, AWS_S3_SECRET_ACCESS_KEY, and AWS_SECURITY_TOKEN environment aliases as explicit fallbacks because boto3 does not consume them. Preserve Django-setting precedence (S3-specific key/secret settings over generic settings; AWS_SESSION_TOKEN over AWS_SECURITY_TOKEN), session-profile behavior, unsigned connection behavior, and existing resource arguments.",
       "acceptance": [
-        "A signed connection with no explicit credentials creates boto3.Session() with no credential keyword arguments.",
-        "An explicit session_profile still creates boto3.Session(profile_name=...).",
-        "Explicit access key, secret key, or security token values still pass through to boto3.Session unchanged.",
-        "The change is in storages/backends/s3.py within S3Storage.connection and its session-construction helper."
+        "With only standard AWS credential environment variables, a signed connection does not pass their values as explicit Session credential arguments, so an already-created resource observes a refreshed provider credential.",
+        "Legacy AWS_S3_ACCESS_KEY_ID, AWS_S3_SECRET_ACCESS_KEY, and AWS_SECURITY_TOKEN environment aliases still create a Session with their corresponding explicit credential keyword arguments.",
+        "Django credential settings retain their existing precedence: S3-specific access and secret settings beat generic settings, and AWS_SESSION_TOKEN beats AWS_SECURITY_TOKEN.",
+        "An explicit session_profile still creates boto3.Session(profile_name=...), and explicit constructor credential values still pass through unchanged.",
+        "The changes are in storages/backends/s3.py at S3Storage.get_default_settings and compose with S3Storage.connection."
       ],
       "overlap_anchors": [
+        {
+          "path": "storages/backends/s3.py",
+          "symbol": "storages.backends.s3.S3Storage.get_default_settings"
+        },
         {
           "path": "storages/backends/s3.py",
           "symbol": "storages.backends.s3.S3Storage.connection"
@@ -32,11 +37,12 @@
         "https://github.com/jschneier/django-storages/issues/1472"
       ],
       "source_hash": "d8421e10acf244751b141547d7d25609ca4a39368bc22e6172bf6490d6bd35a7",
-      "prompt": "Fix issue #1472 in storages.backends.s3.S3Storage.connection. Reuse a per-thread signed S3 resource for equivalent session profile, explicit credential, endpoint, region, SSL, verify, and client-config settings across separately constructed S3Storage instances. Keep each storage instance's local connection reference, do not reuse resources across differing connection settings, and preserve all resource creation keyword arguments.",
+      "prompt": "Fix issue #1472 in storages.backends.s3.S3Storage.connection. Reuse a per-thread signed S3 resource for equivalent session profile, explicit credential, endpoint, region, SSL, verify, and client-config settings across separately constructed S3Storage instances. Keep each storage instance's local connection reference, do not reuse resources across differing connection settings, preserve all resource creation keyword arguments, and retain #1493's distinction between provider-backed standard AWS environment credentials and explicit legacy credential fallbacks.",
       "acceptance": [
         "Two separately constructed S3Storage instances with equivalent signed connection settings receive the same per-thread resource without a second Session or resource construction.",
         "A differing session profile receives a distinct resource and constructs a separately profiled Session.",
         "The cached resource is stored back on each storage instance and retains region, endpoint, SSL, client-config, and verify resource arguments.",
+        "Default-provider sessions do not receive standard environment credential values as explicit arguments, while legacy S3-prefixed or security-token fallback credentials participate in cache identity as explicit settings.",
         "The production change is in storages/backends/s3.py at S3Storage.connection and composes with #1493's refreshable default session."
       ],
       "overlap_anchors": [
@@ -217,10 +223,11 @@
         "https://github.com/jschneier/django-storages/issues/1553"
       ],
       "source_hash": "a84ea3fa919056f4f286dfbfa82d179eff183429f0528fc100fc35f86850a281",
-      "prompt": "Fix issue #1553 in storages.backends.s3.S3Storage.url. For an unsigned URL without custom_domain, compose the public S3 URL directly from the configured endpoint_url or the request region's botocore S3 endpoint, the selected addressing style, bucket_name, normalized key, and caller parameters; do not create an unsigned connection or call generate_presigned_url. Preserve custom-domain URL behavior and signed URL behavior.",
+      "prompt": "Fix issue #1553 in storages.backends.s3.S3Storage.url. For an unsigned URL without custom_domain, compose the public S3 URL directly from the configured endpoint_url or the request region's botocore S3 endpoint, the selected addressing style, bucket_name, normalized key, and caller parameters; do not create an unsigned connection or call generate_presigned_url. Automatic or unset addressing must use path style for HTTPS endpoints with dotted bucket names, while explicit virtual and path styles remain authoritative. Preserve custom-domain URL behavior and signed URL behavior.",
       "acceptance": [
         "With querystring_auth=False and no custom_domain, url('report.pdf', parameters=...) returns the direct regional S3 bucket URL with its encoded query parameter.",
         "Unsigned URLs honor endpoint_url, including its path prefix, and explicit virtual and path addressing styles.",
+        "With automatic or unset addressing, an HTTPS endpoint and a dotted bucket use path-style URLs; explicit virtual and path styles remain unchanged.",
         "Unsigned AWS URLs honor the configured region and its AWS partition DNS suffix.",
         "The unsigned URL path neither accesses unsigned_connection nor calls generate_presigned_url.",
         "With custom_domain configured, an unsigned URL keeps the existing custom-domain URL format and does not touch unsigned_connection.",

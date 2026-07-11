@@ -82,6 +82,30 @@ def main() -> None:
     assert storage.url("report.pdf") == (
         "https://objects.example.test/api/assets/media/report.pdf"
     )
+    storage.bucket_name = "assets.example"
+    storage.endpoint_url = None
+    storage.addressing_style = None
+    assert storage.url("report.pdf") == (
+        "https://s3.us-west-2.amazonaws.com/assets.example/media/report.pdf"
+    )
+
+    storage.region_name = "cn-north-1"
+    storage.addressing_style = "auto"
+    assert storage.url("report.pdf") == (
+        "https://s3.cn-north-1.amazonaws.com.cn/assets.example/media/report.pdf"
+    )
+
+    storage.region_name = "us-west-2"
+    storage.endpoint_url = "https://objects.example.test/api"
+    storage.addressing_style = "virtual"
+    assert storage.url("report.pdf") == (
+        "https://assets.example.objects.example.test/api/media/report.pdf"
+    )
+
+    storage.addressing_style = "path"
+    assert storage.url("report.pdf") == (
+        "https://objects.example.test/api/assets.example/media/report.pdf"
+    )
 
     storage.custom_domain = "cdn.example.test"
     assert storage.url("report.pdf") == "https://cdn.example.test/media/report.pdf"
