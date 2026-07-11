@@ -1,0 +1,73 @@
+diff --git a/pytest_asyncio/plugin.py b/pytest_asyncio/plugin.py
+index 38b75e4..37be493 100644
+--- a/pytest_asyncio/plugin.py
++++ b/pytest_asyncio/plugin.py
+@@ -7,6 +7,7 @@ import contextlib
+ import contextvars
+ import enum
+ import functools
++import importlib
+ import inspect
+ import socket
+ import sys
+@@ -134,6 +135,12 @@ def pytest_addoption(parser: Parser, pluginmanager: PytestPluginManager) -> None
+         type="bool",
+         default="false",
+     )
++    parser.addini(
++        "asyncio_loop_factory",
++        type="string",
++        help="dotted module:callable used to create asyncio event loops",
++        default=None,
++    )
+     parser.addini(
+         "asyncio_default_fixture_loop_scope",
+         type="string",
+@@ -1075,11 +1082,45 @@ def _asyncio_loop_factory(request: FixtureRequest) -> LoopFactory | None:
+ 
+ 
+ @pytest.fixture(scope="session", autouse=True)
+-def event_loop_policy() -> AbstractEventLoopPolicy:
+-    """Return an instance of the policy used to create asyncio event loops."""
++def event_loop_policy(request: FixtureRequest) -> AbstractEventLoopPolicy:
++    """Return the policy used to create asyncio event loops."""
++    loop_factory = _get_configured_loop_factory(request.config)
++    if loop_factory is not None:
++        return _ConfiguredLoopPolicy(loop_factory)
+     return _get_event_loop_policy()
+ 
+ 
++class _ConfiguredLoopPolicy(asyncio.DefaultEventLoopPolicy):
++    def __init__(self, loop_factory: LoopFactory) -> None:
++        super().__init__()
++        self._loop_factory = loop_factory
++
++    def new_event_loop(self) -> AbstractEventLoop:
++        return self._loop_factory()
++
++
++def _get_configured_loop_factory(config: Config) -> LoopFactory | None:
++    configured_factory = config.getini("asyncio_loop_factory")
++    if not configured_factory:
++        return None
++    module_name, separator, factory_name = configured_factory.partition(":")
++    if not module_name or not separator or not factory_name:
++        raise pytest.UsageError(
++            "asyncio_loop_factory must name a callable as 'module:callable'."
++        )
++    try:
++        factory = getattr(importlib.import_module(module_name), factory_name)
++    except (ImportError, AttributeError) as error:
++        raise pytest.UsageError(
++            f"asyncio_loop_factory {configured_factory!r} cannot be imported."
++        ) from error
++    if not callable(factory):
++        raise pytest.UsageError(
++            f"asyncio_loop_factory {configured_factory!r} is not callable."
++        )
++    return factory
++
++
+ def is_async_test(item: Item) -> TypeIs[PytestAsyncioFunction]:
+     """Returns whether a test item is a pytest-asyncio test"""
+     return isinstance(item, PytestAsyncioFunction)

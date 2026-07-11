@@ -1,0 +1,81 @@
+diff --git a/pytest_asyncio/plugin.py b/pytest_asyncio/plugin.py
+--- a/pytest_asyncio/plugin.py
++++ b/pytest_asyncio/plugin.py
+@@ -398,30 +398,61 @@ def _wrap_asyncgen_fixture(
+         **kwargs: AsyncGenFixtureParams.kwargs,
+     ):
+         gen_obj = fixture_function(*args, **kwargs)
++        teardown_requested: asyncio.Event | None = None
++        fixture_task: asyncio.Task[Any] | None = None
+ 
+         async def setup():
+-            res = await gen_obj.__anext__()
+-            return res
++            nonlocal fixture_task
++            nonlocal teardown_requested
++
++            result: asyncio.Future[AsyncGenFixtureYieldType] = (
++                asyncio.get_running_loop().create_future()
++            )
++            teardown_requested = asyncio.Event()
++
++            async def run_fixture() -> None:
++                try:
++                    result.set_result(await gen_obj.__anext__())
++                    await teardown_requested.wait()
++                    try:
++                        await gen_obj.__anext__()
++                    except StopAsyncIteration:
++                        pass
++                    else:
++                        msg = "Async generator fixture didn't stop."
++                        msg += "Yield only once."
++                        raise ValueError(msg)
++                except asyncio.CancelledError:
++                    try:
++                        await gen_obj.__anext__()
++                    except StopAsyncIteration:
++                        pass
++                    raise
++                except BaseException as exc:
++                    if not result.done():
++                        result.set_exception(exc)
++                    raise
++
++            fixture_task = asyncio.create_task(run_fixture(), context=context)
++            return await result
+ 
+         context = contextvars.copy_context()
+         result = runner.run(setup(), context=context)
+ 
+         reset_contextvars = _apply_contextvar_changes(context)
+ 
+         def finalizer() -> None:
+-            """Yield again, to finalize."""
++            """Finish the fixture in the task that yielded its value."""
+ 
+             async def async_finalizer() -> None:
+-                try:
+-                    await gen_obj.__anext__()
+-                except StopAsyncIteration:
+-                    pass
+-                else:
+-                    msg = "Async generator fixture didn't stop."
+-                    msg += "Yield only once."
+-                    raise ValueError(msg)
++                assert teardown_requested is not None
++                assert fixture_task is not None
++                teardown_requested.set()
++                await fixture_task
+ 
+-            runner.run(async_finalizer(), context=context)
+-            if reset_contextvars is not None:
+-                reset_contextvars()
++            try:
++                runner.run(async_finalizer(), context=context)
++            finally:
++                if reset_contextvars is not None:
++                    reset_contextvars()
+ 
+         request.addfinalizer(finalizer)
+         return result

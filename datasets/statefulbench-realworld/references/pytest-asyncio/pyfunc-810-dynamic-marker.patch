@@ -1,0 +1,22 @@
+diff --git a/pytest_asyncio/plugin.py b/pytest_asyncio/plugin.py
+--- a/pytest_asyncio/plugin.py
++++ b/pytest_asyncio/plugin.py
+@@ -875,7 +875,17 @@ def pytest_pyfunc_call(pyfuncitem: Function) -> object | None:
+                     # no stacklevel points at the users code, so we set stacklevel=1
+                     # so it at least indicates that it's the plugin complaining.
+                     # Pytest gives the test file & name in the warnings summary at least
+-
++        elif inspect.iscoroutinefunction(pyfuncitem.obj):
++            with Runner() as runner:
++                synchronized = _synchronize_coroutine(
++                    pyfuncitem.obj,
++                    runner,
++                    contextvars.copy_context(),
++                )
++                with MonkeyPatch.context() as patch:
++                    patch.setattr(pyfuncitem, "obj", synchronized)
++                    yield
++            return
+         else:
+             pyfuncitem.warn(
+                 pytest.PytestWarning(

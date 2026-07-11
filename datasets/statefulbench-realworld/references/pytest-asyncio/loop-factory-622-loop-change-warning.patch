@@ -1,0 +1,50 @@
+--- a/pytest_asyncio/plugin.py
++++ b/pytest_asyncio/plugin.py
+@@ -1020,5 +1020,10 @@ _RUNNER_TEARDOWN_WARNING = """\
+ %s
+ """
+ 
++_RUNNER_LOOP_CHANGE_WARNING = """\
++pytest-asyncio detected that a test changed the current event loop. \
++Restore the runner's loop before the test finishes.\
++"""
++
+ 
+ def _create_scoped_runner_fixture(scope: _ScopeName) -> Callable:
+@@ -1037,13 +1042,26 @@ def _create_scoped_runner_fixture(scope: _ScopeName) -> Callable:
+                 debug=debug_mode,
+                 loop_factory=_asyncio_loop_factory,
+             ).__enter__()
++            runner_loop = runner.get_loop()
+             if _asyncio_loop_factory is not None:
+-                _set_event_loop(runner.get_loop())
++                _set_event_loop(runner_loop)
++
++            def loop_changed() -> bool:
++                try:
++                    current_loop = _get_event_loop_no_warn()
++                except RuntimeError:
++                    current_loop = None
++                return current_loop is not runner_loop
++
+             try:
+                 yield runner
+             except Exception as e:
++                changed_loop = loop_changed()
+                 runner.__exit__(type(e), e, e.__traceback__)
++                if changed_loop:
++                    warnings.warn(_RUNNER_LOOP_CHANGE_WARNING, RuntimeWarning)
+             else:
++                changed_loop = loop_changed()
+                 with warnings.catch_warnings():
+                     warnings.filterwarnings(
+                         "ignore", ".*BaseEventLoop.shutdown_asyncgens.*", RuntimeWarning
+@@ -1070,6 +1084,8 @@ def _create_scoped_runner_fixture(scope: _ScopeName) -> Callable:
+                             _RUNNER_TEARDOWN_WARNING % traceback.format_exc(),
+                             RuntimeWarning,
+                         )
++                if changed_loop:
++                    warnings.warn(_RUNNER_LOOP_CHANGE_WARNING, RuntimeWarning)
+             finally:
+                 if _asyncio_loop_factory is not None:
+                     _set_event_loop(None)
