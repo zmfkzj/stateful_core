@@ -110,6 +110,140 @@ class ManifestTests(unittest.TestCase):
             self.mod.load_manifest(self.manifest_path)
 
 
+class CorpusTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.dataset_root = Path(self.tempdir.name) / "statefulbench-realworld"
+        self.corpus_path = self.dataset_root / "repos" / "fixture.json"
+        self.corpus_path.parent.mkdir(parents=True)
+        self.mod = load_script("statefulbench_realworld.py")
+        self.write_data(self.corpus_data())
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    def corpus_data(self) -> dict:
+        tasks = []
+        for index in range(10):
+            group = index // 2
+            tasks.append(
+                {
+                    "key": f"task-{index}",
+                    "kind": "bug" if index < 5 else "feature",
+                    "sources": [f"https://github.com/example/project/issues/{index}"],
+                    "source_hash": f"{index:064x}",
+                    "prompt": f"Implement task {index}.",
+                    "acceptance": ["normal behavior", "boundary behavior", "error behavior"],
+                    "overlap_anchors": [
+                        {
+                            "path": f"package/module_{group}.py",
+                            "symbol": f"package.module_{group}.target",
+                        }
+                    ],
+                    "evaluator": f"evaluators/task-{index}.py",
+                    "reference_patch": f"references/task-{index}.patch",
+                }
+            )
+        return {
+            "repository": "fixture",
+            "issue_snapshot": "issues/fixture.json",
+            "tasks": tasks,
+            "final_prompt": "Repair all task implementations.",
+            "evaluators": [f"evaluators/task-{index}.py" for index in range(10)],
+            "integrated_reference_patch": "references/integrated.patch",
+        }
+
+    def load_data(self) -> dict:
+        return json.loads(self.corpus_path.read_text(encoding="utf-8"))
+
+    def write_data(self, data: dict) -> None:
+        self.corpus_path.write_text(json.dumps(data), encoding="utf-8")
+
+    def test_load_corpus_accepts_balanced_connected_tasks(self) -> None:
+        corpus = self.mod.load_corpus(self.corpus_path)
+
+        self.assertEqual(corpus["repository"], "fixture")
+        self.assertEqual(len(corpus["tasks"]), 10)
+
+    def test_load_corpus_rejects_duplicate_task_keys(self) -> None:
+        data = self.load_data()
+        data["tasks"][1]["key"] = data["tasks"][0]["key"]
+        self.write_data(data)
+
+        with self.assertRaisesRegex(ValueError, "duplicate task key"):
+            self.mod.load_corpus(self.corpus_path)
+
+    def test_load_corpus_requires_five_bug_and_five_feature_tasks(self) -> None:
+        data = self.load_data()
+        data["tasks"][5]["kind"] = "bug"
+        self.write_data(data)
+
+        with self.assertRaisesRegex(ValueError, "five bug"):
+            self.mod.load_corpus(self.corpus_path)
+
+    def test_load_corpus_requires_three_acceptance_criteria(self) -> None:
+        data = self.load_data()
+        data["tasks"][0]["acceptance"] = ["normal", "boundary"]
+        self.write_data(data)
+
+        with self.assertRaisesRegex(ValueError, "acceptance"):
+            self.mod.load_corpus(self.corpus_path)
+
+    def test_load_corpus_rejects_malformed_sources_and_hashes(self) -> None:
+        cases = (
+            ("sources", ["https://example.com/not-github"], "sources"),
+            ("source_hash", "f" * 63, "source_hash"),
+        )
+        for field, value, message in cases:
+            with self.subTest(field=field):
+                data = self.corpus_data()
+                data["tasks"][0][field] = value
+                self.write_data(data)
+
+                with self.assertRaisesRegex(ValueError, message):
+                    self.mod.load_corpus(self.corpus_path)
+
+    def test_load_corpus_rejects_paths_outside_dataset_root(self) -> None:
+        cases = (
+            ("evaluator", "../escape.py"),
+            ("reference_patch", "../escape.patch"),
+            ("integrated_reference_patch", "../integrated.patch"),
+        )
+        for field, value in cases:
+            with self.subTest(field=field):
+                data = self.corpus_data()
+                target = data if field == "integrated_reference_patch" else data["tasks"][0]
+                target[field] = value
+                self.write_data(data)
+
+                with self.assertRaisesRegex(ValueError, "path"):
+                    self.mod.load_corpus(self.corpus_path)
+
+    def test_load_corpus_requires_nonempty_path_and_symbol_anchors(self) -> None:
+        cases = (
+            [],
+            [{"path": "", "symbol": "package.module.target"}],
+            [{"path": "package/module.py", "symbol": ""}],
+        )
+        for anchors in cases:
+            with self.subTest(anchors=anchors):
+                data = self.corpus_data()
+                data["tasks"][0]["overlap_anchors"] = anchors
+                self.write_data(data)
+
+                with self.assertRaises(ValueError):
+                    self.mod.load_corpus(self.corpus_path)
+
+    def test_load_corpus_rejects_isolated_task(self) -> None:
+        data = self.load_data()
+        data["tasks"][0]["overlap_anchors"] = [
+            {"path": "package/isolated.py", "symbol": "package.isolated.target"}
+        ]
+        self.write_data(data)
+
+        with self.assertRaisesRegex(ValueError, "isolated"):
+            self.mod.load_corpus(self.corpus_path)
+
 
 class ArchiveTests(unittest.TestCase):
     def setUp(self) -> None:

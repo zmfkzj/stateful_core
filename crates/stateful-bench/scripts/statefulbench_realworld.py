@@ -28,6 +28,31 @@ _REPOSITORY_FIELDS = frozenset(
 _HEX_40 = re.compile(r"[0-9a-f]{40}")
 _HEX_64 = re.compile(r"[0-9a-f]{64}")
 
+_CORPUS_FIELDS = frozenset(
+    {
+        "repository",
+        "issue_snapshot",
+        "tasks",
+        "final_prompt",
+        "evaluators",
+        "integrated_reference_patch",
+    }
+)
+_TASK_FIELDS = frozenset(
+    {
+        "key",
+        "kind",
+        "sources",
+        "source_hash",
+        "prompt",
+        "acceptance",
+        "overlap_anchors",
+        "evaluator",
+        "reference_patch",
+    }
+)
+_ANCHOR_FIELDS = frozenset({"path", "symbol"})
+
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -185,6 +210,124 @@ def load_manifest(path: Path) -> dict:
     for entry in repositories:
         _validate_repository(entry, manifest_dir, keys)
     return manifest
+
+def _require_dataset_path(entry: dict, field: str, dataset_root: Path) -> None:
+    value = _require_string(entry, field)
+    candidate = Path(value)
+    resolved = (dataset_root / candidate).resolve()
+    if candidate.is_absolute() or not resolved.is_relative_to(dataset_root):
+        raise ValueError(f"{field} path must remain below the dataset root")
+
+
+def _require_github_sources(entry: dict) -> None:
+    sources = entry["sources"]
+    if type(sources) is not list or not sources:
+        raise ValueError("sources must be a non-empty array")
+    for source in sources:
+        if type(source) is not str or not source:
+            raise ValueError("sources must be a non-empty array")
+        try:
+            parsed = urlsplit(source)
+            valid = (
+                parsed.scheme == "https"
+                and parsed.hostname == "github.com"
+                and parsed.path
+                and not parsed.username
+                and not parsed.password
+                and not parsed.query
+                and not parsed.fragment
+            )
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ValueError("sources must be GitHub HTTPS URLs")
+
+
+def _require_acceptance(entry: dict) -> None:
+    acceptance = entry["acceptance"]
+    if (
+        type(acceptance) is not list
+        or len(acceptance) < 3
+        or any(type(item) is not str or not item for item in acceptance)
+    ):
+        raise ValueError("acceptance must contain at least three non-empty strings")
+
+
+def _validate_task(
+    entry: object, dataset_root: Path, keys: set[str]
+) -> tuple[str, set[tuple[str, str]]]:
+    if type(entry) is not dict:
+        raise ValueError("task entry must be an object")
+    if set(entry) != _TASK_FIELDS:
+        raise ValueError("task entry fields are invalid")
+
+    key = _require_string(entry, "key")
+    if key in keys:
+        raise ValueError(f"duplicate task key: {key}")
+    keys.add(key)
+    if _require_string(entry, "kind") not in {"bug", "feature"}:
+        raise ValueError("kind must be bug or feature")
+    _require_string(entry, "prompt")
+    _require_github_sources(entry)
+    if not _HEX_64.fullmatch(_require_string(entry, "source_hash")):
+        raise ValueError("source_hash has invalid SHA format")
+    _require_acceptance(entry)
+    _require_dataset_path(entry, "evaluator", dataset_root)
+    _require_dataset_path(entry, "reference_patch", dataset_root)
+
+    anchors = entry["overlap_anchors"]
+    if type(anchors) is not list or not anchors:
+        raise ValueError("overlap_anchors must be a non-empty array")
+    pairs: set[tuple[str, str]] = set()
+    for anchor in anchors:
+        if type(anchor) is not dict or set(anchor) != _ANCHOR_FIELDS:
+            raise ValueError("overlap_anchors entries must contain path and symbol")
+        pairs.add((_require_string(anchor, "path"), _require_string(anchor, "symbol")))
+    return key, pairs
+
+
+def load_corpus(path: Path) -> dict:
+    try:
+        corpus = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError("corpus is not valid JSON") from error
+    if type(corpus) is not dict:
+        raise ValueError("corpus must be an object")
+    if set(corpus) != _CORPUS_FIELDS:
+        raise ValueError("corpus fields are invalid")
+
+    _require_string(corpus, "repository")
+    _require_string(corpus, "final_prompt")
+    dataset_root = path.parent.parent.resolve()
+    _require_dataset_path(corpus, "issue_snapshot", dataset_root)
+    _require_dataset_path(corpus, "integrated_reference_patch", dataset_root)
+    evaluators = corpus["evaluators"]
+    if type(evaluators) is not list or not evaluators:
+        raise ValueError("evaluators must be a non-empty array")
+    for evaluator in evaluators:
+        if type(evaluator) is not str or not evaluator:
+            raise ValueError("evaluators must be a non-empty array")
+        _require_dataset_path({"evaluator": evaluator}, "evaluator", dataset_root)
+
+    tasks = corpus["tasks"]
+    if type(tasks) is not list or len(tasks) != 10:
+        raise ValueError("corpus must contain exactly ten tasks")
+    keys: set[str] = set()
+    task_anchors = [_validate_task(task, dataset_root, keys) for task in tasks]
+    kinds = [task["kind"] for task in tasks]
+    if kinds.count("bug") != 5 or kinds.count("feature") != 5:
+        raise ValueError("corpus must contain five bug and five feature tasks")
+
+    anchor_counts: dict[tuple[str, str], int] = {}
+    for _, anchors in task_anchors:
+        for anchor in anchors:
+            anchor_counts[anchor] = anchor_counts.get(anchor, 0) + 1
+    for key, anchors in task_anchors:
+        if not any(anchor_counts[anchor] > 1 for anchor in anchors):
+            raise ValueError(f"task has isolated overlap anchors: {key}")
+    return corpus
+
+
 
 
 def repo_entries(manifest: dict) -> tuple[dict, ...]:
