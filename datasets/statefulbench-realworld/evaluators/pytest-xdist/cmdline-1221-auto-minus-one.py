@@ -30,15 +30,20 @@ def config(numprocesses: str, *, usepdb: bool = False, workers: int = 4) -> Simp
         numprocesses=numprocesses,
         tx=[],
     )
-    hook = SimpleNamespace(
-        pytest_xdist_auto_num_workers=lambda config: workers,
-    )
+    auto_worker_calls: list[object] = []
+
+    def auto_num_workers(config: object) -> int:
+        auto_worker_calls.append(config)
+        return workers
+
+    hook = SimpleNamespace(pytest_xdist_auto_num_workers=auto_num_workers)
     return SimpleNamespace(
         option=option,
         hook=hook,
         invocation_params=SimpleNamespace(args=("-n", numprocesses)),
         getoption=lambda name, default=None: usepdb if name == "usepdb" else default,
         getvalue=lambda name: False,
+        auto_worker_calls=auto_worker_calls,
     )
 
 
@@ -67,12 +72,14 @@ def main() -> None:
     assert four_cpus.option.numprocesses == 3, four_cpus.option.numprocesses
     assert four_cpus.option.dist == "load", four_cpus.option.dist
     assert four_cpus.option.tx == ["popen"] * 3, four_cpus.option.tx
+    assert four_cpus.auto_worker_calls == [four_cpus], four_cpus.auto_worker_calls
 
     one_cpu = config("auto-1", workers=1)
     plugin.pytest_cmdline_main(one_cpu)
     assert one_cpu.option.numprocesses == 0, one_cpu.option.numprocesses
     assert one_cpu.option.dist == "no", one_cpu.option.dist
     assert one_cpu.option.tx == [], one_cpu.option.tx
+    assert one_cpu.auto_worker_calls == [one_cpu], one_cpu.auto_worker_calls
 
     pdb = config("auto-1", usepdb=True)
     pdb.hook.pytest_xdist_auto_num_workers = lambda config: (_ for _ in ()).throw(

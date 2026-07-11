@@ -87,13 +87,11 @@ def main() -> None:
     controller_runs: list[str] = []
 
     def controller_runner(nodeid: str) -> bool:
-        if nodeid == "test_serial.py::test_exclusive":
-            controller_runs.append(nodeid)
-            return True
-        return False
+        controller_runs.append(nodeid)
+        return nodeid == "test_serial.py::test_exclusive"
 
     worker = schedule(checkout, collection, controller_runner)
-    assert controller_runs == ["test_serial.py::test_exclusive"], controller_runs
+    assert controller_runs == collection, controller_runs
     assert worker.sent == [[collection[1], collection[2]]], worker.sent
 
     without_extension = schedule(checkout, collection, None)

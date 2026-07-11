@@ -25,7 +25,7 @@
       "source_hash": "4162fcb1063fec48f115252c5639e341fba831f97ae88ea39b26522b69a8bbc9",
       "prompt": "Implement the explicitly benchmark-defined #1040 issue-family extension in xdist.scheduler.loadscope.LoadScopeScheduling.schedule. If config.option.loadscopecontroller exists, call it once for each collected nodeid while the controller builds loadscope work units. A truthy return means that callable ran the item on the controller, so do not enqueue it to any worker. A false return leaves normal scheduling untouched; absence of the optional callable preserves existing behavior. Do not claim this private callable is the public marker/CLI requested by #1040.",
       "acceptance": [
-        "An optional loadscopecontroller callable runs the selected nodeid in collection order on the controller and a truthy return excludes it from worker batches.",
+        "An optional loadscopecontroller callable is invoked exactly once for every collected nodeid in collection order; a truthy return means it ran that nodeid on the controller and excludes it from worker batches.",
         "Nodeids for which the callable returns false remain in their normal scope work unit without duplication or omission.",
         "Without loadscopecontroller, loadscope scheduling retains its existing behavior.",
         "This is explicitly an issue-family extension because LoadScopeScheduling has nodeids rather than pytest Item marker data.",
@@ -72,15 +72,18 @@
       "kind": "bug",
       "sources": ["https://github.com/pytest-dev/pytest-xdist/issues/1218"],
       "source_hash": "3627ea10b3edfaf4f90a1703c02fa802e91822dc68c985eb236c2d606cebaaaf",
-      "prompt": "Fix open issue #1218 in xdist.plugin.pytest_cmdline_main. Normalize --dist and --numprocesses so an implicit default distribution mode becomes load for -n, but an explicitly supplied --dist value wins. In particular, retain --dist=worksteal with worker processes and let explicit --dist=no disable worker setup. Preserve -n0 as the disabling boundary. This benchmark-defined --dist=no case is an issue-family extension because the pinned base already preserves explicit non-no modes.",
+      "prompt": "Fix open issue #1218 in xdist.plugin's --dist option parsing and pytest_cmdline_main. Track explicit --dist while parsing the option, rather than inspecting InvocationParams.args, so CLI, PYTEST_ADDOPTS, and ini addopts all preserve the configured distribution. Normalize an implicit default distribution mode to load for -n, but an explicitly supplied --dist value wins. In particular, retain --dist=worksteal with worker processes and let explicit --dist=no disable worker setup. Preserve -n0 as the disabling boundary. This benchmark-defined --dist=no case is an issue-family extension because the pinned base already preserves explicit non-no modes.",
       "acceptance": [
         "With -n 2 and no explicit --dist, pytest_cmdline_main normalizes dist to load and creates two popen tx entries.",
         "With --dist=worksteal and -n 2, it retains worksteal and creates two popen tx entries.",
-        "With explicit --dist=no and -n 2, it retains no, clears worker count and tx, rather than silently selecting load.",
+        "With explicit --dist=no and -n 2 from the CLI, PYTEST_ADDOPTS, or ini addopts, it retains no, clears worker count and tx, rather than silently selecting load.",
         "With -n 0 and an explicit distributed mode, it disables distribution and clears tx.",
-        "The production change is in src/xdist/plugin.py at xdist.plugin.pytest_cmdline_main."
+        "Production changes are limited to src/xdist/plugin.py's pytest_addoption parser declaration and pytest_cmdline_main normalization."
       ],
-      "overlap_anchors": [{"path": "src/xdist/plugin.py", "symbol": "xdist.plugin.pytest_cmdline_main"}],
+      "overlap_anchors": [
+        {"path": "src/xdist/plugin.py", "symbol": "xdist.plugin.pytest_addoption"},
+        {"path": "src/xdist/plugin.py", "symbol": "xdist.plugin.pytest_cmdline_main"}
+      ],
       "evaluator": "evaluators/pytest-xdist/cmdline-1218-dist-precedence.py",
       "reference_patch": "references/pytest-xdist/cmdline-1218-dist-precedence.patch"
     },
@@ -89,11 +92,12 @@
       "kind": "feature",
       "sources": ["https://github.com/pytest-dev/pytest-xdist/issues/1221"],
       "source_hash": "2e296e8a8327fe5027f82553b5e2734d3eb1881397e60224e75a00fe632a02cb",
-      "prompt": "Implement open enhancement #1221 in xdist.plugin.pytest_cmdline_main. Accept exactly -n auto-1, detect the automatic worker count once, reserve one worker by subtracting one without going below zero, and then reuse the existing distribution normalization. Treat auto-2 and malformed auto expressions as invalid, and preserve --pdb forcing the worker count to zero without auto detection.",
+      "prompt": "Implement open enhancement #1221 in xdist.plugin.pytest_cmdline_main. Accept exactly -n auto-1, call the automatic-worker hook exactly once, reserve one worker by subtracting one without going below zero, and then reuse the existing distribution normalization. Treat auto-2 and malformed auto expressions as invalid, and preserve --pdb forcing the worker count to zero without auto detection.",
       "acceptance": [
         "parse_numprocesses accepts auto-1 while rejecting auto-2, auto--1, and auto-one.",
         "With an auto-worker hook result of 4, -n auto-1 becomes 3 workers, load distribution, and three popen tx entries.",
         "With an auto-worker hook result of 1, -n auto-1 clamps at zero and disables distribution with no tx entries.",
+        "The automatic-worker hook is called exactly once for each non-pdb auto-1 resolution.",
         "With --pdb, -n auto-1 disables workers without calling auto detection.",
         "The production change is in src/xdist/plugin.py at xdist.plugin.pytest_cmdline_main."
       ],
@@ -140,15 +144,14 @@
       "kind": "bug",
       "sources": ["https://github.com/pytest-dev/pytest-xdist/issues/1278"],
       "source_hash": "532f8fdd5399c493ba9f2303fd76393a5ca650ed11aeaec3529bf0a34827ae9a",
-      "prompt": "Implement open issue #1278 in xdist.dsession.DSession.worker_workerfinished. A worker exit status other than zero must enter the established worker-error lifecycle instead of looking like a normal nodedown. Preserve the keyboard-interrupt behavior and normal zero-status completion. The error lifecycle must retain its existing restart-limit and shutdown behavior.",
+      "prompt": "Fix open issue #1278 source-faithfully in xdist.dsession.DSession.worker_errordown, the process-down callback used when a worker terminates before sending workerfinished. An unclean direct process exit must retain the established worker-error lifecycle and, after the configured restart limit is exhausted, set a terminal failure signal instead of allowing a green session. Do not treat workerfinished exitstatus 1 as a crash: pytest_sessionfinish sends that event for ordinary failed tests. Preserve keyboard-interrupt, orderly workerfinished, and recoverable restart behavior.",
       "acceptance": [
-        "A workerfinished event with exitstatus 1 invokes the worker-error lifecycle, not the normal error=None nodedown path.",
-        "With max-worker-restart set to zero, that nonzero exit shuts the session down, removes the dead worker, and does not create a replacement worker.",
-        "The nodedown hook receives exactly one non-None diagnostic identifying the worker exit status.",
-        "A workerfinished event with exitstatus 0 remains a normal completion with one error=None nodedown hook call.",
-        "The production change is contained in src/xdist/dsession.py inside xdist.dsession.DSession."
+        "An orderly workerfinished event with exitstatus 1 remains a normal completion: it emits exactly one error=None nodedown hook call, removes the worker, and neither shuts down nor restarts it.",
+        "A direct process-down error with restarting disabled emits exactly one non-None nodedown diagnostic, removes the dead worker, shuts the session down without a replacement, and sets a terminal failure signal.",
+        "Below the restart limit, a process-down error keeps the existing replacement-worker lifecycle and does not set the terminal failure signal.",
+        "The production change is confined to src/xdist/dsession.py at xdist.dsession.DSession.worker_errordown, so it composes with the #1219 pytest_sessionstart change."
       ],
-      "overlap_anchors": [{"path": "src/xdist/dsession.py", "symbol": "xdist.dsession.DSession"}],
+      "overlap_anchors": [{"path": "src/xdist/dsession.py", "symbol": "xdist.dsession.DSession.worker_errordown"}, {"path": "src/xdist/dsession.py", "symbol": "xdist.dsession.DSession"}],
       "evaluator": "evaluators/pytest-xdist/dsession-1278-nonzero-exit.py",
       "reference_patch": "references/pytest-xdist/dsession-1278-nonzero-exit.patch"
     },

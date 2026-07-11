@@ -1,7 +1,44 @@
 diff --git a/src/xdist/plugin.py b/src/xdist/plugin.py
 --- a/src/xdist/plugin.py
 +++ b/src/xdist/plugin.py
-@@ -436,9 +436,16 @@ def pytest_cmdline_main(config: pytest.Config) -> None:
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+
++import argparse
+ import math
+ import os
+ import sys
+@@ -131,8 +131,20 @@ def pytest_xdist_auto_num_workers(config: pytest.Config) -> int:
+         if result is not None:
+             return result
+     return 1
+
+
++class _ExplicitDistAction(argparse.Action):
++    def __call__(
++        self,
++        parser: argparse.ArgumentParser,
++        namespace: argparse.Namespace,
++        values: object,
++        option_string: str | None = None,
++    ) -> None:
++        setattr(namespace, self.dest, values)
++        namespace._xdist_explicit_dist = True
++
++
+ def parse_numprocesses(s: str) -> int | Literal["auto", "logical"]:
+     if s in ("auto", "logical"):
+         return s  # type: ignore[return-value]
+@@ -218,7 +232,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
+     group.addoption(
+         "--dist",
+         metavar="distmode",
+-        action="store",
++        action=_ExplicitDistAction,
+         choices=[
+             "each",
+             "load",
+@@ -436,9 +436,13 @@ def pytest_cmdline_main(config: pytest.Config) -> None:
 -    if config.option.numprocesses:
 -        if config.option.dist == "no":
 -            config.option.dist = "load"
@@ -9,10 +46,7 @@ diff --git a/src/xdist/plugin.py b/src/xdist/plugin.py
 -        if config.option.maxprocesses:
 -            numprocesses = min(numprocesses, config.option.maxprocesses)
 -        config.option.tx = ["popen"] * numprocesses
-+    explicit_dist = any(
-+        arg == "--dist" or arg.startswith("--dist=")
-+        for arg in config.invocation_params.args
-+    )
++    explicit_dist = getattr(config.option, "_xdist_explicit_dist", False)
 +    if config.option.numprocesses:
 +        if config.option.dist == "no" and not explicit_dist:
 +            config.option.dist = "load"

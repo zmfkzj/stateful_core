@@ -1,5 +1,5 @@
 diff --git a/src/xdist/dsession.py b/src/xdist/dsession.py
-index 41e62d4..0058b9d 100644
+index 41e62d4..951203a 100644
 --- a/src/xdist/dsession.py
 +++ b/src/xdist/dsession.py
 @@ -5,6 +5,7 @@ from enum import auto
@@ -41,40 +41,61 @@ index 41e62d4..0058b9d 100644
  
      @pytest.hookimpl
      def pytest_sessionfinish(self) -> None:
-@@ -205,11 +216,15 @@ class DSession:
-         The node might not be in the scheduler if it had not emitted
-         workerready before shutdown was triggered.
-         """
--        self.config.hook.pytest_testnodedown(node=node, error=None)
--        if node.workeroutput["exitstatus"] == 2:  # keyboard-interrupt
-+        exitstatus = node.workeroutput["exitstatus"]
-+        if exitstatus == 2:  # keyboard-interrupt
-             self.shouldstop = f"{node} received keyboard-interrupt"
-             self.worker_errordown(node, "keyboard-interrupt")
-             return
-+        if exitstatus:
-+            self.worker_errordown(node, f"worker exited with exit status {exitstatus}")
-+            return
-+        self.config.hook.pytest_testnodedown(node=node, error=None)
-         shouldfail = node.workeroutput["shouldfail"]
-         shouldstop = node.workeroutput["shouldstop"]
-         for shouldx in [shouldfail, shouldstop]:
+@@ -263,7 +273,8 @@ class DSession:
+         if maximum_reached:
+             if self._max_worker_restart == 0:
+                 msg = f"worker {node.gateway.id} crashed and worker restarting disabled"
+             else:
+                 msg = f"maximum crashed workers reached: {self._max_worker_restart}"
+             self._summary_report = msg
++            self.shouldstop = msg
+             self.report_line("\n" + msg)
 diff --git a/src/xdist/plugin.py b/src/xdist/plugin.py
-index 7dcdcdb..b22d2b6 100644
+index 7dcdcdb..30b567b 100644
 --- a/src/xdist/plugin.py
 +++ b/src/xdist/plugin.py
-@@ -133,8 +133,8 @@ def pytest_xdist_auto_num_workers(config: pytest.Config) -> int:
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++import argparse
+ import math
+ import os
+ import sys
+@@ -131,10 +132,22 @@ def pytest_xdist_auto_num_workers(config: pytest.Config) -> int:
+         if result is not None:
+             return result
      return 1
  
  
 -def parse_numprocesses(s: str) -> int | Literal["auto", "logical"]:
 -    if s in ("auto", "logical"):
++class _ExplicitDistAction(argparse.Action):
++    def __call__(
++        self,
++        parser: argparse.ArgumentParser,
++        namespace: argparse.Namespace,
++        values: object,
++        option_string: str | None = None,
++    ) -> None:
++        setattr(namespace, self.dest, values)
++        namespace._xdist_explicit_dist = True
++
++
 +def parse_numprocesses(s: str) -> int | Literal["auto", "auto-1", "logical"]:
 +    if s in ("auto", "auto-1", "logical"):
          return s  # type: ignore[return-value]
      elif s is not None:
          return int(s)
-@@ -425,21 +425,30 @@ def pytest_cmdline_main(config: pytest.Config) -> None:
+@@ -218,7 +231,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
+     group.addoption(
+         "--dist",
+         metavar="distmode",
+-        action="store",
++        action=_ExplicitDistAction,
+         choices=[
+             "each",
+             "load",
+@@ -425,21 +438,27 @@ def pytest_cmdline_main(config: pytest.Config) -> None:
          config.option.dist = "load"
  
      usepdb = config.getoption("usepdb", False)  # a core option
@@ -89,10 +110,7 @@ index 7dcdcdb..b22d2b6 100644
 +                auto_num_cpus = max(auto_num_cpus - 1, 0)
              config.option.numprocesses = auto_num_cpus
  
-+    explicit_dist = any(
-+        arg == "--dist" or arg.startswith("--dist=")
-+        for arg in config.invocation_params.args
-+    )
++    explicit_dist = getattr(config.option, "_xdist_explicit_dist", False)
      if config.option.numprocesses:
 -        if config.option.dist == "no":
 +        if config.option.dist == "no" and not explicit_dist:
@@ -164,7 +182,7 @@ index 73162dc..031e3c9 100644
              # Insert tests scopes into work queue ordered by number of tests.
              for scope, nodeids in sorted(
                  unsorted_workqueue.items(), key=lambda item: -len(item[1])
-@@ -401,11 +414,6 @@ class LoadScopeScheduling:
+@@ -401,10 +414,5 @@ class LoadScopeScheduling:
          for node in self.nodes:
              self._reschedule(node)
  
@@ -175,4 +193,3 @@ index 73162dc..031e3c9 100644
 -
      def _check_nodes_have_same_collection(self) -> bool:
          """Return True if all nodes have collected the same items.
- 
