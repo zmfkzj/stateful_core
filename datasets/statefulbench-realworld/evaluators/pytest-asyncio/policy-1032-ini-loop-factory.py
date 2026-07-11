@@ -120,7 +120,7 @@ asyncio_loop_factory = loop_config:missing_factory
         )
         invalid = run_pytest(project, checkout)
         invalid_output = invalid.stdout + invalid.stderr
-        assert invalid.returncode != 0, invalid_output
+        assert invalid.returncode == 4, invalid_output
         assert "asyncio_loop_factory" in invalid_output, invalid_output
         assert "missing_factory" in invalid_output, invalid_output
 
@@ -131,7 +131,7 @@ asyncio_loop_factory = loop_config:not_a_factory
         )
         noncallable = run_pytest(project, checkout)
         noncallable_output = noncallable.stdout + noncallable.stderr
-        assert noncallable.returncode != 0, noncallable_output
+        assert noncallable.returncode == 4, noncallable_output
         assert "asyncio_loop_factory" in noncallable_output, noncallable_output
         assert "not callable" in noncallable_output, noncallable_output
 
@@ -142,7 +142,7 @@ asyncio_loop_factory = loop_config
         )
         malformed = run_pytest(project, checkout)
         malformed_output = malformed.stdout + malformed.stderr
-        assert malformed.returncode != 0, malformed_output
+        assert malformed.returncode == 4, malformed_output
         assert "asyncio_loop_factory" in malformed_output, malformed_output
         assert "module:callable" in malformed_output, malformed_output
 

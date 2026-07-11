@@ -67,8 +67,11 @@ def test_plain():
 
 
 @pytest.mark.asyncio
-async def test_async(event_loop_policy):
-    assert type(asyncio.get_running_loop()) is event_loop_policy.loop_type
+async def test_async(request):
+    assert (
+        type(asyncio.get_running_loop())
+        is request.node.callspec.params["event_loop_policy"].loop_type
+    )
 """
         )
         environment = os.environ.copy()

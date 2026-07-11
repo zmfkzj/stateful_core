@@ -14,16 +14,46 @@ import textwrap
 
 def _assert_python_310_create_task(repo: Path) -> None:
     tree = ast.parse((repo / "pytest_asyncio" / "plugin.py").read_text(encoding="utf-8"))
+    create_task_aliases = {"create_task"}
     for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "asyncio"
-            and node.func.attr == "create_task"
-            and any(keyword.arg == "context" for keyword in node.keywords)
-        ):
-            raise AssertionError("asyncio.create_task(..., context=...) is not Python 3.10 compatible")
+        if isinstance(node, ast.ImportFrom):
+            create_task_aliases.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name == "create_task"
+            )
+
+    def is_create_task(callable: ast.expr) -> bool:
+        return (
+            isinstance(callable, ast.Attribute) and callable.attr == "create_task"
+        ) or (
+            isinstance(callable, ast.Name) and callable.id in create_task_aliases
+        )
+
+    class CreateTaskVisitor(ast.NodeVisitor):
+        def visit_Assign(self, node: ast.Assign) -> None:
+            self.visit(node.value)
+            if is_create_task(node.value):
+                create_task_aliases.update(
+                    target.id for target in node.targets if isinstance(target, ast.Name)
+                )
+
+        def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+            if node.value is not None:
+                self.visit(node.value)
+                if is_create_task(node.value) and isinstance(node.target, ast.Name):
+                    create_task_aliases.add(node.target.id)
+
+        def visit_Call(self, node: ast.Call) -> None:
+            if is_create_task(node.func) and any(
+                keyword.arg == "context" for keyword in node.keywords
+            ):
+                raise AssertionError(
+                    "create_task(..., context=...) is not Python 3.10 compatible"
+                )
+            self.generic_visit(node)
+
+    CreateTaskVisitor().visit(tree)
 
 
 def _run_pytest(repo: Path, test: str) -> subprocess.CompletedProcess[str]:

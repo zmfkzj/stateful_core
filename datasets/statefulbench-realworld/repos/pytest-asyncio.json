@@ -39,12 +39,14 @@
       "kind": "bug",
       "sources": ["https://github.com/pytest-dev/pytest-asyncio/issues/810"],
       "source_hash": "6e509513d3f9a9ce7cf0093d6d7262b5bac093d0b308c990e5861a6b6df0686b",
-      "prompt": "Fix issue #810 in pytest_asyncio.plugin.pytest_pyfunc_call. In strict mode, a coroutine that receives pytest.mark.asyncio from pytest_collection_modifyitems after collection must execute through the configured scoped runner, preserving its loop policy/factory and context rather than falling through to pytest's unsupported-async-function failure. Preserve the warning for genuinely synchronous marked tests. When composed with the #215 timeout extension, a late-added timeout marker must use that same timeout path.",
+      "prompt": "Fix issue #810 in pytest_asyncio.plugin.pytest_pyfunc_call. In strict mode, a coroutine that receives pytest.mark.asyncio from pytest_collection_modifyitems after collection must execute through the configured scoped runner, preserving its loop policy, named hook loop factory, and context rather than falling through to pytest's unsupported-async-function failure. The standalone patch must accept asyncio(timeout=...) alongside loop marker kwargs and use the same cancellation-aware synchronizer for regular and late-marked coroutines, so it remains semantically compatible with #215. Resolve a late loop_factories=['name'] selection after collection rather than relying on pytest_generate_tests parametrization. Preserve the warning for genuinely synchronous marked tests.",
       "acceptance": [
         "A coroutine marked by pytest_collection_modifyitems runs through the configured scoped runner in strict mode.",
-        "A dynamically added asyncio(timeout=...) marker uses the #215 timeout behavior, completes cancellation cleanup, and lets a following test run.",
-        "A dynamically marked synchronous test still follows the existing PytestWarning path.",
-        "The execution change is in pytest_asyncio/plugin.py at pytest_asyncio.plugin.pytest_pyfunc_call."
+        "A late-added asyncio(timeout=..., loop_scope='module', loop_factories=['name']) marker resolves from its originating test item and selects the named pytest_asyncio_loop_factories hook factory, so the running loop has that exact factory type.",
+        "An unavailable late loop factory skips with the same reason as static loop-factory parametrization instead of raising UsageError.",
+        "A dynamically added timeout marker is accepted, uses cancellation-aware timeout behavior, completes its finally cleanup, and lets a following test run.",
+        "The standalone patch forwards static and late timeout markers through one synchronizer, preserving #215 behavior when the tasks are composed; the late coroutine supplies a non-None context to runner.run.",
+        "A dynamically marked synchronous test still follows the existing PytestWarning path."
       ],
       "overlap_anchors": [{"path": "pytest_asyncio/plugin.py", "symbol": "pytest_asyncio.plugin.pytest_pyfunc_call"}],
       "evaluator": "evaluators/pytest-asyncio/pyfunc-810-dynamic-marker.py",
@@ -147,7 +149,7 @@
       "acceptance": [
         "A session-scoped parametrized event_loop_policy override creates one collected execution per policy for a pytest.mark.asyncio test.",
         "An unmarked synchronous test that does not request event_loop_policy executes only once despite the policy parameters.",
-        "The async runner continues to receive the user-provided event_loop_policy fixture value after the fixture is no longer globally autouse.",
+        "Each asyncio test execution runs with the exact loop type selected by request.node.callspec.params['event_loop_policy'].loop_type, without accepting an event_loop_policy fixture argument.",
         "The primary change is at pytest_asyncio/plugin.py in pytest_asyncio.plugin.event_loop_policy, with collection wiring only to request that fixture for asyncio tests."
       ],
       "overlap_anchors": [{"path": "pytest_asyncio/plugin.py", "symbol": "pytest_asyncio.plugin.event_loop_policy"}],
@@ -165,7 +167,7 @@
         "A configured callable creates the event loop used by a pytest.mark.asyncio test.",
         "A user event_loop_policy fixture override remains usable and takes precedence over the default configured policy fixture.",
         "Malformed, missing, and non-callable configured targets fail with a pytest UsageError naming asyncio_loop_factory and the invalid target.",
-        "The primary change is at pytest_asyncio/plugin.py in pytest_asyncio.plugin.event_loop_policy."
+        "Configured-factory validation is invoked by the existing pytest_configure hook, preserving its asyncio marker registration and scope validation; no second hook overrides it."
       ],
       "overlap_anchors": [{"path": "pytest_asyncio/plugin.py", "symbol": "pytest_asyncio.plugin.event_loop_policy"}],
       "evaluator": "evaluators/pytest-asyncio/policy-1032-ini-loop-factory.py",

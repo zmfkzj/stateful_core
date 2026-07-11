@@ -1,5 +1,5 @@
 diff --git a/pytest_asyncio/plugin.py b/pytest_asyncio/plugin.py
-index 38b75e4..37be493 100644
+index 38b75e4..1e797d7 100644
 --- a/pytest_asyncio/plugin.py
 +++ b/pytest_asyncio/plugin.py
 @@ -7,6 +7,7 @@ import contextlib
@@ -23,7 +23,12 @@ index 38b75e4..37be493 100644
      parser.addini(
          "asyncio_default_fixture_loop_scope",
          type="string",
-@@ -1075,11 +1082,45 @@ def _asyncio_loop_factory(request: FixtureRequest) -> LoopFactory | None:
+@@ -297,2 +304,4 @@ def pytest_configure(config: Config) -> None:
++    _get_configured_loop_factory(config)
++
+     default_fixture_loop_scope = config.getini("asyncio_default_fixture_loop_scope")
+     _validate_scope(default_fixture_loop_scope, "asyncio_default_fixture_loop_scope")
+@@ -1075,11 +1084,45 @@ def _asyncio_loop_factory(request: FixtureRequest) -> LoopFactory | None:
  
  
  @pytest.fixture(scope="session", autouse=True)

@@ -1,5 +1,5 @@
 diff --git a/pytest_asyncio/plugin.py b/pytest_asyncio/plugin.py
-index 38b75e4..9b0857f 100644
+index 38b75e4..24b265b 100644
 --- a/pytest_asyncio/plugin.py
 +++ b/pytest_asyncio/plugin.py
 @@ -7,6 +7,7 @@ import contextlib
@@ -29,9 +29,40 @@ index 38b75e4..9b0857f 100644
      )
      parser.addini(
          "asyncio_default_test_loop_scope",
-@@ -272,16 +279,6 @@ def _collect_hook_loop_factories(
+@@ -271,15 +278,37 @@ def _collect_hook_loop_factories(
+         raise pytest.UsageError(_INVALID_LOOP_FACTORIES)
      return factories
  
++def _get_marker_loop_factory(item: Item) -> LoopFactory | None:
++    asyncio_marker = item.get_closest_marker("asyncio")
++    if asyncio_marker is None:
++        return None
++    _, selected_factory_names = _parse_asyncio_marker(asyncio_marker)
++    if selected_factory_names is None:
++        return None
++    hook_factories = _collect_hook_loop_factories(item.config, item)
++    if hook_factories is None:
++        raise pytest.UsageError(
++            "mark.asyncio 'loop_factories' requires at least one "
++            "pytest_asyncio_loop_factories hook implementation."
++        )
++    if len(selected_factory_names) != 1:
++        raise pytest.UsageError(
++            "mark.asyncio 'loop_factories' added after collection must name "
++            "exactly one factory."
++        )
++    factory_name = selected_factory_names[0]
++    try:
++        return hook_factories[factory_name]
++    except KeyError:
++        pytest.skip(
++            reason=(
++                f"Loop factory {factory_name!r} is not available."
++                f" Available factories:"
++                f" {', '.join(hook_factories)}."
++            ),
++        )
++
  
 -_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET = """\
 -The configuration option "asyncio_default_fixture_loop_scope" is unset.
@@ -41,13 +72,15 @@ index 38b75e4..9b0857f 100644
 -to avoid unexpected behavior in the future. Valid fixture loop scopes are: \
 -"function", "class", "module", "package", "session"
 -"""
--
--
+ 
+ 
  def _validate_scope(scope: str | None, option_name: str) -> None:
-     if scope is None:
-         return
-@@ -296,8 +293,6 @@ def _validate_scope(scope: str | None, option_name: str) -> None:
+@@ -294,10 +323,10 @@ def _validate_scope(scope: str | None, option_name: str) -> None:
+ 
+ 
  def pytest_configure(config: Config) -> None:
++    _get_configured_loop_factory(config)
++
      default_fixture_loop_scope = config.getini("asyncio_default_fixture_loop_scope")
      _validate_scope(default_fixture_loop_scope, "asyncio_default_fixture_loop_scope")
 -    if not default_fixture_loop_scope:
@@ -55,7 +88,7 @@ index 38b75e4..9b0857f 100644
  
      default_test_loop_scope = config.getini("asyncio_default_test_loop_scope")
      _validate_scope(default_test_loop_scope, "asyncio_default_test_loop_scope")
-@@ -399,32 +394,71 @@ def _wrap_asyncgen_fixture(
+@@ -399,32 +428,71 @@ def _wrap_asyncgen_fixture(
          **kwargs: AsyncGenFixtureParams.kwargs,
      ):
          gen_obj = fixture_function(*args, **kwargs)
@@ -142,7 +175,7 @@ index 38b75e4..9b0857f 100644
  
          request.addfinalizer(finalizer)
          return result
-@@ -562,8 +596,9 @@ class PytestAsyncioFunction(Function):
+@@ -562,8 +630,9 @@ class PytestAsyncioFunction(Function):
          runner_fixture_id = f"_{self._loop_scope}_scoped_runner"
          runner = self._request.getfixturevalue(runner_fixture_id)
          context = contextvars.copy_context()
@@ -153,7 +186,7 @@ index 38b75e4..9b0857f 100644
          )
          with MonkeyPatch.context() as c:
              c.setattr(*self._synchronization_target_attr, synchronized_obj)
-@@ -735,6 +770,14 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
+@@ -735,6 +804,14 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
      asyncio_marker = _resolve_asyncio_marker(metafunc.definition)
      if asyncio_marker is None:
          return
@@ -168,7 +201,7 @@ index 38b75e4..9b0857f 100644
      marker_loop_scope, marker_selected_factory_names = _parse_asyncio_marker(
          asyncio_marker
      )
-@@ -875,7 +918,23 @@ def pytest_pyfunc_call(pyfuncitem: Function) -> object | None:
+@@ -875,7 +952,23 @@ def pytest_pyfunc_call(pyfuncitem: Function) -> object | None:
                      # no stacklevel points at the users code, so we set stacklevel=1
                      # so it at least indicates that it's the plugin complaining.
                      # Pytest gives the test file & name in the warnings summary at least
@@ -193,7 +226,7 @@ index 38b75e4..9b0857f 100644
          else:
              pyfuncitem.warn(
                  pytest.PytestWarning(
-@@ -894,6 +953,7 @@ def _synchronize_coroutine(
+@@ -894,6 +987,7 @@ def _synchronize_coroutine(
      func: Callable[..., CoroutineType],
      runner: asyncio.Runner,
      context: contextvars.Context,
@@ -201,7 +234,7 @@ index 38b75e4..9b0857f 100644
  ):
      """
      Return a sync wrapper around a coroutine executing it in the
-@@ -903,6 +963,8 @@ def _synchronize_coroutine(
+@@ -903,6 +997,8 @@ def _synchronize_coroutine(
      @functools.wraps(func)
      def inner(*args, **kwargs):
          coro = func(*args, **kwargs)
@@ -210,7 +243,7 @@ index 38b75e4..9b0857f 100644
          runner.run(coro, context=context)
  
      return inner
-@@ -997,11 +1059,12 @@ def _parse_asyncio_marker(
+@@ -997,11 +1093,12 @@ def _parse_asyncio_marker(
  def _validate_asyncio_marker(asyncio_marker: Mark) -> None:
      if asyncio_marker.args or (
          asyncio_marker.kwargs
@@ -226,7 +259,7 @@ index 38b75e4..9b0857f 100644
          )
          raise ValueError(msg)
  
-@@ -1019,6 +1082,10 @@ Please ensure that your tests don't close the event loop. \
+@@ -1019,6 +1116,10 @@ Please ensure that your tests don't close the event loop. \
  Here is the traceback of the exception triggered during teardown:
  %s
  """
@@ -237,7 +270,7 @@ index 38b75e4..9b0857f 100644
  
  
  def _create_scoped_runner_fixture(scope: _ScopeName) -> Callable:
-@@ -1031,34 +1098,53 @@ def _create_scoped_runner_fixture(scope: _ScopeName) -> Callable:
+@@ -1031,34 +1132,56 @@ def _create_scoped_runner_fixture(scope: _ScopeName) -> Callable:
          _asyncio_loop_factory,
          request: FixtureRequest,
      ) -> Iterator[Runner]:
@@ -246,6 +279,9 @@ index 38b75e4..9b0857f 100644
 +        except RuntimeError:
 +            old_loop = None
          new_loop_policy = event_loop_policy
++        loop_factory = _asyncio_loop_factory or _get_marker_loop_factory(
++            request._pyfuncitem
++        )
          debug_mode = _get_asyncio_debug(request.config)
 -        with _temporary_event_loop_policy(new_loop_policy):
 -            runner = Runner(
@@ -267,10 +303,10 @@ index 38b75e4..9b0857f 100644
 +            with _temporary_event_loop_policy(new_loop_policy):
 +                runner = Runner(
 +                    debug=debug_mode,
-+                    loop_factory=_asyncio_loop_factory,
++                    loop_factory=loop_factory,
 +                ).__enter__()
 +                runner_loop = runner.get_loop()
-+                if _asyncio_loop_factory is not None:
++                if loop_factory is not None:
 +                    _set_event_loop(runner_loop)
 +
 +                def loop_changed() -> bool:
@@ -314,7 +350,7 @@ index 38b75e4..9b0857f 100644
  
      return _scoped_runner
  
-@@ -1074,12 +1160,46 @@ def _asyncio_loop_factory(request: FixtureRequest) -> LoopFactory | None:
+@@ -1074,12 +1197,46 @@ def _asyncio_loop_factory(request: FixtureRequest) -> LoopFactory | None:
      return getattr(request, "param", None)
  
  
