@@ -1,0 +1,48 @@
+diff --git a/src/click/core.py b/src/click/core.py
+--- a/src/click/core.py
++++ b/src/click/core.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++import asyncio
+ import collections.abc as cabc
+ import enum
+ import errno
+@@ -1992,2 +1993,19 @@ class Group(Command):
+     def invoke(self, ctx: Context) -> t.Any:
++        def _run_awaitable(value: t.Any) -> t.Any:
++            if not inspect.isawaitable(value):
++                return value
++
++            try:
++                asyncio.get_running_loop()
++            except RuntimeError:
++                async def runner() -> t.Any:
++                    return await value
++
++                return asyncio.run(runner())
++
++            if inspect.iscoroutine(value):
++                value.close()
++
++            ctx.fail(_("Cannot invoke an async command while an event loop is running."))
++
+         def _process_result(value: t.Any) -> t.Any:
+@@ -2023,7 +2041,7 @@ class Group(Command):
+                 super().invoke(ctx)
+                 sub_ctx = cmd.make_context(cmd_name, args, parent=ctx)
+                 with sub_ctx:
+-                    return _process_result(sub_ctx.command.invoke(sub_ctx))
++                    return _process_result(_run_awaitable(sub_ctx.command.invoke(sub_ctx)))
+ 
+         # In chain mode we create the contexts step by step, but after the
+         # base command has been invoked.  Because at that point we do not
+@@ -2054,7 +2072,7 @@ class Group(Command):
+             rv = []
+             for sub_ctx in contexts:
+                 with sub_ctx:
+-                    rv.append(sub_ctx.command.invoke(sub_ctx))
++                    rv.append(_run_awaitable(sub_ctx.command.invoke(sub_ctx)))
+             return _process_result(rv)
+ 
+     def resolve_command(

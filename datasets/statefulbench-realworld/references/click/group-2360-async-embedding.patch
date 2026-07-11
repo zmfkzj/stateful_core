@@ -1,0 +1,51 @@
+diff --git a/src/click/core.py b/src/click/core.py
+--- a/src/click/core.py
++++ b/src/click/core.py
+@@ -6,6 +6,7 @@ import enum
+ import errno
+ import inspect
+ import os
++import threading
+ import sys
+ import typing as t
+ from abc import ABC
+@@ -1993,5 +1994,38 @@ class Group(Command):
+         def _process_result(value: t.Any) -> t.Any:
++            def _run_awaitable(value: t.Any) -> t.Any:
++                if not inspect.isawaitable(value):
++                    return value
++
++                import asyncio
++
++                async def runner() -> t.Any:
++                    return await value
++
++                try:
++                    asyncio.get_running_loop()
++                except RuntimeError:
++                    return asyncio.run(runner())
++
++                result: list[t.Any] = []
++                error: list[BaseException] = []
++
++                def run_in_thread() -> None:
++                    try:
++                        with ctx:
++                            result.append(asyncio.run(runner()))
++                    except BaseException as exc:
++                        error.append(exc)
++
++                thread = threading.Thread(target=run_in_thread)
++                thread.start()
++                thread.join()
++
++                if error:
++                    raise error[0]
++
++                return result[0]
++
+             if self._result_callback is not None:
+                 value = ctx.invoke(self._result_callback, value, **ctx.params)
+-            return value
++            return _run_awaitable(value)
+ 

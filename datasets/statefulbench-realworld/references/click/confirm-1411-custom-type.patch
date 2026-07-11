@@ -1,0 +1,41 @@
+diff --git a/src/click/termui.py b/src/click/termui.py
+--- a/src/click/termui.py
++++ b/src/click/termui.py
+@@ -249,3 +249,4 @@ def confirm(
+     prompt_suffix: str = ": ",
++    type: ParamType[bool] | t.Any | None = None,
+     show_default: bool = True,
+     err: bool = False,
+@@ -276,2 +277,11 @@ def confirm(
+     """
++    if isinstance(type, bool):
++        # Keep positional show_default and err arguments valid.
++        if show_default is not True:
++            err = show_default
++        show_default = type
++        type = None
++
++    value_proc = convert_type(type, default) if type is not None else None
++
+     prompt = _build_prompt(
+@@ -289,9 +299,15 @@ def confirm(
+-        if value in ("y", "yes"):
+-            rv = True
+-        elif value in ("n", "no"):
+-            rv = False
+-        elif default is not None and value == "":
++        if default is not None and value == "":
+             rv = default
++        elif value_proc is not None:
++            try:
++                rv = value_proc(value)
++            except UsageError as e:
++                echo(_("Error: {message}").format(message=e.message), err=err)
++                continue
++        elif value in ("y", "yes"):
++            rv = True
++        elif value in ("n", "no"):
++            rv = False
+         else:
+             echo(_("Error: invalid input"), err=err)
+             continue

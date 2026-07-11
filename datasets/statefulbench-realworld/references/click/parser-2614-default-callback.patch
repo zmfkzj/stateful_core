@@ -1,0 +1,13 @@
+--- a/src/click/shell_completion.py
++++ b/src/click/shell_completion.py
+@@ -612,2 +612,10 @@ def _resolve_context(
+     """
++    default_map = dict(ctx_args.get("default_map") or ())
++
++    for param in cli.params:
++        if param.name is not None and callable(param.default):
++            default_map.setdefault(param.name, None)
++
++    if default_map:
++        ctx_args = {**ctx_args, "default_map": default_map}
+     ctx_args["resilient_parsing"] = True

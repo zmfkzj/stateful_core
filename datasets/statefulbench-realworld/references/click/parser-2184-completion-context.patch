@@ -1,0 +1,19 @@
+--- a/src/click/shell_completion.py
++++ b/src/click/shell_completion.py
+@@ -611,5 +611,16 @@ def _resolve_context(
+     :param args: List of complete args before the incomplete value.
+     """
+     ctx_args["resilient_parsing"] = True
++    if args:
++        for param in cli.params:
++            if (
++                isinstance(param, Option)
++                and not param.is_flag
++                and not param.count
++                and param.flag_value is None
++                and args[-1] in param.opts
++            ):
++                args = args[:-1]
++                break
+     with cli.make_context(prog_name, args.copy(), **ctx_args) as ctx:
+         args = ctx._protected_args + ctx.args

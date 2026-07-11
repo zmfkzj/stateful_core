@@ -1,0 +1,42 @@
+diff --git a/src/click/formatting.py b/src/click/formatting.py
+--- a/src/click/formatting.py
++++ b/src/click/formatting.py
+@@ -31,7 +31,8 @@
+ def wrap_text(
+     text: str,
+     width: int = 78,
+     initial_indent: str = "",
+     subsequent_indent: str = "",
+     preserve_paragraphs: bool = False,
++    break_on_hyphens: bool = True,
+ ) -> str:
+@@ -65,6 +66,7 @@
+     wrapper = TextWrapper(
+         width,
+         initial_indent=initial_indent,
+         subsequent_indent=subsequent_indent,
+         replace_whitespace=False,
++        break_on_hyphens=break_on_hyphens,
+     )
+@@ -183,8 +185,9 @@
+             self.write(
+                 wrap_text(
+                     args,
+                     text_width,
+                     initial_indent=usage_prefix,
+                     subsequent_indent=indent,
++                    break_on_hyphens=False,
+                 )
+             )
+@@ -195,6 +198,10 @@
+             indent = " " * (max(self.current_indent, term_len(prefix)) + 4)
+             self.write(
+                 wrap_text(
+-                    args, text_width, initial_indent=indent, subsequent_indent=indent
++                    args,
++                    text_width,
++                    initial_indent=indent,
++                    subsequent_indent=indent,
++                    break_on_hyphens=False,
+                 )
+             )

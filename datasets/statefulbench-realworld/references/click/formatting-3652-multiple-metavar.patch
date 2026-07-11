@@ -1,0 +1,28 @@
+diff --git a/src/click/formatting.py b/src/click/formatting.py
+--- a/src/click/formatting.py
++++ b/src/click/formatting.py
+@@ -154,5 +154,9 @@ class HelpFormatter:
+     def dedent(self) -> None:
+         """Decreases the indentation."""
+         self.current_indent -= self.indent_increment
+ 
++    @staticmethod
++    def format_option_metavar(metavar: str, multiple: bool) -> str:
++        return f"{metavar}..." if multiple and not metavar.endswith("...") else metavar
++
+     def write_usage(self, prog: str, args: str = "", prefix: str | None = None) -> None:
+diff --git a/src/click/core.py b/src/click/core.py
+--- a/src/click/core.py
++++ b/src/click/core.py
+@@ -3273,7 +3273,10 @@ class Option(Parameter):
+             if any_slashes:
+                 any_prefix_is_slash = True
+ 
+             if not self.is_flag and not self.count:
+-                rv += f" {self.make_metavar(ctx=ctx)}"
++                metavar = HelpFormatter.format_option_metavar(
++                    self.make_metavar(ctx=ctx), self.multiple
++                )
++                rv += f" {metavar}"
+ 
+             return rv
