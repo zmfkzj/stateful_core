@@ -8,6 +8,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from threading import Event, Lock, Thread
 from pathlib import Path
 from types import ModuleType
 
@@ -186,8 +187,79 @@ class ArchiveTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "checksum"):
             self.mod.ensure_archive(repo, cache_dir, lambda _: io.BytesIO(contents))
 
-        self.assertFalse((cache_dir / f"{repo['archive_sha256']}.tmp").exists())
+        self.assertFalse(any(cache_dir.glob("*.tmp")))
         self.assertFalse((cache_dir / f"{repo['archive_sha256']}.tar.gz").exists())
+
+    def test_ensure_archive_concurrent_downloads_do_not_promote_unverified_bytes(self) -> None:
+        contents = self.archive_bytes({"pyproject.toml": b"[project]\n"})
+        unverified = b"unverified download"
+        expected_sha256 = hashlib.sha256(contents).hexdigest()
+        repo = {
+            "archive_url": "https://example.invalid/source.tar.gz",
+            "archive_sha256": expected_sha256,
+        }
+        first_write = Event()
+        second_write = Event()
+        first_finished = Event()
+        opener_lock = Lock()
+        opener_count = 0
+        results: list[Path] = []
+        errors: list[BaseException] = []
+
+        class Response:
+            def __init__(self, data: bytes, before_eof: Event | None = None) -> None:
+                self.data = data
+                self.before_eof = before_eof
+                self.reads = 0
+
+            def __enter__(self) -> Response:
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                return None
+
+            def read(self, _: int) -> bytes:
+                if self.reads == 0:
+                    self.reads += 1
+                    if self.data == contents:
+                        first_write.set()
+                    else:
+                        second_write.set()
+                    return self.data
+                if self.before_eof is not None:
+                    self.before_eof.wait(1)
+                return b""
+
+        def opener(_: str) -> Response:
+            nonlocal opener_count
+            with opener_lock:
+                opener_count += 1
+                return Response(contents) if opener_count == 1 else Response(unverified, first_finished)
+
+        def download() -> None:
+            try:
+                results.append(self.mod.ensure_archive(repo, self.root / "cache", opener))
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                first_finished.set()
+
+        first = Thread(target=download)
+        second = Thread(target=download)
+        first.start()
+        self.assertTrue(first_write.wait(1))
+        second.start()
+        self.assertTrue(second_write.wait(1))
+        first.join(1)
+        second.join(1)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(results, [self.root / "cache" / f"{expected_sha256}.tar.gz"])
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], ValueError)
+        self.assertEqual(results[0].read_bytes(), contents)
+        self.assertFalse(any((self.root / "cache").glob("*.tmp")))
 
     def test_extract_workspace_rejects_unsafe_members_and_multiple_roots(self) -> None:
         cases = (
@@ -204,6 +276,33 @@ class ArchiveTests(unittest.TestCase):
                     self.mod.extract_workspace(archive, expected_sha256, destination)
 
                 self.assertFalse(destination.exists())
+
+    def test_extract_workspace_rejects_dot_root_members(self) -> None:
+        contents = io.BytesIO()
+        with tarfile.open(fileobj=contents, mode="w:gz") as source:
+            root = tarfile.TarInfo(".")
+            root.type = tarfile.DIRTYPE
+            source.addfile(root)
+            member = tarfile.TarInfo("./source/file")
+            member.size = len(b"unsafe root")
+            source.addfile(member, io.BytesIO(b"unsafe root"))
+        archive, expected_sha256 = self.write_archive(contents.getvalue())
+        destination = self.root / "dot-root"
+
+        with self.assertRaisesRegex(ValueError, "archive"):
+            self.mod.extract_workspace(archive, expected_sha256, destination)
+
+        self.assertFalse(destination.exists())
+
+    def test_extract_workspace_mismatch_leaves_destination_absent(self) -> None:
+        archive, expected_sha256 = self.write_archive(self.archive_bytes({"pyproject.toml": b"[project]\n"}))
+        destination = self.root / "checksum-mismatch"
+        wrong_sha256 = "0" * 64 if expected_sha256 != "0" * 64 else "f" * 64
+
+        with self.assertRaisesRegex(ValueError, "checksum"):
+            self.mod.extract_workspace(archive, wrong_sha256, destination)
+
+        self.assertFalse(destination.exists())
 
     def test_extract_workspace_creates_byte_identical_fresh_workspaces(self) -> None:
         contents = self.archive_bytes({"pyproject.toml": b"[project]\n", "src/module.py": b"answer = 42\n"})

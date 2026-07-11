@@ -46,19 +46,27 @@ def ensure_archive(repo: dict, cache_dir: Path, opener=request.urlopen) -> Path:
         raise ValueError("cached archive checksum mismatch")
 
     cache_dir.mkdir(parents=True, exist_ok=True)
-    temporary = cache_dir / f"{expected_sha256}.tmp"
-    temporary.unlink(missing_ok=True)
+    temporary: Path | None = None
     digest = hashlib.sha256()
     try:
-        with opener(repo["archive_url"]) as response, temporary.open("wb") as output:
-            while chunk := response.read(1024 * 1024):
-                output.write(chunk)
-                digest.update(chunk)
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=cache_dir,
+            prefix=f"{expected_sha256}.",
+            suffix=".tmp",
+            delete=False,
+        ) as output:
+            temporary = Path(output.name)
+            with opener(repo["archive_url"]) as response:
+                while chunk := response.read(1024 * 1024):
+                    output.write(chunk)
+                    digest.update(chunk)
         if digest.hexdigest() != expected_sha256:
             raise ValueError("downloaded archive checksum mismatch")
         os.replace(temporary, archive)
     finally:
-        temporary.unlink(missing_ok=True)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return archive
 
 
@@ -70,6 +78,8 @@ def extract_workspace(archive: Path, expected_sha256: str, destination: Path) ->
 
     with tarfile.open(archive, "r:gz") as source:
         members = source.getmembers()
+        if any(member.name == "." or member.name.startswith("./") for member in members):
+            raise ValueError("archive contains unsafe members")
         roots = {member.name.split("/", 1)[0] for member in members if member.name}
         if len(roots) != 1:
             raise ValueError("archive must contain exactly one root directory")
