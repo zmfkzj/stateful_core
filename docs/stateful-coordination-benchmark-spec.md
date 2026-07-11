@@ -1,6 +1,7 @@
 # Stateful Coordination Task-Graph Benchmark — Implementation Spec
 
 Status: Proposed  
+> 2026-07-11: Implementation of this full protocol is cancelled. The maintained lightweight benchmark is described in docs/statefulbench-lite.md.
 Date: 2026-07-10
 
 > **Scope.** This document specifies a new graph-execution benchmark extension. It does not describe an implemented runner. Unless a paragraph is explicitly labelled **Current**, every requirement below is **Proposed**. Existing normal DeNovoSWE/ProgramBench runs, condition matrices, forced-overlap evidence, and checked reports remain unchanged and MUST NOT be relabelled as this benchmark.

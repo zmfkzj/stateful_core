@@ -1,0 +1,225 @@
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from types import SimpleNamespace
+from pathlib import Path
+from unittest.mock import patch
+
+from .conftest import load_script
+
+
+class _FakePopen:
+    def __init__(self, agent_id, events, exit_code=0, timed_out=False):
+        self.agent_id = agent_id
+        self.events = events
+        self.exit_code = exit_code
+        self.timed_out = timed_out
+        self.returncode = None
+        self.pid = 1
+        self._timed_out_once = False
+
+    def wait(self, timeout=None):
+        self.events.append(("wait", self.agent_id))
+        if self.timed_out and not self._timed_out_once:
+            self._timed_out_once = True
+            raise subprocess.TimeoutExpired(self.agent_id, timeout)
+        self.returncode = self.exit_code
+        return self.returncode
+
+
+def _fake_launch(events, outcomes=None):
+    outcomes = outcomes or {}
+
+    def launch(arm_dir, workspace, agent_id, prompt_path, mode, cfg):
+        events.append(("launch", agent_id, mode))
+        exit_code, timed_out = outcomes.get(agent_id, (0, False))
+        return SimpleNamespace(
+            popen=_FakePopen(agent_id, events, exit_code, timed_out),
+            agent_id=agent_id,
+            started_monotonic=time.monotonic(),
+        )
+
+    return launch
+
+
+class StatefulBenchLiteTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = load_script("statefulbench_lite.py")
+
+    def test_generate_workspace_is_deterministic_and_red(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first = root / "first"
+            second = root / "second"
+            self.mod.generate_workspace(first, 5)
+            self.mod.generate_workspace(second, 5)
+
+            def files(workspace):
+                return {
+                    path.relative_to(workspace): path.read_bytes()
+                    for path in workspace.rglob("*")
+                    if path.is_file() and ".git" not in path.relative_to(workspace).parts
+                }
+
+            self.assertEqual(files(first), files(second))
+            red = subprocess.run(
+                [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", "."],
+                cwd=first,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertNotEqual(red.returncode, 0)
+            self.assertIn("KeyError", red.stderr)
+
+    def test_task_prompts_bind_module_key_and_shared_files(self):
+        contracts = {
+            "slug": "`slug(text: str) -> str`: lowercase; every run of non-alphanumeric chars becomes one `-`; strip leading/trailing `-`",
+            "stats": "`stats(nums: list) -> tuple`: `(mean, median)`; mean is float; median averages the two middle values for even length",
+            "rle": "`encode(text: str) -> str` run-length (`\"aaabcc\" -> \"a3b1c2\"`); also `decode(code: str) -> str`; registry value is `encode`",
+            "roman": "`roman(n: int) -> str` for 1..3999",
+            "intervals": "`intervals(pairs: list[tuple[int,int]]) -> list[tuple[int,int]]`: merge overlapping/touching, sorted",
+        }
+        for spec in self.mod.TASK_SPECS:
+            with self.subTest(key=spec["key"]):
+                prompt = self.mod.render_task_prompt(spec)
+                self.assertIn(f"taskset/{spec['module']}.py", prompt)
+                self.assertIn(f"Contract: {contracts[spec['key']]}", prompt)
+                self.assertIn(f'REGISTRY["{spec["key"]}"]', prompt)
+                self.assertIn("CHANGELOG.md", prompt)
+        self.assertIn("python3 -m unittest discover -s tests -t .", self.mod.render_final_prompt())
+
+    def test_usage_parser_sums_tokens_and_tool_calls(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log = Path(temp_dir) / "agent.stdout.log"
+            log.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"message": {"usage": {"totalTokens": 11, "toolCalls": 3}}}),
+                        "not json",
+                        json.dumps({"usage": {"total_tokens": 7, "tool_calls": 2}}),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(self.mod.usage_from_log(log), {"total_tokens": 18, "tool_calls": 5})
+    def test_copy_stateful_omp_agent_db_copies_existing_db_and_ignores_missing_source(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            host_home = root / "host-home"
+            source = host_home / ".omp" / "profiles" / "stateful" / "agent" / "agent.db"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"stateful agent database")
+            agent_dir = root / "arm" / "omp-homes" / "agent-a" / "home" / ".omp" / "profiles" / "stateful" / "agent"
+
+            self.mod.copy_stateful_omp_agent_db(host_home, agent_dir)
+
+            self.assertEqual((agent_dir / "agent.db").read_bytes(), source.read_bytes())
+            missing_agent_dir = root / "missing" / "agent"
+            self.mod.copy_stateful_omp_agent_db(root / "missing-home", missing_agent_dir)
+            self.assertFalse((missing_agent_dir / "agent.db").exists())
+
+    def test_sequential_serializes_and_parallel_overlaps(self):
+        task_ids = [f"task-{spec['key']}" for spec in self.mod.TASK_SPECS]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            sequential_events = []
+            self.mod.run_arm(
+                "sequential",
+                root / "sequential",
+                self.mod.RunConfig(tasks=5),
+                launch=_fake_launch(sequential_events),
+            )
+            parallel_events = []
+            self.mod.run_arm(
+                "parallel-off",
+                root / "parallel",
+                self.mod.RunConfig(tasks=5),
+                launch=_fake_launch(parallel_events),
+            )
+
+        def index(events, kind, agent_id):
+            return next(position for position, event in enumerate(events) if event[:2] == (kind, agent_id))
+
+        for current, following in zip(task_ids, task_ids[1:]):
+            self.assertLess(index(sequential_events, "wait", current), index(sequential_events, "launch", following))
+        self.assertLess(
+            max(index(sequential_events, "wait", task_id) for task_id in task_ids),
+            index(sequential_events, "launch", "final"),
+        )
+        self.assertLess(
+            max(index(parallel_events, "launch", task_id) for task_id in task_ids),
+            min(index(parallel_events, "wait", task_id) for task_id in task_ids),
+        )
+        self.assertLess(
+            max(index(parallel_events, "wait", task_id) for task_id in task_ids),
+            index(parallel_events, "launch", "final"),
+        )
+
+    def test_cleared_requires_all_zero_exits(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            all_zero = self.mod.run_arm(
+                "parallel-off", root / "all-zero", self.mod.RunConfig(tasks=5), launch=_fake_launch([])
+            )
+            nonzero = self.mod.run_arm(
+                "parallel-off",
+                root / "nonzero",
+                self.mod.RunConfig(tasks=5),
+                launch=_fake_launch([], {"task-slug": (1, False)}),
+            )
+            with patch.object(self.mod.os, "killpg"):
+                timed_out = self.mod.run_arm(
+                    "parallel-off",
+                    root / "timed-out",
+                    self.mod.RunConfig(tasks=5),
+                    launch=_fake_launch([], {"final": (0, True)}),
+                )
+        self.assertTrue(all_zero["cleared"])
+        self.assertFalse(nonzero["cleared"])
+        self.assertFalse(timed_out["cleared"])
+
+    def test_timeout_race_retains_timed_out_task_and_runs_final(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = None
+            with patch.object(self.mod.os, "killpg", side_effect=ProcessLookupError):
+                result = self.mod.run_arm(
+                    "parallel-off",
+                    Path(temp_dir),
+                    self.mod.RunConfig(tasks=2),
+                    launch=_fake_launch([], {"task-slug": (0, True)}),
+                )
+
+        self.assertIsNone(result["error"])
+        self.assertFalse(result["cleared"])
+        self.assertEqual(
+            {record["agent_id"] for record in result["agents"]},
+            {"task-slug", "task-stats", "final"},
+        )
+        timed_out = next(record for record in result["agents"] if record["agent_id"] == "task-slug")
+        self.assertTrue(timed_out["timed_out"])
+    def test_parallel_on_without_stateful_binary_errors(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            events = []
+            cfg = self.mod.RunConfig(tasks=5, stateful_binary=None)
+            results = [
+                self.mod.run_arm("sequential", root, cfg, launch=_fake_launch(events)),
+                self.mod.run_arm("parallel-off", root, cfg, launch=_fake_launch(events)),
+                self.mod.run_arm("parallel-on", root, cfg, launch=_fake_launch(events)),
+            ]
+        self.assertIsNone(results[0]["error"])
+        self.assertIsNone(results[1]["error"])
+        self.assertIn("stateful binary", results[2]["error"])
+        self.assertEqual(len([event for event in events if event[0] == "launch"]), 12)
+
+
+if __name__ == "__main__":
+    unittest.main()
