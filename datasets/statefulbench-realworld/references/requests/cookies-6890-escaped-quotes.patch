@@ -1,15 +1,14 @@
 diff --git a/src/requests/cookies.py b/src/requests/cookies.py
 --- a/src/requests/cookies.py
 +++ b/src/requests/cookies.py
-@@ -382,8 +382,8 @@ class RequestsCookieJar(CookieJar, MutableMapping[str, str | None]):
+@@ -382,8 +382,2 @@ class RequestsCookieJar(CookieJar, MutableMapping[str, str | None]):
      def set_cookie(self, cookie: Cookie, *args: Any, **kwargs: Any) -> None:
-         if (
-             (value := cookie.value) is not None
-             and value.startswith('"')
-             and value.endswith('"')
-         ):
+-        if (
+-            (value := cookie.value) is not None
+-            and value.startswith('"')
+-            and value.endswith('"')
+-        ):
 -            cookie.value = value.replace('\\"', "")
-+            cookie.value = value[1:-1]
          return super().set_cookie(cookie, *args, **kwargs)
 
 diff --git a/src/requests/sessions.py b/src/requests/sessions.py

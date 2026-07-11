@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
 """Evaluator for Requests issue #7040."""
 import argparse
+import ssl
 import sys
 from pathlib import Path
-
-
-def connection(*, ssl_context=None):
-    values = {"cert_reqs": None, "ca_certs": None, "ca_cert_dir": None}
-    if ssl_context is not None:
-        values["ssl_context"] = ssl_context
-    return type("Connection", (), values)()
 
 
 def main() -> None:
@@ -18,27 +12,38 @@ def main() -> None:
     args = parser.parse_args()
     sys.path.insert(0, str(args.repo / "src"))
     from requests.adapters import HTTPAdapter
+    from urllib3.connectionpool import HTTPSConnectionPool
 
-    adapter = HTTPAdapter()
-    custom = connection(ssl_context=object())
+    custom_context = ssl.create_default_context()
+
+    class ContextAdapter(HTTPAdapter):
+        def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+            pool_kwargs["ssl_context"] = custom_context
+            return super().init_poolmanager(connections, maxsize, block, **pool_kwargs)
+
+    adapter = ContextAdapter()
+    custom = adapter.poolmanager.connection_from_url("https://example.test")
+    assert isinstance(custom, HTTPSConnectionPool)
+    assert custom.conn_kw["ssl_context"] is custom_context
     adapter.cert_verify(custom, "https://example.test", True, None)
     assert custom.cert_reqs == "CERT_REQUIRED"
-    assert custom.ca_certs is None
-    assert custom.ca_cert_dir is None
+    assert getattr(custom, "ca_certs", None) is None
+    assert getattr(custom, "ca_cert_dir", None) is None
 
-    default = connection()
+    default = HTTPAdapter().poolmanager.connection_from_url("https://example.test")
     adapter.cert_verify(default, "https://example.test", True, None)
     assert default.cert_reqs == "CERT_REQUIRED"
     assert default.ca_certs is not None
 
-    disabled = connection(ssl_context=object())
-    adapter.cert_verify(disabled, "https://example.test", False, None)
-    assert disabled.cert_reqs == "CERT_NONE"
-    assert disabled.ca_certs is None
-    assert disabled.ca_cert_dir is None
+    adapter.cert_verify(custom, "https://example.test", False, None)
+    assert custom.cert_reqs == "CERT_NONE"
+    assert custom.ca_certs is None
+    assert custom.ca_cert_dir is None
 
     try:
-        adapter.cert_verify(custom, "https://example.test", "/definitely/missing/ca.pem", None)
+        adapter.cert_verify(
+            custom, "https://example.test", "/definitely/missing/ca.pem", None
+        )
     except OSError as error:
         assert "TLS CA certificate bundle" in str(error)
     else:

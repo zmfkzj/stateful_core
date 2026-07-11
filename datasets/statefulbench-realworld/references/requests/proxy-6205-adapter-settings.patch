@@ -1,21 +1,31 @@
 diff --git a/src/requests/adapters.py b/src/requests/adapters.py
-index 79ed426..74742a2 100644
 --- a/src/requests/adapters.py
 +++ b/src/requests/adapters.py
-@@ -657,6 +657,16 @@ class HTTPAdapter(BaseAdapter):
+@@ -19,5 +19,6 @@ from urllib3.exceptions import (
+     ConnectTimeoutError,
+     LocationValueError,
++    ProxySchemeUnknown,
+     MaxRetryError,
+     NewConnectionError,
+     ProtocolError,
+@@ -278,6 +279,12 @@ class HTTPAdapter(BaseAdapter):
+         :returns: ProxyManager
+         :rtype: urllib3.ProxyManager
          """
- 
-         assert _is_prepared(request)
-+        proxy = select_proxy(request.url, proxies)
-+        if proxy:
-+            proxy = prepend_scheme_if_needed(proxy, "http")
-+            proxy_kwargs = {
-+                key: value
-+                for key, value in self.poolmanager.connection_pool_kw.items()
-+                if key not in {"num_pools", "maxsize", "block"}
-+            }
-+            self.proxy_manager_for(proxy, **proxy_kwargs)
-+
- 
++        proxy_pool_kwargs = {
++            key: value
++            for key, value in self.poolmanager.connection_pool_kw.items()
++            if key not in {"num_pools", "maxsize", "block"}
++        }
++        proxy_kwargs = {**proxy_pool_kwargs, **proxy_kwargs}
+         if proxy in self.proxy_manager:
+             manager = self.proxy_manager[proxy]
+         elif proxy.lower().startswith("socks"):
+@@ -668,6 +675,6 @@ class HTTPAdapter(BaseAdapter):
          try:
              conn = self.get_connection_with_tls_context(
+                 request, verify, proxies=proxies, cert=cert
+             )
+-        except LocationValueError as e:
++        except (LocationValueError, ProxySchemeUnknown) as e:
+             raise InvalidURL(e, request=request)

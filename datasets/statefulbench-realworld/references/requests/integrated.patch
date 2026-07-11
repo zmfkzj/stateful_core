@@ -1,16 +1,37 @@
 diff --git a/src/requests/adapters.py b/src/requests/adapters.py
-index 79ed426..57c5fad 100644
+index 79ed426..b2d110a 100644
 --- a/src/requests/adapters.py
 +++ b/src/requests/adapters.py
-@@ -7,6 +7,7 @@ and maintain connections.
- """
+@@ -8,6 +8,7 @@ and maintain connections.
  
  from __future__ import annotations
-+import errno
  
++import errno
  import os.path
  import socket  # noqa: F401
-@@ -336,10 +337,11 @@ class HTTPAdapter(BaseAdapter):
+ import typing
+@@ -18,6 +19,7 @@ from urllib3.exceptions import (
+     ClosedPoolError,
+     ConnectTimeoutError,
+     LocationValueError,
++    ProxySchemeUnknown,
+     MaxRetryError,
+     NewConnectionError,
+     ProtocolError,
+@@ -278,6 +280,12 @@ class HTTPAdapter(BaseAdapter):
+         :returns: ProxyManager
+         :rtype: urllib3.ProxyManager
+         """
++        proxy_pool_kwargs = {
++            key: value
++            for key, value in self.poolmanager.connection_pool_kw.items()
++            if key not in {"num_pools", "maxsize", "block"}
++        }
++        proxy_kwargs = {**proxy_pool_kwargs, **proxy_kwargs}
+         if proxy in self.proxy_manager:
+             manager = self.proxy_manager[proxy]
+         elif proxy.lower().startswith("socks"):
+@@ -336,10 +344,11 @@ class HTTPAdapter(BaseAdapter):
  
              conn.cert_reqs = "CERT_REQUIRED"
  
@@ -18,7 +39,7 @@ index 79ed426..57c5fad 100644
 -                conn.ca_certs = cert_loc
 -            else:
 -                conn.ca_cert_dir = cert_loc
-+            if not getattr(conn, "ssl_context", None):
++            if not getattr(conn, "conn_kw", {}).get("ssl_context"):
 +                if not os.path.isdir(cert_loc):
 +                    conn.ca_certs = cert_loc
 +                else:
@@ -26,7 +47,7 @@ index 79ed426..57c5fad 100644
          else:
              conn.cert_reqs = "CERT_NONE"
              conn.ca_certs = None
-@@ -353,13 +355,12 @@ class HTTPAdapter(BaseAdapter):
+@@ -353,13 +362,12 @@ class HTTPAdapter(BaseAdapter):
                  conn.cert_file = cert
                  conn.key_file = None
              if conn.cert_file and not os.path.exists(conn.cert_file):
@@ -44,32 +65,29 @@ index 79ed426..57c5fad 100644
                  )
  
      def build_response(self, req: PreparedRequest, resp: Any) -> Response:
-@@ -657,6 +658,15 @@ class HTTPAdapter(BaseAdapter):
-         """
- 
-         assert _is_prepared(request)
-+        proxy = select_proxy(request.url, proxies)
-+        if proxy:
-+            proxy = prepend_scheme_if_needed(proxy, "http")
-+            proxy_kwargs = {
-+                key: value
-+                for key, value in self.poolmanager.connection_pool_kw.items()
-+                if key not in {"num_pools", "maxsize", "block"}
-+            }
-+            self.proxy_manager_for(proxy, **proxy_kwargs)
- 
-         try:
+@@ -662,7 +670,7 @@ class HTTPAdapter(BaseAdapter):
              conn = self.get_connection_with_tls_context(
+                 request, verify, proxies=proxies, cert=cert
+             )
+-        except LocationValueError as e:
++        except (LocationValueError, ProxySchemeUnknown) as e:
+             raise InvalidURL(e, request=request)
+ 
+         self.cert_verify(conn, request.url, verify, cert)
 diff --git a/src/requests/cookies.py b/src/requests/cookies.py
-index 24dd9a7..bb51b25 100644
+index 24dd9a7..f980ff7 100644
 --- a/src/requests/cookies.py
 +++ b/src/requests/cookies.py
-@@ -385,7 +385,7 @@ class RequestsCookieJar(CookieJar, MutableMapping[str, str | None]):  # type: ig
-             and value.startswith('"')
-             and value.endswith('"')
-         ):
+@@ -380,12 +380,6 @@ class RequestsCookieJar(CookieJar, MutableMapping[str, str | None]):  # type: ig
+         remove_cookie_by_name(self, name)
+ 
+     def set_cookie(self, cookie: Cookie, *args: Any, **kwargs: Any) -> None:
+-        if (
+-            (value := cookie.value) is not None
+-            and value.startswith('"')
+-            and value.endswith('"')
+-        ):
 -            cookie.value = value.replace('\\"', "")
-+            cookie.value = value[1:-1]
          return super().set_cookie(cookie, *args, **kwargs)
  
      def update(  # type: ignore[override]

@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Evaluator for requests issue #6900."""
+"""Evaluator for the proxy SNI extension motivated by Requests issue #6900."""
 import argparse
 import sys
-import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,9 +10,6 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("repo", type=Path)
     args = parser.parse_args()
-    dependency_dir = args.repo / ".deps"
-    if dependency_dir.is_dir():
-        sys.path.insert(0, str(dependency_dir))
     sys.path.insert(0, str(args.repo / "src"))
 
     import requests
@@ -51,23 +47,23 @@ def main() -> None:
         return manager
 
     request = requests.Request("GET", "https://192.0.2.1/check").prepare()
-    with tempfile.NamedTemporaryFile() as ca_file:
-        with (
-            patch("requests.adapters.proxy_from_url", side_effect=proxy_factory),
-            patch.object(adapter, "build_response", return_value=object()),
-        ):
-            adapter.send(
-                request,
-                proxies={"https": "http://proxy.example:8080"},
-                verify=ca_file.name,
-            )
+    ca_file = args.repo / "tests/certs/valid/ca/ca.crt"
+    with (
+        patch("requests.adapters.proxy_from_url", side_effect=proxy_factory),
+        patch.object(adapter, "build_response", return_value=object()),
+    ):
+        adapter.send(
+            request,
+            proxies={"https": "http://proxy.example:8080"},
+            verify=str(ca_file),
+        )
 
-        proxy_kwargs, manager = created[0]
-        assert proxy_kwargs["assert_hostname"] == "service.internal"
-        assert proxy_kwargs["server_hostname"] == "service.internal"
-        assert manager.connection.host_args["host"] == "192.0.2.1"
-        assert manager.pool_kwargs["ca_certs"] == ca_file.name
-        assert manager.connection.ca_certs == ca_file.name
+    proxy_kwargs, manager = created[0]
+    assert proxy_kwargs["assert_hostname"] == "service.internal"
+    assert proxy_kwargs["server_hostname"] == "service.internal"
+    assert manager.connection.host_args["host"] == "192.0.2.1"
+    assert manager.pool_kwargs["ca_certs"] == str(ca_file)
+    assert manager.connection.ca_certs == str(ca_file)
 
 
 if __name__ == "__main__":

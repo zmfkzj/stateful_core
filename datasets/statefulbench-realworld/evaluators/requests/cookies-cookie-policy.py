@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluator for Requests issue #7122."""
+"""Evaluator for the cookie-policy extension motivated by Requests issue #7122."""
 import argparse
 import http.cookiejar
 import sys

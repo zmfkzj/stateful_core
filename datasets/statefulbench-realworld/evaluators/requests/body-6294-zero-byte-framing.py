@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluator for Requests issue #6294 zero-byte upload framing."""
+"""Evaluator for the zero-byte framing extension motivated by Requests issue #6294."""
 
 import argparse
 import io

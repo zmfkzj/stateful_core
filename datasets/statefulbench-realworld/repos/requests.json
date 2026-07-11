@@ -23,7 +23,7 @@
       "kind": "feature",
       "sources": ["https://github.com/psf/requests/issues/6294"],
       "source_hash": "c0766f7610681dc3487761b04ea4a87041f1746aea33f7b3de8b7206f248cecf",
-      "prompt": "Implement Requests issue #6294 in src/requests/models.py at requests.models.PreparedRequest.prepare_body. For a seekable stream with a known length of zero, set Content-Length: 0 instead of automatically adding Transfer-Encoding: chunked. Keep exact framing for non-empty known-length streams and retain the existing streamed-body/files error.",
+      "prompt": "Add an explicit zero-length stream framing extension in src/requests/models.py at requests.models.PreparedRequest.prepare_body. For a seekable stream with a known length of zero, set Content-Length: 0 instead of automatically adding Transfer-Encoding: chunked. This extension is motivated by issue #6294, an upstream regression report; it deliberately does not reclassify that report as a feature. Keep exact framing for non-empty known-length streams and retain the existing streamed-body/files error.",
       "acceptance": [
         "An empty BytesIO PUT has Content-Length: 0 and no Transfer-Encoding header.",
         "A non-empty BytesIO PUT has the exact byte count in Content-Length and no Transfer-Encoding header.",
@@ -104,13 +104,13 @@
       "kind": "bug",
       "sources": ["https://github.com/psf/requests/issues/6890"],
       "source_hash": "373d16124647cc70f14f3ffef542ad67a5b5891c2091d61d1948fa4b324f3f97",
-      "prompt": "Preserve escaped quotes in cookie values. RequestsCookieJar.set_cookie must remove only surrounding quotes, not escaped quotes within the value. Also prepare Session requests from generic CookieJars without routing session cookies through a RequestsCookieJar, so the Cookie header retains those values.",
+      "prompt": "Fix issue #6890 in both requests.cookies.RequestsCookieJar.set_cookie and requests.sessions.Session.prepare_request. Preserve cookie values verbatim, including surrounding and escaped quotes; do not slice or otherwise normalize them. Also prepare Session requests from generic CookieJars without routing session cookies through a RequestsCookieJar, so the Cookie header retains those values.",
       "acceptance": [
         "A plain cookie value remains unchanged when RequestsCookieJar stores it and when Session prepares it.",
-        "A surrounding-quote value containing an escaped quote loses only its surrounding quotes and preserves the escaped quote.",
+        "A quoted value containing an escaped quote remains byte-for-byte unchanged, including both outer quotes and the escaped quote.",
         "Preparing a secure generic-jar cookie does not corrupt it or raise while producing its HTTPS Cookie header."
       ],
-      "overlap_anchors": [{"path": "src/requests/sessions.py", "symbol": "requests.sessions.Session.prepare_request"}],
+      "overlap_anchors": [{"path": "src/requests/cookies.py", "symbol": "requests.cookies.RequestsCookieJar.set_cookie"}, {"path": "src/requests/sessions.py", "symbol": "requests.sessions.Session.prepare_request"}],
       "evaluator": "evaluators/requests/cookies-escaped-quotes.py",
       "reference_patch": "references/requests/cookies-6890-escaped-quotes.patch"
     },
@@ -119,7 +119,7 @@
       "kind": "feature",
       "sources": ["https://github.com/psf/requests/issues/7122"],
       "source_hash": "83970284322eb64996d869b847df5c1873f46977f4a3b2beb8d0d84ffb724e4e",
-      "prompt": "Preserve a caller-provided CookiePolicy when Session.prepare_request merges a generic session CookieJar with request cookies. The prepared request must use that policy to decide whether cookies are sent, including explicit policy denial.",
+      "prompt": "Add a Session.prepare_request cookie-policy preservation extension: when a generic session CookieJar merges with request cookies, retain and honor its caller-provided CookiePolicy. This extension is motivated by issue #7122, an upstream regression report; it deliberately does not reclassify that report as a feature.",
       "acceptance": [
         "An allowing caller-provided policy permits a secure cookie on HTTP during session preparation.",
         "The prepared CookieJar retains the exact caller-provided policy object.",
@@ -134,13 +134,14 @@
       "kind": "bug",
       "sources": ["https://github.com/psf/requests/issues/6205"],
       "source_hash": "78e82c75f4cc4fba46689b818184a63c567636924b819920680fb9f7c8d68b61",
-      "prompt": "Make HTTPAdapter.send preserve custom transport-adapter TLS pool settings when a request is routed through a proxy. A proxy manager must receive the adapter's non-manager pool settings before the normal connection lookup caches it; do not duplicate manager-owned sizing settings.",
+      "prompt": "Fix Requests issue #6205 through requests.adapters.HTTPAdapter.proxy_manager_for while retaining the existing requests.adapters.HTTPAdapter.send translation of LocationValueError and ProxySchemeUnknown to requests.InvalidURL. A SOCKS proxy manager must receive the adapter's non-manager pool settings before normal connection lookup caches it; do not duplicate manager-owned sizing settings.",
       "acceptance": [
-        "A proxied HTTPS send propagates a custom ssl_version from poolmanager.connection_pool_kw to the created proxy manager.",
+        "A socks5 proxied HTTPS send propagates a custom ssl_version from poolmanager.connection_pool_kw to the created SOCKS proxy manager.",
         "The normal connection lookup reuses that configured proxy manager rather than creating a second manager.",
-        "The proxied request still selects the target host and sends its path to urlopen."
+        "The proxied request still selects the target host and sends its path to urlopen.",
+        "An invalid proxy scheme raised during manager construction is translated to requests.InvalidURL."
       ],
-      "overlap_anchors": [{"path": "src/requests/adapters.py", "symbol": "requests.adapters.HTTPAdapter.send"}],
+      "overlap_anchors": [{"path": "src/requests/adapters.py", "symbol": "requests.adapters.HTTPAdapter.proxy_manager_for"}, {"path": "src/requests/adapters.py", "symbol": "requests.adapters.HTTPAdapter.send"}],
       "evaluator": "evaluators/requests/proxy-6205-adapter-settings.py",
       "reference_patch": "references/requests/proxy-6205-adapter-settings.patch"
     },
@@ -149,14 +150,14 @@
       "kind": "feature",
       "sources": ["https://github.com/psf/requests/issues/6900"],
       "source_hash": "8576bdb467bfb7bc5e5eec36cba0ed6fc92e69bb34d2c472846fdc2e60e0fa30",
-      "prompt": "Make HTTPAdapter.send preserve custom SNI settings from an adapter's connection pool when routing a private HTTPS request through an HTTP proxy, while keeping the request's self-signed CA bundle in the target connection pool settings.",
+      "prompt": "Add a proxy SNI propagation extension through requests.adapters.HTTPAdapter.proxy_manager_for while retaining requests.adapters.HTTPAdapter.send's translation of LocationValueError and ProxySchemeUnknown to requests.InvalidURL. Preserve custom SNI settings from an adapter's connection pool when routing a private HTTPS request through an HTTP proxy, while keeping the request's self-signed CA bundle in the target connection pool settings. This extension is motivated by issue #6900, an upstream regression report; it deliberately does not reclassify that report as a feature.",
       "acceptance": [
         "A proxied HTTPS send propagates custom assert_hostname to the created proxy manager.",
         "A proxied HTTPS send propagates custom server_hostname to the created proxy manager.",
         "A verify CA file remains the target pool's ca_certs setting and is applied to the proxied connection.",
         "The private IP target remains the host selected for the proxy connection."
       ],
-      "overlap_anchors": [{"path": "src/requests/adapters.py", "symbol": "requests.adapters.HTTPAdapter.send"}],
+      "overlap_anchors": [{"path": "src/requests/adapters.py", "symbol": "requests.adapters.HTTPAdapter.proxy_manager_for"}, {"path": "src/requests/adapters.py", "symbol": "requests.adapters.HTTPAdapter.send"}],
       "evaluator": "evaluators/requests/proxy-6900-sni-settings.py",
       "reference_patch": "references/requests/proxy-6900-sni-settings.patch"
     }

@@ -10,12 +10,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("repo", type=Path)
     args = parser.parse_args()
-    dependency_dir = args.repo / ".deps"
-    if dependency_dir.is_dir():
-        sys.path.insert(0, str(dependency_dir))
     sys.path.insert(0, str(args.repo / "src"))
 
     import requests
+    from urllib3.exceptions import ProxySchemeUnknown
+    from requests.exceptions import InvalidURL
     from requests.adapters import HTTPAdapter
 
     class Connection:
@@ -39,19 +38,19 @@ def main() -> None:
     adapter.poolmanager.connection_pool_kw["ssl_version"] = "TLSv1.2"
     created = []
 
-    def proxy_factory(*args, **kwargs):
+    def socks_factory(*args, **kwargs):
         manager = Manager()
         created.append((kwargs, manager))
         return manager
 
     request = requests.Request("GET", "https://example.test/").prepare()
     with (
-        patch("requests.adapters.proxy_from_url", side_effect=proxy_factory),
+        patch("requests.adapters.SOCKSProxyManager", side_effect=socks_factory),
         patch.object(adapter, "build_response", return_value=object()),
     ):
         adapter.send(
             request,
-            proxies={"https": "http://proxy.example:8080"},
+            proxies={"https": "socks5://proxy.example:1080"},
             verify=False,
         )
 
@@ -61,6 +60,20 @@ def main() -> None:
     assert manager.connection.host_args["host"] == "example.test"
     assert manager.connection.urlopen_args["url"] == "/"
 
+    with patch(
+        "requests.adapters.proxy_from_url",
+        side_effect=ProxySchemeUnknown("unsupported proxy scheme"),
+    ):
+        try:
+            adapter.send(
+                request,
+                proxies={"https": "http://proxy.example:8080"},
+                verify=False,
+            )
+        except InvalidURL as error:
+            assert "unsupported proxy scheme" in str(error)
+        else:
+            raise AssertionError("invalid proxy schemes must become requests.InvalidURL")
 
 if __name__ == "__main__":
     main()
