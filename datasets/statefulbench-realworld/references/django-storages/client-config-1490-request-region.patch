@@ -1,0 +1,69 @@
+diff --git a/storages/backends/s3.py b/storages/backends/s3.py
+--- a/storages/backends/s3.py
++++ b/storages/backends/s3.py
+@@ -455,38 +455,52 @@
+         state["_unsigned_connections"] = threading.local()
+         state["_bucket"] = None
+         self.__dict__ = state
++
++    def get_region_name(self):
++        return self.region_name
+ 
+     @property
+     def connection(self):
++        region_name = self.get_region_name()
+         connection = getattr(self._connections, "connection", None)
+-        if connection is None:
++        if (
++            connection is None
++            or getattr(self._connections, "region_name", None) != region_name
++        ):
++            self._bucket = None
+             session = self._create_session()
+             self._connections.connection = session.resource(
+                 "s3",
+-                region_name=self.region_name,
++                region_name=region_name,
+                 use_ssl=self.use_ssl,
+                 endpoint_url=self.endpoint_url,
+                 config=self.client_config,
+                 verify=self.verify,
+             )
++            self._connections.region_name = region_name
+         return self._connections.connection
+ 
+     @property
+     def unsigned_connection(self):
++        region_name = self.get_region_name()
+         unsigned_connection = getattr(self._unsigned_connections, "connection", None)
+-        if unsigned_connection is None:
++        if (
++            unsigned_connection is None
++            or getattr(self._unsigned_connections, "region_name", None) != region_name
++        ):
+             session = self._create_session()
+             config = self.client_config.merge(
+                 Config(signature_version=botocore.UNSIGNED)
+             )
+             self._unsigned_connections.connection = session.resource(
+                 "s3",
+-                region_name=self.region_name,
++                region_name=region_name,
+                 use_ssl=self.use_ssl,
+                 endpoint_url=self.endpoint_url,
+                 config=config,
+                 verify=self.verify,
+             )
++            self._unsigned_connections.region_name = region_name
+         return self._unsigned_connections.connection
+ 
+     def _create_session(self):
+@@ -511,6 +525,7 @@
+         Get the current bucket. If there is no current bucket object
+         create it.
+         """
++        connection = self.connection
+         if self._bucket is None:
+-            self._bucket = self.connection.Bucket(self.bucket_name)
++            self._bucket = connection.Bucket(self.bucket_name)
+         return self._bucket

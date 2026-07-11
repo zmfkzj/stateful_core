@@ -1,0 +1,46 @@
+--- a/storages/backends/s3.py
++++ b/storages/backends/s3.py
+@@ -312,1 +312,2 @@
+-    config = None
++    config = None
++    _connection_cache = threading.local()
+@@ -460,13 +460,30 @@
+     def connection(self):
+         connection = getattr(self._connections, "connection", None)
++        cache_key = (
++            self.session_profile,
++            self.access_key,
++            self.secret_key,
++            self.security_token,
++            self.region_name,
++            self.use_ssl,
++            self.endpoint_url,
++            self.verify,
++            repr(getattr(self.client_config, "__dict__", self.client_config)),
++        )
+         if connection is None:
+-            session = self._create_session()
+-            self._connections.connection = session.resource(
+-                "s3",
+-                region_name=self.region_name,
+-                use_ssl=self.use_ssl,
+-                endpoint_url=self.endpoint_url,
+-                config=self.client_config,
+-                verify=self.verify,
+-            )
++            connections = getattr(self._connection_cache, "connections", {})
++            connection = connections.get(cache_key)
++            if connection is None:
++                session = self._create_session()
++                connection = session.resource(
++                    "s3",
++                    region_name=self.region_name,
++                    use_ssl=self.use_ssl,
++                    endpoint_url=self.endpoint_url,
++                    config=self.client_config,
++                    verify=self.verify,
++                )
++                connections[cache_key] = connection
++                self._connection_cache.connections = connections
++            self._connections.connection = connection
+         return self._connections.connection

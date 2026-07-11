@@ -1,0 +1,66 @@
+diff --git a/storages/backends/s3.py b/storages/backends/s3.py
+index fa2d39f..7e3a750 100644
+--- a/storages/backends/s3.py
++++ b/storages/backends/s3.py
+@@ -331,6 +331,7 @@ class S3Storage(CompressStorageMixin, BaseStorage):
+ 
+         self._bucket = None
+         self._connections = threading.local()
++        self._object_metadata = {}
+         self._unsigned_connections = threading.local()
+ 
+         if self.config is not None:
+@@ -557,6 +558,7 @@ class S3Storage(CompressStorageMixin, BaseStorage):
+             params["ContentEncoding"] = "gzip"
+ 
+         obj = self.bucket.Object(name)
++        self._object_metadata.pop(name, None)
+ 
+         # Workaround file being closed errantly see: https://github.com/boto/s3transfer/issues/80
+         original_close = content.close
+@@ -570,6 +572,7 @@ class S3Storage(CompressStorageMixin, BaseStorage):
+     def delete(self, name):
+         try:
+             name = self._normalize_name(clean_name(name))
++            self._object_metadata.pop(name, None)
+             self.bucket.Object(name).delete()
+         except ClientError as err:
+             if err.response["ResponseMetadata"]["HTTPStatusCode"] == 404:
+@@ -581,11 +584,15 @@ class S3Storage(CompressStorageMixin, BaseStorage):
+ 
+     def exists(self, name):
+         name = self._normalize_name(clean_name(name))
++        if name in self._object_metadata:
++            return True
++
+         params = _filter_download_params(self.get_object_parameters(name))
+         try:
+-            self.connection.meta.client.head_object(
++            metadata = self.connection.meta.client.head_object(
+                 Bucket=self.bucket_name, Key=name, **params
+             )
++            self._object_metadata[name] = metadata
+             return True
+         except ClientError as err:
+             if err.response["ResponseMetadata"]["HTTPStatusCode"] == 404:
+@@ -658,12 +665,17 @@ class S3Storage(CompressStorageMixin, BaseStorage):
+         USE_TZ is True, otherwise returns a naive datetime in the local timezone.
+         """
+         name = self._normalize_name(clean_name(name))
+-        entry = self.bucket.Object(name)
++        metadata = self._object_metadata.get(name)
++        if metadata is None:
++            modified_time = self.bucket.Object(name).last_modified
++        else:
++            modified_time = metadata["LastModified"]
++
+         if setting("USE_TZ"):
+             # boto3 returns TZ aware timestamps
+-            return entry.last_modified
++            return modified_time
+         else:
+-            return make_naive(entry.last_modified)
++            return make_naive(modified_time)
+ 
+     def url(self, name, parameters=None, expire=None, http_method=None):
+         # Preserve the trailing slash after normalizing the path.

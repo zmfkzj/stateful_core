@@ -1,0 +1,251 @@
+{
+  "repository": "jschneier/django-storages",
+  "issue_snapshot": "issues/django-storages.json",
+  "tasks": [
+    {
+      "key": "read-metadata-1493-refreshable-session",
+      "kind": "bug",
+      "sources": [
+        "https://github.com/jschneier/django-storages/issues/1493"
+      ],
+      "source_hash": "9e6ae693d24213fe16960f65f0e381759eff509f2b314d005b7c616e52c06728",
+      "prompt": "Fix issue #1493 in storages.backends.s3.S3Storage.connection. When the signed connection has no explicit access key, secret key, security token, or session profile, construct boto3.Session without explicit None credential arguments so boto3's refreshable default provider chain remains authoritative. Preserve explicit credential and session-profile behavior, unsigned connection behavior, and the existing resource arguments.",
+      "acceptance": [
+        "A signed connection with no explicit credentials creates boto3.Session() with no credential keyword arguments.",
+        "An explicit session_profile still creates boto3.Session(profile_name=...).",
+        "Explicit access key, secret key, or security token values still pass through to boto3.Session unchanged.",
+        "The change is in storages/backends/s3.py within S3Storage.connection and its session-construction helper."
+      ],
+      "overlap_anchors": [
+        {
+          "path": "storages/backends/s3.py",
+          "symbol": "storages.backends.s3.S3Storage.connection"
+        }
+      ],
+      "evaluator": "evaluators/django-storages/read-metadata-1493-refreshable-session.py",
+      "reference_patch": "references/django-storages/read-metadata-1493-refreshable-session.patch"
+    },
+    {
+      "key": "read-metadata-1472-connection-cache",
+      "kind": "bug",
+      "sources": [
+        "https://github.com/jschneier/django-storages/issues/1472"
+      ],
+      "source_hash": "d8421e10acf244751b141547d7d25609ca4a39368bc22e6172bf6490d6bd35a7",
+      "prompt": "Fix issue #1472 in storages.backends.s3.S3Storage.connection. Reuse a per-thread signed S3 resource for equivalent session profile, explicit credential, endpoint, region, SSL, verify, and client-config settings across separately constructed S3Storage instances. Keep each storage instance's local connection reference, do not reuse resources across differing connection settings, and preserve all resource creation keyword arguments.",
+      "acceptance": [
+        "Two separately constructed S3Storage instances with equivalent signed connection settings receive the same per-thread resource without a second Session or resource construction.",
+        "A differing session profile receives a distinct resource and constructs a separately profiled Session.",
+        "The cached resource is stored back on each storage instance and retains region, endpoint, SSL, client-config, and verify resource arguments.",
+        "The production change is in storages/backends/s3.py at S3Storage.connection and composes with #1493's refreshable default session."
+      ],
+      "overlap_anchors": [
+        {
+          "path": "storages/backends/s3.py",
+          "symbol": "storages.backends.s3.S3Storage.connection"
+        }
+      ],
+      "evaluator": "evaluators/django-storages/read-metadata-1472-connection-cache.py",
+      "reference_patch": "references/django-storages/read-metadata-1472-connection-cache.patch"
+    },
+    {
+      "key": "client-config-1551-verify",
+      "kind": "bug",
+      "sources": [
+        "https://github.com/jschneier/django-storages/issues/1551"
+      ],
+      "source_hash": "27c0d6a7069f28e1841586089000f6c65e3b57c44b316de450ff2412fb5d0940",
+      "prompt": "Implement open bug #1551 in storages.backends.s3.S3Storage's shared client configuration block. The documented str(False) value for AWS_S3_VERIFY/verify must be passed to boto as boolean False, rather than as a CA-bundle path, for both signed and unsigned S3 resources. Preserve an actual CA bundle path unchanged and retain the configured region, endpoint, client Config, session behavior, proxies, and signature settings.",
+      "acceptance": [
+        "verify=str(False) reaches both signed and unsigned boto resources as boolean False.",
+        "A CA-bundle pathname remains the exact verify argument and is never coerced.",
+        "The signed resource keeps its configured region, endpoint URL, and client Config object.",
+        "The behavior change is in storages.backends.s3.S3Storage.connection and its adjacent unsigned client configuration block."
+      ],
+      "overlap_anchors": [
+        {
+          "path": "storages/backends/s3.py",
+          "symbol": "storages.backends.s3.S3Storage.connection"
+        }
+      ],
+      "evaluator": "evaluators/django-storages/client-config-1551-verify.py",
+      "reference_patch": "references/django-storages/client-config-1551-verify.patch"
+    },
+    {
+      "key": "client-config-1490-request-region",
+      "kind": "feature",
+      "sources": [
+        "https://github.com/jschneier/django-storages/issues/1490"
+      ],
+      "source_hash": "d32a7b5244706d28d72c897d0d3fc998b888eaa99368705c53f5d3f67ea51e31",
+      "prompt": "Implement open feature extension #1490 in storages.backends.s3.S3Storage's shared connection/client configuration block. Add a get_region_name() hook that defaults to region_name so a subclass can select the AWS region for the current request. Refresh cached signed and unsigned resources when the resolved region changes, invalidate the bucket accordingly, and preserve profile-session creation, endpoint URL, SSL verification, client Config/proxy/signature settings, and ordinary fixed-region behavior.",
+      "acceptance": [
+        "A subclass overriding get_region_name() creates a signed resource for the current request region and creates a distinct resource when that region changes.",
+        "A region change refreshes bucket selection instead of returning a bucket bound to the previous resource.",
+        "Unsigned resources also use the resolved region and refresh on a region change.",
+        "Each refreshed resource retains the configured session profile, endpoint URL, verify value, and client Config.",
+        "The execution change is centered on storages.backends.s3.S3Storage.connection and its adjacent unsigned client configuration block."
+      ],
+      "overlap_anchors": [
+        {
+          "path": "storages/backends/s3.py",
+          "symbol": "storages.backends.s3.S3Storage.connection"
+        }
+      ],
+      "evaluator": "evaluators/django-storages/client-config-1490-request-region.py",
+      "reference_patch": "references/django-storages/client-config-1490-request-region.patch"
+    },
+    {
+      "key": "object-meta-1255-metadata-cache",
+      "kind": "feature",
+      "sources": [
+        "https://github.com/jschneier/django-storages/issues/1255"
+      ],
+      "source_hash": "50ba871fd69f1436a4f018f19011295b89f91722466b00696e505946d81d730b",
+      "prompt": "Implement issue #1255 as an S3Storage metadata reuse extension. S3Storage.exists must retain successful head_object metadata by normalized key, reuse it for repeated existence checks, and get_modified_time must reuse cached LastModified rather than re-fetching the object. Invalidate cached metadata before an upload or delete so stale state never survives a mutation. Preserve normal 404 and non-404 ClientError behavior.",
+      "acceptance": [
+        "Two exists() calls for one normalized S3 key perform one head_object request and return True.",
+        "get_modified_time() after exists() returns cached LastModified without constructing a bucket Object.",
+        "delete() invalidates the normalized-key cache, so a later exists() performs a new head_object request.",
+        "The implementation modifies storages/backends/s3.py in S3Storage.exists and composes with #1561's ETag use of the same metadata."
+      ],
+      "overlap_anchors": [
+        {
+          "path": "storages/backends/s3.py",
+          "symbol": "storages.backends.s3.S3Storage.exists"
+        }
+      ],
+      "evaluator": "evaluators/django-storages/object-meta-1255-metadata-cache.py",
+      "reference_patch": "references/django-storages/object-meta-1255-metadata-cache.patch"
+    },
+    {
+      "key": "object-meta-1561-etag-skip",
+      "kind": "feature",
+      "sources": [
+        "https://github.com/jschneier/django-storages/issues/1561"
+      ],
+      "source_hash": "3083389ed9e29836366f8592ea2a6df3fbf27a496dc34a14dfcc1033c9d7f512",
+      "prompt": "Implement issue #1561 as the opt-in AWS_S3_SKIP_UNCHANGED S3Storage behavior. S3Storage.exists must retain ETag-bearing successful head_object metadata by normalized key. Before a seekable upload, reuse that metadata (or make one head_object request when absent), compare a reset-safe MD5 with the quoted ETag, and skip upload on equality. Clear cached metadata before an actual upload or delete; do not suppress non-404 ClientErrors, and preserve the disabled default.",
+      "acceptance": [
+        "With AWS_S3_SKIP_UNCHANGED enabled, exists() caches a normalized key's ETag and a matching seekable upload skips upload_fileobj without a second head_object request.",
+        "A mismatched ETag uploads the original bytes and invalidates cached metadata, so a later exists() requests fresh metadata.",
+        "With the option disabled, a matching ETag does not suppress upload_fileobj after exists() has cached metadata.",
+        "Content is rewound after hashing, quoted ETags are canonicalized, and the implementation modifies S3Storage.exists as the strict shared anchor plus S3Storage._save where required."
+      ],
+      "overlap_anchors": [
+        {
+          "path": "storages/backends/s3.py",
+          "symbol": "storages.backends.s3.S3Storage.exists"
+        }
+      ],
+      "evaluator": "evaluators/django-storages/object-meta-1561-etag-skip.py",
+      "reference_patch": "references/django-storages/object-meta-1561-etag-skip.patch"
+    },
+    {
+      "key": "presign-1481-direct-upload",
+      "kind": "feature",
+      "sources": [
+        "https://github.com/jschneier/django-storages/issues/1481"
+      ],
+      "source_hash": "e84530faf8666ab43670b59b68f7f23abae0a0d266d4708b1bff4b5bd44ab30f",
+      "prompt": "Implement open issue #1481 as the explicit benchmark-defined S3Storage API `generate_presigned_upload_url(name, parameters=None, expire=None)`. It must generate a signed S3 `put_object` URL with HTTP PUT, normalize the name and merge caller parameters exactly like `url`, and honor an explicit expiry or the existing querystring default. Extend the existing S3Storage.url signing block with an internal operation selector so ordinary get URLs preserve their current custom-domain, query-auth, default-expiry, and HTTP-method behavior. A direct-upload URL must use the signed connection even when normal URL query authentication is disabled and must not return an unsigned custom-domain download URL.",
+      "acceptance": [
+        "`S3Storage.generate_presigned_upload_url(\"uploads/report.pdf\", parameters={\"ContentType\": \"application/pdf\"}, expire=61)` calls the fake boto client with `put_object`, Bucket/Key plus ContentType, ExpiresIn 61, and HttpMethod `PUT`.",
+        "Ordinary `url()` still calls `get_object` with the configured default expiration and its normal query-auth connection selection.",
+        "An ordinary custom-domain URL remains the existing custom-domain URL, while the direct-upload API bypasses that download-only branch and produces a signed PUT URL even if `querystring_auth` is false.",
+        "The benchmark-defined public API and its internal operation routing are implemented in `storages/backends/s3.py` at `S3Storage.url`'s presigning block."
+      ],
+      "overlap_anchors": [
+        {
+          "path": "storages/backends/s3.py",
+          "symbol": "storages.backends.s3.S3Storage.url"
+        }
+      ],
+      "evaluator": "evaluators/django-storages/presign-1481-direct-upload.py",
+      "reference_patch": "references/django-storages/presign-1481-direct-upload.patch"
+    },
+    {
+      "key": "presign-1222-expiration-hook",
+      "kind": "feature",
+      "sources": [
+        "https://github.com/jschneier/django-storages/issues/1222"
+      ],
+      "source_hash": "17c2209b60576cc4ad60cacfafab7b3d4b4fe97bbdd7eaaa9ccfe41e45d91afe",
+      "prompt": "Implement open issue #1222 as the explicit benchmark-defined S3Storage hook `get_presigned_url_expiration(expire)`. Its default must return the current UTC time plus the requested duration. In S3Storage.url's existing custom-domain CloudFront signing branch, obtain `date_less_than` through this hook so subclasses can bucket expiration instants without copying URL construction. Preserve the existing `expire` default, querystring-auth gate, custom-domain output when unsigned, and normal S3 client `ExpiresIn` behavior.",
+      "acceptance": [
+        "A subclass overriding `get_presigned_url_expiration(91)` receives 91 and its exact returned marker is passed as CloudFront `date_less_than` for a signed custom-domain URL.",
+        "A custom-domain URL with query authentication disabled remains unsigned, does not invoke the hook or signer, and preserves its original URL.",
+        "A non-custom-domain `url(..., expire=23)` still calls the fake S3 client as `get_object` with ExpiresIn 23 and no HTTP method.",
+        "The benchmark-defined hook is used by the existing `storages.backends.s3.S3Storage.url` CloudFront presigning block and composes with #1481's internal presigned operation selector."
+      ],
+      "overlap_anchors": [
+        {
+          "path": "storages/backends/s3.py",
+          "symbol": "storages.backends.s3.S3Storage.url"
+        }
+      ],
+      "evaluator": "evaluators/django-storages/presign-1222-expiration-hook.py",
+      "reference_patch": "references/django-storages/presign-1222-expiration-hook.patch"
+    },
+    {
+      "key": "url-path-1558-empty-location",
+      "kind": "bug",
+      "sources": [
+        "https://github.com/jschneier/django-storages/issues/1558"
+      ],
+      "source_hash": "d50a92be66d48f79efa539dadb9ad68bf036b9db96ea7344d9139843cfd0fa7e",
+      "prompt": "Fix issue #1558 at storages.backends.s3.S3Storage.url. When location is empty, reject a URL name that normalizes to '..' or begins with '../' before resolving it. Preserve valid empty-location URL paths, normal prefixed locations, custom-domain URL formatting, and every non-URL storage operation.",
+      "acceptance": [
+        "With location='', url('../../secret.txt') raises SuspiciousOperation instead of returning a root-bucket URL.",
+        "With location='', url('album/photo.jpg') continues to produce the valid custom-domain URL path album/photo.jpg.",
+        "With location='media', url('album/photo.jpg') continues to use the media/album/photo.jpg path.",
+        "The production change is contained in storages/backends/s3.py at storages.backends.s3.S3Storage.url."
+      ],
+      "overlap_anchors": [
+        {
+          "path": "storages/backends/s3.py",
+          "symbol": "storages.backends.s3.S3Storage.url"
+        }
+      ],
+      "evaluator": "evaluators/django-storages/url-path-1558-empty-location.py",
+      "reference_patch": "references/django-storages/url-path-1558-empty-location.patch"
+    },
+    {
+      "key": "url-path-1553-unsigned-url",
+      "kind": "bug",
+      "sources": [
+        "https://github.com/jschneier/django-storages/issues/1553"
+      ],
+      "source_hash": "a84ea3fa919056f4f286dfbfa82d179eff183429f0528fc100fc35f86850a281",
+      "prompt": "Fix issue #1553 in storages.backends.s3.S3Storage.url. For an unsigned URL without custom_domain, compose the public virtual-host S3 URL directly from url_protocol, bucket_name, normalized key, and caller parameters; do not create an unsigned connection or call generate_presigned_url. Preserve custom-domain URL behavior and signed URL behavior.",
+      "acceptance": [
+        "With querystring_auth=False and no custom_domain, url('report.pdf', parameters=...) returns the direct bucket URL with its encoded query parameter.",
+        "The unsigned URL path neither accesses unsigned_connection nor calls generate_presigned_url.",
+        "With custom_domain configured, an unsigned URL keeps the existing custom-domain URL format and does not touch unsigned_connection.",
+        "The production change is contained in storages/backends/s3.py at storages.backends.s3.S3Storage.url."
+      ],
+      "overlap_anchors": [
+        {
+          "path": "storages/backends/s3.py",
+          "symbol": "storages.backends.s3.S3Storage.url"
+        }
+      ],
+      "evaluator": "evaluators/django-storages/url-path-1553-unsigned-url.py",
+      "reference_patch": "references/django-storages/url-path-1553-unsigned-url.patch"
+    }
+  ],
+  "final_prompt": "You are the integration reviewer for the django-storages corpus. Run every listed evaluator against the shared checkout after all ten task patches are applied. Fix every evaluator failure while preserving all task contracts, resolve same-symbol edits without discarding either behavior, and finish only when every evaluator passes.",
+  "evaluators": [
+    "evaluators/django-storages/read-metadata-1493-refreshable-session.py",
+    "evaluators/django-storages/read-metadata-1472-connection-cache.py",
+    "evaluators/django-storages/client-config-1551-verify.py",
+    "evaluators/django-storages/client-config-1490-request-region.py",
+    "evaluators/django-storages/object-meta-1255-metadata-cache.py",
+    "evaluators/django-storages/object-meta-1561-etag-skip.py",
+    "evaluators/django-storages/presign-1481-direct-upload.py",
+    "evaluators/django-storages/presign-1222-expiration-hook.py",
+    "evaluators/django-storages/url-path-1558-empty-location.py",
+    "evaluators/django-storages/url-path-1553-unsigned-url.py"
+  ],
+  "integrated_reference_patch": "references/django-storages/integrated.patch"
+}

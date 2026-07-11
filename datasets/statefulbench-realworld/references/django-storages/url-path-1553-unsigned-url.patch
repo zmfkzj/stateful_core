@@ -1,0 +1,18 @@
+diff --git a/storages/backends/s3.py b/storages/backends/s3.py
+--- a/storages/backends/s3.py
++++ b/storages/backends/s3.py
+@@ -688,6 +688,14 @@ class S3Storage(CompressStorageMixin, BaseStorage):
+ 
+             return url
+ 
++        if not self.querystring_auth:
++            return "{}//{}.s3.amazonaws.com/{}{}".format(
++                self.url_protocol,
++                self.bucket_name,
++                filepath_to_uri(name),
++                "?{}".format(urlencode(params)) if params else "",
++            )
++
+         params["Bucket"] = self.bucket.name
+         params["Key"] = name
+ 

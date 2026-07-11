@@ -1,0 +1,15 @@
+--- a/storages/backends/s3.py
++++ b/storages/backends/s3.py
+@@ -463,1 +463,1 @@
+-            session = self._create_session()
++            session = self._create_session(refreshable=True)
+@@ -492,1 +492,1 @@
+-    def _create_session(self):
++    def _create_session(self, refreshable=False):
+@@ -500,1 +500,5 @@
+-        else:
++        elif refreshable and not any(
++            (self.access_key, self.secret_key, self.security_token)
++        ):
++            session = boto3.Session()
++        else:
