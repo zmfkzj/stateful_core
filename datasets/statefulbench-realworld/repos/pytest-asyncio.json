@@ -39,11 +39,11 @@
       "kind": "bug",
       "sources": ["https://github.com/pytest-dev/pytest-asyncio/issues/810"],
       "source_hash": "6e509513d3f9a9ce7cf0093d6d7262b5bac093d0b308c990e5861a6b6df0686b",
-      "prompt": "Fix issue #810 in pytest_asyncio.plugin.pytest_pyfunc_call. In strict mode, an async test that receives pytest.mark.asyncio from pytest_collection_modifyitems after collection must execute successfully rather than falling through to pytest's unsupported-async-function failure. Preserve the warning for genuinely synchronous marked tests.",
+      "prompt": "Fix issue #810 in pytest_asyncio.plugin.pytest_pyfunc_call. In strict mode, a coroutine that receives pytest.mark.asyncio from pytest_collection_modifyitems after collection must execute through the configured scoped runner, preserving its loop policy/factory and context rather than falling through to pytest's unsupported-async-function failure. Preserve the warning for genuinely synchronous marked tests. When composed with the #215 timeout extension, a late-added timeout marker must use that same timeout path.",
       "acceptance": [
-        "An async test marked by pytest_collection_modifyitems runs and passes in strict mode.",
-        "The dynamically marked coroutine executes inside a running asyncio event loop.",
-        "A synchronous test with pytest.mark.asyncio still follows the existing warning path.",
+        "A coroutine marked by pytest_collection_modifyitems runs through the configured scoped runner in strict mode.",
+        "A dynamically added asyncio(timeout=...) marker uses the #215 timeout behavior, completes cancellation cleanup, and lets a following test run.",
+        "A dynamically marked synchronous test still follows the existing PytestWarning path.",
         "The execution change is in pytest_asyncio/plugin.py at pytest_asyncio.plugin.pytest_pyfunc_call."
       ],
       "overlap_anchors": [{"path": "pytest_asyncio/plugin.py", "symbol": "pytest_asyncio.plugin.pytest_pyfunc_call"}],
@@ -55,12 +55,13 @@
       "kind": "feature",
       "sources": ["https://github.com/pytest-dev/pytest-asyncio/issues/215"],
       "source_hash": "76420acfcad765b3af2bae48d7284bc5cafbb5e3a52a510f4e80a791112eceef",
-      "prompt": "Implement feature #215 in pytest_asyncio.plugin.pytest_pyfunc_call. Support pytest.mark.asyncio(timeout=<seconds>) by bounding the marked coroutine with asyncio's cancellation-aware timeout behavior. A timeout must surface as TimeoutError and wait for cancellation cleanup before pytest continues to the next test. Keep existing loop-scope marker kwargs working.",
+      "prompt": "Implement feature #215 in pytest_asyncio.plugin.pytest_pyfunc_call. Support pytest.mark.asyncio(timeout=<seconds>) by bounding the marked coroutine with asyncio's cancellation-aware timeout behavior. A timeout must surface as TimeoutError and wait for cancellation cleanup before pytest continues to the next test. Keep existing loop-scope marker kwargs working. In the #810 late-marker integration path, that path must forward its timeout to this synchronizer rather than creating separate timeout behavior.",
       "acceptance": [
         "pytest.mark.asyncio(timeout=0.01) is accepted during collection rather than rejected as an unknown marker kwarg.",
         "A coroutine that outlives its timeout fails with TimeoutError.",
-        "The coroutine's finally block completes before a following test observes its cleanup result.",
+        "The coroutine's finally block completes and a following test runs before pytest finishes the suite.",
         "The timeout is applied during pytest_asyncio.plugin.pytest_pyfunc_call's asyncio test execution.",
+        "When integrated with #810, dynamically added markers forward timeout through the same synchronizer.",
         "Existing loop_scope, scope, and loop_factories marker kwargs remain accepted."
       ],
       "overlap_anchors": [{"path": "pytest_asyncio/plugin.py", "symbol": "pytest_asyncio.plugin.pytest_pyfunc_call"}],
@@ -110,7 +111,10 @@
         "A TaskGroup child failure after an async-generator fixture yields makes fixture teardown fail promptly rather than hang.",
         "The fixture test body can complete before teardown reports the TaskGroup child failure.",
         "TaskGroup cancellation reaches and cancels a companion task when its sibling fails.",
-        "The reported teardown failure retains the TaskGroup child RuntimeError."
+        "The reported teardown failure retains the TaskGroup child RuntimeError.",
+        "A setup exception before the fixture yield is delivered to pytest without an un-retrieved background-task exception.",
+        "The task created during setup inherits the fixture context without Python 3.11's create_task(context=...) API.",
+        "This paired fixture-yield fix intentionally converges with fixture-yield-1191-cancel-scope on one wrapper while retaining TaskGroup failure propagation."
       ],
       "overlap_anchors": [{"path": "pytest_asyncio/plugin.py", "symbol": "pytest_asyncio.plugin._wrap_asyncgen_fixture"}],
       "evaluator": "evaluators/pytest-asyncio/fixture-yield-1083-taskgroup.py",
@@ -125,7 +129,10 @@
       "acceptance": [
         "An async-generator fixture can enter and exit a task-bound synchronous context manager without a different-task error.",
         "The fixture value remains available to the async test while the task-bound context manager is active.",
-        "Fixture teardown completes successfully after the test returns."
+        "Fixture teardown completes successfully after the test returns.",
+        "A setup exception before the fixture yield is delivered to pytest without an un-retrieved background-task exception.",
+        "The task created during setup inherits the fixture context without Python 3.11's create_task(context=...) API.",
+        "This paired fixture-yield fix intentionally converges with fixture-yield-1083-taskgroup on one wrapper while retaining task-bound scope teardown."
       ],
       "overlap_anchors": [{"path": "pytest_asyncio/plugin.py", "symbol": "pytest_asyncio.plugin._wrap_asyncgen_fixture"}],
       "evaluator": "evaluators/pytest-asyncio/fixture-yield-1191-cancel-scope.py",
@@ -152,12 +159,12 @@
       "kind": "feature",
       "sources": ["https://github.com/pytest-dev/pytest-asyncio/issues/1032"],
       "source_hash": "d1785533c54014a4b9c53af275e7484f97be98e4a3e05fdff92c4ddda4b7aa84",
-      "prompt": "Implement the minimal asyncio_loop_factory configuration API in pytest_asyncio.plugin.event_loop_policy, motivated by feature #1032. An ini value module:callable selects the callable used to create Runner loops; validate malformed, missing, and non-callable targets with a pytest UsageError. Existing user event_loop_policy fixture overrides must continue to take precedence.",
+      "prompt": "Implement the benchmark-defined asyncio_loop_factory feature extension in pytest_asyncio.plugin.event_loop_policy. This concrete API is motivated by the open discussion in issue #1032; it is not an upstream-specified API. An ini value module:callable selects the callable used to create Runner loops; validate malformed, missing, and non-callable targets with a pytest UsageError. Existing user event_loop_policy fixture overrides must continue to take precedence.",
       "acceptance": [
-        "The asyncio_loop_factory ini setting accepts a module:callable value without an unknown-configuration warning.",
+        "The benchmark-defined asyncio_loop_factory setting accepts a module:callable value without an unknown-configuration warning.",
         "A configured callable creates the event loop used by a pytest.mark.asyncio test.",
         "A user event_loop_policy fixture override remains usable and takes precedence over the default configured policy fixture.",
-        "A missing configured callable fails with a pytest usage error naming asyncio_loop_factory and the requested callable.",
+        "Malformed, missing, and non-callable configured targets fail with a pytest UsageError naming asyncio_loop_factory and the invalid target.",
         "The primary change is at pytest_asyncio/plugin.py in pytest_asyncio.plugin.event_loop_policy."
       ],
       "overlap_anchors": [{"path": "pytest_asyncio/plugin.py", "symbol": "pytest_asyncio.plugin.event_loop_policy"}],

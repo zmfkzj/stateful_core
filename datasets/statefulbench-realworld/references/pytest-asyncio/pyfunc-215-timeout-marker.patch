@@ -17,7 +17,7 @@ diff --git a/pytest_asyncio/plugin.py b/pytest_asyncio/plugin.py
      func: Callable[..., CoroutineType],
      runner: asyncio.Runner,
      context: contextvars.Context,
-+    timeout: float | None,
++    timeout: float | None = None,
  ):
      """
      Return a sync wrapper around a coroutine executing it in the

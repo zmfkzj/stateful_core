@@ -30,12 +30,26 @@ def main() -> None:
 import pytest
 
 
-class FirstPolicy(asyncio.DefaultEventLoopPolicy):
+class FirstLoop(asyncio.SelectorEventLoop):
     pass
+
+
+class SecondLoop(asyncio.SelectorEventLoop):
+    pass
+
+
+class FirstPolicy(asyncio.DefaultEventLoopPolicy):
+    loop_type = FirstLoop
+
+    def new_event_loop(self):
+        return self.loop_type()
 
 
 class SecondPolicy(asyncio.DefaultEventLoopPolicy):
-    pass
+    loop_type = SecondLoop
+
+    def new_event_loop(self):
+        return self.loop_type()
 
 
 @pytest.fixture(scope="session", params=[FirstPolicy(), SecondPolicy()], ids=["first", "second"])
@@ -53,8 +67,8 @@ def test_plain():
 
 
 @pytest.mark.asyncio
-async def test_async():
-    assert asyncio.get_running_loop().is_running()
+async def test_async(event_loop_policy):
+    assert type(asyncio.get_running_loop()) is event_loop_policy.loop_type
 """
         )
         environment = os.environ.copy()

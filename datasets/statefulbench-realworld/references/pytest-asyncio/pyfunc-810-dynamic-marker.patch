@@ -1,21 +1,27 @@
 diff --git a/pytest_asyncio/plugin.py b/pytest_asyncio/plugin.py
 --- a/pytest_asyncio/plugin.py
 +++ b/pytest_asyncio/plugin.py
-@@ -875,7 +875,17 @@ def pytest_pyfunc_call(pyfuncitem: Function) -> object | None:
+@@ -875,7 +875,23 @@ def pytest_pyfunc_call(pyfuncitem: Function) -> object | None:
                      # no stacklevel points at the users code, so we set stacklevel=1
                      # so it at least indicates that it's the plugin complaining.
                      # Pytest gives the test file & name in the warnings summary at least
 -
 +        elif inspect.iscoroutinefunction(pyfuncitem.obj):
-+            with Runner() as runner:
-+                synchronized = _synchronize_coroutine(
-+                    pyfuncitem.obj,
-+                    runner,
-+                    contextvars.copy_context(),
-+                )
-+                with MonkeyPatch.context() as patch:
-+                    patch.setattr(pyfuncitem, "obj", synchronized)
-+                    yield
++            asyncio_marker = pyfuncitem.get_closest_marker("asyncio")
++            assert asyncio_marker is not None
++            marker_loop_scope, _ = _parse_asyncio_marker(asyncio_marker)
++            runner = pyfuncitem._request.getfixturevalue(
++                f"_{marker_loop_scope or _get_default_test_loop_scope(pyfuncitem.config)}_scoped_runner"
++            )
++            synchronized = _synchronize_coroutine(
++                pyfuncitem.obj,
++                runner,
++                contextvars.copy_context(),
++                asyncio_marker.kwargs.get("timeout"),
++            )
++            with MonkeyPatch.context() as patch:
++                patch.setattr(pyfuncitem, "obj", synchronized)
++                yield
 +            return
          else:
              pyfuncitem.warn(

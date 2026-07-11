@@ -39,6 +39,7 @@ def main() -> None:
         )
         environment = os.environ.copy()
         environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+        environment["PYTHONWARNINGS"] = "default"
         environment["PYTHONPATH"] = os.pathsep.join(
             (str(root), str(checkout), str(dependencies)),
         )
@@ -49,6 +50,8 @@ def main() -> None:
                 "pytest",
                 "-p",
                 "pytest_asyncio.plugin",
+                "-W",
+                "default",
                 "--asyncio-mode=strict",
                 "-q",
             ],
@@ -62,6 +65,7 @@ def main() -> None:
         output = result.stdout + result.stderr
         assert result.returncode != 0, output
         assert "TimeoutError" in output, output
+        assert "1 failed, 1 passed" in output, output
         assert (root / "cleanup.txt").read_text() == "done"
 
 

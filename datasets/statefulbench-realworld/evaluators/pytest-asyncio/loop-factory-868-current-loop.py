@@ -19,14 +19,15 @@ def main() -> None:
         (metadata / "METADATA").write_text(
             "Metadata-Version: 2.1\nName: pytest_asyncio\nVersion: 0\n"
         )
-        (metadata / "entry_points.txt").write_text(
-            "[pytest11]\nasyncio = pytest_asyncio.plugin\n"
-        )
         (work / "conftest.py").write_text(
             "import asyncio\n"
             "import pytest\n"
             "original_loop = asyncio.new_event_loop()\n"
             "asyncio.set_event_loop(original_loop)\n"
+            "class CustomEventLoop(asyncio.SelectorEventLoop):\n"
+            "    pass\n"
+            "def pytest_asyncio_loop_factories(config, item):\n"
+            "    return {'custom': CustomEventLoop}\n"
             "@pytest.hookimpl(trylast=True)\n"
             "def pytest_sessionfinish(session, exitstatus):\n"
             "    try:\n"
@@ -36,17 +37,17 @@ def main() -> None:
             "        original_loop.close()\n"
         )
         (work / "test_current_loop.py").write_text(
+            "import asyncio\n"
             "import pytest\n"
-            "pytest_plugins = 'pytest_asyncio'\n"
-            "@pytest.mark.asyncio\n"
+            "@pytest.mark.asyncio(loop_factories=['custom'])\n"
             "async def test_async():\n"
-            "    pass\n"
+            "    assert type(asyncio.get_running_loop()).__name__ == 'CustomEventLoop'\n"
         )
         env = os.environ | {
             "PYTHONPATH": os.pathsep.join((str(repo), str(work), os.environ.get("PYTHONPATH", ""))),
         }
         result = subprocess.run(
-            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"],
+            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "pytest_asyncio.plugin"],
             cwd=work,
             env=env,
             text=True,
