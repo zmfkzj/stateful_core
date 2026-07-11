@@ -1,36 +1,98 @@
 diff --git a/storages/backends/s3.py b/storages/backends/s3.py
-index fa2d39f..7e3a750 100644
 --- a/storages/backends/s3.py
 +++ b/storages/backends/s3.py
-@@ -331,6 +331,7 @@ class S3Storage(CompressStorageMixin, BaseStorage):
+@@ -331,6 +331,9 @@
  
          self._bucket = None
          self._connections = threading.local()
 +        self._object_metadata = {}
++        self._object_metadata_generations = {}
++        self._object_metadata_lock = threading.RLock()
          self._unsigned_connections = threading.local()
  
          if self.config is not None:
-@@ -557,6 +558,7 @@ class S3Storage(CompressStorageMixin, BaseStorage):
+@@ -448,14 +451,47 @@
+         state.pop("_connections", None)
+         state.pop("_unsigned_connections", None)
+         state.pop("_bucket", None)
++        state.pop("_object_metadata", None)
++        state.pop("_object_metadata_generations", None)
++        state.pop("_object_metadata_lock", None)
+         return state
+ 
+     def __setstate__(self, state):
+         state["_connections"] = threading.local()
+         state["_unsigned_connections"] = threading.local()
+         state["_bucket"] = None
++        state["_object_metadata"] = {}
++        state["_object_metadata_generations"] = {}
++        state["_object_metadata_lock"] = threading.RLock()
+         self.__dict__ = state
+ 
++    def _object_metadata_key(self, name):
++        get_region_name = getattr(self, "get_region_name", None)
++        region_name = get_region_name() if get_region_name is not None else self.region_name
++        return region_name, name
++
++    def _get_object_metadata(self, key):
++        with self._object_metadata_lock:
++            return (
++                self._object_metadata.get(key),
++                self._object_metadata_generations.get(key, 0),
++            )
++
++    def _cache_object_metadata(self, key, generation, metadata):
++        with self._object_metadata_lock:
++            if self._object_metadata_generations.get(key, 0) != generation:
++                return False
++            self._object_metadata[key] = metadata
++            return True
++
++    def _invalidate_object_metadata(self, name):
++        key = self._object_metadata_key(name)
++        with self._object_metadata_lock:
++            self._object_metadata.pop(key, None)
++            self._object_metadata_generations[key] = (
++                self._object_metadata_generations.get(key, 0) + 1
++            )
++
+     @property
+     def connection(self):
+         connection = getattr(self._connections, "connection", None)
+@@ -557,6 +593,7 @@
              params["ContentEncoding"] = "gzip"
  
          obj = self.bucket.Object(name)
-+        self._object_metadata.pop(name, None)
++        self._invalidate_object_metadata(name)
  
          # Workaround file being closed errantly see: https://github.com/boto/s3transfer/issues/80
          original_close = content.close
-@@ -570,6 +572,7 @@ class S3Storage(CompressStorageMixin, BaseStorage):
+@@ -565,12 +602,17 @@
+             obj.upload_fileobj(content, ExtraArgs=params, Config=self.transfer_config)
+         finally:
+             content.close = original_close
++            self._invalidate_object_metadata(name)
+         return cleaned_name
+ 
      def delete(self, name):
          try:
              name = self._normalize_name(clean_name(name))
-+            self._object_metadata.pop(name, None)
-             self.bucket.Object(name).delete()
+-            self.bucket.Object(name).delete()
++            self._invalidate_object_metadata(name)
++            try:
++                self.bucket.Object(name).delete()
++            finally:
++                self._invalidate_object_metadata(name)
          except ClientError as err:
              if err.response["ResponseMetadata"]["HTTPStatusCode"] == 404:
-@@ -581,11 +584,15 @@ class S3Storage(CompressStorageMixin, BaseStorage):
+                 # Not an error to delete something that does not exist
+@@ -581,11 +623,17 @@
  
      def exists(self, name):
          name = self._normalize_name(clean_name(name))
-+        if name in self._object_metadata:
++        key = self._object_metadata_key(name)
++        metadata, generation = self._get_object_metadata(key)
++        if metadata is not None:
 +            return True
 +
          params = _filter_download_params(self.get_object_parameters(name))
@@ -39,16 +101,16 @@ index fa2d39f..7e3a750 100644
 +            metadata = self.connection.meta.client.head_object(
                  Bucket=self.bucket_name, Key=name, **params
              )
-+            self._object_metadata[name] = metadata
++            self._cache_object_metadata(key, generation, metadata)
              return True
          except ClientError as err:
              if err.response["ResponseMetadata"]["HTTPStatusCode"] == 404:
-@@ -658,12 +665,17 @@ class S3Storage(CompressStorageMixin, BaseStorage):
+@@ -658,12 +706,17 @@
          USE_TZ is True, otherwise returns a naive datetime in the local timezone.
          """
          name = self._normalize_name(clean_name(name))
 -        entry = self.bucket.Object(name)
-+        metadata = self._object_metadata.get(name)
++        metadata, _ = self._get_object_metadata(self._object_metadata_key(name))
 +        if metadata is None:
 +            modified_time = self.bucket.Object(name).last_modified
 +        else:

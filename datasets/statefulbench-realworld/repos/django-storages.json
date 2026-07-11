@@ -78,10 +78,10 @@
         "https://github.com/jschneier/django-storages/issues/1490"
       ],
       "source_hash": "d32a7b5244706d28d72c897d0d3fc998b888eaa99368705c53f5d3f67ea51e31",
-      "prompt": "Implement open feature extension #1490 in storages.backends.s3.S3Storage's shared connection/client configuration block. Add a get_region_name() hook that defaults to region_name so a subclass can select the AWS region for the current request. Refresh cached signed and unsigned resources when the resolved region changes, invalidate the bucket accordingly, and preserve profile-session creation, endpoint URL, SSL verification, client Config/proxy/signature settings, and ordinary fixed-region behavior.",
+      "prompt": "Implement open feature extension #1490 in storages.backends.s3.S3Storage's shared connection/client configuration block. Add a get_region_name() hook that defaults to region_name so a subclass can select the AWS region for the current request. Refresh cached signed and unsigned resources when the resolved region changes, bind the bucket cache to the active thread-local connection so concurrent requests cannot receive another region's bucket, and preserve profile-session creation, endpoint URL, SSL verification, client Config/proxy/signature settings, and ordinary fixed-region behavior.",
       "acceptance": [
         "A subclass overriding get_region_name() creates a signed resource for the current request region and creates a distinct resource when that region changes.",
-        "A region change refreshes bucket selection instead of returning a bucket bound to the previous resource.",
+        "Concurrent threads resolving different regions each receive a bucket built from their own thread-local signed resource; a region change resets only that thread's bucket.",
         "Unsigned resources also use the resolved region and refresh on a region change.",
         "Each refreshed resource retains the configured session profile, endpoint URL, verify value, and client Config.",
         "The execution change is centered on storages.backends.s3.S3Storage.connection and its adjacent unsigned client configuration block."
@@ -102,11 +102,11 @@
         "https://github.com/jschneier/django-storages/issues/1255"
       ],
       "source_hash": "50ba871fd69f1436a4f018f19011295b89f91722466b00696e505946d81d730b",
-      "prompt": "Implement issue #1255 as an S3Storage metadata reuse extension. S3Storage.exists must retain successful head_object metadata by normalized key, reuse it for repeated existence checks, and get_modified_time must reuse cached LastModified rather than re-fetching the object. Invalidate cached metadata before an upload or delete so stale state never survives a mutation. Preserve normal 404 and non-404 ClientError behavior.",
+      "prompt": "Implement issue #1255 as an S3Storage metadata reuse extension. S3Storage.exists must retain successful head_object metadata by resolved region and normalized key, reuse it for repeated existence checks, and get_modified_time must reuse cached LastModified rather than re-fetching the object. Invalidate cached metadata and bump its per-key generation both before and in finally after every upload or delete, so a HEAD begun after mutation starts cannot survive mutation completion. Reset metadata and its synchronization state during pickle state handling. Preserve normal 404 and non-404 ClientError behavior.",
       "acceptance": [
         "Two exists() calls for one normalized S3 key perform one head_object request and return True.",
         "get_modified_time() after exists() returns cached LastModified without constructing a bucket Object.",
-        "delete() invalidates the normalized-key cache, so a later exists() performs a new head_object request.",
+        "Upload and delete invalidate and generation-bump metadata before and after remote mutation (the latter in finally); a blocked-mutation race proves a HEAD started during mutation cannot survive completion.",
         "The implementation modifies storages/backends/s3.py in S3Storage.exists and composes with #1561's ETag use of the same metadata."
       ],
       "overlap_anchors": [
@@ -125,10 +125,10 @@
         "https://github.com/jschneier/django-storages/issues/1561"
       ],
       "source_hash": "3083389ed9e29836366f8592ea2a6df3fbf27a496dc34a14dfcc1033c9d7f512",
-      "prompt": "Implement issue #1561 as the opt-in AWS_S3_SKIP_UNCHANGED S3Storage behavior. S3Storage.exists must retain ETag-bearing successful head_object metadata by normalized key. Before a seekable upload, reuse that metadata (or make one head_object request when absent), compare a reset-safe MD5 with the quoted ETag, and skip upload on equality. Clear cached metadata before an actual upload or delete; do not suppress non-404 ClientErrors, and preserve the disabled default.",
+      "prompt": "Implement issue #1561 as the opt-in AWS_S3_SKIP_UNCHANGED S3Storage behavior. S3Storage.exists must retain ETag-bearing successful head_object metadata by resolved region and normalized key. Before a seekable upload, reuse that metadata (or make exactly one head_object request when absent), compare a reset-safe MD5 with the quoted ETag, and skip upload on equality. Invalidate cached metadata and generation-bump both before and in finally after every actual upload or delete so a concurrent HEAD cannot survive completion. Do not suppress non-404 ClientErrors, reset metadata during pickle state handling, and preserve the disabled default.",
       "acceptance": [
         "With AWS_S3_SKIP_UNCHANGED enabled, exists() caches a normalized key's ETag and a matching seekable upload skips upload_fileobj without a second head_object request.",
-        "A mismatched ETag uploads the original bytes and invalidates cached metadata, so a later exists() requests fresh metadata.",
+        "A mismatched ETag uploads the original bytes and invalidates/generation-bumps metadata before and after remote completion, so a later exists() requests fresh metadata.",
         "With the option disabled, a matching ETag does not suppress upload_fileobj after exists() has cached metadata.",
         "Content is rewound after hashing, quoted ETags are canonicalized, and the implementation modifies S3Storage.exists as the strict shared anchor plus S3Storage._save where required."
       ],
@@ -152,7 +152,7 @@
       "acceptance": [
         "`S3Storage.generate_presigned_upload_url(\"uploads/report.pdf\", parameters={\"ContentType\": \"application/pdf\"}, expire=61)` calls the fake boto client with `put_object`, Bucket/Key plus ContentType, ExpiresIn 61, and HttpMethod `PUT`.",
         "Ordinary `url()` still calls `get_object` with the configured default expiration and its normal query-auth connection selection.",
-        "An ordinary custom-domain URL remains the existing custom-domain URL, while the direct-upload API bypasses that download-only branch and produces a signed PUT URL even if `querystring_auth` is false.",
+        "An ordinary custom-domain URL remains the existing custom-domain URL, while the direct-upload API bypasses that download-only branch and, with `querystring_auth` false, uses only the signed connection for its PUT URL; the evaluator's distinct unsigned client raises if selected.",
         "The benchmark-defined public API and its internal operation routing are implemented in `storages/backends/s3.py` at `S3Storage.url`'s presigning block."
       ],
       "overlap_anchors": [
@@ -217,9 +217,11 @@
         "https://github.com/jschneier/django-storages/issues/1553"
       ],
       "source_hash": "a84ea3fa919056f4f286dfbfa82d179eff183429f0528fc100fc35f86850a281",
-      "prompt": "Fix issue #1553 in storages.backends.s3.S3Storage.url. For an unsigned URL without custom_domain, compose the public virtual-host S3 URL directly from url_protocol, bucket_name, normalized key, and caller parameters; do not create an unsigned connection or call generate_presigned_url. Preserve custom-domain URL behavior and signed URL behavior.",
+      "prompt": "Fix issue #1553 in storages.backends.s3.S3Storage.url. For an unsigned URL without custom_domain, compose the public S3 URL directly from the configured endpoint_url or the request region's botocore S3 endpoint, the selected addressing style, bucket_name, normalized key, and caller parameters; do not create an unsigned connection or call generate_presigned_url. Preserve custom-domain URL behavior and signed URL behavior.",
       "acceptance": [
-        "With querystring_auth=False and no custom_domain, url('report.pdf', parameters=...) returns the direct bucket URL with its encoded query parameter.",
+        "With querystring_auth=False and no custom_domain, url('report.pdf', parameters=...) returns the direct regional S3 bucket URL with its encoded query parameter.",
+        "Unsigned URLs honor endpoint_url, including its path prefix, and explicit virtual and path addressing styles.",
+        "Unsigned AWS URLs honor the configured region and its AWS partition DNS suffix.",
         "The unsigned URL path neither accesses unsigned_connection nor calls generate_presigned_url.",
         "With custom_domain configured, an unsigned URL keeps the existing custom-domain URL format and does not touch unsigned_connection.",
         "The production change is contained in storages/backends/s3.py at storages.backends.s3.S3Storage.url."

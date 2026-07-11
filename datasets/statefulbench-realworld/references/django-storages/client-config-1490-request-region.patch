@@ -1,14 +1,30 @@
 diff --git a/storages/backends/s3.py b/storages/backends/s3.py
 --- a/storages/backends/s3.py
 +++ b/storages/backends/s3.py
-@@ -455,38 +455,52 @@
+@@ -329,7 +329,6 @@ class S3Storage(CompressStorageMixin, BaseStorage):
+                 "AWS_S3_SECRET_ACCESS_KEY/secret_key"
+             )
+ 
+-        self._bucket = None
+         self._connections = threading.local()
+         self._unsigned_connections = threading.local()
+ 
+@@ -447,46 +446,58 @@ class S3Storage(CompressStorageMixin, BaseStorage):
+         state = self.__dict__.copy()
+         state.pop("_connections", None)
+         state.pop("_unsigned_connections", None)
+-        state.pop("_bucket", None)
+         return state
+ 
+     def __setstate__(self, state):
+         state["_connections"] = threading.local()
          state["_unsigned_connections"] = threading.local()
-         state["_bucket"] = None
+-        state["_bucket"] = None
          self.__dict__ = state
-+
+ 
 +    def get_region_name(self):
 +        return self.region_name
- 
++
      @property
      def connection(self):
 +        region_name = self.get_region_name()
@@ -18,7 +34,7 @@ diff --git a/storages/backends/s3.py b/storages/backends/s3.py
 +            connection is None
 +            or getattr(self._connections, "region_name", None) != region_name
 +        ):
-+            self._bucket = None
++            self._connections.bucket = None
              session = self._create_session()
              self._connections.connection = session.resource(
                  "s3",
@@ -58,12 +74,17 @@ diff --git a/storages/backends/s3.py b/storages/backends/s3.py
          return self._unsigned_connections.connection
  
      def _create_session(self):
-@@ -511,6 +525,7 @@
+@@ -511,9 +522,10 @@ class S3Storage(CompressStorageMixin, BaseStorage):
          Get the current bucket. If there is no current bucket object
          create it.
          """
-+        connection = self.connection
-         if self._bucket is None:
+-        if self._bucket is None:
 -            self._bucket = self.connection.Bucket(self.bucket_name)
-+            self._bucket = connection.Bucket(self.bucket_name)
-         return self._bucket
+-        return self._bucket
++        connection = self.connection
++        if getattr(self._connections, "bucket", None) is None:
++            self._connections.bucket = connection.Bucket(self.bucket_name)
++        return self._connections.bucket
+ 
+     def _normalize_name(self, name):
+         """

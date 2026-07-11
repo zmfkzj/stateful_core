@@ -5,7 +5,12 @@ import sys
 from pathlib import Path
 
 
-DEPENDENCIES = Path("/private/tmp/statefulbench-realworld-curation/django-storages-deps")
+def dependencies(checkout: Path) -> Path:
+    return next(
+        parent / "django-storages-deps"
+        for parent in checkout.resolve().parents
+        if (parent / "django-storages-deps").is_dir()
+    )
 
 
 class Bucket:
@@ -29,7 +34,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("repo", type=Path)
     args = parser.parse_args()
-    sys.path[:0] = [str(args.repo), str(DEPENDENCIES)]
+    sys.path[:0] = [str(args.repo), str(dependencies(args.repo))]
 
     from storages.backends.s3 import S3Storage
 
@@ -51,14 +56,32 @@ def main() -> None:
     storage._bucket = Bucket()
     storage.unsigned_connection_accesses = 0
 
+    storage.region_name = "us-west-2"
+    storage.addressing_style = "virtual"
+
     assert storage.url(
         "report.pdf",
         parameters={"response-content-disposition": "attachment; filename=report.pdf"},
     ) == (
-        "https://assets.s3.amazonaws.com/media/report.pdf?"
+        "https://assets.s3.us-west-2.amazonaws.com/media/report.pdf?"
         "response-content-disposition=attachment%3B+filename%3Dreport.pdf"
     )
-    assert storage.unsigned_connection_accesses == 0
+
+    storage.region_name = "cn-north-1"
+    assert storage.url("report.pdf") == (
+        "https://assets.s3.cn-north-1.amazonaws.com.cn/media/report.pdf"
+    )
+
+    storage.region_name = "us-west-2"
+    storage.endpoint_url = "https://objects.example.test/api"
+    assert storage.url("report.pdf") == (
+        "https://assets.objects.example.test/api/media/report.pdf"
+    )
+
+    storage.addressing_style = "path"
+    assert storage.url("report.pdf") == (
+        "https://objects.example.test/api/assets/media/report.pdf"
+    )
 
     storage.custom_domain = "cdn.example.test"
     assert storage.url("report.pdf") == "https://cdn.example.test/media/report.pdf"

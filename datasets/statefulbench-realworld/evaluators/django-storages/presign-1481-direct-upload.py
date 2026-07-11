@@ -39,8 +39,13 @@ class Client:
         return f"https://presigned.example/{operation}"
 
 
+class UnsignedClient:
+    def generate_presigned_url(self, *args: object, **kwargs: object) -> str:
+        raise AssertionError("direct uploads must not use the unsigned connection")
+
+
 class Resource:
-    def __init__(self, client: Client) -> None:
+    def __init__(self, client: object) -> None:
         self.meta = type("Meta", (), {"client": client})()
 
     def Bucket(self, name: str) -> object:
@@ -52,16 +57,21 @@ def storage_with(client: Client):
 
     storage = S3Storage()
     storage._connections.connection = Resource(client)
-    storage._unsigned_connections.connection = Resource(client)
+    storage._unsigned_connections.connection = Resource(UnsignedClient())
     return storage
 
 
 def main() -> None:
-    sys.path[:0] = [
-        "/private/tmp/statefulbench-realworld-curation/django-storages-deps",
-        str(Path(sys.argv[1]).resolve()),
-    ]
+    checkout = Path(sys.argv[1]).resolve()
+    deps = next(
+        parent / "django-storages-deps"
+        for parent in checkout.parents
+        if (parent / "django-storages-deps").is_dir()
+    )
+    sys.path[:0] = [str(checkout), str(deps)]
     configure_django()
+
+
 
     client = Client()
     storage = storage_with(client)

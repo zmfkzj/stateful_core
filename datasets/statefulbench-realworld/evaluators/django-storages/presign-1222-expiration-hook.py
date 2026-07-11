@@ -57,10 +57,13 @@ class Signer:
 
 
 def main() -> None:
-    sys.path[:0] = [
-        "/private/tmp/statefulbench-realworld-curation/django-storages-deps",
-        str(Path(sys.argv[1]).resolve()),
-    ]
+    checkout = Path(sys.argv[1]).resolve()
+    deps = next(
+        parent / "django-storages-deps"
+        for parent in checkout.parents
+        if (parent / "django-storages-deps").is_dir()
+    )
+    sys.path[:0] = [str(checkout), str(deps)]
     configure_django()
 
     from storages.backends.s3 import S3Storage

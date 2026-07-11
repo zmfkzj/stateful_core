@@ -11,15 +11,20 @@ from types import SimpleNamespace
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("repo", type=Path)
-    repo = parser.parse_args().repo
-    sys.path.insert(0, str(repo))
-
+    repo = parser.parse_args().repo.resolve()
+    deps = next(
+        parent / "django-storages-deps"
+        for parent in repo.parents
+        if (parent / "django-storages-deps").is_dir()
+    )
+    sys.path[:0] = [str(repo), str(deps)]
     from django.conf import settings
 
     if not settings.configured:
         settings.configure()
 
     from django.core.files.base import ContentFile
+    from botocore.exceptions import ClientError
     from storages.backends.s3 import S3Storage
 
     class Client:
@@ -43,11 +48,38 @@ def main() -> None:
         storage._connections.connection = SimpleNamespace(
             meta=SimpleNamespace(client=client)
         )
-        storage._bucket = SimpleNamespace(Object=lambda key: Object())
+        bucket = SimpleNamespace(Object=lambda key: Object())
+        storage._bucket = bucket
+        storage._connections.bucket = bucket
         return storage, uploads
+    class ErrorClient:
+        def __init__(self):
+            self.calls = []
+
+        def head_object(self, **kwargs):
+            self.calls.append(kwargs)
+            raise ClientError(
+                {
+                    "Error": {"Code": "AccessDenied", "Message": "denied"},
+                    "ResponseMetadata": {"HTTPStatusCode": 403},
+                },
+                "HeadObject",
+            )
+
 
     payload = b"stable asset"
     digest = hashlib.md5(payload).hexdigest()
+
+    # A cache miss with an equal ETag uses one HEAD and skips the upload.
+    cache_miss_client = Client(f'"{digest}"')
+    cache_miss, cache_miss_uploads = storage_for(cache_miss_client, skip_unchanged=True)
+    cache_miss_content = ContentFile(payload)
+    assert cache_miss._save("assets/app.js", cache_miss_content) == "assets/app.js"
+    assert cache_miss_client.calls == [
+        {"Bucket": "unit-bucket", "Key": "media/assets/app.js"}
+    ], cache_miss_client.calls
+    assert cache_miss_uploads == [], cache_miss_uploads
+    assert cache_miss_content.tell() == 0, cache_miss_content.tell()
 
     # exists() saves the ETag-bearing metadata that _save() uses without a second HEAD.
     matching_client = Client(f'"{digest}"')
@@ -77,6 +109,17 @@ def main() -> None:
     disabled._save("assets/app.js", ContentFile(payload))
     assert disabled_uploads[0][0] == payload, disabled_uploads
     assert len(disabled_client.calls) == 1, disabled_client.calls
+    # Cache misses suppress only object-not-found errors, not access failures.
+    error_client = ErrorClient()
+    errored, errored_uploads = storage_for(error_client, skip_unchanged=True)
+    try:
+        errored._save("assets/app.js", ContentFile(payload))
+    except ClientError as error:
+        assert error.response["ResponseMetadata"]["HTTPStatusCode"] == 403
+    else:
+        raise AssertionError("non-404 HEAD failure was swallowed")
+    assert errored_uploads == [], errored_uploads
+    assert len(error_client.calls) == 1, error_client.calls
 
 
 if __name__ == "__main__":
