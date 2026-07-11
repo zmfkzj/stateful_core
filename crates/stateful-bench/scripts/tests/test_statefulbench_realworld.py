@@ -1,0 +1,110 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from types import ModuleType
+
+SCRIPT_DIR = Path(__file__).resolve().parents[1]
+
+
+def load_script(name: str) -> ModuleType:
+    path = SCRIPT_DIR / name
+    spec = importlib.util.spec_from_file_location(f"{path.stem}_test", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+ROOT = Path(__file__).resolve().parents[4]
+MANIFEST = ROOT / "datasets" / "statefulbench-realworld" / "manifest.json"
+PINS = (
+    ("requests", "f361ead047be5cb873174218582f7d8b9fcd9f49", "7f60df8524d7a042f604a4176cc64777f6543037ab96dc4adaaabff55ada28fd"),
+    ("jsonschema", "97c044c48d6c6c08f88142ad27edc590f2a2cb07", "1d5bef7a24de2bec70a7840fef22cbaa5b169cf5159a0194635a7720eaa19a75"),
+    ("pytest-asyncio", "66253978d8518925d3f5d2c12615fd7005b63080", "6715e3e9991cce7fb56ab50e19ceee46c5528ed4817ff9375eab8ab23612cf1d"),
+    ("pytest-xdist", "f63b6a25b4eb932385c6ee4651eac5c08fbd3a20", "d035858bc41d5aa126e54a3edf8af4a4e871d0b7e5383211da767ab50ad6d511"),
+    ("click", "b67832c2167e5b0ff6764a8c04a0a9087e697b5a", "bc2f89f9b4687d51ca6ff592f6de34a9f8f97c49b4637c84eabd6a8df16ed1d2"),
+    ("django-storages", "ca89a94a7462a2423df460e7bfd5f847457042ca", "e0a0a36d3b1470776b6463e5dcd44c805fd31ccd3090110ea16936c176d90fab"),
+    ("attrs", "45de9beb093d2142517ab7d1ebda6522e3d3c4ac", "b330a639611e08fcfd54baaf3780d364c5e9bec44ab33fda961f0fe6956daffd"),
+    ("watchdog", "c9edf3296d9edb9afded6adfaf3987e87ca8f928", "a6e12fd17e2706161733cf111e7cd899a15b7e8a8f66540239c57e1a60d3d40d"),
+    ("pendulum", "5ad098bc7b74d660679f0606673728042b9d4aca", "d49ad8f8c6f43a18c3744dec61730fb369cf91dc77bb1c23df3360ae76d11397"),
+    ("authlib", "5cb26721a39f74a196304e90fa5ae8d31925fd4a", "c7e7818a31fd3ee7be4e370786974f92eb6c4f90f24efeeb6d3ea02fb0aca6e2"),
+)
+
+
+class ManifestTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.manifest_path = Path(self.tempdir.name) / "manifest.json"
+        self.manifest_path.write_text(MANIFEST.read_text(encoding="utf-8"), encoding="utf-8")
+        self.mod = load_script("statefulbench_realworld.py")
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    def load_data(self) -> dict:
+        return json.loads(self.manifest_path.read_text(encoding="utf-8"))
+
+    def write_data(self, data: dict) -> None:
+        self.manifest_path.write_text(json.dumps(data), encoding="utf-8")
+
+    def test_load_manifest_accepts_ten_unique_pinned_repositories(self) -> None:
+        manifest = self.mod.load_manifest(self.manifest_path)
+        entries = self.mod.repo_entries(manifest)
+
+        self.assertEqual(len(entries), 10)
+        self.assertEqual(
+            tuple((entry["key"], entry["commit"], entry["archive_sha256"]) for entry in entries),
+            PINS,
+        )
+        for entry in entries:
+            self.assertTrue(entry["requested_url"].startswith("https://"))
+            self.assertTrue(entry["canonical_url"].startswith("https://"))
+            self.assertTrue(entry["archive_url"].startswith("https://"))
+            self.assertEqual(entry["python"], "3.14.6")
+            self.assertTrue(entry["setup"])
+            self.assertTrue(entry["suite"])
+            self.assertTrue(all(isinstance(part, str) and part for part in entry["setup"]))
+            self.assertTrue(all(isinstance(part, str) and part for part in entry["suite"]))
+            self.assertEqual(entry["corpus"], f"repos/{entry['key']}.json")
+
+    def test_load_manifest_rejects_duplicate_keys(self) -> None:
+        data = self.load_data()
+        data["repositories"][1]["key"] = data["repositories"][0]["key"]
+        self.write_data(data)
+
+        with self.assertRaisesRegex(ValueError, "duplicate repository key"):
+            self.mod.load_manifest(self.manifest_path)
+
+    def test_load_manifest_rejects_malformed_hash_url_and_argv(self) -> None:
+        cases = (
+            ("commit", "not-a-sha", "commit"),
+            ("archive_sha256", "f" * 63, "archive_sha256"),
+            ("canonical_url", "http://github.com/psf/requests", "canonical_url"),
+            ("setup", [], "setup"),
+            ("suite", [""], "suite"),
+        )
+        for field, value, message in cases:
+            with self.subTest(field=field):
+                data = json.loads(MANIFEST.read_text(encoding="utf-8"))
+                data["repositories"][0][field] = value
+                self.write_data(data)
+                with self.assertRaisesRegex(ValueError, message):
+                    self.mod.load_manifest(self.manifest_path)
+
+    def test_load_manifest_rejects_corpus_escape(self) -> None:
+        data = self.load_data()
+        data["repositories"][0]["corpus"] = "../escape.json"
+        self.write_data(data)
+
+        with self.assertRaisesRegex(ValueError, "corpus path"):
+            self.mod.load_manifest(self.manifest_path)
+
+
+if __name__ == "__main__":
+    unittest.main()
