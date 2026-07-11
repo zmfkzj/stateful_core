@@ -69,3 +69,6 @@ def main() -> None:
     )
     assert calls == [], calls
     assert seen == [{"config": "explicit", "choice": None}], seen
+
+if __name__ == "__main__":
+    main()

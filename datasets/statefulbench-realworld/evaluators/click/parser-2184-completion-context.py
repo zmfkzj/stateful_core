@@ -58,3 +58,6 @@ def main() -> None:
     )
     assert completions == []
     assert seen == [{"item": "known", "choice": None}], seen
+
+if __name__ == "__main__":
+    main()
