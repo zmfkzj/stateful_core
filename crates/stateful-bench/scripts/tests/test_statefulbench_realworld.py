@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import io
 import json
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -106,5 +109,113 @@ class ManifestTests(unittest.TestCase):
             self.mod.load_manifest(self.manifest_path)
 
 
+
+class ArchiveTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tempdir.name)
+        self.mod = load_script("statefulbench_realworld.py")
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    def archive_bytes(
+        self,
+        files: dict[str, bytes],
+        *,
+        symlink: str | None = None,
+        extra_root: bool = False,
+    ) -> bytes:
+        output = io.BytesIO()
+        with tarfile.open(fileobj=output, mode="w:gz") as archive:
+            root = tarfile.TarInfo("source")
+            root.type = tarfile.DIRTYPE
+            archive.addfile(root)
+            for name, contents in files.items():
+                member = tarfile.TarInfo(f"source/{name}")
+                member.size = len(contents)
+                archive.addfile(member, io.BytesIO(contents))
+            if symlink is not None:
+                member = tarfile.TarInfo("source/link")
+                member.type = tarfile.SYMTYPE
+                member.linkname = symlink
+                archive.addfile(member)
+            if extra_root:
+                root = tarfile.TarInfo("other")
+                root.type = tarfile.DIRTYPE
+                archive.addfile(root)
+        return output.getvalue()
+
+    def write_archive(self, contents: bytes) -> tuple[Path, str]:
+        archive = self.root / "source.tar.gz"
+        archive.write_bytes(contents)
+        return archive, hashlib.sha256(contents).hexdigest()
+
+    def test_ensure_archive_downloads_once_then_uses_verified_cache(self) -> None:
+        contents = self.archive_bytes({"pyproject.toml": b"[project]\n"})
+        expected_sha256 = hashlib.sha256(contents).hexdigest()
+        repo = {
+            "archive_url": "https://example.invalid/source.tar.gz",
+            "archive_sha256": expected_sha256,
+        }
+        calls: list[str] = []
+
+        def opener(url: str) -> io.BytesIO:
+            calls.append(url)
+            return io.BytesIO(contents)
+
+        cache_dir = self.root / "cache"
+        archive = self.mod.ensure_archive(repo, cache_dir, opener)
+
+        self.assertEqual(archive, cache_dir / f"{expected_sha256}.tar.gz")
+        self.assertEqual(archive.read_bytes(), contents)
+        self.assertEqual(calls, [repo["archive_url"]])
+        self.assertEqual(
+            self.mod.ensure_archive(repo, cache_dir, lambda _: self.fail("network called")),
+            archive,
+        )
+
+    def test_ensure_archive_rejects_mismatch_and_removes_temporary_download(self) -> None:
+        contents = self.archive_bytes({"pyproject.toml": b"[project]\n"})
+        repo = {
+            "archive_url": "https://example.invalid/source.tar.gz",
+            "archive_sha256": "0" * 64,
+        }
+        cache_dir = self.root / "cache"
+
+        with self.assertRaisesRegex(ValueError, "checksum"):
+            self.mod.ensure_archive(repo, cache_dir, lambda _: io.BytesIO(contents))
+
+        self.assertFalse((cache_dir / f"{repo['archive_sha256']}.tmp").exists())
+        self.assertFalse((cache_dir / f"{repo['archive_sha256']}.tar.gz").exists())
+
+    def test_extract_workspace_rejects_unsafe_members_and_multiple_roots(self) -> None:
+        cases = (
+            ("traversal", self.archive_bytes({"../escape": b"no"})),
+            ("symlink", self.archive_bytes({"pyproject.toml": b"[project]\n"}, symlink="../escape")),
+            ("multiple roots", self.archive_bytes({"pyproject.toml": b"[project]\n"}, extra_root=True)),
+        )
+        for name, contents in cases:
+            with self.subTest(name=name):
+                archive, expected_sha256 = self.write_archive(contents)
+                destination = self.root / name
+
+                with self.assertRaisesRegex(ValueError, "archive"):
+                    self.mod.extract_workspace(archive, expected_sha256, destination)
+
+                self.assertFalse(destination.exists())
+
+    def test_extract_workspace_creates_byte_identical_fresh_workspaces(self) -> None:
+        contents = self.archive_bytes({"pyproject.toml": b"[project]\n", "src/module.py": b"answer = 42\n"})
+        archive, expected_sha256 = self.write_archive(contents)
+        first = self.root / "first"
+        second = self.root / "second"
+
+        self.mod.extract_workspace(archive, expected_sha256, first)
+        self.mod.extract_workspace(archive, expected_sha256, second)
+
+        self.assertEqual((first / "pyproject.toml").read_bytes(), (second / "pyproject.toml").read_bytes())
+        self.assertEqual((first / "src" / "module.py").read_bytes(), (second / "src" / "module.py").read_bytes())
+        self.assertNotEqual((first / "src" / "module.py").stat().st_ino, (second / "src" / "module.py").stat().st_ino)
 if __name__ == "__main__":
     unittest.main()

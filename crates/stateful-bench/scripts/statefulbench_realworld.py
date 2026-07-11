@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
+import tarfile
+import tempfile
 from pathlib import Path
+from urllib import request
 from urllib.parse import urlsplit
 
 
@@ -22,6 +27,70 @@ _REPOSITORY_FIELDS = frozenset(
 )
 _HEX_40 = re.compile(r"[0-9a-f]{40}")
 _HEX_64 = re.compile(r"[0-9a-f]{64}")
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def ensure_archive(repo: dict, cache_dir: Path, opener=request.urlopen) -> Path:
+    expected_sha256 = repo["archive_sha256"]
+    archive = cache_dir / f"{expected_sha256}.tar.gz"
+    if archive.exists():
+        if _sha256(archive) == expected_sha256:
+            return archive
+        raise ValueError("cached archive checksum mismatch")
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    temporary = cache_dir / f"{expected_sha256}.tmp"
+    temporary.unlink(missing_ok=True)
+    digest = hashlib.sha256()
+    try:
+        with opener(repo["archive_url"]) as response, temporary.open("wb") as output:
+            while chunk := response.read(1024 * 1024):
+                output.write(chunk)
+                digest.update(chunk)
+        if digest.hexdigest() != expected_sha256:
+            raise ValueError("downloaded archive checksum mismatch")
+        os.replace(temporary, archive)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return archive
+
+
+def extract_workspace(archive: Path, expected_sha256: str, destination: Path) -> None:
+    if destination.exists():
+        raise ValueError("workspace destination must be absent")
+    if _sha256(archive) != expected_sha256:
+        raise ValueError("archive checksum mismatch")
+
+    with tarfile.open(archive, "r:gz") as source:
+        members = source.getmembers()
+        roots = {member.name.split("/", 1)[0] for member in members if member.name}
+        if len(roots) != 1:
+            raise ValueError("archive must contain exactly one root directory")
+        root = roots.pop()
+        if any(".." in member.name.split("/") for member in members):
+            raise ValueError("archive contains unsafe members")
+        if not any(member.name.rstrip("/") == root and member.isdir() for member in members):
+            raise ValueError("archive root must be a directory")
+        if any(member.issym() or member.islnk() for member in members):
+            raise ValueError("archive contains link members")
+
+        with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
+            extracted = Path(temporary)
+            try:
+                source.extractall(extracted, filter="data")
+            except tarfile.TarError as error:
+                raise ValueError("archive contains unsafe members") from error
+            root_directory = extracted / root
+            destination.mkdir()
+            for child in root_directory.iterdir():
+                child.replace(destination / child.name)
 
 
 def _require_string(entry: dict, field: str) -> str:
