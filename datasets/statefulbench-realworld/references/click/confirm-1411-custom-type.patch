@@ -1,24 +1,32 @@
 diff --git a/src/click/termui.py b/src/click/termui.py
+index 4bd74ed..a1b6627 100644
 --- a/src/click/termui.py
 +++ b/src/click/termui.py
-@@ -249,3 +249,4 @@ def confirm(
+@@ -249,6 +249,7 @@ def confirm(
      prompt_suffix: str = ": ",
-+    type: ParamType[bool] | t.Any | None = None,
      show_default: bool = True,
      err: bool = False,
-@@ -276,2 +277,11 @@ def confirm(
++    type: ParamType[bool] | t.Any | None = None,
+ ) -> bool:
+     """Prompts for confirmation (yes/no question).
+ 
+@@ -274,6 +275,8 @@ def confirm(
+     .. versionadded:: 4.0
+         Added the ``err`` parameter.
      """
-+    if isinstance(type, bool):
-+        # Keep positional show_default and err arguments valid.
-+        if show_default is not True:
-+            err = show_default
-+        show_default = type
-+        type = None
-+
 +    value_proc = convert_type(type, default) if type is not None else None
 +
      prompt = _build_prompt(
-@@ -289,9 +299,15 @@ def confirm(
+         text,
+         prompt_suffix,
+@@ -283,18 +286,26 @@ def confirm(
+ 
+     while True:
+         try:
+-            value = _readline_prompt(visible_prompt_func, prompt, err).lower().strip()
++            value = _readline_prompt(visible_prompt_func, prompt, err).strip()
+         except (KeyboardInterrupt, EOFError):
+             raise Abort() from None
 -        if value in ("y", "yes"):
 -            rv = True
 -        elif value in ("n", "no"):
@@ -32,10 +40,17 @@ diff --git a/src/click/termui.py b/src/click/termui.py
 +            except UsageError as e:
 +                echo(_("Error: {message}").format(message=e.message), err=err)
 +                continue
-+        elif value in ("y", "yes"):
-+            rv = True
-+        elif value in ("n", "no"):
-+            rv = False
          else:
-             echo(_("Error: invalid input"), err=err)
-             continue
+-            echo(_("Error: invalid input"), err=err)
+-            continue
++            normalized_value = value.lower()
++            if normalized_value in ("y", "yes"):
++                rv = True
++            elif normalized_value in ("n", "no"):
++                rv = False
++            else:
++                echo(_("Error: invalid input"), err=err)
++                continue
+         break
+     if abort and not rv:
+         raise Abort()

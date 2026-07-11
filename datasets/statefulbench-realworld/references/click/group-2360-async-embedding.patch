@@ -1,7 +1,12 @@
 diff --git a/src/click/core.py b/src/click/core.py
 --- a/src/click/core.py
 +++ b/src/click/core.py
-@@ -6,6 +6,7 @@ import enum
+@@ -1,10 +1,12 @@
+ from __future__ import annotations
+ 
+ import collections.abc as cabc
++import contextvars
+ import enum
  import errno
  import inspect
  import os
@@ -9,7 +14,9 @@ diff --git a/src/click/core.py b/src/click/core.py
  import sys
  import typing as t
  from abc import ABC
-@@ -1993,5 +1994,38 @@ class Group(Command):
+@@ -1991,9 +1993,48 @@ class Group(Command):
+ 
+     def invoke(self, ctx: Context) -> t.Any:
          def _process_result(value: t.Any) -> t.Any:
 +            def _run_awaitable(value: t.Any) -> t.Any:
 +                if not inspect.isawaitable(value):
@@ -28,10 +35,15 @@ diff --git a/src/click/core.py b/src/click/core.py
 +                result: list[t.Any] = []
 +                error: list[BaseException] = []
 +
++                copied_context = contextvars.copy_context()
++
 +                def run_in_thread() -> None:
 +                    try:
-+                        with ctx:
-+                            result.append(asyncio.run(runner()))
++                        def run() -> None:
++                            with ctx:
++                                result.append(asyncio.run(runner()))
++
++                        copied_context.run(run)
 +                    except BaseException as exc:
 +                        error.append(exc)
 +
@@ -44,8 +56,11 @@ diff --git a/src/click/core.py b/src/click/core.py
 +
 +                return result[0]
 +
++            value = _run_awaitable(value)
              if self._result_callback is not None:
                  value = ctx.invoke(self._result_callback, value, **ctx.params)
 -            return value
 +            return _run_awaitable(value)
  
+         if not ctx._protected_args:
+             if self.invoke_without_command:

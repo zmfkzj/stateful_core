@@ -1,13 +1,62 @@
+diff --git a/src/click/shell_completion.py b/src/click/shell_completion.py
+index 5652214..05bcc23 100644
 --- a/src/click/shell_completion.py
 +++ b/src/click/shell_completion.py
-@@ -612,2 +612,10 @@ def _resolve_context(
+@@ -610,8 +610,35 @@ def _resolve_context(
+     :param prog_name: Name of the executable in the shell.
+     :param args: List of complete args before the incomplete value.
      """
-+    default_map = dict(ctx_args.get("default_map") or ())
++    def _make_context(
++        command: Command,
++        info_name: str | None,
++        args: list[str],
++        **extra: t.Any,
++    ) -> Context:
++        default_map = extra.get("default_map")
++        parent = extra.get("parent")
 +
-+    for param in cli.params:
-+        if param.name is not None and callable(param.default):
-+            default_map.setdefault(param.name, None)
++        if (
++            default_map is None
++            and parent is not None
++            and parent.default_map is not None
++        ):
++            default_map = parent.default_map.get(info_name)
 +
-+    if default_map:
-+        ctx_args = {**ctx_args, "default_map": default_map}
++        default_map = dict(default_map or ())
++
++        for param in command.params:
++            if param.name is not None and callable(param.default):
++                default_map.setdefault(param.name, None)
++
++        if default_map:
++            extra["default_map"] = default_map
++
++        return command.make_context(info_name, args, **extra)
++
      ctx_args["resilient_parsing"] = True
+-    with cli.make_context(prog_name, args.copy(), **ctx_args) as ctx:
++    with _make_context(cli, prog_name, args.copy(), **ctx_args) as ctx:
+         args = ctx._protected_args + ctx.args
+ 
+         while args:
+@@ -624,8 +651,8 @@ def _resolve_context(
+                     if cmd is None:
+                         return ctx
+ 
+-                    with cmd.make_context(
+-                        name, args, parent=ctx, resilient_parsing=True
++                    with _make_context(
++                        cmd, name, args, parent=ctx, resilient_parsing=True
+                     ) as sub_ctx:
+                         ctx = sub_ctx
+                         args = ctx._protected_args + ctx.args
+@@ -638,7 +665,8 @@ def _resolve_context(
+                         if cmd is None:
+                             return ctx
+ 
+-                        with cmd.make_context(
++                        with _make_context(
++                            cmd,
+                             name,
+                             args,
+                             parent=ctx,

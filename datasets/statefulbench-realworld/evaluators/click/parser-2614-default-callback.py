@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import inspect
 import sys
 from pathlib import Path
 
@@ -12,12 +13,18 @@ def main() -> None:
     sys.path.insert(0, str(checkout / "src"))
 
     import click
+    import click.shell_completion as shell_completion
     from click.testing import CliRunner
     from click.shell_completion import BashComplete
 
+    resolve_source = inspect.getsource(shell_completion._resolve_context)
+    assert (
+        "callable(param.default)" in resolve_source
+        and "command.params" in resolve_source
+    ), resolve_source
+
     calls: list[str] = []
     seen: list[dict[str, object]] = []
-
 
     def expensive_default() -> str:
         calls.append("called")
@@ -27,29 +34,38 @@ def main() -> None:
         seen.append(dict(ctx.params))
         return []
 
-    @click.command()
+    @click.group()
+    def cli() -> None:
+        pass
+
+    @cli.command()
     @click.option("--config", default=expensive_default)
     @click.option("--choice", shell_complete=complete)
-    def cli(config: str, choice: str | None) -> None:
+    def sub(config: str, choice: str | None) -> None:
         pass
 
     completions = BashComplete(cli, {}, "cli", "_CLI_COMPLETE").get_completions(
-        ["--choice"], ""
+        ["sub", "--choice"], ""
     )
     assert completions == []
     assert calls == [], calls
     assert seen == [{"config": None, "choice": None}], seen
-    result = CliRunner().invoke(cli, [])
+
+    result = CliRunner().invoke(cli, ["sub"])
     assert result.exit_code == 0, result.output
     assert calls == ["called"], calls
+
     calls.clear()
     seen.clear()
     BashComplete(
-        cli, {"default_map": {"config": "provided"}}, "cli", "_CLI_COMPLETE"
-    ).get_completions(["--choice"], "")
+        cli, {"default_map": {"sub": {"config": "provided"}}}, "cli", "_CLI_COMPLETE"
+    ).get_completions(["sub", "--choice"], "")
     assert calls == [], calls
     assert seen == [{"config": "provided", "choice": None}], seen
 
-
-if __name__ == "__main__":
-    main()
+    seen.clear()
+    BashComplete(cli, {}, "cli", "_CLI_COMPLETE").get_completions(
+        ["sub", "--config", "explicit", "--choice"], ""
+    )
+    assert calls == [], calls
+    assert seen == [{"config": "explicit", "choice": None}], seen

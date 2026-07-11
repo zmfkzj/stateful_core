@@ -37,6 +37,25 @@ def main() -> None:
     assert "--single TEXT..." not in result.output, result.output
     assert "-v, --verbose" in result.output, result.output
     assert "--verbose ..." not in result.output, result.output
+    formatter_method = click.HelpFormatter.format_option_metavar
+    calls: list[tuple[str, bool]] = []
+
+    def sentinel(metavar: str, multiple: bool) -> str:
+        calls.append((metavar, multiple))
+        return f"SENTINEL[{metavar}]"
+
+    click.HelpFormatter.format_option_metavar = staticmethod(sentinel)
+    try:
+        sentinel_result = CliRunner().invoke(cli, ["--help"])
+    finally:
+        click.HelpFormatter.format_option_metavar = formatter_method
+
+    assert sentinel_result.exit_code == 0, sentinel_result.output
+    assert ("TEXT", True) in calls, calls
+    assert ("<TEXT INTEGER>...", True) in calls, calls
+    assert ("TEXT", False) in calls, calls
+    assert "SENTINEL[TEXT]" in sentinel_result.output, sentinel_result.output
+
 
 
 if __name__ == "__main__":

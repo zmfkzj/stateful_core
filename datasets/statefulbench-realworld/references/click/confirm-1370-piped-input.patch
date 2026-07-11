@@ -25,6 +25,19 @@ diff --git a/src/click/termui.py b/src/click/termui.py
      while True:
          try:
 -            value = _readline_prompt(visible_prompt_func, prompt, err).lower().strip()
-+            value = prompt_func().lower().strip()
++            value = prompt_func().strip()
          except (KeyboardInterrupt, EOFError):
              raise Abort() from None
+@@ -289,9 +301,10 @@ def confirm(
+-        if value in ("y", "yes"):
++        normalized_value = value.lower()
++        if normalized_value in ("y", "yes"):
+             rv = True
+-        elif value in ("n", "no"):
++        elif normalized_value in ("n", "no"):
+             rv = False
+         elif default is not None and value == "":
+             rv = default
+         else:
+             echo(_("Error: invalid input"), err=err)
+             continue

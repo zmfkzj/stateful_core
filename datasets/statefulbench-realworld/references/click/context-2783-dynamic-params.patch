@@ -9,7 +9,19 @@
          # Tracks whether the option that currently owns each parameter slot in
          # :attr:`params` had its ``default`` set explicitly by the user. Used
          # to tie-break feature-switch groups where multiple options share a
-@@ -1101,7 +1103,7 @@
+@@ -719,9 +721,9 @@
+         if self.parent is not None:
+             parent_command_path = [self.parent.command_path]
+ 
+             if isinstance(self.parent.command, Command):
+-                for param in self.parent.command.get_params(self):
+-                    parent_command_path.extend(param.get_usage_pieces(self))
++                for param in self.parent.command.get_params(self.parent):
++                    parent_command_path.extend(param.get_usage_pieces(self.parent))
+ 
+             rv = f"{' '.join(parent_command_path)} {rv}"
+         return rv.lstrip()
+@@ -1099,7 +1101,7 @@
          return formatter.getvalue().rstrip("\n")
  
      def get_params(self, ctx: Context) -> list[Parameter]:
@@ -18,7 +30,8 @@
          help_option = self.get_help_option(ctx)
  
          if help_option is not None:
-@@ -1356,6 +1358,13 @@
+@@ -1299,6 +1301,14 @@
+         with ctx.scope(cleanup=False):
              self.parse_args(ctx, args)
          return ctx
  
@@ -26,7 +39,8 @@
 +    def make_dynamic_context(cls, ctx: Context, **extra: t.Any) -> Context:
 +        """Create a child context that parses this context's dynamic parameters."""
 +        extra.setdefault("default_map", ctx.default_map)
-+        command = cls(name=None, params=ctx.dynamic_params)
++        command = Command(name=None, params=ctx.dynamic_params, no_args_is_help=False)
++        command.context_class = type(ctx)
 +        return command.make_context(info_name=None, args=ctx.args, parent=ctx, **extra)
 +
      def parse_args(self, ctx: Context, args: list[str]) -> list[str]:

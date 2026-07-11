@@ -14,6 +14,8 @@ def main() -> None:
     sys.path.insert(0, str(repository / "src"))
 
     import click
+    from click.formatting import wrap_text
+
 
     options = [
         "--enable-verbose-logging",
@@ -38,6 +40,8 @@ def main() -> None:
         "               --network-timeout-seconds --debug-trace-enabled\n"
     )
     assert output == expected, output
+    assert wrap_text("prefix-suffix", width=8) == "prefix-\nsuffix"
+
 
     styled = click.style("--long-option-name", fg="red")
     formatter = click.HelpFormatter(width=40)

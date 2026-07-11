@@ -36,6 +36,25 @@ def run(
     return seen
 
 
+def run_direct() -> list[tuple[int, click.ParameterSource | None]]:
+    seen: list[tuple[int, click.ParameterSource | None]] = []
+
+    @click.command()
+    @click.option("--count", default=1)
+    @click.pass_context
+    def target(ctx: click.Context, count: int) -> None:
+        seen.append((count, ctx.get_parameter_source("count")))
+
+    @click.command()
+    @click.pass_context
+    def root(ctx: click.Context) -> None:
+        ctx.invoke(target, count=7)
+
+    result = CliRunner().invoke(root, [])
+    assert result.exit_code == 0, result.output
+    return seen
+
+
 def main() -> None:
     observed = run(["--count", "7"])
     assert observed == [
@@ -47,6 +66,7 @@ def main() -> None:
         (1, click.ParameterSource.DEFAULT),
         (9, click.ParameterSource.DEFAULT_MAP),
     ], observed
+    assert run_direct() == [(7, click.ParameterSource.COMMANDLINE)]
 
 
 if __name__ == "__main__":
