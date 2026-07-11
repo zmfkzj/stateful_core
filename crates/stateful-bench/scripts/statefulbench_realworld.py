@@ -231,6 +231,7 @@ def _require_github_sources(entry: dict) -> None:
             valid = (
                 parsed.scheme == "https"
                 and parsed.hostname == "github.com"
+                and parsed.port in (None, 443)
                 and parsed.path
                 and not parsed.username
                 and not parsed.password

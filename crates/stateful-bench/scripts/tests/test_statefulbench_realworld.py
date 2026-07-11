@@ -165,6 +165,19 @@ class CorpusTests(unittest.TestCase):
         self.assertEqual(corpus["repository"], "fixture")
         self.assertEqual(len(corpus["tasks"]), 10)
 
+    def test_load_corpus_accepts_canonical_github_source_ports(self) -> None:
+        for source in (
+            "https://github.com/example/project/issues/0",
+            "https://github.com:443/example/project/issues/0",
+        ):
+            with self.subTest(source=source):
+                data = self.corpus_data()
+                data["tasks"][0]["sources"] = [source]
+                self.write_data(data)
+
+                self.mod.load_corpus(self.corpus_path)
+
+
     def test_load_corpus_rejects_duplicate_task_keys(self) -> None:
         data = self.load_data()
         data["tasks"][1]["key"] = data["tasks"][0]["key"]
@@ -192,6 +205,12 @@ class CorpusTests(unittest.TestCase):
     def test_load_corpus_rejects_malformed_sources_and_hashes(self) -> None:
         cases = (
             ("sources", ["https://example.com/not-github"], "sources"),
+            (
+                "sources",
+                ["https://github.com:not-a-port/example/project/issues/0"],
+                "sources",
+            ),
+            ("sources", ["https://github.com:444/example/project/issues/0"], "sources"),
             ("source_hash", "f" * 63, "source_hash"),
         )
         for field, value, message in cases:
