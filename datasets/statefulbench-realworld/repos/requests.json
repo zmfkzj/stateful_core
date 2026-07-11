@@ -1,0 +1,178 @@
+{
+  "repository": "psf/requests",
+  "issue_snapshot": "issues/requests.json",
+  "tasks": [
+    {
+      "key": "requests-body-6992-multipart-content-type",
+      "kind": "bug",
+      "sources": ["https://github.com/psf/requests/issues/6992"],
+      "source_hash": "b46d1bcb56211be5025999e0fceae6aa75b4803c830ff6db486b72e8d0557f8b",
+      "prompt": "Fix Requests issue #6992 in src/requests/models.py at requests.models.PreparedRequest.prepare_body. When files cause a multipart body to be encoded, replace any caller- or Session-supplied Content-Type with the encoder's multipart/form-data value so its boundary matches the body. Preserve explicitly supplied Content-Type for requests without files, and preserve existing multipart input validation.",
+      "acceptance": [
+        "A POST with form data, files, and Content-Type: application/json is encoded as multipart/form-data, and its declared boundary occurs in the body.",
+        "An inherited application/json; charset=utf-8 Content-Type is replaced for a zero-byte multipart file while retaining that file part.",
+        "String data combined with files continues to raise ValueError('Data must not be a string.').",
+        "A raw non-multipart body retains the caller-supplied application/json Content-Type."
+      ],
+      "overlap_anchors": [{"path": "src/requests/models.py", "symbol": "requests.models.PreparedRequest.prepare_body"}],
+      "evaluator": "evaluators/requests/body-6992-multipart-content-type.py",
+      "reference_patch": "references/requests/body-6992-multipart-content-type.patch"
+    },
+    {
+      "key": "requests-body-6294-zero-byte-framing",
+      "kind": "feature",
+      "sources": ["https://github.com/psf/requests/issues/6294"],
+      "source_hash": "c0766f7610681dc3487761b04ea4a87041f1746aea33f7b3de8b7206f248cecf",
+      "prompt": "Implement Requests issue #6294 in src/requests/models.py at requests.models.PreparedRequest.prepare_body. For a seekable stream with a known length of zero, set Content-Length: 0 instead of automatically adding Transfer-Encoding: chunked. Keep exact framing for non-empty known-length streams and retain the existing streamed-body/files error.",
+      "acceptance": [
+        "An empty BytesIO PUT has Content-Length: 0 and no Transfer-Encoding header.",
+        "A non-empty BytesIO PUT has the exact byte count in Content-Length and no Transfer-Encoding header.",
+        "Combining a streamed body with files still raises NotImplementedError('Streamed bodies and files are mutually exclusive.').",
+        "An empty BytesIO POST receives the same explicit zero framing."
+      ],
+      "overlap_anchors": [{"path": "src/requests/models.py", "symbol": "requests.models.PreparedRequest.prepare_body"}],
+      "evaluator": "evaluators/requests/body-6294-zero-byte-framing.py",
+      "reference_patch": "references/requests/body-6294-zero-byte-framing.patch"
+    },
+    {
+      "key": "requests-7040-custom-ssl-context",
+      "kind": "bug",
+      "sources": ["https://github.com/psf/requests/issues/7040"],
+      "source_hash": "cf666d7f1e319d3ab1bb9c134d306e2dda1944e6834e70adb36d614dd74426b1",
+      "prompt": "Fix the custom SSLContext regression in HTTPAdapter.cert_verify. HTTPS requests using a truthy connection ssl_context must still require certificate verification but must not overwrite its CA file or directory settings; ordinary connections and disabled verification retain their existing behavior.",
+      "acceptance": [
+        "An HTTPS request with verify=True and a truthy conn.ssl_context sets conn.cert_reqs to CERT_REQUIRED without assigning conn.ca_certs or conn.ca_cert_dir.",
+        "An HTTPS request with verify=True and no ssl_context continues to select the default CA bundle through conn.ca_certs.",
+        "verify=False continues to set CERT_NONE and clear CA settings even when conn has an ssl_context.",
+        "An explicit missing CA bundle path still raises OSError rather than being bypassed by the custom-context guard."
+      ],
+      "overlap_anchors": [{"path": "src/requests/adapters.py", "symbol": "requests.adapters.HTTPAdapter.cert_verify"}],
+      "evaluator": "evaluators/requests/tls-7040-custom-ssl-context.py",
+      "reference_patch": "references/requests/tls-7040-custom-ssl-context.patch"
+    },
+    {
+      "key": "requests-7564-missing-tls-material",
+      "kind": "feature",
+      "sources": ["https://github.com/psf/requests/issues/7564"],
+      "source_hash": "32e6e3a0dd1af0034c7546c962e551deb7c9795f01b2472a191c0446763f711d",
+      "prompt": "Make missing client TLS certificate and private-key paths raise structured FileNotFoundError values from HTTPAdapter.cert_verify. Preserve the errno, filename, and a clear certificate/key-specific message while retaining normal client-certificate and no-certificate behavior.",
+      "acceptance": [
+        "A missing client certificate raises FileNotFoundError with errno.ENOENT, its path in filename, and a TLS certificate file message.",
+        "A missing client private key raises FileNotFoundError with errno.ENOENT, its path in filename, and a TLS key file message.",
+        "An existing client certificate with no key is accepted and assigned to conn.cert_file.",
+        "No client certificate with verify=False continues to set CERT_NONE without adding a cert_file attribute."
+      ],
+      "overlap_anchors": [{"path": "src/requests/adapters.py", "symbol": "requests.adapters.HTTPAdapter.cert_verify"}],
+      "evaluator": "evaluators/requests/tls-7564-missing-tls-material.py",
+      "reference_patch": "references/requests/tls-7564-missing-tls-material.patch"
+    },
+    {
+      "key": "requests-6885-redirect-body-replay",
+      "kind": "bug",
+      "sources": ["https://github.com/psf/requests/issues/6885"],
+      "source_hash": "12ed0aba720f1cb7e925507e627ac188663e86a228069d9f1214033a99dc89fe",
+      "prompt": "Fix issue #6885 in requests.sessions.SessionRedirectMixin.resolve_redirects. When consuming a 307 or 308 redirect response encounters the TLS EOF represented by requests.exceptions.SSLError, release the old response through the existing raw-read fallback and continue redirect handling. A seekable PUT payload must be rewound and replayed intact; do not alter non-redirect request behavior.",
+      "acceptance": [
+        "A requests.exceptions.SSLError raised while consuming a redirect response follows the existing raw-read fallback instead of aborting resolution.",
+        "A 307 redirect retains the PUT method, Content-Length, and complete seekable request body after the initial send consumed it.",
+        "A 308 redirect retains the PUT method, Content-Length, and complete seekable request body after the initial send consumed it.",
+        "The change is contained in src/requests/sessions.py at requests.sessions.SessionRedirectMixin.resolve_redirects."
+      ],
+      "overlap_anchors": [{"path": "src/requests/sessions.py", "symbol": "requests.sessions.SessionRedirectMixin.resolve_redirects"}],
+      "evaluator": "evaluators/requests/redirect-6885-replay-body.py",
+      "reference_patch": "references/requests/redirect-6885-replay-body.patch"
+    },
+    {
+      "key": "requests-7574-query-redirect-semantics",
+      "kind": "feature",
+      "sources": ["https://github.com/psf/requests/issues/7574"],
+      "source_hash": "fa28c073f01f235c92b71d91473f33f040cf6261c76e4797ab28b87a6b18fd98",
+      "prompt": "Implement RFC 10008 section 2.5 redirect semantics for arbitrary QUERY requests in requests.sessions.SessionRedirectMixin.resolve_redirects. Preserve QUERY and its entity on 301, 302, 307, and 308 redirects; keep the existing 303 conversion to a bodyless GET. Preserve existing semantics for every other method.",
+      "acceptance": [
+        "A QUERY request retains method, Content-Type, Content-Length, and body on a 301 redirect.",
+        "A QUERY request retains method, Content-Type, Content-Length, and body on a 302 redirect instead of inheriting browser POST behavior.",
+        "A QUERY request retains method and body on 307 and 308 redirects.",
+        "A 303 response to QUERY remains a bodyless GET with entity headers removed.",
+        "The change is contained in src/requests/sessions.py at requests.sessions.SessionRedirectMixin.resolve_redirects."
+      ],
+      "overlap_anchors": [{"path": "src/requests/sessions.py", "symbol": "requests.sessions.SessionRedirectMixin.resolve_redirects"}],
+      "evaluator": "evaluators/requests/redirect-7574-query-semantics.py",
+      "reference_patch": "references/requests/redirect-7574-query-semantics.patch"
+    },
+    {
+      "key": "cookies-escaped-quotes",
+      "kind": "bug",
+      "sources": ["https://github.com/psf/requests/issues/6890"],
+      "source_hash": "373d16124647cc70f14f3ffef542ad67a5b5891c2091d61d1948fa4b324f3f97",
+      "prompt": "Preserve escaped quotes in cookie values. RequestsCookieJar.set_cookie must remove only surrounding quotes, not escaped quotes within the value. Also prepare Session requests from generic CookieJars without routing session cookies through a RequestsCookieJar, so the Cookie header retains those values.",
+      "acceptance": [
+        "A plain cookie value remains unchanged when RequestsCookieJar stores it and when Session prepares it.",
+        "A surrounding-quote value containing an escaped quote loses only its surrounding quotes and preserves the escaped quote.",
+        "Preparing a secure generic-jar cookie does not corrupt it or raise while producing its HTTPS Cookie header."
+      ],
+      "overlap_anchors": [{"path": "src/requests/sessions.py", "symbol": "requests.sessions.Session.prepare_request"}],
+      "evaluator": "evaluators/requests/cookies-escaped-quotes.py",
+      "reference_patch": "references/requests/cookies-6890-escaped-quotes.patch"
+    },
+    {
+      "key": "cookies-cookie-policy",
+      "kind": "feature",
+      "sources": ["https://github.com/psf/requests/issues/7122"],
+      "source_hash": "83970284322eb64996d869b847df5c1873f46977f4a3b2beb8d0d84ffb724e4e",
+      "prompt": "Preserve a caller-provided CookiePolicy when Session.prepare_request merges a generic session CookieJar with request cookies. The prepared request must use that policy to decide whether cookies are sent, including explicit policy denial.",
+      "acceptance": [
+        "An allowing caller-provided policy permits a secure cookie on HTTP during session preparation.",
+        "The prepared CookieJar retains the exact caller-provided policy object.",
+        "A rejecting caller-provided policy suppresses the Cookie header rather than silently falling back to Requests defaults."
+      ],
+      "overlap_anchors": [{"path": "src/requests/sessions.py", "symbol": "requests.sessions.Session.prepare_request"}],
+      "evaluator": "evaluators/requests/cookies-cookie-policy.py",
+      "reference_patch": "references/requests/cookies-7122-cookie-policy.patch"
+    },
+    {
+      "key": "proxy-6205-adapter-settings",
+      "kind": "bug",
+      "sources": ["https://github.com/psf/requests/issues/6205"],
+      "source_hash": "78e82c75f4cc4fba46689b818184a63c567636924b819920680fb9f7c8d68b61",
+      "prompt": "Make HTTPAdapter.send preserve custom transport-adapter TLS pool settings when a request is routed through a proxy. A proxy manager must receive the adapter's non-manager pool settings before the normal connection lookup caches it; do not duplicate manager-owned sizing settings.",
+      "acceptance": [
+        "A proxied HTTPS send propagates a custom ssl_version from poolmanager.connection_pool_kw to the created proxy manager.",
+        "The normal connection lookup reuses that configured proxy manager rather than creating a second manager.",
+        "The proxied request still selects the target host and sends its path to urlopen."
+      ],
+      "overlap_anchors": [{"path": "src/requests/adapters.py", "symbol": "requests.adapters.HTTPAdapter.send"}],
+      "evaluator": "evaluators/requests/proxy-6205-adapter-settings.py",
+      "reference_patch": "references/requests/proxy-6205-adapter-settings.patch"
+    },
+    {
+      "key": "proxy-6900-sni-settings",
+      "kind": "feature",
+      "sources": ["https://github.com/psf/requests/issues/6900"],
+      "source_hash": "8576bdb467bfb7bc5e5eec36cba0ed6fc92e69bb34d2c472846fdc2e60e0fa30",
+      "prompt": "Make HTTPAdapter.send preserve custom SNI settings from an adapter's connection pool when routing a private HTTPS request through an HTTP proxy, while keeping the request's self-signed CA bundle in the target connection pool settings.",
+      "acceptance": [
+        "A proxied HTTPS send propagates custom assert_hostname to the created proxy manager.",
+        "A proxied HTTPS send propagates custom server_hostname to the created proxy manager.",
+        "A verify CA file remains the target pool's ca_certs setting and is applied to the proxied connection.",
+        "The private IP target remains the host selected for the proxy connection."
+      ],
+      "overlap_anchors": [{"path": "src/requests/adapters.py", "symbol": "requests.adapters.HTTPAdapter.send"}],
+      "evaluator": "evaluators/requests/proxy-6900-sni-settings.py",
+      "reference_patch": "references/requests/proxy-6900-sni-settings.patch"
+    }
+  ],
+  "final_prompt": "You are the integration reviewer for the Requests corpus. Run every listed evaluator against the shared checkout after all ten task patches are applied. Fix every evaluator failure while preserving all task contracts, resolve same-symbol edits without discarding either behavior, and finish only when every evaluator passes.",
+  "evaluators": [
+    "evaluators/requests/body-6992-multipart-content-type.py",
+    "evaluators/requests/body-6294-zero-byte-framing.py",
+    "evaluators/requests/tls-7040-custom-ssl-context.py",
+    "evaluators/requests/tls-7564-missing-tls-material.py",
+    "evaluators/requests/redirect-6885-replay-body.py",
+    "evaluators/requests/redirect-7574-query-semantics.py",
+    "evaluators/requests/cookies-escaped-quotes.py",
+    "evaluators/requests/cookies-cookie-policy.py",
+    "evaluators/requests/proxy-6205-adapter-settings.py",
+    "evaluators/requests/proxy-6900-sni-settings.py"
+  ],
+  "integrated_reference_patch": "references/requests/integrated.patch"
+}

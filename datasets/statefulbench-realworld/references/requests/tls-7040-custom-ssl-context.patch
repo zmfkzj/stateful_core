@@ -1,0 +1,18 @@
+diff --git a/src/requests/adapters.py b/src/requests/adapters.py
+--- a/src/requests/adapters.py
++++ b/src/requests/adapters.py
+@@ -336,9 +336,10 @@ class HTTPAdapter(BaseAdapter):
+             conn.cert_reqs = "CERT_REQUIRED"
+ 
+-            if not os.path.isdir(cert_loc):
+-                conn.ca_certs = cert_loc
+-            else:
+-                conn.ca_cert_dir = cert_loc
++            if not getattr(conn, "ssl_context", None):
++                if not os.path.isdir(cert_loc):
++                    conn.ca_certs = cert_loc
++                else:
++                    conn.ca_cert_dir = cert_loc
+         else:
+             conn.cert_reqs = "CERT_NONE"
+             conn.ca_certs = None

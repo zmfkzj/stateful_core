@@ -1,0 +1,159 @@
+diff --git a/src/requests/adapters.py b/src/requests/adapters.py
+index 79ed426..57c5fad 100644
+--- a/src/requests/adapters.py
++++ b/src/requests/adapters.py
+@@ -7,6 +7,7 @@ and maintain connections.
+ """
+ 
+ from __future__ import annotations
++import errno
+ 
+ import os.path
+ import socket  # noqa: F401
+@@ -336,10 +337,11 @@ class HTTPAdapter(BaseAdapter):
+ 
+             conn.cert_reqs = "CERT_REQUIRED"
+ 
+-            if not os.path.isdir(cert_loc):
+-                conn.ca_certs = cert_loc
+-            else:
+-                conn.ca_cert_dir = cert_loc
++            if not getattr(conn, "ssl_context", None):
++                if not os.path.isdir(cert_loc):
++                    conn.ca_certs = cert_loc
++                else:
++                    conn.ca_cert_dir = cert_loc
+         else:
+             conn.cert_reqs = "CERT_NONE"
+             conn.ca_certs = None
+@@ -353,13 +355,12 @@ class HTTPAdapter(BaseAdapter):
+                 conn.cert_file = cert
+                 conn.key_file = None
+             if conn.cert_file and not os.path.exists(conn.cert_file):
+-                raise OSError(
+-                    f"Could not find the TLS certificate file, "
+-                    f"invalid path: {conn.cert_file}"
++                raise FileNotFoundError(
++                    errno.ENOENT, "Could not find the TLS certificate file", conn.cert_file
+                 )
+             if conn.key_file and not os.path.exists(conn.key_file):
+-                raise OSError(
+-                    f"Could not find the TLS key file, invalid path: {conn.key_file}"
++                raise FileNotFoundError(
++                    errno.ENOENT, "Could not find the TLS key file", conn.key_file
+                 )
+ 
+     def build_response(self, req: PreparedRequest, resp: Any) -> Response:
+@@ -657,6 +658,15 @@ class HTTPAdapter(BaseAdapter):
+         """
+ 
+         assert _is_prepared(request)
++        proxy = select_proxy(request.url, proxies)
++        if proxy:
++            proxy = prepend_scheme_if_needed(proxy, "http")
++            proxy_kwargs = {
++                key: value
++                for key, value in self.poolmanager.connection_pool_kw.items()
++                if key not in {"num_pools", "maxsize", "block"}
++            }
++            self.proxy_manager_for(proxy, **proxy_kwargs)
+ 
+         try:
+             conn = self.get_connection_with_tls_context(
+diff --git a/src/requests/cookies.py b/src/requests/cookies.py
+index 24dd9a7..bb51b25 100644
+--- a/src/requests/cookies.py
++++ b/src/requests/cookies.py
+@@ -385,7 +385,7 @@ class RequestsCookieJar(CookieJar, MutableMapping[str, str | None]):  # type: ig
+             and value.startswith('"')
+             and value.endswith('"')
+         ):
+-            cookie.value = value.replace('\\"', "")
++            cookie.value = value[1:-1]
+         return super().set_cookie(cookie, *args, **kwargs)
+ 
+     def update(  # type: ignore[override]
+diff --git a/src/requests/models.py b/src/requests/models.py
+index 17b39cd..f7fa929 100644
+--- a/src/requests/models.py
++++ b/src/requests/models.py
+@@ -624,7 +624,7 @@ class PreparedRequest(RequestEncodingMixin, RequestHooksMixin):
+                     "Streamed bodies and files are mutually exclusive."
+                 )
+ 
+-            if length:
++            if length is not None:
+                 self.headers["Content-Length"] = builtin_str(length)
+             else:
+                 self.headers["Transfer-Encoding"] = "chunked"
+@@ -645,8 +645,10 @@ class PreparedRequest(RequestEncodingMixin, RequestHooksMixin):
+ 
+             self.prepare_content_length(body)
+ 
+-            # Add content-type if it wasn't explicitly provided.
+-            if content_type and ("content-type" not in self.headers):
++            # Multipart boundaries must match the encoded body.
++            if files and content_type:
++                self.headers["Content-Type"] = content_type
++            elif content_type and ("content-type" not in self.headers):
+                 self.headers["Content-Type"] = content_type
+ 
+         self.body = body  # type: ignore[assignment]  # body transforms from DataType to BodyType
+diff --git a/src/requests/sessions.py b/src/requests/sessions.py
+index d11355b..a2529d1 100644
+--- a/src/requests/sessions.py
++++ b/src/requests/sessions.py
+@@ -22,6 +22,7 @@ from .adapters import HTTPAdapter
+ from .auth import _basic_auth_str
+ from .compat import cookielib, urljoin, urlparse
+ from .cookies import (
++    _copy_cookie_jar,
+     RequestsCookieJar,
+     cookiejar_from_dict,
+     extract_cookies_to_jar,
+@@ -31,6 +32,7 @@ from .exceptions import (
+     ChunkedEncodingError,
+     ContentDecodingError,
+     InvalidSchema,
++    SSLError,
+     TooManyRedirects,
+ )
+ from .hooks import default_hooks, dispatch_hook
+@@ -210,7 +212,7 @@ class SessionRedirectMixin:
+ 
+             try:
+                 resp.content  # Consume socket so it can be released
+-            except (ChunkedEncodingError, ContentDecodingError, RuntimeError):
++            except (ChunkedEncodingError, ContentDecodingError, RuntimeError, SSLError):
+                 resp.raw.read(decode_content=False)
+ 
+             if len(resp.history) >= self.max_redirects:
+@@ -245,11 +247,17 @@ class SessionRedirectMixin:
+             prepared_request.url = to_native_string(url)
+ 
+             self.rebuild_method(prepared_request, resp)
++            # https://www.rfc-editor.org/rfc/rfc10008.html#section-2.5
++            if req.method == "QUERY" and resp.status_code != codes.see_other:
++                prepared_request.method = req.method
+ 
+             # https://github.com/psf/requests/issues/1084
+             if resp.status_code not in (
+                 codes.temporary_redirect,
+                 codes.permanent_redirect,
++            ) and not (
++                req.method == "QUERY"
++                and resp.status_code in (codes.moved, codes.found)
+             ):
+                 # https://github.com/psf/requests/issues/3490
+                 purged_headers = ("Content-Length", "Content-Type", "Transfer-Encoding")
+@@ -528,9 +536,7 @@ class Session(SessionRedirectMixin):
+             cookies = cookiejar_from_dict(cookies)
+ 
+         # Merge with session cookies
+-        merged_cookies = merge_cookies(
+-            merge_cookies(RequestsCookieJar(), self.cookies), cookies
+-        )
++        merged_cookies = merge_cookies(_copy_cookie_jar(self.cookies), cookies)
+ 
+         # Set environment's basic authentication if not explicitly set.
+         auth = request.auth
