@@ -1,0 +1,21 @@
+diff --git a/src/xdist/dsession.py b/src/xdist/dsession.py
+--- a/src/xdist/dsession.py
++++ b/src/xdist/dsession.py
+@@ -205,10 +205,14 @@ class DSession:
+         The node might not be in the scheduler if it had not emitted
+         workerready before shutdown was triggered.
+         """
+-        self.config.hook.pytest_testnodedown(node=node, error=None)
+-        if node.workeroutput["exitstatus"] == 2:  # keyboard-interrupt
++        exitstatus = node.workeroutput["exitstatus"]
++        if exitstatus == 2:  # keyboard-interrupt
+             self.shouldstop = f"{node} received keyboard-interrupt"
+             self.worker_errordown(node, "keyboard-interrupt")
+             return
++        if exitstatus:
++            self.worker_errordown(node, f"worker exited with exit status {exitstatus}")
++            return
++        self.config.hook.pytest_testnodedown(node=node, error=None)
+         shouldfail = node.workeroutput["shouldfail"]
+         shouldstop = node.workeroutput["shouldstop"]
+         for shouldx in [shouldfail, shouldstop]:

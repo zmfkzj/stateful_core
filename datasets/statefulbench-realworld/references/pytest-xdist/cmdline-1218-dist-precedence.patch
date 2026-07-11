@@ -1,0 +1,27 @@
+diff --git a/src/xdist/plugin.py b/src/xdist/plugin.py
+--- a/src/xdist/plugin.py
++++ b/src/xdist/plugin.py
+@@ -436,9 +436,16 @@ def pytest_cmdline_main(config: pytest.Config) -> None:
+-    if config.option.numprocesses:
+-        if config.option.dist == "no":
+-            config.option.dist = "load"
+-        numprocesses = config.option.numprocesses
+-        if config.option.maxprocesses:
+-            numprocesses = min(numprocesses, config.option.maxprocesses)
+-        config.option.tx = ["popen"] * numprocesses
++    explicit_dist = any(
++        arg == "--dist" or arg.startswith("--dist=")
++        for arg in config.invocation_params.args
++    )
++    if config.option.numprocesses:
++        if config.option.dist == "no" and not explicit_dist:
++            config.option.dist = "load"
++        if config.option.dist != "no":
++            numprocesses = config.option.numprocesses
++            if config.option.maxprocesses:
++                numprocesses = min(numprocesses, config.option.maxprocesses)
++            config.option.tx = ["popen"] * numprocesses
++        else:
++            config.option.numprocesses = 0
+ 
+     if config.option.numprocesses == 0:
