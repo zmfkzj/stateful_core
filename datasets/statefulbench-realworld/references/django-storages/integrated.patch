@@ -58,34 +58,33 @@ index fa2d39f..9c8750f 100644
          self._unsigned_connections = threading.local()
  
          if self.config is not None:
-@@ -385,24 +399,15 @@ class S3Storage(CompressStorageMixin, BaseStorage):
+@@ -384,23 +384,23 @@ class S3Storage(CompressStorageMixin, BaseStorage):
+     def get_default_settings(self):
          return {
              "access_key": setting(
                  "AWS_S3_ACCESS_KEY_ID",
--                setting(
--                    "AWS_ACCESS_KEY_ID",
+                 setting(
+                     "AWS_ACCESS_KEY_ID",
 -                    lookup_env(["AWS_S3_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID"]),
--                ),
-+                setting("AWS_ACCESS_KEY_ID"),
++                    lookup_env(["AWS_S3_ACCESS_KEY_ID"]),
+                 ),
              ),
              "secret_key": setting(
                  "AWS_S3_SECRET_ACCESS_KEY",
--                setting(
--                    "AWS_SECRET_ACCESS_KEY",
+                 setting(
+                     "AWS_SECRET_ACCESS_KEY",
 -                    lookup_env(["AWS_S3_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY"]),
--                ),
-+                setting("AWS_SECRET_ACCESS_KEY"),
++                    lookup_env(["AWS_S3_SECRET_ACCESS_KEY"]),
+                 ),
              ),
              "security_token": setting(
                  "AWS_SESSION_TOKEN",
--                setting(
--                    "AWS_SECURITY_TOKEN",
+                 setting(
+                     "AWS_SECURITY_TOKEN",
 -                    lookup_env(["AWS_SESSION_TOKEN", "AWS_SECURITY_TOKEN"]),
--                ),
-+                setting("AWS_SECURITY_TOKEN"),
++                    lookup_env(["AWS_SECURITY_TOKEN"]),
+                 ),
              ),
-             "session_profile": setting(
-                 "AWS_S3_SESSION_PROFILE", lookup_env(["AWS_S3_SESSION_PROFILE"])
 @@ -420,6 +425,7 @@ class S3Storage(CompressStorageMixin, BaseStorage):
              "addressing_style": setting("AWS_S3_ADDRESSING_STYLE"),
              "file_name_charset": setting("AWS_S3_FILE_NAME_CHARSET", "utf-8"),
@@ -370,7 +369,7 @@ index fa2d39f..9c8750f 100644
              url = "{}//{}/{}{}".format(
                  self.url_protocol,
                  self.custom_domain,
-@@ -681,23 +812,68 @@ class S3Storage(CompressStorageMixin, BaseStorage):
+@@ -681,23 +812,73 @@ class S3Storage(CompressStorageMixin, BaseStorage):
              )
  
              if self.querystring_auth and self.cloudfront_signer:
@@ -395,7 +394,12 @@ index fa2d39f..9c8750f 100644
 +            addressing_style = s3_config.get(
 +                "addressing_style", self.addressing_style
 +            )
-+            if addressing_style == "path":
++            use_path_style = addressing_style == "path" or (
++                addressing_style in (None, "auto")
++                and endpoint.scheme == "https"
++                and "." in self.bucket_name
++            )
++            if use_path_style:
 +                path = "{}/{}/{}".format(
 +                    endpoint.path.rstrip("/"),
 +                    self.bucket_name,
@@ -407,7 +411,7 @@ index fa2d39f..9c8750f 100644
 +                (
 +                    endpoint.scheme,
 +                    endpoint.netloc
-+                    if addressing_style == "path"
++                    if use_path_style
 +                    else "{}.{}".format(self.bucket_name, endpoint.netloc),
 +                    path,
 +                    "",

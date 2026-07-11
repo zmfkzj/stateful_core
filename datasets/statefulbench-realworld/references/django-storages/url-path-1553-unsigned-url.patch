@@ -35,7 +35,7 @@ diff --git a/storages/backends/s3.py b/storages/backends/s3.py
  @deconstructible
  class S3File(CompressedFileMixin, File):
      """
-@@ -688,6 +698,40 @@ class S3Storage(CompressStorageMixin, BaseStorage):
+@@ -688,6 +698,45 @@ class S3Storage(CompressStorageMixin, BaseStorage):
  
              return url
  
@@ -52,7 +52,12 @@ diff --git a/storages/backends/s3.py b/storages/backends/s3.py
 +            addressing_style = s3_config.get(
 +                "addressing_style", self.addressing_style
 +            )
-+            if addressing_style == "path":
++            use_path_style = addressing_style == "path" or (
++                addressing_style in (None, "auto")
++                and endpoint.scheme == "https"
++                and "." in self.bucket_name
++            )
++            if use_path_style:
 +                path = "{}/{}/{}".format(
 +                    endpoint.path.rstrip("/"), self.bucket_name, filepath_to_uri(name)
 +                )
@@ -62,7 +67,7 @@ diff --git a/storages/backends/s3.py b/storages/backends/s3.py
 +                (
 +                    endpoint.scheme,
 +                    endpoint.netloc
-+                    if addressing_style == "path"
++                    if use_path_style
 +                    else "{}.{}".format(self.bucket_name, endpoint.netloc),
 +                    path,
 +                    "",
