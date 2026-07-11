@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import subprocess
 import sys
@@ -8,7 +9,7 @@ import time
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from .conftest import load_script
 
@@ -45,6 +46,13 @@ def _fake_launch(events, outcomes=None):
         )
 
     return launch
+
+
+def _suite_result(returncode):
+    def run(*args, **kwargs):
+        return subprocess.CompletedProcess(args[0] if args else [], returncode)
+
+    return run
 
 
 class StatefulBenchLiteTests(unittest.TestCase):
@@ -104,12 +112,28 @@ class StatefulBenchLiteTests(unittest.TestCase):
                         json.dumps({"message": {"usage": {"totalTokens": 11, "toolCalls": 3}}}),
                         "not json",
                         json.dumps({"usage": {"total_tokens": 7, "tool_calls": 2}}),
+                        json.dumps({"type": "tool_execution_start"}),
                     ]
                 )
                 + "\n",
                 encoding="utf-8",
             )
             self.assertEqual(self.mod.usage_from_log(log), {"total_tokens": 18, "tool_calls": 5})
+
+            event_log = Path(temp_dir) / "event-agent.stdout.log"
+            event_log.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"type": "toolcall_start"}),
+                        json.dumps({"type": "tool_execution_start"}),
+                        json.dumps({"type": "tool_execution_end"}),
+                        json.dumps({"type": "tool_execution_start"}),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(self.mod.usage_from_log(event_log), {"total_tokens": 0, "tool_calls": 2})
     def test_copy_stateful_omp_agent_db_copies_existing_db_and_ignores_missing_source(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -163,17 +187,29 @@ class StatefulBenchLiteTests(unittest.TestCase):
             index(parallel_events, "launch", "final"),
         )
 
-    def test_cleared_requires_all_zero_exits(self):
+    def test_cleared_requires_zero_exits_no_timeouts_and_passing_post_suite(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             all_zero = self.mod.run_arm(
-                "parallel-off", root / "all-zero", self.mod.RunConfig(tasks=5), launch=_fake_launch([])
+                "parallel-off",
+                root / "all-zero",
+                self.mod.RunConfig(tasks=5),
+                launch=_fake_launch([]),
+                suite_run=_suite_result(0),
+            )
+            failed_suite = self.mod.run_arm(
+                "parallel-off",
+                root / "failed-suite",
+                self.mod.RunConfig(tasks=5),
+                launch=_fake_launch([]),
+                suite_run=_suite_result(1),
             )
             nonzero = self.mod.run_arm(
                 "parallel-off",
                 root / "nonzero",
                 self.mod.RunConfig(tasks=5),
                 launch=_fake_launch([], {"task-slug": (1, False)}),
+                suite_run=_suite_result(0),
             )
             with patch.object(self.mod.os, "killpg"):
                 timed_out = self.mod.run_arm(
@@ -181,8 +217,12 @@ class StatefulBenchLiteTests(unittest.TestCase):
                     root / "timed-out",
                     self.mod.RunConfig(tasks=5),
                     launch=_fake_launch([], {"final": (0, True)}),
+                    suite_run=_suite_result(0),
                 )
         self.assertTrue(all_zero["cleared"])
+        self.assertTrue(all_zero["post_suite_ok"])
+        self.assertFalse(failed_suite["cleared"])
+        self.assertFalse(failed_suite["post_suite_ok"])
         self.assertFalse(nonzero["cleared"])
         self.assertFalse(timed_out["cleared"])
 
@@ -205,6 +245,68 @@ class StatefulBenchLiteTests(unittest.TestCase):
         )
         timed_out = next(record for record in result["agents"] if record["agent_id"] == "task-slug")
         self.assertTrue(timed_out["timed_out"])
+    def test_arm_server_tolerates_signal_denial_from_outer_sandbox(self):
+        process = Mock(pid=42)
+        process.poll.return_value = None
+        response = Mock(status=200)
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.object(self.mod, "_available_port", return_value=45678),
+                patch.object(self.mod.secrets, "token_urlsafe", return_value="token"),
+                patch.object(self.mod.subprocess, "Popen", return_value=process),
+                patch.object(self.mod.urllib.request, "urlopen", return_value=response),
+                patch.object(self.mod.os, "killpg", side_effect=PermissionError),
+            ):
+                with self.mod.arm_stateful_server(
+                    Path(temp_dir),
+                    self.mod.RunConfig(stateful_binary="/tmp/stateful"),
+                ) as env:
+                    self.assertEqual(env["STATEFUL_SERVER_URL"], "http://127.0.0.1:45678")
+                    self.assertEqual(env["STATEFUL_SERVER_TOKEN"], "token")
+
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=5)
+
+    def test_parallel_on_shares_one_arm_server_across_agents(self):
+        events = []
+
+        @contextmanager
+        def server(arm_dir, cfg):
+            events.append(("server", "start"))
+            yield {
+                "STATEFUL_SERVER_URL": "http://127.0.0.1:45678",
+                "STATEFUL_SERVER_TOKEN": "token",
+            }
+            events.append(("server", "stop"))
+
+        def launch(arm_dir, workspace, agent_id, prompt_path, mode, cfg):
+            self.assertEqual(
+                cfg.stateful_runtime_env,
+                {
+                    "STATEFUL_SERVER_URL": "http://127.0.0.1:45678",
+                    "STATEFUL_SERVER_TOKEN": "token",
+                },
+            )
+            return _fake_launch(events)(arm_dir, workspace, agent_id, prompt_path, mode, cfg)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = self.mod.run_arm(
+                "parallel-on",
+                Path(temp_dir),
+                self.mod.RunConfig(tasks=2, stateful_binary="/tmp/stateful"),
+                launch=launch,
+                server=server,
+                suite_run=_suite_result(0),
+            )
+
+        self.assertTrue(result["cleared"])
+        self.assertEqual(events.count(("server", "start")), 1)
+        self.assertEqual(events.count(("server", "stop")), 1)
+        self.assertLess(events.index(("server", "start")), events.index(("launch", "task-slug", "stateful")))
+        self.assertLess(events.index(("wait", "final")), events.index(("server", "stop")))
     def test_parallel_on_without_stateful_binary_errors(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

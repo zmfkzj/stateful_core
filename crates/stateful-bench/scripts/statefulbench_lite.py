@@ -4,14 +4,18 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager, nullcontext
 import importlib.util
 import json
 import os
 import shutil
 import signal
+import secrets
+import socket
 import subprocess
 import sys
 import time
+import urllib.request
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
@@ -93,6 +97,7 @@ class RunConfig:
     thinking: str = "high"
     omp_bin: str = "omp"
     stateful_binary: str | None = None
+    stateful_runtime_env: dict[str, str] | None = None
     trial: int = 1
 
 
@@ -225,9 +230,11 @@ def generate_workspace(dest: Path, task_count: int) -> None:
 
 def usage_from_log(path: Path) -> dict[str, int]:
     total_tokens = 0
-    tool_calls = 0
+    usage_tool_calls = 0
+    execution_tool_calls = 0
+    has_usage_tool_calls = False
     if not path.exists():
-        return {"total_tokens": total_tokens, "tool_calls": tool_calls}
+        return {"total_tokens": total_tokens, "tool_calls": usage_tool_calls}
     for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
         try:
             value = json.loads(line)
@@ -235,6 +242,8 @@ def usage_from_log(path: Path) -> dict[str, int]:
             continue
         if not isinstance(value, dict):
             continue
+        if value.get("type") == "tool_execution_start":
+            execution_tool_calls += 1
         message = value.get("message")
         usage = message.get("usage") if isinstance(message, dict) else None
         if not isinstance(usage, dict):
@@ -242,8 +251,104 @@ def usage_from_log(path: Path) -> dict[str, int]:
         if not isinstance(usage, dict):
             continue
         total_tokens += int(usage.get("totalTokens") or usage.get("total_tokens") or 0)
-        tool_calls += int(usage.get("toolCalls") or usage.get("tool_calls") or 0)
-    return {"total_tokens": total_tokens, "tool_calls": tool_calls}
+        if "toolCalls" in usage or "tool_calls" in usage:
+            has_usage_tool_calls = True
+            usage_tool_calls += int(usage.get("toolCalls") or usage.get("tool_calls") or 0)
+    return {
+        "total_tokens": total_tokens,
+        "tool_calls": usage_tool_calls if has_usage_tool_calls else execution_tool_calls,
+    }
+
+
+def _available_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+@contextmanager
+def arm_stateful_server(arm_dir: Path, cfg: RunConfig):
+    port = _available_port()
+    token = secrets.token_urlsafe(32)
+    workspace_id = f"statefulbench-lite-{cfg.trial}"
+    server_home = arm_dir / "stateful-server-home"
+    server_home.mkdir(parents=True, exist_ok=True)
+    logs = arm_dir / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    stdout_path = logs / "stateful-server.stdout.log"
+    stderr_path = logs / "stateful-server.stderr.log"
+    env = dict(os.environ)
+    env["HOME"] = str(server_home)
+    env["STATEFUL_HOME"] = str(server_home)
+    command = [
+        cfg.stateful_binary,
+        "server",
+        "start",
+        "--foreground",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--token",
+        token,
+        "--workspace-id",
+        workspace_id,
+        "--coordination-mode",
+        "enforcement",
+    ]
+    with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
+        process = subprocess.Popen(command, env=env, stdout=stdout, stderr=stderr, start_new_session=True)
+
+    server_url = f"http://127.0.0.1:{port}"
+    deadline = time.monotonic() + 10
+    while True:
+        if process.poll() is not None:
+            detail = stderr_path.read_text(encoding="utf-8", errors="ignore").strip()
+            raise RuntimeError(f"stateful server exited before becoming healthy: {detail}")
+        try:
+            with urllib.request.urlopen(f"{server_url}/health", timeout=0.2) as response:
+                if response.status == 200:
+                    break
+        except OSError:
+            pass
+        if time.monotonic() >= deadline:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+            raise RuntimeError("stateful server did not become healthy within 10 seconds")
+        time.sleep(0.05)
+
+    try:
+        yield {
+            "STATEFUL_SERVER_URL": server_url,
+            "STATEFUL_SERVER_TOKEN": token,
+            "STATEFUL_WORKSPACE_ID": workspace_id,
+        }
+    finally:
+        signal_denied = False
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except PermissionError:
+            try:
+                process.terminate()
+            except PermissionError:
+                signal_denied = True
+        except ProcessLookupError:
+            pass
+        if not signal_denied:
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except PermissionError:
+                    try:
+                        process.kill()
+                    except PermissionError:
+                        signal_denied = True
+                except ProcessLookupError:
+                    pass
+                if not signal_denied:
+                    process.wait()
 
 
 def launch_agent(
@@ -255,6 +360,8 @@ def launch_agent(
     cfg: RunConfig,
 ) -> AgentHandle:
     env = omp_environment(arm_dir, agent_id)
+    if cfg.stateful_runtime_env:
+        env.update(cfg.stateful_runtime_env)
     copy_openai_codex_auth(Path.home(), Path(env["HOME"]))
     copy_stateful_omp_agent_db(Path.home(), Path(env["PI_CODING_AGENT_DIR"]))
     prepare_environment(env, workspace, mode, cfg.stateful_binary)
@@ -327,6 +434,8 @@ def run_arm(
     out_dir: Path,
     cfg: RunConfig,
     launch: Callable[[Path, Path, str, Path, str, RunConfig], AgentHandle] = launch_agent,
+    server=arm_stateful_server,
+    suite_run: Callable = subprocess.run,
 ) -> dict:
     if arm not in {"sequential", "parallel-off", "parallel-on"}:
         raise ValueError(f"unknown arm: {arm}")
@@ -346,6 +455,15 @@ def run_arm(
     final_prompt.write_text(render_final_prompt(), encoding="utf-8")
 
     mode = "stateful" if arm == "parallel-on" else "no-state"
+    server_context = server(arm_dir, cfg) if arm == "parallel-on" else nullcontext({})
+    try:
+        runtime_env = server_context.__enter__()
+        cfg = replace(cfg, stateful_runtime_env=runtime_env or None)
+    except Exception as exc:
+        result = _empty_arm_result(arm, trial, str(exc))
+        arm_dir.mkdir(parents=True, exist_ok=True)
+        (arm_dir / "results.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+        return result
     agents: list[dict] = []
     task_handles: list[AgentHandle] = []
     task_started: float | None = None
@@ -394,9 +512,14 @@ def run_arm(
                 except Exception:
                     pass
 
+    try:
+        server_context.__exit__(None, None, None)
+    except Exception as exc:
+        error = str(exc)
+
     post_suite_ok = False
     if final_ended is not None:
-        post_suite_ok = subprocess.run(
+        post_suite_ok = suite_run(
             [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", "."],
             cwd=workspace,
             stdout=subprocess.DEVNULL,
@@ -411,7 +534,7 @@ def run_arm(
     result = {
         "arm": arm,
         "trial": trial,
-        "cleared": error is None and len(agents) == expected_agents and all(
+        "cleared": post_suite_ok and error is None and len(agents) == expected_agents and all(
             record["exit_code"] == 0 and not record["timed_out"] for record in agents
         ),
         "error": error,

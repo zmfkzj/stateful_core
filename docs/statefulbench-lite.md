@@ -6,7 +6,7 @@ Every arm/trial creates a fresh repository checkout shared only by the agents in
 
 ## Completion and results
 
-An arm is `cleared` only when every task agent and the final reviewer exit with code 0 without timing out. `post_suite_ok` is an informational post-final execution smoke result only; it is never behavioral grading or a `cleared` criterion.
+An arm is `cleared` only when every task agent and the final reviewer exit with code 0 without timing out **and** the post-final full suite passes. `post_suite_ok: false` is an arm failure and therefore forces `cleared: false`; it remains a smoke gate rather than a behavioral-quality score.
 
 Each agent record contains:
 
@@ -40,7 +40,7 @@ Each arm/trial `results.json` record contains:
 }
 ```
 
-`summary.json` contains `model`, `thinking`, `tasks`, `trials`, `generated_at`, and `arms`. The harness also prints one markdown-table row per arm and trial with `cleared`, `arm_wall_time_s`, `total_tokens`, `total_tool_calls`, and the informational `post_suite_ok`.
+`summary.json` contains `model`, `thinking`, `tasks`, `trials`, `generated_at`, and `arms`. The harness also prints one markdown-table row per arm and trial with `cleared`, `arm_wall_time_s`, `total_tokens`, `total_tool_calls`, and `post_suite_ok`. Tool calls come from OMP's explicit usage count when present, otherwise from `tool_execution_start` events. The `parallel-on` arm starts one enforcement server per arm/trial and gives every agent in that arm the same server URL and token.
 
 ## Commands
 
