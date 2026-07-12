@@ -70,7 +70,7 @@ class DockerRuntimeTests(unittest.TestCase):
             with (
                 patch.object(self.entry.os, "setsid") as setsid,
                 patch.object(self.entry.os, "getpid", return_value=42),
-                patch.object(self.entry.os, "getpgrp", return_value=42),
+                patch.object(self.entry.os, "getpgrp", side_effect=[41, 42]),
                 patch.object(self.entry.os, "replace") as replace,
                 patch.object(self.entry.os, "execvpe", side_effect=RuntimeError("exec")) as execvpe,
             ):
@@ -81,6 +81,47 @@ class DockerRuntimeTests(unittest.TestCase):
             setsid.assert_called_once_with()
             replace.assert_called_once_with(temporary, pid_file)
             execvpe.assert_called_once_with("/usr/bin/env", ["/usr/bin/env", "true"], os.environ)
+
+    def test_entrypoint_forks_group_leader_and_records_exec_child_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pid_file = Path(directory) / "agent.pid.json"
+            temporary = pid_file.with_suffix(".tmp")
+            with (
+                patch.object(self.entry.os, "fork", return_value=0) as fork,
+                patch.object(self.entry.os, "setsid") as setsid,
+                patch.object(self.entry.os, "getpid", side_effect=[42, 99]),
+                patch.object(self.entry.os, "getpgrp", side_effect=[42, 99]),
+                patch.object(self.entry.os, "replace") as replace,
+                patch.object(self.entry.os, "execvpe", side_effect=RuntimeError("exec")) as execvpe,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "exec"):
+                    self.entry.main(["entry", str(pid_file), "/usr/bin/env", "true"])
+
+            assert json.loads(temporary.read_text(encoding="utf-8")) == {"pid": 99, "pgid": 99}
+            fork.assert_called_once_with()
+            setsid.assert_called_once_with()
+            replace.assert_called_once_with(temporary, pid_file)
+            execvpe.assert_called_once_with("/usr/bin/env", ["/usr/bin/env", "true"], os.environ)
+
+    def test_entrypoint_group_leader_parent_waits_for_child_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pid_file = Path(directory) / "agent.pid.json"
+            with (
+                patch.object(self.entry.os, "fork", return_value=99) as fork,
+                patch.object(self.entry.os, "setsid") as setsid,
+                patch.object(self.entry.os, "getpid", return_value=42),
+                patch.object(self.entry.os, "getpgrp", return_value=42),
+                patch.object(self.entry.os, "waitpid", return_value=(99, 0)) as waitpid,
+                patch.object(self.entry.os, "execvpe", side_effect=RuntimeError("exec")),
+            ):
+                self.assertEqual(
+                    self.entry.main(["entry", str(pid_file), "/usr/bin/env", "true"]),
+                    0,
+                )
+
+        fork.assert_called_once_with()
+        waitpid.assert_called_once_with(99, 0)
+        setsid.assert_not_called()
 
 
 if __name__ == "__main__":

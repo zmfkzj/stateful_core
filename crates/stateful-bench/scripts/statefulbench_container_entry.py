@@ -8,6 +8,11 @@ from pathlib import Path
 def main(argv: list[str]) -> int:
     if len(argv) < 3:
         raise SystemExit("usage: statefulbench-container-entry PID_FILE COMMAND [ARG ...]")
+    if os.getpid() == os.getpgrp():
+        child = os.fork()
+        if child:
+            _, status = os.waitpid(child, 0)
+            return os.waitstatus_to_exitcode(status)
     pid_file = Path(argv[1])
     os.setsid()
     record = {"pid": os.getpid(), "pgid": os.getpgrp()}
