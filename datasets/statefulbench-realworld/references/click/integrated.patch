@@ -1,14 +1,8 @@
 diff --git a/src/click/core.py b/src/click/core.py
-index cc8fb47..413f53f 100644
+index cc8fb47..d53742b 100644
 --- a/src/click/core.py
 +++ b/src/click/core.py
-@@ -1,10 +1,13 @@
- from __future__ import annotations
- 
-+import asyncio
- import collections.abc as cabc
-+import contextvars
- import enum
+@@ -5,6 +5,7 @@ import enum
  import errno
  import inspect
  import os
@@ -16,7 +10,7 @@ index cc8fb47..413f53f 100644
  import sys
  import typing as t
  from abc import ABC
-@@ -505,6 +508,8 @@ class Context:
+@@ -505,6 +506,8 @@ class Context:
          self._close_callbacks = []
          self._depth = 0
          self._parameter_source = {}
@@ -25,7 +19,7 @@ index cc8fb47..413f53f 100644
          # Tracks whether the option that currently owns each parameter slot in
          # :attr:`params` had its ``default`` set explicitly by the user. Used
          # to tie-break feature-switch groups where multiple options share a
-@@ -724,8 +729,8 @@ class Context:
+@@ -724,8 +727,8 @@ class Context:
              parent_command_path = [self.parent.command_path]
  
              if isinstance(self.parent.command, Command):
@@ -36,7 +30,7 @@ index cc8fb47..413f53f 100644
  
              rv = f"{' '.join(parent_command_path)} {rv}"
          return rv.lstrip()
-@@ -899,6 +904,20 @@ class Context:
+@@ -899,6 +902,20 @@ class Context:
                      if default_value is UNSET:
                          default_value = None
                      kwargs[param.name] = param.type_cast_value(ctx, default_value)
@@ -57,7 +51,7 @@ index cc8fb47..413f53f 100644
  
              # Track all kwargs as params, so that forward() will pass
              # them on in subsequent calls.
-@@ -1101,7 +1120,7 @@ class Command:
+@@ -1101,7 +1118,7 @@ class Command:
          return formatter.getvalue().rstrip("\n")
  
      def get_params(self, ctx: Context) -> list[Parameter]:
@@ -66,7 +60,7 @@ index cc8fb47..413f53f 100644
          help_option = self.get_help_option(ctx)
  
          if help_option is not None:
-@@ -1356,6 +1375,14 @@ class Command:
+@@ -1356,6 +1373,14 @@ class Command:
              self.parse_args(ctx, args)
          return ctx
  
@@ -81,13 +75,15 @@ index cc8fb47..413f53f 100644
      def parse_args(self, ctx: Context, args: list[str]) -> list[str]:
          if not args and self.no_args_is_help and not ctx.resilient_parsing:
              raise NoArgsIsHelpError(ctx)
-@@ -1990,10 +2017,65 @@ class Group(Command):
+@@ -1990,10 +2015,70 @@ class Group(Command):
          return ctx.args
  
      def invoke(self, ctx: Context) -> t.Any:
 +        def _run_awaitable(value: t.Any) -> t.Any:
 +            if not inspect.isawaitable(value):
 +                return value
++
++            import asyncio
 +
 +            try:
 +                asyncio.get_running_loop()
@@ -107,6 +103,8 @@ index cc8fb47..413f53f 100644
 +                if not inspect.isawaitable(value):
 +                    return value
 +
++                import asyncio
++
 +                async def runner() -> t.Any:
 +                    return await value
 +
@@ -117,6 +115,7 @@ index cc8fb47..413f53f 100644
 +
 +                result: list[t.Any] = []
 +                error: list[BaseException] = []
++                import contextvars
 +                copied_context = contextvars.copy_context()
 +
 +                def run_in_thread() -> None:
@@ -148,7 +147,7 @@ index cc8fb47..413f53f 100644
  
          if not ctx._protected_args:
              if self.invoke_without_command:
-@@ -2020,10 +2102,10 @@ class Group(Command):
+@@ -2020,10 +2105,10 @@ class Group(Command):
                  cmd_name, cmd, args = self.resolve_command(ctx, args)
                  assert cmd is not None
                  ctx.invoked_subcommand = cmd_name
@@ -161,7 +160,7 @@ index cc8fb47..413f53f 100644
  
          # In chain mode we create the contexts step by step, but after the
          # base command has been invoked.  Because at that point we do not
-@@ -2032,7 +2114,7 @@ class Group(Command):
+@@ -2032,7 +2117,7 @@ class Group(Command):
          # but nothing else.
          with ctx:
              ctx.invoked_subcommand = "*" if args else None
@@ -170,7 +169,7 @@ index cc8fb47..413f53f 100644
  
              # Otherwise we make every single context and invoke them in a
              # chain.  In that case the return value to the result processor
-@@ -2054,7 +2136,7 @@ class Group(Command):
+@@ -2054,7 +2139,7 @@ class Group(Command):
              rv = []
              for sub_ctx in contexts:
                  with sub_ctx:
@@ -179,7 +178,7 @@ index cc8fb47..413f53f 100644
              return _process_result(rv)
  
      def resolve_command(
-@@ -3274,7 +3356,10 @@ class Option(Parameter):
+@@ -3274,7 +3359,10 @@ class Option(Parameter):
                  any_prefix_is_slash = True
  
              if not self.is_flag and not self.count:
