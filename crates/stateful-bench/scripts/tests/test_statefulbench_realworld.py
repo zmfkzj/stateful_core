@@ -263,6 +263,17 @@ class CorpusTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "path"):
                     self.mod.load_corpus(self.corpus_path)
 
+    def test_load_corpus_rejects_evaluator_traversal_outside_evaluators(self) -> None:
+        data = self.load_data()
+        data["tasks"][0]["evaluator"] = "evaluators/../pyproject.toml"
+        data["evaluators"][0] = "evaluators/../pyproject.toml"
+        self.write_data(data)
+
+        with self.assertRaisesRegex(ValueError, "evaluator"):
+            self.mod.load_corpus(self.corpus_path)
+
+        self.assertFalse((self.dataset_root / "pyproject.toml").exists())
+
     def test_load_corpus_requires_nonempty_path_and_symbol_anchors(self) -> None:
         cases = (
             [],
@@ -919,6 +930,8 @@ class RealWorldRunnerTests(unittest.TestCase):
 
     def run_arm(self, arm, events, **kwargs):
         suite_ok = kwargs.pop("suite_ok", True)
+        evaluator = kwargs.pop("evaluator", lambda *_: True)
+        suite = kwargs.pop("suite", lambda *_: suite_ok)
         return self.mod.run_repo_arm(
             self.repo,
             self.corpus,
@@ -931,8 +944,8 @@ class RealWorldRunnerTests(unittest.TestCase):
             workspace_factory=self.workspace,
             archive_loader=lambda *_: self.root / "archive.tar.gz",
             setup=lambda *_: True,
-            evaluator=lambda *_: True,
-            suite=lambda *_: suite_ok,
+            evaluator=evaluator,
+            suite=suite,
             **kwargs,
         )
 
@@ -997,6 +1010,126 @@ class RealWorldRunnerTests(unittest.TestCase):
         self.assertFalse(agent_failed["cleared"])
         self.assertEqual(len(suite_failed["agents"]), 11)
         self.assertEqual(len(agent_failed["agents"]), 11)
+
+
+    def test_parallel_launch_error_reaps_already_started_agents(self) -> None:
+        events = []
+
+        class Process:
+            def __init__(self, agent_id):
+                self.agent_id = agent_id
+                self.pid = 1
+                self.returncode = None
+
+            def wait(self, timeout=None):
+                events.append(("wait", self.agent_id))
+                self.returncode = 0
+                return 0
+
+        def launch(arm_dir, workspace, agent_id, prompt_path, mode, cfg):
+            if agent_id == "task-3":
+                raise RuntimeError("launch failed")
+            events.append(("launch", agent_id))
+            log = arm_dir / "logs" / f"{agent_id}.stdout.log"
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text("", encoding="utf-8")
+            return self.mod.AgentHandle(Process(agent_id), agent_id, 0.0)
+
+        result = self.mod.run_repo_arm(
+            self.repo,
+            self.corpus,
+            self.dataset,
+            self.root / "cache",
+            self.root / "out",
+            "parallel-off",
+            self.mod.RunConfig(tasks=10, stateful_binary="/tmp/stateful"),
+            launch=launch,
+            workspace_factory=self.workspace,
+            archive_loader=lambda *_: self.root / "archive.tar.gz",
+            setup=lambda *_: True,
+            evaluator=lambda *_: True,
+            suite=lambda *_: True,
+        )
+
+        self.assertEqual(result["error"], "launch failed")
+        self.assertEqual([event[1] for event in events if event[0] == "launch"], ["task-0", "task-1", "task-2"])
+        self.assertEqual([event[1] for event in events if event[0] == "wait"], ["task-0", "task-1", "task-2"])
+        self.assertNotIn(("launch", "final"), events)
+
+    def test_agents_receive_workspace_virtualenv_environment(self) -> None:
+        events = []
+        venv = self.root / "workspace-venv"
+        expected_env = {"VIRTUAL_ENV": str(venv), "PATH": f"{venv / 'bin'}:/usr/bin"}
+
+        @contextlib.contextmanager
+        def workspace(*_args):
+            workspace = self.root / "workspace-with-venv"
+            workspace.mkdir(exist_ok=True)
+            yield workspace, Path(sys.executable), expected_env
+
+        def launch(arm_dir, workspace, agent_id, prompt_path, mode, cfg):
+            self.assertEqual(cfg.launch_env, expected_env)
+            return self.fake_launch(events)(arm_dir, workspace, agent_id, prompt_path, mode, cfg)
+
+        result = self.mod.run_repo_arm(
+            self.repo,
+            self.corpus,
+            self.dataset,
+            self.root / "cache",
+            self.root / "out",
+            "parallel-off",
+            self.mod.RunConfig(tasks=10, stateful_binary="/tmp/stateful"),
+            launch=launch,
+            workspace_factory=workspace,
+            archive_loader=lambda *_: self.root / "archive.tar.gz",
+            setup=lambda *_: True,
+            evaluator=lambda *_: True,
+            suite=lambda *_: True,
+        )
+
+        self.assertTrue(result["cleared"], result)
+
+    def test_final_mutation_of_injected_evaluator_cannot_change_grading(self) -> None:
+        events = []
+        seen = []
+
+        def mutate_injected(workspace):
+            evaluator = workspace / ".statefulbench-evaluators" / "task-0.py"
+            evaluator.unlink()
+            evaluator.write_text("raise SystemExit(0)\n", encoding="utf-8")
+
+        def evaluator(path, *_args):
+            seen.append(path)
+            self.assertEqual(path.read_text(encoding="utf-8"), "print('evaluator')\n")
+            return True
+
+        result = self.run_arm(
+            "parallel-off",
+            events,
+            launch_kwargs={"final_check": mutate_injected},
+            evaluator=evaluator,
+        )
+
+        self.assertTrue(result["cleared"], result)
+        self.assertEqual(seen, [(self.dataset / f"evaluators/task-{index}.py").resolve() for index in range(10)])
+
+    def test_all_evaluators_and_suite_run_after_an_evaluator_failure(self) -> None:
+        events = []
+        calls = []
+
+        def evaluator(path, *_args):
+            calls.append(path.name)
+            return path.name != "task-0.py"
+
+        def suite(*_args):
+            calls.append("suite")
+            return True
+
+        result = self.run_arm("parallel-off", events, evaluator=evaluator, suite=suite)
+
+        self.assertFalse(result["evaluators_ok"])
+        self.assertTrue(result["upstream_suite_ok"])
+        self.assertEqual(calls, [f"task-{index}.py" for index in range(10)] + ["suite"])
 
     def test_run_help_lists_required_realworld_arguments(self) -> None:
         stdout = io.StringIO()

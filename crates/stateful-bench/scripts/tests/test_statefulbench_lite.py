@@ -270,6 +270,38 @@ class StatefulBenchLiteTests(unittest.TestCase):
         process.terminate.assert_called_once_with()
         process.wait.assert_called_once_with(timeout=5)
 
+    def test_launch_agent_merges_workspace_virtualenv_environment_before_popen(self):
+        process = Mock()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            venv = workspace / ".statefulbench-venv"
+            launch_env = {
+                "VIRTUAL_ENV": str(venv),
+                "PATH": f"{venv / 'bin'}:/usr/bin",
+            }
+            with (
+                patch.object(self.mod, "omp_environment", return_value={"HOME": str(root / "home"), "PI_CODING_AGENT_DIR": str(root / "agent")}),
+                patch.object(self.mod, "copy_openai_codex_auth"),
+                patch.object(self.mod, "copy_stateful_omp_agent_db"),
+                patch.object(self.mod, "prepare_environment"),
+                patch.object(self.mod, "omp_command", return_value=["omp"]),
+                patch.object(self.mod.subprocess, "Popen", return_value=process) as popen,
+            ):
+                self.mod.launch_agent(
+                    root,
+                    workspace,
+                    "task",
+                    root / "task.prompt.txt",
+                    "no-state",
+                    self.mod.RunConfig(launch_env=launch_env),
+                )
+
+        launched_env = popen.call_args.kwargs["env"]
+        self.assertEqual(launched_env["VIRTUAL_ENV"], str(venv))
+        self.assertEqual(launched_env["PATH"], f"{venv / 'bin'}:/usr/bin")
+
     def test_parallel_on_shares_one_arm_server_across_agents(self):
         events = []
 

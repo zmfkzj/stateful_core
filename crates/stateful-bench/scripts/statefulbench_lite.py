@@ -98,6 +98,7 @@ class RunConfig:
     omp_bin: str = "omp"
     stateful_binary: str | None = None
     stateful_runtime_env: dict[str, str] | None = None
+    launch_env: dict[str, str] | None = None
     trial: int = 1
 
 
@@ -360,6 +361,8 @@ def launch_agent(
     cfg: RunConfig,
 ) -> AgentHandle:
     env = omp_environment(arm_dir, agent_id)
+    if cfg.launch_env:
+        env.update(cfg.launch_env)
     if cfg.stateful_runtime_env:
         env.update(cfg.stateful_runtime_env)
     copy_openai_codex_auth(Path.home(), Path(env["HOME"]))

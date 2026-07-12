@@ -258,6 +258,24 @@ def _require_dataset_path(entry: dict, field: str, dataset_root: Path) -> None:
         raise ValueError(f"{field} path must remain below the dataset root")
 
 
+
+def _canonical_evaluator_path(entry: dict, dataset_root: Path) -> Path:
+    value = _require_string(entry, "evaluator")
+    candidate = Path(value)
+    evaluators_root = (dataset_root / "evaluators").resolve()
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise ValueError("evaluator path must remain below the evaluators directory")
+    try:
+        relative = candidate.relative_to("evaluators")
+    except ValueError as error:
+        raise ValueError("evaluator path must remain below the evaluators directory") from error
+    if relative == Path("."):
+        raise ValueError("evaluator path must name a file below the evaluators directory")
+    resolved = (dataset_root / candidate).resolve()
+    if not resolved.is_relative_to(evaluators_root):
+        raise ValueError("evaluator path must remain below the evaluators directory")
+    return resolved
+
 def _require_github_sources(entry: dict) -> None:
     sources = entry["sources"]
     if type(sources) is not list or not sources:
@@ -329,7 +347,7 @@ def _validate_task(
     if not _HEX_64.fullmatch(_require_string(entry, "source_hash")):
         raise ValueError("source_hash has invalid SHA format")
     _require_acceptance(entry)
-    _require_dataset_path(entry, "evaluator", dataset_root)
+    _canonical_evaluator_path(entry, dataset_root)
     _require_dataset_path(entry, "reference_patch", dataset_root)
 
     anchors = entry["overlap_anchors"]
@@ -364,7 +382,7 @@ def load_corpus(path: Path) -> dict:
     for evaluator in evaluators:
         if type(evaluator) is not str or not evaluator:
             raise ValueError("evaluators must be a non-empty array")
-        _require_dataset_path({"evaluator": evaluator}, "evaluator", dataset_root)
+        _canonical_evaluator_path({"evaluator": evaluator}, dataset_root)
 
     tasks = corpus["tasks"]
     if type(tasks) is not list or len(tasks) != 10:
@@ -910,12 +928,13 @@ def _inject_evaluators(corpus: dict, dataset_root: Path, workspace: Path) -> lis
     injected = workspace / ".statefulbench-evaluators"
     paths = []
     for task in corpus["tasks"]:
-        relative = Path(task["evaluator"])
-        source = dataset_root / relative
-        destination = injected / relative.relative_to("evaluators")
+        source = _canonical_evaluator_path(task, dataset_root)
+        destination = injected / source.relative_to((dataset_root / "evaluators").resolve())
         destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.unlink(missing_ok=True)
         shutil.copyfile(source, destination)
-        paths.append(destination)
+        destination.chmod(0o444)
+        paths.append(source)
     return paths
 
 
@@ -976,9 +995,13 @@ def run_repo_arm(
     error: str | None = None
     evaluators_ok = False
     upstream_suite_ok = False
+    pending: list[tuple[AgentHandle, str]] = []
+
 
     def wait(handle: AgentHandle, kind: str) -> tuple[dict, float]:
-        return _LITE._wait_agent(handle, arm_dir, kind, cfg)
+        record, ended = _LITE._wait_agent(handle, arm_dir, kind, cfg)
+        pending.remove((handle, kind))
+        return record, ended
 
     try:
         archive = archive_loader(repo, cache_dir)
@@ -993,11 +1016,16 @@ def run_repo_arm(
             mode = "stateful" if arm == "parallel-on" else "no-state"
             server_context = server(arm_dir, cfg) if arm == "parallel-on" else nullcontext({})
             with server_context as runtime_env:
-                runtime_cfg = replace(cfg, stateful_runtime_env=runtime_env or None)
+                runtime_cfg = replace(
+                    cfg,
+                    launch_env={name: env[name] for name in ("VIRTUAL_ENV", "PATH") if name in env},
+                    stateful_runtime_env=runtime_env or None,
+                )
 
                 def start(task: dict, prompt: Path) -> AgentHandle:
                     nonlocal task_started, arm_started
                     handle = launch(arm_dir, workspace, task["key"], prompt, mode, runtime_cfg)
+                    pending.append((handle, "task"))
                     started = getattr(handle, "started_monotonic", time.monotonic())
                     task_started = started if task_started is None else min(task_started, started)
                     arm_started = started if arm_started is None else min(arm_started, started)
@@ -1009,28 +1037,46 @@ def run_repo_arm(
                         agents.append(record)
                         task_ended = ended
                 else:
-                    handles = [start(task, prompt) for task, prompt in tasks]
+                    handles = []
+                    for task, prompt in tasks:
+                        handles.append(start(task, prompt))
                     for handle in handles:
                         record, ended = wait(handle, "task")
                         agents.append(record)
                         task_ended = ended if task_ended is None else max(task_ended, ended)
 
                 evaluator_paths = _inject_evaluators(corpus, manifest_dir, workspace)
+                evaluator_hashes = {path: _sha256(path) for path in evaluator_paths}
                 final_handle = launch(arm_dir, workspace, "final", final_prompt, mode, runtime_cfg)
+                pending.append((final_handle, "final"))
                 final_started = getattr(final_handle, "started_monotonic", time.monotonic())
                 arm_started = final_started if arm_started is None else min(arm_started, final_started)
                 final_record, final_ended = wait(final_handle, "final")
                 agents.append(final_record)
 
-                evaluators_ok = all(
+                if any(_sha256(path) != digest for path, digest in evaluator_hashes.items()):
+                    raise RuntimeError("canonical evaluator changed during agent execution")
+                evaluator_results = [
                     evaluator(path, workspace, python, env, artifacts, artifact_dir, task["key"])
                     for path, (task, _) in zip(evaluator_paths, tasks, strict=True)
-                )
+                ]
+                evaluators_ok = all(evaluator_results)
                 upstream_suite_ok = suite(
                     repo, workspace, python, env, artifacts, artifact_dir, "post-final"
                 )
     except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
         error = str(exc)
+    finally:
+        for handle, kind in pending[:]:
+            try:
+                record, ended = wait(handle, kind)
+            except (OSError, subprocess.SubprocessError):
+                continue
+            agents.append(record)
+            if kind == "task":
+                task_ended = ended if task_ended is None else max(task_ended, ended)
+            else:
+                final_ended = ended
 
     post_suite_ok = evaluators_ok and upstream_suite_ok
     tasks_wall_time_s = (
