@@ -601,7 +601,9 @@ def _rust_tool_directories(workspace: Path | None) -> tuple[str, ...]:
 
 
 def _sanitized_environment(
-    venv: Path | None = None, workspace: Path | None = None
+    venv: Path | None = None,
+    workspace: Path | None = None,
+    pip_cache_dir: Path | None = None,
 ) -> dict[str, str]:
     path_parts = [str(venv / "bin")] if venv is not None else []
     path_parts.extend(_rust_tool_directories(workspace))
@@ -613,18 +615,20 @@ def _sanitized_environment(
         runtime_root = workspace.parent / ".statefulbench-runtime"
         locations = {
             "HOME": runtime_root / "home",
-            "PIP_CACHE_DIR": runtime_root / "pip-cache",
             "TMPDIR": runtime_root / "tmp",
             "CARGO_HOME": runtime_root / "cargo-home",
         }
         for name, location in locations.items():
             location.mkdir(parents=True, exist_ok=True)
             env[name] = str(location)
+        pip_cache_dir = pip_cache_dir or runtime_root / "pip-cache"
+        pip_cache_dir.mkdir(parents=True, exist_ok=True)
+        env["PIP_CACHE_DIR"] = str(pip_cache_dir)
     return env
 
 
 def _repository_environment(repo: dict, environment: dict[str, str]) -> dict[str, str]:
-    return {**environment, **repo.get("environment", {})}
+    return {**repo.get("environment", {}), **environment}
 
 
 def _venv_argv(argv: list[str], python: Path) -> list[str]:
@@ -641,6 +645,7 @@ def _fresh_workspace(
     artifacts: dict[str, dict[str, str]],
     artifact_dir: Path,
     label: str,
+    pip_cache_dir: Path | None = None,
 ):
     interpreter = verified_python(repo["python"])
     with tempfile.TemporaryDirectory(prefix="statefulbench-qualify-", dir=cache_dir) as temporary:
@@ -682,11 +687,17 @@ def _fresh_workspace(
             artifacts,
             artifact_dir,
             f"{label}:venv",
-            env=_sanitized_environment(workspace=workspace),
+            env=_sanitized_environment(workspace=workspace, pip_cache_dir=pip_cache_dir),
         )
         python = venv / "bin" / "python"
         yield (
-            (workspace, python, _repository_environment(repo, _sanitized_environment(venv, workspace)))
+            (
+                workspace,
+                python,
+                _repository_environment(
+                    repo, _sanitized_environment(venv, workspace, pip_cache_dir)
+                ),
+            )
             if initialized.returncode == 0
             and indexed.returncode == 0
             and committed.returncode == 0
@@ -872,11 +883,12 @@ def _qualify_base_suite(
     repo: dict,
     archive: Path,
     cache_dir: Path,
+    pip_cache_dir: Path,
     artifacts: dict[str, dict[str, str]],
     artifact_dir: Path,
 ) -> bool:
     with _fresh_workspace(
-        repo, archive, cache_dir, artifacts, artifact_dir, "base-suite"
+        repo, archive, cache_dir, artifacts, artifact_dir, "base-suite", pip_cache_dir
     ) as fresh:
         if fresh is None:
             return False
@@ -894,13 +906,20 @@ def _qualify_task(
     dataset_root: Path,
     archive: Path,
     cache_dir: Path,
+    pip_cache_dir: Path,
     artifacts: dict[str, dict[str, str]],
     artifact_dir: Path,
 ) -> dict:
     evaluator = dataset_root / task["evaluator"]
     base_red = False
     with _fresh_workspace(
-        repo, archive, cache_dir, artifacts, artifact_dir, f"{task['key']}:base"
+        repo,
+        archive,
+        cache_dir,
+        artifacts,
+        artifact_dir,
+        f"{task['key']}:base",
+        pip_cache_dir,
     ) as fresh:
         if fresh is not None:
             workspace, python, env = fresh
@@ -913,7 +932,13 @@ def _qualify_task(
     reference_green = False
     changed_hunks: dict[str, list[tuple[int, int]]] = {}
     with _fresh_workspace(
-        repo, archive, cache_dir, artifacts, artifact_dir, f"{task['key']}:reference"
+        repo,
+        archive,
+        cache_dir,
+        artifacts,
+        artifact_dir,
+        f"{task['key']}:reference",
+        pip_cache_dir,
     ) as fresh:
         if fresh is not None:
             workspace, python, env = fresh
@@ -964,13 +989,14 @@ def _qualify_integration(
     dataset_root: Path,
     archive: Path,
     cache_dir: Path,
+    pip_cache_dir: Path,
     artifacts: dict[str, dict[str, str]],
     artifact_dir: Path,
 ) -> tuple[bool, bool]:
     integrated_green = False
     upstream_green = False
     with _fresh_workspace(
-        repo, archive, cache_dir, artifacts, artifact_dir, "integrated"
+        repo, archive, cache_dir, artifacts, artifact_dir, "integrated", pip_cache_dir
     ) as fresh:
         if fresh is not None:
             workspace, python, env = fresh
@@ -1014,22 +1040,38 @@ def qualify_repository(repo: dict, corpus: dict, manifest_dir: Path, cache_dir: 
     artifacts: dict[str, dict[str, str]] = {}
     dataset_root = manifest_dir.resolve()
     archive = ensure_archive(repo, cache_dir)
+    pip_cache_dir = cache_dir / "pip-cache"
+    pip_cache_dir.mkdir(parents=True, exist_ok=True)
     try:
         with tarfile.open(archive, "r:gz") as source:
             source.getmembers()
     except tarfile.TarError as error:
         raise ValueError("archive is unreadable") from error
     base_suite_green = _qualify_base_suite(
-        repo, archive, cache_dir, artifacts, artifact_dir
+        repo, archive, cache_dir, pip_cache_dir, artifacts, artifact_dir
     )
     tasks = [
         _qualify_task(
-            repo, task, dataset_root, archive, cache_dir, artifacts, artifact_dir
+            repo,
+            task,
+            dataset_root,
+            archive,
+            cache_dir,
+            pip_cache_dir,
+            artifacts,
+            artifact_dir,
         )
         for task in corpus["tasks"]
     ]
     integrated_green, upstream_green = _qualify_integration(
-        repo, corpus, dataset_root, archive, cache_dir, artifacts, artifact_dir
+        repo,
+        corpus,
+        dataset_root,
+        archive,
+        cache_dir,
+        pip_cache_dir,
+        artifacts,
+        artifact_dir,
     )
     changed_sets = [set(task["changed_anchors"]) for task in tasks]
     isolated_tasks = [
@@ -1213,8 +1255,16 @@ def run_repo_arm(
 
     try:
         archive = archive_loader(repo, cache_dir)
+        pip_cache_dir = cache_dir / "pip-cache"
+        pip_cache_dir.mkdir(parents=True, exist_ok=True)
         with workspace_factory(
-            repo, archive, cache_dir, artifacts, artifact_dir, f"run:{arm}:trial-{trial}"
+            repo,
+            archive,
+            cache_dir,
+            artifacts,
+            artifact_dir,
+            f"run:{arm}:trial-{trial}",
+            pip_cache_dir,
         ) as materialized:
             if materialized is None:
                 raise RuntimeError("unable to create benchmark workspace")

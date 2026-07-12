@@ -467,6 +467,44 @@ class ManifestTests(unittest.TestCase):
         self.assertNotIn("PYTHONPATH", environment)
         self.assertNotIn("UNRELATED_HOST_SETTING", environment)
 
+
+    def test_explicit_pip_cache_is_shared_while_workspace_runtime_isolated(self) -> None:
+        pip_cache = Path(self.tempdir.name) / "benchmark-cache" / "pip-cache"
+        first_workspace = Path(self.tempdir.name) / "first" / "workspace"
+        second_workspace = Path(self.tempdir.name) / "second" / "workspace"
+        with mock.patch.object(self.mod, "_rust_tool_directories", return_value=()):
+            first = self.mod._sanitized_environment(
+                workspace=first_workspace, pip_cache_dir=pip_cache
+            )
+            second = self.mod._sanitized_environment(
+                workspace=second_workspace, pip_cache_dir=pip_cache
+            )
+
+        self.assertEqual(first["PIP_CACHE_DIR"], str(pip_cache))
+        self.assertEqual(second["PIP_CACHE_DIR"], str(pip_cache))
+        self.assertTrue(pip_cache.is_dir())
+        for name in ("HOME", "TMPDIR", "CARGO_HOME"):
+            self.assertNotEqual(first[name], second[name])
+            self.assertFalse(Path(first[name]).is_relative_to(first_workspace))
+            self.assertFalse(Path(second[name]).is_relative_to(second_workspace))
+
+    def test_repository_environment_cannot_override_protected_runtime_paths(self) -> None:
+        protected = {"HOME": "/runtime/home", "PIP_CACHE_DIR": "/cache/pip-cache"}
+
+        environment = self.mod._repository_environment(
+            {
+                "environment": {
+                    "HOME": "/repository/home",
+                    "PIP_CACHE_DIR": "/repository/pip-cache",
+                    "PROJECT_SETTING": "enabled",
+                }
+            },
+            protected,
+        )
+
+        self.assertEqual(environment["HOME"], protected["HOME"])
+        self.assertEqual(environment["PIP_CACHE_DIR"], protected["PIP_CACHE_DIR"])
+        self.assertEqual(environment["PROJECT_SETTING"], "enabled")
     def test_workspace_environment_falls_back_to_direct_resolved_rust_tools(self) -> None:
         workspace = Path(self.tempdir.name) / "workspace"
         rust_bin = Path(self.tempdir.name) / "direct-toolchain" / "bin"
@@ -1181,6 +1219,7 @@ class QualificationTests(unittest.TestCase):
             "assert 'PYTHONPATH' not in os.environ\n"
             "assert 'PYTHONHOME' not in os.environ\n"
             "assert os.environ['PROJECT_SETTING'] == 'enabled'\n"
+            f"assert os.environ['PIP_CACHE_DIR'] == {str(self.cache / 'pip-cache')!r}\n"
             "assert 'task-0' in (Path(sys.argv[1]) / 'target.py').read_text()\n",
             encoding="utf-8",
         )
@@ -1193,6 +1232,7 @@ class QualificationTests(unittest.TestCase):
         self.assertTrue(repository["integrated_green"], result)
         self.assertFalse(repository["isolated_tasks"], result)
         self.assertEqual(status, 0, result)
+        self.assertTrue((self.cache / "pip-cache").is_dir())
 
     def test_changed_anchors_require_hunks_to_touch_the_symbol(self) -> None:
         source = self.root / "symbol-workspace" / "src" / "pkg" / "mod.py"
@@ -1226,6 +1266,7 @@ class QualificationTests(unittest.TestCase):
             ),
             {"src/pkg/__init__.py:pkg.from_timestamp"},
         )
+
 
     def test_changed_anchors_include_decorated_function_decorators(self) -> None:
         source = self.root / "symbol-workspace" / "src" / "pkg" / "decorated.py"
@@ -1592,10 +1633,12 @@ class RealWorldRunnerTests(unittest.TestCase):
 
     def test_agent_launch_environment_omits_rustup_home(self) -> None:
         events = []
+        workspace_arguments = []
         workspace_env = {"PATH": "/toolchain/bin:/usr/bin", "RUSTUP_HOME": "/host/rustup"}
 
         @contextlib.contextmanager
-        def workspace(*_args):
+        def workspace(*args):
+            workspace_arguments.append(args)
             workspace = self.root / "workspace-with-rustup"
             workspace.mkdir(exist_ok=True)
             yield workspace, Path(sys.executable), workspace_env
@@ -1621,6 +1664,10 @@ class RealWorldRunnerTests(unittest.TestCase):
         )
 
         self.assertTrue(result["cleared"], result)
+        self.assertEqual(
+            workspace_arguments[0][-1], self.root / "cache" / "pip-cache"
+        )
+        self.assertTrue((self.root / "cache" / "pip-cache").is_dir())
 
     def test_repository_environment_reaches_setup_evaluators_suite_and_agents(self) -> None:
         events = []

@@ -139,6 +139,7 @@ successfully before a live run. Qualification artifacts live at:
 ```text
 <cache>/
   <archive-sha256>.tar.gz
+  pip-cache/
   qualification/<repository>/artifacts/
     <number>.stdout.log
     <number>.stderr.log
@@ -146,6 +147,9 @@ successfully before a live run. Qualification artifacts live at:
 
 The content-addressed archive cache is reusable across qualification and runs.
 Delete it only to deliberately redownload and re-verify archives.
+`<cache>/pip-cache` is retained and shared by qualification and all run
+workspaces only as `PIP_CACHE_DIR`; each workspace keeps `HOME`, `TMPDIR`, and
+`CARGO_HOME` in its own runtime directory outside the checkout.
 
 ### Run the full benchmark
 
