@@ -1,0 +1,181 @@
+diff --git a/authlib/integrations/base_client/sync_app.py b/authlib/integrations/base_client/sync_app.py
+index 3c8f324..508eb2c 100644
+--- a/authlib/integrations/base_client/sync_app.py
++++ b/authlib/integrations/base_client/sync_app.py
+@@ -1,3 +1,4 @@
++from contextlib import contextmanager
+ import logging
+ import time
+ 
+@@ -233,7 +234,7 @@ class OAuth2Base:
+         session.headers["User-Agent"] = self._user_agent
+         return session
+ 
+-    def _get_oauth_client(self, **metadata):
++    def _get_oauth_client(self, token=None, **metadata):
+         client_kwargs = {}
+         client_kwargs.update(self.client_kwargs)
+         client_kwargs.update(metadata)
+@@ -242,6 +243,13 @@ class OAuth2Base:
+             client_kwargs["authorization_endpoint"] = self.authorize_url
+         if self.access_token_url:
+             client_kwargs["token_endpoint"] = self.access_token_url
++        if (
++            "grant_type" not in client_kwargs
++            and "authorization_endpoint" not in client_kwargs
++            and "token_endpoint" in client_kwargs
++            and not self.access_token_params
++        ):
++            client_kwargs["grant_type"] = "client_credentials"
+ 
+         session = self.client_cls(
+             client_id=self.client_id,
+@@ -257,6 +265,8 @@ class OAuth2Base:
+             self.compliance_fix(session)
+ 
+         session.headers["User-Agent"] = self._user_agent
++        if token is not None:
++            session.token = token
+         return session
+ 
+     @staticmethod
+@@ -305,6 +315,18 @@ class OAuth2Base:
+ 
+ 
+ class OAuth2Mixin(_RequestMixin, OAuth2Base):
++    @contextmanager
++    def client(self, token=None, request=None):
++        """Yield one authenticated OAuth client for multiple requests."""
++        if token is None:
++            token = self._get_requested_token(request)
++        if token is None:
++            raise MissingTokenError()
++
++        metadata = self.load_server_metadata()
++        with self._get_oauth_client(token=token, **metadata) as session:
++            yield session
++
+     def _on_update_token(self, token, refresh_token=None, access_token=None):
+         if callable(self._update_token):
+             self._update_token(
+diff --git a/authlib/integrations/httpx_client/oauth2_client.py b/authlib/integrations/httpx_client/oauth2_client.py
+index a157b7e..d79aae2 100644
+--- a/authlib/integrations/httpx_client/oauth2_client.py
++++ b/authlib/integrations/httpx_client/oauth2_client.py
+@@ -1,3 +1,4 @@
++import inspect
+ import typing
+ from contextlib import asynccontextmanager
+ 
+@@ -171,9 +172,13 @@ class AsyncOAuth2Client(_OAuth2Client, httpx.AsyncClient):
+             resp = await self.get(url, headers=headers, auth=auth, **kwargs)
+ 
+         for hook in self.compliance_hook["access_token_response"]:
+-            resp = hook(resp)
++            result = hook(resp)
++            resp = await result if inspect.isawaitable(result) else result
+ 
+-        return self.parse_response_token(resp)
++        token = self.parse_response_token(resp)
++        if url and self.metadata.get("token_endpoint") is None:
++            self.metadata["token_endpoint"] = url
++        return token
+ 
+     async def _refresh_token(
+         self,
+diff --git a/authlib/oauth2/client.py b/authlib/oauth2/client.py
+index 340c11b..a6f4964 100644
+--- a/authlib/oauth2/client.py
++++ b/authlib/oauth2/client.py
+@@ -1,3 +1,5 @@
++from urllib.parse import urlsplit
++
+ from authlib.common.security import generate_token
+ from authlib.common.urls import url_decode
+ 
+@@ -212,6 +214,24 @@ class OAuth2Client:
+         state = state or self.state
+         # implicit  grant_type
+         authorization_response = kwargs.pop("authorization_response", None)
++        if authorization_response is None and url is not None:
++            token_endpoint = self.metadata.get("token_endpoint")
++            if token_endpoint and url != token_endpoint:
++                callback = urlsplit(url)
++                if callback.fragment:
++                    fragment = url_decode(callback.fragment)
++                    if any(key == "code" for key, _ in fragment):
++                        raise ValueError(
++                            "authorization code response must use query parameters"
++                        )
++                query = url_decode(callback.query)
++                code_count = sum(key == "code" for key, _ in query)
++                if code_count > 1:
++                    raise ValueError("authorization response has multiple code parameters")
++                if code_count:
++                    authorization_response = url
++                    url = None
++
+         if authorization_response and "#" in authorization_response:
+             return self.token_from_fragment(authorization_response, state)
+ 
+@@ -231,6 +251,8 @@ class OAuth2Client:
+         if grant_type is None:
+             grant_type = _guess_grant_type(kwargs)
+             self.metadata["grant_type"] = grant_type
++        elif grant_type == "client_credentials":
++            self.metadata["grant_type"] = grant_type
+ 
+         body = self._prepare_token_endpoint_body(body, grant_type, **kwargs)
+ 
+@@ -303,6 +325,8 @@ class OAuth2Client:
+             token = self.token
+         if not token.is_expired(leeway=self.leeway):
+             return True
++        if self.metadata.get("token_auto_update", True) is False:
++            return False
+         refresh_token = token.get("refresh_token")
+         url = self.metadata.get("token_endpoint")
+         if refresh_token and url:
+@@ -310,7 +334,9 @@ class OAuth2Client:
+             return True
+         elif self.metadata.get("grant_type") == "client_credentials":
+             access_token = token["access_token"]
+-            new_token = self.fetch_token(url, grant_type="client_credentials")
++            params = dict(self.metadata.get("access_token_params") or {})
++            params["grant_type"] = "client_credentials"
++            new_token = self.fetch_token(url, **params)
+             if self.update_token:
+                 self.update_token(new_token, access_token=access_token)
+             return True
+diff --git a/authlib/oidc/core/grants/code.py b/authlib/oidc/core/grants/code.py
+index c482590..fc4bd2a 100644
+--- a/authlib/oidc/core/grants/code.py
++++ b/authlib/oidc/core/grants/code.py
+@@ -143,7 +143,26 @@ class OpenIDCode(OpenIDToken):
+         raise NotImplementedError()
+ 
+     def validate_openid_authorization_request(self, grant, redirect_uri):
+-        validate_nonce(grant.request, self.exists_nonce, self.require_nonce)
++        request = grant.request
++        validate_nonce(request, self.exists_nonce, self.require_nonce)
++
++        max_age = request.payload.data.get("max_age")
++        if max_age is not None:
++            if not isinstance(max_age, str) or not (
++                max_age.isascii() and max_age.isdecimal()
++            ):
++                from authlib.oauth2.rfc6749 import InvalidRequestError
++
++                raise InvalidRequestError("Invalid 'max_age' parameter.")
++            request.max_age = int(max_age)
++
++        acr_values = request.payload.data.get("acr_values")
++        if acr_values is not None:
++            if not isinstance(acr_values, str) or not acr_values.strip():
++                from authlib.oauth2.rfc6749 import InvalidRequestError
++
++                raise InvalidRequestError("Invalid 'acr_values' parameter.")
++            request.acr_values = tuple(acr_values.split())
+ 
+     def __call__(self, grant):
+         grant.register_hook("after_create_token_response", self.process_token)

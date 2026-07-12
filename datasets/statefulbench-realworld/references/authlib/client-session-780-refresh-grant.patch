@@ -1,0 +1,17 @@
+diff --git a/authlib/integrations/base_client/sync_app.py b/authlib/integrations/base_client/sync_app.py
+--- a/authlib/integrations/base_client/sync_app.py
++++ b/authlib/integrations/base_client/sync_app.py
+@@ -242,6 +242,13 @@ class OAuth2Base:
+             client_kwargs["authorization_endpoint"] = self.authorize_url
+         if self.access_token_url:
+             client_kwargs["token_endpoint"] = self.access_token_url
++        if (
++            "grant_type" not in client_kwargs
++            and "authorization_endpoint" not in client_kwargs
++            and "token_endpoint" in client_kwargs
++            and not self.access_token_params
++        ):
++            client_kwargs["grant_type"] = "client_credentials"
+ 
+         session = self.client_cls(
+             client_id=self.client_id,
