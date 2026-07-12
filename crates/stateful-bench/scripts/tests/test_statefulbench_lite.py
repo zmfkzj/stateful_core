@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import json
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -134,21 +135,105 @@ class StatefulBenchLiteTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(self.mod.usage_from_log(event_log), {"total_tokens": 0, "tool_calls": 2})
-    def test_copy_stateful_omp_agent_db_copies_existing_db_and_ignores_missing_source(self):
+    def test_copy_stateful_omp_agent_db_seeds_only_codex_oauth_credentials(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             host_home = root / "host-home"
             source = host_home / ".omp" / "profiles" / "stateful" / "agent" / "agent.db"
             source.parent.mkdir(parents=True)
-            source.write_bytes(b"stateful agent database")
+            with closing(sqlite3.connect(source)) as db:
+                db.execute(
+                    "CREATE TABLE auth_credentials (provider TEXT, credential_type TEXT, data TEXT, disabled_cause TEXT, identity_key TEXT, created_at INTEGER, updated_at INTEGER)"
+                )
+                db.execute(
+                    "CREATE TABLE unrelated_state (secret TEXT)"
+                )
+                db.executemany(
+                    "INSERT INTO auth_credentials VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        ("openai-codex", "oauth", "oauth-token", None, "user", 1, 2),
+                        ("openai-codex", "api-key", "api-key", None, "user", 3, 4),
+                    ],
+                )
+                db.execute("INSERT INTO unrelated_state VALUES ('must not copy')")
+                db.commit()
             agent_dir = root / "arm" / "omp-homes" / "agent-a" / "home" / ".omp" / "profiles" / "stateful" / "agent"
 
             self.mod.copy_stateful_omp_agent_db(host_home, agent_dir)
 
-            self.assertEqual((agent_dir / "agent.db").read_bytes(), source.read_bytes())
+            with closing(sqlite3.connect(agent_dir / "agent.db")) as db:
+                tables = {
+                    row[0]
+                    for row in db.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
+                rows = db.execute(
+                    "SELECT provider, credential_type, data FROM auth_credentials"
+                ).fetchall()
+            self.assertEqual(tables, {"auth_credentials"})
+            self.assertEqual(rows, [("openai-codex", "oauth", "oauth-token")])
             missing_agent_dir = root / "missing" / "agent"
             self.mod.copy_stateful_omp_agent_db(root / "missing-home", missing_agent_dir)
             self.assertFalse((missing_agent_dir / "agent.db").exists())
+
+    def test_resolve_omp_binary_is_absolute_or_errors(self):
+        with patch.object(self.mod.shutil, "which", return_value="/tmp/bin/omp"):
+            self.assertEqual(
+                self.mod.resolve_omp_binary("custom-omp"),
+                str(Path("/tmp/bin/omp").absolute()),
+            )
+        with patch.object(self.mod.shutil, "which", return_value=None):
+            with self.assertRaisesRegex(ValueError, "--omp-bin"):
+                self.mod.resolve_omp_binary("missing-omp")
+
+    def test_denied_read_wrapper_blocks_dataset_but_keeps_runtime_access(self):
+        denied = Path("/datasets/statefulbench-realworld").resolve()
+        with patch.object(self.mod.shutil, "which", return_value="/usr/bin/sandbox-exec"):
+            command = self.mod.wrap_omp_with_denied_reads(
+                ["/opt/omp/bin/omp", "--mode", "json"],
+                (denied,),
+            )
+
+        self.assertEqual(command[:2], [str(Path("/usr/bin/sandbox-exec").resolve()), "-p"])
+        profile = command[2]
+        self.assertIn("(allow default)", profile)
+        self.assertIn("(allow network*)", profile)
+        self.assertIn(f'(deny file-read* (literal "{denied}"))', profile)
+        self.assertIn(f'(deny file-read* (subpath "{denied}"))', profile)
+        self.assertLess(profile.index("(allow default)"), profile.index("(deny file-read*"))
+        self.assertEqual(command[3:], ["/opt/omp/bin/omp", "--mode", "json"])
+
+    def test_wait_agent_reaps_group_after_normal_parent_exit(self):
+        events = []
+        process = _FakePopen("normal", events)
+        handle = SimpleNamespace(
+            popen=process,
+            agent_id="normal",
+            started_monotonic=time.monotonic(),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            arm_dir = Path(temp_dir)
+            (arm_dir / "logs").mkdir()
+            (arm_dir / "logs" / "normal.stdout.log").write_text("", encoding="utf-8")
+
+            def killpg(pid, sig):
+                events.append(("killpg", pid, sig))
+
+            with patch.object(self.mod.os, "killpg", side_effect=killpg):
+                record, _ = self.mod._wait_agent(
+                    handle, arm_dir, "task", self.mod.RunConfig()
+                )
+
+        self.assertEqual(record["exit_code"], 0)
+        self.assertEqual(
+            events,
+            [
+                ("wait", "normal"),
+                ("killpg", 1, self.mod.signal.SIGTERM),
+                ("killpg", 1, self.mod.signal.SIGKILL),
+            ],
+        )
 
     def test_sequential_serializes_and_parallel_overlaps(self):
         task_ids = [f"task-{spec['key']}" for spec in self.mod.TASK_SPECS]

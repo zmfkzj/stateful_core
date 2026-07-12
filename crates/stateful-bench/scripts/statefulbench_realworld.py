@@ -1468,6 +1468,10 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--timeout-s must be at least 1")
         if "parallel-on" in arguments.arms and not arguments.stateful_binary:
             parser.error("parallel-on requires a resolvable stateful binary; pass --stateful-binary")
+        try:
+            omp_binary = _LITE.resolve_omp_binary(arguments.omp_bin)
+        except ValueError as error:
+            parser.error(str(error))
     manifest = load_manifest(arguments.manifest)
     repositories = repo_entries(manifest)
     wanted = arguments.repos if arguments.command == "run" else arguments.repo
@@ -1485,8 +1489,9 @@ def main(argv: list[str] | None = None) -> int:
             timeout_s=arguments.timeout_s,
             model=arguments.model,
             thinking=arguments.thinking,
-            omp_bin=arguments.omp_bin,
+            omp_bin=omp_binary,
             stateful_binary=arguments.stateful_binary,
+            denied_read_paths=(Path("datasets/statefulbench-realworld").resolve(),),
         )
         results = []
         for repo in selected:

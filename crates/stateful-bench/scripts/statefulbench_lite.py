@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 import importlib.util
 import json
 import os
@@ -13,6 +13,7 @@ import signal
 import secrets
 import socket
 import subprocess
+import sqlite3
 import sys
 import time
 import urllib.request
@@ -36,8 +37,60 @@ def copy_stateful_omp_agent_db(source_home: Path, agent_dir: Path) -> None:
     source = source_home / ".omp" / "profiles" / "stateful" / "agent" / "agent.db"
     if not source.exists():
         return
+    with closing(sqlite3.connect(source)) as source_db:
+        auth_schema = source_db.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'auth_credentials'"
+        ).fetchone()
+        rows = source_db.execute(
+            """
+            SELECT provider, credential_type, data, disabled_cause, identity_key, created_at, updated_at
+            FROM auth_credentials
+            WHERE provider = 'openai-codex' AND credential_type = 'oauth'
+            """
+        ).fetchall()
+    if not rows:
+        return
+    target_db = agent_dir / "agent.db"
     agent_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, agent_dir / "agent.db")
+    target_db.unlink(missing_ok=True)
+    with closing(sqlite3.connect(target_db)) as target:
+        if auth_schema is not None:
+            target.execute(auth_schema[0])
+        target.executemany(
+            """
+            INSERT INTO auth_credentials
+                (provider, credential_type, data, disabled_cause, identity_key, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        target.commit()
+
+
+def resolve_omp_binary(omp_bin: str) -> str:
+    resolved = shutil.which(omp_bin)
+    if resolved is None:
+        raise ValueError(f"--omp-bin is not an executable on PATH: {omp_bin}")
+    return str(Path(resolved).absolute())
+
+
+def _sandbox_literal(path: Path) -> str:
+    return str(path.absolute()).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def wrap_omp_with_denied_reads(command: list[str], denied_read_paths: tuple[Path, ...]) -> list[str]:
+    if not denied_read_paths:
+        return command
+    sandbox_exec = shutil.which("sandbox-exec")
+    if sandbox_exec is None:
+        raise RuntimeError("sandbox-exec is required to deny real-world dataset reads")
+    denied_rules = [
+        f'(deny file-read* (literal "{_sandbox_literal(path)}"))'
+        f'\n(deny file-read* (subpath "{_sandbox_literal(path)}"))'
+        for path in denied_read_paths
+    ]
+    profile = "\n".join(["(version 1)", "(allow default)", "(allow network*)", *denied_rules])
+    return [str(Path(sandbox_exec).absolute()), "-p", profile, *command]
 
 
 
@@ -99,6 +152,7 @@ class RunConfig:
     stateful_binary: str | None = None
     stateful_runtime_env: dict[str, str] | None = None
     launch_env: dict[str, str] | None = None
+    denied_read_paths: tuple[Path, ...] = ()
     trial: int = 1
 
 
@@ -368,13 +422,18 @@ def launch_agent(
     copy_openai_codex_auth(Path.home(), Path(env["HOME"]))
     copy_stateful_omp_agent_db(Path.home(), Path(env["PI_CODING_AGENT_DIR"]))
     prepare_environment(env, workspace, mode, cfg.stateful_binary)
+    omp_binary = resolve_omp_binary(cfg.omp_bin)
     logs = arm_dir / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     stdout = (logs / f"{agent_id}.stdout.log").open("w", encoding="utf-8")
     stderr = (logs / f"{agent_id}.stderr.log").open("w", encoding="utf-8")
     try:
+        command = wrap_omp_with_denied_reads(
+            omp_command(workspace, prompt_path, omp_binary, cfg.model, cfg.thinking),
+            cfg.denied_read_paths,
+        )
         popen = subprocess.Popen(
-            omp_command(workspace, prompt_path, cfg.omp_bin, cfg.model, cfg.thinking),
+            command,
             env=env,
             cwd=workspace,
             stdout=stdout,
@@ -387,17 +446,25 @@ def launch_agent(
     return AgentHandle(popen=popen, agent_id=agent_id, started_monotonic=time.monotonic())
 
 
+def _cleanup_agent_group(popen: subprocess.Popen) -> None:
+    for group_signal in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(popen.pid, group_signal)
+        except (PermissionError, ProcessLookupError):
+            pass
+
+
 def _wait_agent(handle: AgentHandle, arm_dir: Path, kind: str, cfg: RunConfig) -> tuple[dict, float]:
     timed_out = False
     try:
-        completed = handle.popen.wait(timeout=cfg.timeout_s)
-    except subprocess.TimeoutExpired:
-        timed_out = True
         try:
-            os.killpg(handle.popen.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        completed = handle.popen.wait()
+            completed = handle.popen.wait(timeout=cfg.timeout_s)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _cleanup_agent_group(handle.popen)
+            completed = handle.popen.wait()
+    finally:
+        _cleanup_agent_group(handle.popen)
     ended = time.monotonic()
     exit_code = getattr(handle.popen, "returncode", None)
     if exit_code is None:
@@ -614,12 +681,17 @@ def main(argv: list[str] | None = None) -> int:
     if "parallel-on" in args.arms and not args.stateful_binary:
         parser.error("parallel-on requires a resolvable stateful binary; pass --stateful-binary")
 
+    try:
+        omp_binary = resolve_omp_binary(args.omp_bin)
+    except ValueError as error:
+        parser.error(str(error))
+
     cfg = RunConfig(
         tasks=args.tasks,
         timeout_s=args.timeout_s,
         model=args.model,
         thinking=args.thinking,
-        omp_bin=args.omp_bin,
+        omp_bin=omp_binary,
         stateful_binary=args.stateful_binary,
     )
     results = []
