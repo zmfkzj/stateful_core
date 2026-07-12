@@ -105,6 +105,30 @@ class StatefulBenchLiteTests(unittest.TestCase):
                 self.assertIn("CHANGELOG.md", prompt)
         self.assertIn("python3 -m unittest discover -s tests -t .", self.mod.render_final_prompt())
 
+    def test_duplicate_arm_selection_is_rejected(self):
+        with self.assertRaisesRegex(self.mod.argparse.ArgumentTypeError, "duplicate"):
+            self.mod._parse_arms("sequential,sequential")
+
+        self.assertEqual(
+            self.mod._parse_arms("sequential,parallel-off"),
+            ["sequential", "parallel-off"],
+        )
+
+    def test_json_writer_is_atomic_and_preserves_prior_valid_json(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "results.json"
+            original_value = {"total_tokens": 1}
+            self.mod._write_json_atomically(target, original_value)
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8")), original_value)
+            original = target.read_text(encoding="utf-8")
+
+            with patch.object(self.mod.os, "replace", side_effect=OSError("replace failed")):
+                with self.assertRaisesRegex(OSError, "replace failed"):
+                    self.mod._write_json_atomically(target, {"total_tokens": 2})
+
+            self.assertEqual(target.read_text(encoding="utf-8"), original)
+            self.assertFalse(any(target.parent.glob(f".{target.name}.*.tmp")))
+
     def test_usage_parser_sums_tokens_and_tool_calls(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             log = Path(temp_dir) / "agent.stdout.log"

@@ -16,6 +16,7 @@ import subprocess
 import sqlite3
 import sys
 import time
+import tempfile
 import urllib.request
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -541,6 +542,27 @@ def _empty_arm_result(arm: str, trial: int, error: str | None = None) -> dict:
         "agents": [],
     }
 
+def _write_json_atomically(path: Path, value: dict) -> None:
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as output:
+            temporary = Path(output.name)
+            json.dump(value, output, indent=2)
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
 
 def run_arm(
     arm: str,
@@ -575,7 +597,7 @@ def run_arm(
     except Exception as exc:
         result = _empty_arm_result(arm, trial, str(exc))
         arm_dir.mkdir(parents=True, exist_ok=True)
-        (arm_dir / "results.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+        _write_json_atomically(arm_dir / "results.json", result)
         return result
     agents: list[dict] = []
     task_handles: list[AgentHandle] = []
@@ -666,7 +688,7 @@ def run_arm(
         "agents": agents,
     }
     arm_dir.mkdir(parents=True, exist_ok=True)
-    (arm_dir / "results.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    _write_json_atomically(arm_dir / "results.json", result)
     return result
 
 
@@ -674,6 +696,8 @@ def _parse_arms(value: str) -> list[str]:
     arms = [arm.strip() for arm in value.split(",") if arm.strip()]
     valid = {"sequential", "parallel-off", "parallel-on"}
     invalid = [arm for arm in arms if arm not in valid]
+    if len(set(arms)) != len(arms):
+        raise argparse.ArgumentTypeError("arms must not contain duplicates")
     if not arms or invalid:
         raise argparse.ArgumentTypeError(f"arms must be comma-separated values from {', '.join(sorted(valid))}")
     return arms
@@ -756,7 +780,7 @@ def main(argv: list[str] | None = None) -> int:
         "arms": results,
     }
     args.out.mkdir(parents=True, exist_ok=True)
-    (args.out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    _write_json_atomically(args.out / "summary.json", summary)
     print(_table(results))
     return 0
 
