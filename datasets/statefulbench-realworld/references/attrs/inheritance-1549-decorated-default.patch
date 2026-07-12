@@ -1,0 +1,23 @@
+diff --git a/src/attr/_make.py b/src/attr/_make.py
+--- a/src/attr/_make.py
++++ b/src/attr/_make.py
+@@ -808,6 +808,19 @@ class _ClassBuilder:
+             if PY_3_10_PLUS:
+                 cls = abc.update_abstractmethods(cls)
+ 
++        for a in self._attrs:
++            default = a.default
++            factory_name = (
++                getattr(default.factory, "__name__", None)
++                if isinstance(default, Factory) and default.takes_self
++                else None
++            )
++            factory = cls.__dict__.get(factory_name) if factory_name else None
++            if a.inherited and factory is not None and factory is not default.factory:
++                for method_name in ("__init__", "__attrs_init__"):
++                    method = cls.__dict__.get(method_name)
++                    if method is not None:
++                        method.__globals__[_INIT_FACTORY_PAT % a.name] = factory
+         # The method gets only called if it's not inherited from a base class.
+         # _has_own_attribute does NOT work properly for classmethods.
+         if (

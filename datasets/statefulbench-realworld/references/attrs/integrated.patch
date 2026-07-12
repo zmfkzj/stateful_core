@@ -1,0 +1,180 @@
+diff --git a/src/attr/_make.py b/src/attr/_make.py
+index 6794464..6a11bf8 100644
+--- a/src/attr/_make.py
++++ b/src/attr/_make.py
+@@ -403,17 +403,17 @@ def _transform_attrs(
+         ca_names = {
+             name
+             for name, attr in cd.items()
+-            if attr.__class__ is _CountingAttr
++            if isinstance(attr, _CountingAttr)
+         }
+         ca_list = []
+         annot_names = set()
+         for attr_name, type in anns.items():
+-            if _is_class_var(type):
++            if _is_class_var(getattr(type, "__forward_arg__", type)):
+                 continue
+             annot_names.add(attr_name)
+             a = cd.get(attr_name, NOTHING)
+ 
+-            if a.__class__ is not _CountingAttr:
++            if not isinstance(a, _CountingAttr):
+                 a = attrib(a)
+             ca_list.append((attr_name, a))
+ 
+@@ -431,7 +431,7 @@ def _transform_attrs(
+             (
+                 (name, attr)
+                 for name, attr in cd.items()
+-                if attr.__class__ is _CountingAttr
++                if isinstance(attr, _CountingAttr)
+             ),
+             key=lambda e: e[1].counter,
+         )
+@@ -808,13 +808,28 @@ class _ClassBuilder:
+             if PY_3_10_PLUS:
+                 cls = abc.update_abstractmethods(cls)
+ 
++        for a in self._attrs:
++            default = a.default
++            factory_name = (
++                getattr(default.factory, "__name__", None)
++                if isinstance(default, Factory) and default.takes_self
++                else None
++            )
++            factory = cls.__dict__.get(factory_name) if factory_name else None
++            if a.inherited and factory is not None and factory is not default.factory:
++                for method_name in ("__init__", "__attrs_init__"):
++                    method = cls.__dict__.get(method_name)
++                    if method is not None:
++                        method.__globals__[_INIT_FACTORY_PAT % a.name] = factory
+         # The method gets only called if it's not inherited from a base class.
+         # _has_own_attribute does NOT work properly for classmethods.
+         if (
+             getattr(cls, "__attrs_init_subclass__", None)
+             and "__attrs_init_subclass__" not in cls.__dict__
+         ):
+-            cls.__attrs_init_subclass__()
++            cls.__attrs_init_subclass__(
++                **cls.__dict__.get("__attrs_init_subclass_kwargs__", {})
++            )
+ 
+         return cls
+ 
+@@ -915,29 +930,42 @@ class _ClassBuilder:
+             for name, cached_prop in cd.items()
+             if isinstance(cached_prop, cached_property)
+         }
++        if cached_properties:
++            cd["__attrs_cached_properties__"] = dict(cached_properties)
+ 
+         # Collect methods with a `__class__` reference that are shadowed in the new class.
+         # To know to update them.
+         additional_closure_functions_to_update = []
++
++        class _SlottedCachedProperty:
++            def __init__(self, slot, func):
++                self.slot = slot
++                self.func = func
++
++            def __get__(self, instance, owner=None):
++                if instance is None:
++                    return self
++
++                try:
++                    return self.slot.__get__(instance, owner)
++                except AttributeError:
++                    value = self.func(instance)
++                    self.slot.__set__(instance, value)
++                    return value
++
++            def __set__(self, instance, value):
++                self.slot.__set__(instance, value)
++
++            def __delete__(self, instance):
++                self.slot.__delete__(instance)
++
+         if cached_properties:
+-            class_annotations = _get_annotations(self._cls)
+             for name, func in cached_properties.items():
+                 # Add cached properties to names for slotting.
+                 names += (name,)
+                 # Clear out function from class to avoid clashing.
+                 del cd[name]
+                 additional_closure_functions_to_update.append(func)
+-                annotation = inspect.signature(func).return_annotation
+-                if annotation is not inspect.Parameter.empty:
+-                    class_annotations[name] = annotation
+-
+-            original_getattr = cd.get("__getattr__")
+-            if original_getattr is not None:
+-                additional_closure_functions_to_update.append(original_getattr)
+-
+-            cd["__getattr__"] = _make_cached_property_getattr(
+-                cached_properties, original_getattr, self._cls
+-            )
+ 
+         # We only add the names of attributes that aren't inherited.
+         # Setting __slots__ to inherited attributes wastes memory.
+@@ -957,13 +985,23 @@ class _ClassBuilder:
+         if self._cache_hash:
+             slot_names.append(_HASH_CACHE_FIELD)
+ 
+-        cd["__slots__"] = tuple(slot_names)
++        slot_docs = {
++            a.name: a.metadata["slot_doc"]
++            for a in self._attrs
++            if a.name in slot_names and "slot_doc" in a.metadata
++        }
++        cd["__slots__"] = {name: slot_docs.get(name) for name in slot_names}
+ 
+         cd["__qualname__"] = self._cls.__qualname__
+ 
+         # Create new class based on old class and our methods.
+         cls = type(self._cls)(self._cls.__name__, self._cls.__bases__, cd)
+ 
++        for name, func in cached_properties.items():
++            slot = getattr(cls, name)
++            slot = getattr(slot, "slot", slot)
++            setattr(cls, name, _SlottedCachedProperty(slot, func))
++
+         # The following is a fix for
+         # <https://github.com/python-attrs/attrs/issues/102>.
+         # If a method mentions `__class__` or uses the no-arg super(), the
+@@ -1139,17 +1177,21 @@ class _ClassBuilder:
+ 
+         return self
+ 
+-    def add_eq(self):
++    def add_eq(self, make_eq=True):
+         cd = self._cls_dict
+ 
+         script, globs = _make_eq_script(self._attrs)
+ 
+         def _attach_eq(cls_dict, globs):
+-            cls_dict["__eq__"] = self._add_method_dunders(globs["__eq__"])
++            attrs_eq = self._add_method_dunders(globs["__eq__"])
++            cls_dict["__attrs_eq__"] = attrs_eq
++            if make_eq:
++                cls_dict["__eq__"] = attrs_eq
+ 
+         self._script_snippets.append((script, globs, _attach_eq))
+ 
+-        cd["__ne__"] = __ne__
++        if make_eq:
++            cd["__ne__"] = __ne__
+ 
+         return self
+ 
+@@ -1551,8 +1593,8 @@ def attrs(
+         if props.added_str:
+             builder.add_str()
+ 
+-        if props.added_eq:
+-            builder.add_eq()
++        if props.added_eq or _has_own_attribute(cls, "__eq__"):
++            builder.add_eq(props.added_eq)
+         if props.added_ordering:
+             builder.add_order()
+ 

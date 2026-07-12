@@ -1,0 +1,37 @@
+--- a/src/attr/_make.py
++++ b/src/attr/_make.py
+@@ -930,6 +930,34 @@
+                 annotation = inspect.signature(func).return_annotation
+                 if annotation is not inspect.Parameter.empty:
+                     class_annotations[name] = annotation
++            # Keep each class's original functions available while creating
++            # wrappers for cached properties shadowing an inherited one.
++            cd["_attrs_cached_properties"] = dict(cached_properties)
++            inherited_cached_properties = {}
++            for base_cls in self._cls.__mro__[1:]:
++                for name, func in base_cls.__dict__.get(
++                    "_attrs_cached_properties", {}
++                ).items():
++                    inherited_cached_properties.setdefault(name, func)
++
++            for name, func in tuple(cached_properties.items()):
++                inherited_func = inherited_cached_properties.get(name)
++                if inherited_func is not None:
++
++                    def get_cached_property(
++                        self,
++                        _func=func,
++                        _inherited_func=inherited_func,
++                        _name=name,
++                    ):
++                        try:
++                            object.__getattribute__(self, _name)
++                        except AttributeError:
++                            _OBJ_SETATTR(self, _name, _inherited_func(self))
++
++                        return _func(self)
++
++                    cached_properties[name] = get_cached_property
+ 
+             original_getattr = cd.get("__getattr__")
+             if original_getattr is not None:

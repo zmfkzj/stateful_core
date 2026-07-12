@@ -1,0 +1,16 @@
+diff --git a/src/attr/_make.py b/src/attr/_make.py
+--- a/src/attr/_make.py
++++ b/src/attr/_make.py
+@@ -957,7 +957,12 @@ class _ClassBuilder:
+         if self._cache_hash:
+             slot_names.append(_HASH_CACHE_FIELD)
+ 
+-        cd["__slots__"] = tuple(slot_names)
++        slot_docs = {
++            a.name: a.metadata["slot_doc"]
++            for a in self._attrs
++            if a.name in slot_names and "slot_doc" in a.metadata
++        }
++        cd["__slots__"] = {name: slot_docs.get(name) for name in slot_names}
+ 
+         cd["__qualname__"] = self._cls.__qualname__

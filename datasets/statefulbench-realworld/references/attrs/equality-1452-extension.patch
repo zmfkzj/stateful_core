@@ -1,0 +1,38 @@
+diff --git a/src/attr/_make.py b/src/attr/_make.py
+--- a/src/attr/_make.py
++++ b/src/attr/_make.py
+@@ -1139,16 +1139,20 @@ class _ClassBuilder:
+ 
+         return self
+ 
+-    def add_eq(self):
++    def add_eq(self, make_eq=True):
+         cd = self._cls_dict
+ 
+         script, globs = _make_eq_script(self._attrs)
+ 
+         def _attach_eq(cls_dict, globs):
+-            cls_dict["__eq__"] = self._add_method_dunders(globs["__eq__"])
++            attrs_eq = self._add_method_dunders(globs["__eq__"])
++            cls_dict["__attrs_eq__"] = attrs_eq
++            if make_eq:
++                cls_dict["__eq__"] = attrs_eq
+ 
+         self._script_snippets.append((script, globs, _attach_eq))
+ 
+-        cd["__ne__"] = __ne__
++        if make_eq:
++            cd["__ne__"] = __ne__
+ 
+         return self
+@@ -1551,8 +1555,8 @@ def attrs(
+         if props.added_str:
+             builder.add_str()
+ 
+-        if props.added_eq:
+-            builder.add_eq()
++        if props.added_eq or _has_own_attribute(cls, "__eq__"):
++            builder.add_eq(props.added_eq)
+         if props.added_ordering:
+             builder.add_order()
+ 
