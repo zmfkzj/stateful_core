@@ -56,6 +56,7 @@ _PROTECTED_ENVIRONMENT_NAMES = frozenset(
 )
 _HEX_40 = re.compile(r"[0-9a-f]{40}")
 _HEX_64 = re.compile(r"[0-9a-f]{64}")
+_GITHUB_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 
 _CORPUS_FIELDS = frozenset(
     {
@@ -226,6 +227,34 @@ def _require_https_url(entry: dict, field: str) -> None:
         raise ValueError(f"{field} must be an HTTPS URL")
 
 
+def _github_repository(entry: dict) -> tuple[str, str]:
+    value = _require_string(entry, "canonical_url")
+    try:
+        parsed = urlsplit(value)
+        parts = parsed.path.split("/")
+        valid = (
+            parsed.scheme == "https"
+            and parsed.netloc == "github.com"
+            and not parsed.query
+            and not parsed.fragment
+            and len(parts) == 3
+            and not parts[0]
+            and all(_GITHUB_COMPONENT.fullmatch(part) for part in parts[1:])
+            and value == f"https://github.com/{parts[1]}/{parts[2]}"
+        )
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError("canonical_url must be an exact GitHub repository URL")
+    return parts[1], parts[2]
+
+
+def _require_archive_url(entry: dict, owner: str, repository: str, commit: str) -> None:
+    expected = f"https://github.com/{owner}/{repository}/archive/{commit}.tar.gz"
+    if _require_string(entry, "archive_url") != expected:
+        raise ValueError("archive_url must bind canonical_url and commit")
+
+
 def _require_argv(entry: dict, field: str) -> None:
     value = entry[field]
     if type(value) is not list or not value or any(type(part) is not str or not part for part in value):
@@ -330,12 +359,15 @@ def _validate_repository(entry: object, manifest_dir: Path, keys: set[str]) -> N
         raise ValueError(f"duplicate repository key: {key}")
     keys.add(key)
 
-    for field in ("requested_url", "canonical_url", "archive_url"):
-        _require_https_url(entry, field)
-    for field, pattern in (("commit", _HEX_40), ("archive_sha256", _HEX_64)):
-        value = _require_string(entry, field)
-        if not pattern.fullmatch(value):
-            raise ValueError(f"{field} has invalid SHA format")
+    _require_https_url(entry, "requested_url")
+    commit = _require_string(entry, "commit")
+    if not _HEX_40.fullmatch(commit):
+        raise ValueError("commit has invalid SHA format")
+    owner, repository = _github_repository(entry)
+    _require_archive_url(entry, owner, repository, commit)
+    archive_sha256 = _require_string(entry, "archive_sha256")
+    if not _HEX_64.fullmatch(archive_sha256):
+        raise ValueError("archive_sha256 has invalid SHA format")
     if _require_string(entry, "python") != "3.14.6":
         raise ValueError("python must be 3.14.6")
     _require_argv(entry, "setup")
@@ -627,6 +659,39 @@ def _sanitized_environment(
     return env
 
 
+def _run_qualification_git(
+    argv: list[str],
+    cwd: Path,
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+    label: str,
+) -> subprocess.CompletedProcess[str]:
+    environment = _sanitized_environment(workspace=cwd)
+    environment.update(
+        {
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+        }
+    )
+    return _run_logged(
+        [
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.autocrlf=false",
+            "-c",
+            "core.whitespace=trailing-space,space-before-tab",
+            *argv,
+        ],
+        cwd,
+        artifacts,
+        artifact_dir,
+        label,
+        env=environment,
+    )
+
+
 def _repository_environment(repo: dict, environment: dict[str, str]) -> dict[str, str]:
     return {**repo.get("environment", {}), **environment}
 
@@ -658,15 +723,14 @@ def _fresh_workspace(
             artifacts[f"{label}:extract"] = {"stdout": "", "stderr": str(error_path)}
             yield None
             return
-        initialized = _run_logged(
-            ["git", "init"], workspace, artifacts, artifact_dir, f"{label}:git-init"
+        initialized = _run_qualification_git(
+            ["init"], workspace, artifacts, artifact_dir, f"{label}:git-init"
         )
-        indexed = _run_logged(
-            ["git", "add", "-A"], workspace, artifacts, artifact_dir, f"{label}:git-add"
+        indexed = _run_qualification_git(
+            ["add", "-A"], workspace, artifacts, artifact_dir, f"{label}:git-add"
         )
-        committed = _run_logged(
+        committed = _run_qualification_git(
             [
-                "git",
                 "-c",
                 "user.email=statefulbench@local",
                 "-c",
@@ -794,8 +858,8 @@ def _apply_patch(
     artifact_dir: Path,
     label: str,
 ) -> tuple[bool, dict[str, list[tuple[int, int]]]]:
-    applied = _run_logged(
-        ["git", "apply", "--index", str(patch)],
+    applied = _run_qualification_git(
+        ["apply", "--index", "--whitespace=error-all", str(patch)],
         workspace,
         artifacts,
         artifact_dir,
@@ -803,8 +867,8 @@ def _apply_patch(
     )
     if applied.returncode != 0:
         return False, {}
-    changed = _run_logged(
-        ["git", "diff", "--no-ext-diff", "--cached", "--unified=0"],
+    changed = _run_qualification_git(
+        ["diff", "--no-ext-diff", "--cached", "--unified=0"],
         workspace,
         artifacts,
         artifact_dir,

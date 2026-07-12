@@ -352,6 +352,28 @@ class ManifestTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, message):
                     self.mod.load_manifest(self.manifest_path)
 
+    def test_load_manifest_binds_github_archive_to_canonical_repository_and_commit(self) -> None:
+        commit = self.load_data()["repositories"][0]["commit"]
+        cases = (
+            ("canonical_url", "https://github.com/psf/requests/", "canonical_url"),
+            ("canonical_url", "https://github.com/psf/\nrequests", "canonical_url"),
+            ("canonical_url", "https://github.com:443/psf/requests", "canonical_url"),
+            ("canonical_url", "https://github.com/psf/requests?source=manifest", "canonical_url"),
+            ("archive_url", f"https://github.com/psf/other/archive/{commit}.tar.gz", "archive_url"),
+            ("archive_url", f"https://github.com/psf/requests/archive/{'0' * 40}.tar.gz", "archive_url"),
+            ("archive_url", f"https://github.com:443/psf/requests/archive/{commit}.tar.gz", "archive_url"),
+            ("archive_url", f"https://github.com/psf/requests/archive/{commit}.tar.gz#fragment", "archive_url"),
+        )
+        for field, value, message in cases:
+            with self.subTest(field=field, value=value):
+                data = json.loads(MANIFEST.read_text(encoding="utf-8"))
+                data["repositories"][0][field] = value
+                self.write_data(data)
+
+                with self.assertRaisesRegex(ValueError, message):
+                    self.mod.load_manifest(self.manifest_path)
+
+
     def test_load_manifest_rejects_corpus_escape(self) -> None:
         data = self.load_data()
         data["repositories"][0]["corpus"] = "../escape.json"
@@ -1115,7 +1137,7 @@ class QualificationTests(unittest.TestCase):
             "requested_url": "https://github.com/example/fixture",
             "canonical_url": "https://github.com/example/fixture",
             "commit": "0" * 40,
-            "archive_url": "https://github.com/example/fixture/archive.tar.gz",
+            "archive_url": "https://github.com/example/fixture/archive/" + "0" * 40 + ".tar.gz",
             "archive_sha256": digest,
             "python": "3.14.6",
             "setup": [sys.executable, "-c", "pass"],
@@ -1133,6 +1155,34 @@ class QualificationTests(unittest.TestCase):
         manifest_path = self.dataset / "manifest.json"
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         return manifest_path
+    def test_qualification_git_helper_ignores_host_config_and_rejects_whitespace_errors(self) -> None:
+        workspace = self.root / "workspace"
+        artifacts: dict[str, dict[str, str]] = {}
+        with (
+            mock.patch.object(self.mod, "_sanitized_environment", return_value={"PATH": "/usr/bin"}),
+            mock.patch.object(
+                self.mod,
+                "_run_logged",
+                return_value=subprocess.CompletedProcess([], 0, "", ""),
+            ) as run_logged,
+        ):
+            self.mod._run_qualification_git(
+                ["apply", "--index", "--whitespace=error-all", "patch.diff"],
+                workspace,
+                artifacts,
+                self.root,
+                "git-apply",
+            )
+
+        argv = run_logged.call_args.args[0]
+        environment = run_logged.call_args.kwargs["env"]
+        self.assertEqual(argv[0], "git")
+        self.assertIn("core.hooksPath=/dev/null", argv)
+        self.assertIn("core.autocrlf=false", argv)
+        self.assertIn("--whitespace=error-all", argv)
+        self.assertEqual(environment["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(environment["GIT_CONFIG_GLOBAL"], "/dev/null")
+
 
     def _qualify(self) -> tuple[int, dict]:
         stdout = io.StringIO()
