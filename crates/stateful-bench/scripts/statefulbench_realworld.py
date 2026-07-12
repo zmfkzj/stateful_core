@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import hashlib
 import json
@@ -106,31 +107,34 @@ def extract_workspace(archive: Path, expected_sha256: str, destination: Path) ->
     if _sha256(archive) != expected_sha256:
         raise ValueError("archive checksum mismatch")
 
-    with tarfile.open(archive, "r:gz") as source:
-        members = source.getmembers()
-        if any(member.name == "." or member.name.startswith("./") for member in members):
-            raise ValueError("archive contains unsafe members")
-        roots = {member.name.split("/", 1)[0] for member in members if member.name}
-        if len(roots) != 1:
-            raise ValueError("archive must contain exactly one root directory")
-        root = roots.pop()
-        if any(".." in member.name.split("/") for member in members):
-            raise ValueError("archive contains unsafe members")
-        if not any(member.name.rstrip("/") == root and member.isdir() for member in members):
-            raise ValueError("archive root must be a directory")
-        if any(member.issym() or member.islnk() for member in members):
-            raise ValueError("archive contains link members")
+    try:
+        with tarfile.open(archive, "r:gz") as source:
+            members = source.getmembers()
+            if any(member.name == "." or member.name.startswith("./") for member in members):
+                raise ValueError("archive contains unsafe members")
+            roots = {member.name.split("/", 1)[0] for member in members if member.name}
+            if len(roots) != 1:
+                raise ValueError("archive must contain exactly one root directory")
+            root = roots.pop()
+            if any(".." in member.name.split("/") for member in members):
+                raise ValueError("archive contains unsafe members")
+            if not any(member.name.rstrip("/") == root and member.isdir() for member in members):
+                raise ValueError("archive root must be a directory")
+            if any(member.issym() or member.islnk() for member in members):
+                raise ValueError("archive contains link members")
 
-        with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
-            extracted = Path(temporary)
-            try:
-                source.extractall(extracted, filter="data")
-            except tarfile.TarError as error:
-                raise ValueError("archive contains unsafe members") from error
-            root_directory = extracted / root
-            destination.mkdir()
-            for child in root_directory.iterdir():
-                child.replace(destination / child.name)
+            with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
+                extracted = Path(temporary)
+                try:
+                    source.extractall(extracted, filter="data")
+                except tarfile.TarError as error:
+                    raise ValueError("archive contains unsafe members") from error
+                root_directory = extracted / root
+                destination.mkdir()
+                for child in root_directory.iterdir():
+                    child.replace(destination / child.name)
+    except tarfile.TarError as error:
+        raise ValueError("archive contains unsafe members") from error
 
 
 def _require_string(entry: dict, field: str) -> str:
@@ -138,6 +142,20 @@ def _require_string(entry: dict, field: str) -> str:
     if type(value) is not str or not value:
         raise ValueError(f"{field} must be a non-empty string")
     return value
+
+
+def _require_key(entry: dict, field: str) -> str:
+    key = _require_string(entry, field)
+    if key in {".", ".."} or "/" in key or "\\" in key or Path(key).is_absolute():
+        raise ValueError(f"{field} must be a safe single-component key")
+    return key
+
+
+def verified_python(required: str) -> Path:
+    version = ".".join(str(part) for part in sys.version_info[:3])
+    if version != required:
+        raise ValueError(f"python version mismatch: manifest requires {required}, found {version}")
+    return Path(sys.executable).resolve()
 
 
 def _require_https_url(entry: dict, field: str) -> None:
@@ -171,7 +189,7 @@ def _validate_repository(entry: object, manifest_dir: Path, keys: set[str]) -> N
     if set(entry) != _REPOSITORY_FIELDS:
         raise ValueError("repository entry fields are invalid")
 
-    key = _require_string(entry, "key")
+    key = _require_key(entry, "key")
     if key in keys:
         raise ValueError(f"duplicate repository key: {key}")
     keys.add(key)
@@ -267,7 +285,7 @@ def _validate_task(
     if set(entry) != _TASK_FIELDS:
         raise ValueError("task entry fields are invalid")
 
-    key = _require_string(entry, "key")
+    key = _require_key(entry, "key")
     if key in keys:
         raise ValueError(f"duplicate task key: {key}")
     keys.add(key)
@@ -320,6 +338,8 @@ def load_corpus(path: Path) -> dict:
         raise ValueError("corpus must contain exactly ten tasks")
     keys: set[str] = set()
     task_anchors = [_validate_task(task, dataset_root, keys) for task in tasks]
+    if evaluators != [task["evaluator"] for task in tasks]:
+        raise ValueError("evaluators must exactly match task evaluators")
     kinds = [task["kind"] for task in tasks]
     if kinds.count("bug") != 5 or kinds.count("feature") != 5:
         raise ValueError("corpus must contain five bug and five feature tasks")
@@ -348,10 +368,13 @@ def _run_logged(
     artifacts: dict[str, dict[str, str]],
     artifact_dir: Path,
     label: str,
+    *,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(
         argv,
         cwd=cwd,
+        env=env,
         capture_output=True,
         check=False,
         encoding="utf-8",
@@ -366,6 +389,25 @@ def _run_logged(
     return completed
 
 
+def _sanitized_environment(venv: Path | None = None) -> dict[str, str]:
+    env = dict(os.environ)
+    for name in ("PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONUSERBASE"):
+        env.pop(name, None)
+    if venv is None:
+        env.pop("VIRTUAL_ENV", None)
+        env["PATH"] = os.defpath
+    else:
+        env["VIRTUAL_ENV"] = str(venv)
+        env["PATH"] = f"{venv / 'bin'}{os.pathsep}{os.defpath}"
+    return env
+
+
+def _venv_argv(argv: list[str], python: Path) -> list[str]:
+    if Path(argv[0]).name.startswith("python"):
+        return [str(python), *argv[1:]]
+    return argv
+
+
 @contextlib.contextmanager
 def _fresh_workspace(
     repo: dict,
@@ -375,6 +417,7 @@ def _fresh_workspace(
     artifact_dir: Path,
     label: str,
 ):
+    interpreter = verified_python(repo["python"])
     with tempfile.TemporaryDirectory(prefix="statefulbench-qualify-", dir=cache_dir) as temporary:
         workspace = Path(temporary) / "workspace"
         try:
@@ -407,13 +450,95 @@ def _fresh_workspace(
             artifact_dir,
             f"{label}:git-commit",
         )
+        venv = workspace / ".statefulbench-venv"
+        created = _run_logged(
+            [str(interpreter), "-m", "venv", str(venv)],
+            workspace,
+            artifacts,
+            artifact_dir,
+            f"{label}:venv",
+            env=_sanitized_environment(),
+        )
+        python = venv / "bin" / "python"
         yield (
-            workspace
+            (workspace, python, _sanitized_environment(venv))
             if initialized.returncode == 0
             and indexed.returncode == 0
             and committed.returncode == 0
+            and created.returncode == 0
+            and python.is_file()
             else None
         )
+
+
+def _patch_hunks(diff: str) -> dict[str, list[tuple[int, int]]]:
+    hunks: dict[str, list[tuple[int, int]]] = {}
+    path: str | None = None
+    header = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+    for line in diff.splitlines():
+        if line.startswith("+++ b/"):
+            path = line[6:]
+        elif path is not None and (match := header.match(line)):
+            hunks.setdefault(path, []).append(
+                (int(match.group(1)), int(match.group(2) or 1))
+            )
+    return hunks
+
+
+def changed_anchor_symbols(
+    source: Path, anchors: list[tuple[Path, str]], hunks: list[tuple[int, int]]
+) -> set[str]:
+    try:
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return set()
+    module = source.with_suffix("").name
+    ranges: dict[str, tuple[int, int]] = {}
+
+    class Symbols(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.scope: list[str] = []
+
+        def _record(self, name: str, node: ast.AST) -> None:
+            ranges[".".join((module, *self.scope, name))] = (
+                node.lineno,
+                node.end_lineno or node.lineno,
+            )
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            self._record(node.name, node)
+            self.scope.append(node.name)
+            self.generic_visit(node)
+            self.scope.pop()
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self._record(node.name, node)
+            self.scope.append(node.name)
+            self.generic_visit(node)
+            self.scope.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Assign(self, node: ast.Assign) -> None:
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    self._record(target.id, node)
+            self.generic_visit(node)
+
+        def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+            if isinstance(node.target, ast.Name):
+                self._record(node.target.id, node)
+            self.generic_visit(node)
+
+    Symbols().visit(tree)
+    changed: set[str] = set()
+    for anchor_source, symbol in anchors:
+        if anchor_source != source or symbol not in ranges:
+            continue
+        first, last = ranges[symbol]
+        if any(count and start <= last and start + count - 1 >= first for start, count in hunks):
+            changed.add(f"{source.name}:{symbol}")
+    return changed
 
 
 def _apply_patch(
@@ -422,7 +547,7 @@ def _apply_patch(
     artifacts: dict[str, dict[str, str]],
     artifact_dir: Path,
     label: str,
-) -> tuple[bool, set[str]]:
+) -> tuple[bool, dict[str, list[tuple[int, int]]]]:
     applied = _run_logged(
         ["git", "apply", "--index", str(patch)],
         workspace,
@@ -431,26 +556,57 @@ def _apply_patch(
         f"{label}:git-apply",
     )
     if applied.returncode != 0:
-        return False, set()
+        return False, {}
     changed = _run_logged(
-        ["git", "diff", "--cached", "--name-only"],
+        ["git", "diff", "--cached", "--unified=0"],
         workspace,
         artifacts,
         artifact_dir,
         f"{label}:git-diff",
     )
-    return changed.returncode == 0, set(changed.stdout.splitlines())
+    return changed.returncode == 0, _patch_hunks(changed.stdout)
 
 
 def _run_setup(
     repo: dict,
     workspace: Path,
+    python: Path,
+    env: dict[str, str],
     artifacts: dict[str, dict[str, str]],
     artifact_dir: Path,
     label: str,
 ) -> bool:
     return (
-        _run_logged(repo["setup"], workspace, artifacts, artifact_dir, f"{label}:setup").returncode
+        _run_logged(
+            _venv_argv(repo["setup"], python),
+            workspace,
+            artifacts,
+            artifact_dir,
+            f"{label}:setup",
+            env=env,
+        ).returncode
+        == 0
+    )
+
+
+def _run_suite(
+    repo: dict,
+    workspace: Path,
+    python: Path,
+    env: dict[str, str],
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+    label: str,
+) -> bool:
+    return (
+        _run_logged(
+            _venv_argv(repo["suite"], python),
+            workspace,
+            artifacts,
+            artifact_dir,
+            f"{label}:upstream-suite",
+            env=env,
+        ).returncode
         == 0
     )
 
@@ -458,20 +614,43 @@ def _run_setup(
 def _run_evaluator(
     evaluator: Path,
     workspace: Path,
+    python: Path,
+    env: dict[str, str],
     artifacts: dict[str, dict[str, str]],
     artifact_dir: Path,
     label: str,
 ) -> bool:
     return (
         _run_logged(
-            [sys.executable, str(evaluator), str(workspace)],
+            [str(python), str(evaluator), str(workspace)],
             workspace,
             artifacts,
             artifact_dir,
             f"{label}:evaluator",
+            env=env,
         ).returncode
         == 0
     )
+
+
+def _qualify_base_suite(
+    repo: dict,
+    archive: Path,
+    cache_dir: Path,
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+) -> bool:
+    with _fresh_workspace(
+        repo, archive, cache_dir, artifacts, artifact_dir, "base-suite"
+    ) as fresh:
+        if fresh is None:
+            return False
+        workspace, python, env = fresh
+        return _run_setup(
+            repo, workspace, python, env, artifacts, artifact_dir, "base-suite"
+        ) and _run_suite(
+            repo, workspace, python, env, artifacts, artifact_dir, "base-suite"
+        )
 
 
 def _qualify_task(
@@ -487,21 +666,23 @@ def _qualify_task(
     base_red = False
     with _fresh_workspace(
         repo, archive, cache_dir, artifacts, artifact_dir, f"{task['key']}:base"
-    ) as workspace:
-        if workspace is not None:
+    ) as fresh:
+        if fresh is not None:
+            workspace, python, env = fresh
             base_red = _run_setup(
-                repo, workspace, artifacts, artifact_dir, f"{task['key']}:base"
+                repo, workspace, python, env, artifacts, artifact_dir, f"{task['key']}:base"
             ) and not _run_evaluator(
-                evaluator, workspace, artifacts, artifact_dir, f"{task['key']}:base"
+                evaluator, workspace, python, env, artifacts, artifact_dir, f"{task['key']}:base"
             )
 
     reference_green = False
-    changed_paths: set[str] = set()
+    changed_hunks: dict[str, list[tuple[int, int]]] = {}
     with _fresh_workspace(
         repo, archive, cache_dir, artifacts, artifact_dir, f"{task['key']}:reference"
-    ) as workspace:
-        if workspace is not None:
-            applied, changed_paths = _apply_patch(
+    ) as fresh:
+        if fresh is not None:
+            workspace, python, env = fresh
+            applied, changed_hunks = _apply_patch(
                 workspace,
                 dataset_root / task["reference_patch"],
                 artifacts,
@@ -509,26 +690,32 @@ def _qualify_task(
                 f"{task['key']}:reference",
             )
             reference_green = applied and _run_setup(
-                repo, workspace, artifacts, artifact_dir, f"{task['key']}:reference"
+                repo, workspace, python, env, artifacts, artifact_dir, f"{task['key']}:reference"
             )
             if reference_green:
                 reference_green = _run_evaluator(
-                    evaluator,
-                    workspace,
-                    artifacts,
-                    artifact_dir,
-                    f"{task['key']}:reference",
+                    evaluator, workspace, python, env, artifacts, artifact_dir, f"{task['key']}:reference"
                 )
-    changed_anchors = sorted(
-        f"{anchor['path']}:{anchor['symbol']}"
-        for anchor in task["overlap_anchors"]
-        if anchor["path"] in changed_paths
-    )
+            changed_anchors = set().union(
+                *(
+                    changed_anchor_symbols(
+                        workspace / anchor["path"],
+                        [
+                            (workspace / candidate["path"], candidate["symbol"])
+                            for candidate in task["overlap_anchors"]
+                        ],
+                        changed_hunks.get(anchor["path"], []),
+                    )
+                    for anchor in task["overlap_anchors"]
+                )
+            )
+        else:
+            changed_anchors = set()
     return {
         "key": task["key"],
         "base_red": base_red,
         "reference_green": reference_green,
-        "changed_anchors": changed_anchors,
+        "changed_anchors": sorted(changed_anchors),
     }
 
 
@@ -545,8 +732,9 @@ def _qualify_integration(
     upstream_green = False
     with _fresh_workspace(
         repo, archive, cache_dir, artifacts, artifact_dir, "integrated"
-    ) as workspace:
-        if workspace is not None:
+    ) as fresh:
+        if fresh is not None:
+            workspace, python, env = fresh
             applied, _ = _apply_patch(
                 workspace,
                 dataset_root / corpus["integrated_reference_patch"],
@@ -555,12 +743,14 @@ def _qualify_integration(
                 "integrated",
             )
             setup_green = applied and _run_setup(
-                repo, workspace, artifacts, artifact_dir, "integrated"
+                repo, workspace, python, env, artifacts, artifact_dir, "integrated"
             )
             evaluator_results = [
                 _run_evaluator(
                     dataset_root / evaluator,
                     workspace,
+                    python,
+                    env,
                     artifacts,
                     artifact_dir,
                     f"integrated:{index}",
@@ -568,27 +758,31 @@ def _qualify_integration(
                 for index, evaluator in enumerate(corpus["evaluators"])
             ] if setup_green else []
             integrated_green = setup_green and all(evaluator_results)
-            upstream_green = setup_green and (
-                _run_logged(
-                    repo["suite"],
-                    workspace,
-                    artifacts,
-                    artifact_dir,
-                    "integrated:upstream-suite",
-                ).returncode
-                == 0
+            upstream_green = setup_green and _run_suite(
+                repo, workspace, python, env, artifacts, artifact_dir, "integrated"
             )
     return integrated_green, upstream_green
 
 
 def qualify_repository(repo: dict, corpus: dict, manifest_dir: Path, cache_dir: Path) -> dict:
-    output_dir = cache_dir / "qualification" / repo["key"]
+    qualification_root = (cache_dir / "qualification").resolve()
+    output_dir = (qualification_root / repo["key"]).resolve()
+    if not output_dir.is_relative_to(qualification_root):
+        raise ValueError("repository key escapes qualification output")
     shutil.rmtree(output_dir, ignore_errors=True)
     artifact_dir = output_dir / "artifacts"
     artifact_dir.mkdir(parents=True)
     artifacts: dict[str, dict[str, str]] = {}
     dataset_root = manifest_dir.resolve()
     archive = ensure_archive(repo, cache_dir)
+    try:
+        with tarfile.open(archive, "r:gz") as source:
+            source.getmembers()
+    except tarfile.TarError as error:
+        raise ValueError("archive is unreadable") from error
+    base_suite_green = _qualify_base_suite(
+        repo, archive, cache_dir, artifacts, artifact_dir
+    )
     tasks = [
         _qualify_task(
             repo, task, dataset_root, archive, cache_dir, artifacts, artifact_dir
@@ -610,6 +804,7 @@ def qualify_repository(repo: dict, corpus: dict, manifest_dir: Path, cache_dir: 
     ]
     return {
         "key": repo["key"],
+        "base_suite_green": base_suite_green,
         "tasks": tasks,
         "integrated_green": integrated_green,
         "upstream_green": upstream_green,
@@ -621,6 +816,7 @@ def qualify_repository(repo: dict, corpus: dict, manifest_dir: Path, cache_dir: 
 def _qualified(result: dict) -> bool:
     return (
         not result.get("error")
+        and result["base_suite_green"]
         and all(task["base_red"] and task["reference_green"] for task in result["tasks"])
         and result["integrated_green"]
         and result["upstream_green"]
@@ -655,12 +851,15 @@ def main(argv: list[str] | None = None) -> int:
     for repo in selected:
         try:
             corpus = load_corpus(arguments.manifest.parent / repo["corpus"])
+            if corpus["repository"] != repo["key"]:
+                raise ValueError("corpus repository does not match manifest key")
             result = qualify_repository(repo, corpus, arguments.manifest.parent, arguments.cache)
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             result = {
                 "key": repo["key"],
                 "error": str(error),
                 "tasks": [],
+                "base_suite_green": False,
                 "integrated_green": False,
                 "upstream_green": False,
                 "isolated_tasks": [],

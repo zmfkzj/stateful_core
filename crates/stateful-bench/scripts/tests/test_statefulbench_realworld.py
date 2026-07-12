@@ -9,6 +9,8 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
+
 from threading import Event, Lock, Thread
 from pathlib import Path
 from types import ModuleType
@@ -109,6 +111,22 @@ class ManifestTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "corpus path"):
             self.mod.load_manifest(self.manifest_path)
+
+    def test_load_manifest_rejects_unsafe_repository_keys(self) -> None:
+        for key in (".", "..", "/absolute", "nested/key"):
+            with self.subTest(key=key):
+                data = self.load_data()
+                data["repositories"][0]["key"] = key
+                self.write_data(data)
+
+                with self.assertRaisesRegex(ValueError, "key"):
+                    self.mod.load_manifest(self.manifest_path)
+    def test_verified_python_rejects_manifest_version_mismatch(self) -> None:
+        with mock.patch.object(
+            self.mod.sys, "version_info", (3, 14, 5, "final", 0)
+        ), self.assertRaisesRegex(ValueError, "python"):
+            self.mod.verified_python("3.14.6")
+
 
 
 class CorpusTests(unittest.TestCase):
@@ -263,6 +281,25 @@ class CorpusTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "isolated"):
             self.mod.load_corpus(self.corpus_path)
+
+    def test_load_corpus_requires_exact_task_evaluators(self) -> None:
+        data = self.load_data()
+        data["evaluators"] = data["evaluators"][1:]
+        self.write_data(data)
+
+        with self.assertRaisesRegex(ValueError, "evaluators"):
+            self.mod.load_corpus(self.corpus_path)
+
+    def test_load_corpus_rejects_unsafe_task_keys(self) -> None:
+        for key in (".", "..", "/absolute", "nested/key"):
+            with self.subTest(key=key):
+                data = self.corpus_data()
+                data["tasks"][0]["key"] = key
+                self.write_data(data)
+
+                with self.assertRaisesRegex(ValueError, "key"):
+                    self.mod.load_corpus(self.corpus_path)
+
 
 
 class ArchiveTests(unittest.TestCase):
@@ -484,7 +521,10 @@ class QualificationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
-    def _patch(self, before: str, after: str, path: str = "target.txt") -> str:
+    def _patch(self, before: str, after: str, path: str = "target.py") -> str:
+        if path.endswith(".py"):
+            before = f"value = {before!r}"
+            after = f"value = {after!r}"
         return (
             f"diff --git a/{path} b/{path}\n"
             f"--- a/{path}\n"
@@ -504,7 +544,7 @@ class QualificationTests(unittest.TestCase):
             evaluator.parent.mkdir(parents=True, exist_ok=True)
             evaluator.write_text(
                 "import sys\nfrom pathlib import Path\n"
-                f"assert {key!r} in (Path(sys.argv[1]) / 'target.txt').read_text()\n",
+                f"assert {key!r} in (Path(sys.argv[1]) / 'target.py').read_text()\n",
                 encoding="utf-8",
             )
             patch = self.dataset / "references" / f"{key}.patch"
@@ -518,7 +558,7 @@ class QualificationTests(unittest.TestCase):
                     "source_hash": f"{index:064x}",
                     "prompt": key,
                     "acceptance": ["normal", "boundary", "error"],
-                    "overlap_anchors": [{"path": "target.txt", "symbol": "target"}],
+                    "overlap_anchors": [{"path": "target.py", "symbol": "target.value"}],
                     "evaluator": f"evaluators/{key}.py",
                     "reference_patch": f"references/{key}.patch",
                 }
@@ -546,7 +586,7 @@ class QualificationTests(unittest.TestCase):
             root.type = tarfile.DIRTYPE
             archive.addfile(root)
             for name, contents in {
-                "target.txt": b"base\n",
+                "target.py": b"value = 'base'\n",
                 "suite.txt": b"base\n",
             }.items():
                 member = tarfile.TarInfo(f"fixture/{name}")
@@ -568,7 +608,7 @@ class QualificationTests(unittest.TestCase):
             "suite": [
                 sys.executable,
                 "-c",
-                "from pathlib import Path; assert 'integrated' in Path('suite.txt').read_text()",
+                "from pathlib import Path; assert 'base' in Path('target.py').read_text()",
             ],
             "corpus": "repos/fixture.json",
         }
@@ -643,6 +683,86 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertFalse(result["repositories"][0]["upstream_green"])
 
+    def test_qualify_rejects_base_suite_failure(self) -> None:
+        manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
+        manifest["repositories"][0]["suite"] = [
+            sys.executable,
+            "-c",
+            "from pathlib import Path; assert 'integrated' in Path('suite.txt').read_text()",
+        ]
+        self.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+
+        status, result = self._qualify()
+
+        self.assertEqual(status, 1)
+        self.assertFalse(result["repositories"][0]["base_suite_green"])
+
+    def test_qualify_rejects_corpus_repository_mismatch(self) -> None:
+        corpus_path = self.dataset / "repos" / "fixture.json"
+        corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+        corpus["repository"] = "other"
+        corpus_path.write_text(json.dumps(corpus), encoding="utf-8")
+
+        status, result = self._qualify()
+
+        self.assertEqual(status, 1)
+        self.assertIn("repository", result["repositories"][0]["error"])
+
+    def test_qualify_uses_isolated_sanitized_virtualenv(self) -> None:
+        evaluator = self.dataset / "evaluators" / "task-0.py"
+        evaluator.write_text(
+            "import os\nimport sys\nfrom pathlib import Path\n"
+            "assert Path(sys.prefix).resolve() == Path(os.environ['VIRTUAL_ENV']).resolve()\n"
+            "assert 'PYTHONPATH' not in os.environ\n"
+            "assert 'PYTHONHOME' not in os.environ\n"
+            "assert 'task-0' in (Path(sys.argv[1]) / 'target.py').read_text()\n",
+            encoding="utf-8",
+        )
+
+        status, result = self._qualify()
+
+        repository = result["repositories"][0]
+        self.assertTrue(repository["base_suite_green"], result)
+        self.assertTrue(repository["tasks"][0]["reference_green"], result)
+        self.assertTrue(repository["integrated_green"], result)
+        self.assertFalse(repository["isolated_tasks"], result)
+        self.assertEqual(status, 0, result)
+
+    def test_changed_anchors_require_hunks_to_touch_the_symbol(self) -> None:
+        workspace = self.root / "symbol-workspace"
+        workspace.mkdir()
+        source = workspace / "target.py"
+        source.write_text(
+            "def first():\n    return 'base'\n\n\ndef second():\n    return 'base'\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            self.mod.changed_anchor_symbols(
+                source,
+                [(source, "target.first"), (source, "target.second")],
+                [(5, 1)],
+            ),
+            {"target.py:target.second"},
+        )
+    def test_qualify_reports_malformed_matching_archive(self) -> None:
+        contents = b"not a tar archive"
+        digest = hashlib.sha256(contents).hexdigest()
+        archive = next(self.cache.glob("*.tar.gz"))
+        archive.unlink()
+        (self.cache / f"{digest}.tar.gz").write_bytes(contents)
+        manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
+        for repository in manifest["repositories"]:
+            repository["archive_sha256"] = digest
+        self.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+
+        status, result = self._qualify()
+
+        self.assertEqual(status, 1)
+        repository = result["repositories"][0]
+        self.assertIn("archive", repository["error"])
+        self.assertTrue((self.cache / "qualification" / "fixture" / "artifacts").is_dir())
+
+
     def test_qualify_rejects_task_without_changed_shared_anchor(self) -> None:
         evaluator = self.dataset / "evaluators" / "task-0.py"
         evaluator.write_text(
@@ -676,7 +796,7 @@ class QualificationTests(unittest.TestCase):
             root.type = tarfile.DIRTYPE
             source.addfile(root)
             for name, contents in {
-                "target.txt": b"base\n",
+                "target.py": b"value = 'base'\n",
                 "lonely.txt": b"base\n",
                 "suite.txt": b"base\n",
             }.items():
@@ -695,7 +815,7 @@ class QualificationTests(unittest.TestCase):
 
         self.assertEqual(status, 1, result)
         repository = result["repositories"][0]
-        self.assertEqual(repository["tasks"][0]["changed_anchors"], ["lonely.txt:lonely"])
+        self.assertEqual(repository["tasks"][0]["changed_anchors"], [])
         self.assertEqual(repository["isolated_tasks"], ["task-0"])
         self.assertTrue((self.cache / "qualification" / "fixture" / "artifacts").is_dir())
 if __name__ == "__main__":
