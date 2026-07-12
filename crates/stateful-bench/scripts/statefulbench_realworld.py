@@ -726,10 +726,10 @@ def changed_anchor_symbols(
             self.scope: list[str] = []
 
         def _record(self, name: str, node: ast.AST) -> None:
-            ranges[".".join((*self.scope, name))] = (
-                node.lineno,
-                node.end_lineno or node.lineno,
+            first = min(
+                (node.lineno, *(decorator.lineno for decorator in getattr(node, "decorator_list", ()))),
             )
+            ranges[".".join((*self.scope, name))] = (first, node.end_lineno or node.lineno)
 
         def visit_ClassDef(self, node: ast.ClassDef) -> None:
             self._record(node.name, node)

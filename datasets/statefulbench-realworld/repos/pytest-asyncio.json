@@ -48,7 +48,7 @@
         "The standalone patch forwards static and late timeout markers through one synchronizer, preserving #215 behavior when the tasks are composed; the late coroutine supplies a non-None context to runner.run.",
         "A dynamically marked synchronous test still follows the existing PytestWarning path."
       ],
-      "overlap_anchors": [{"path": "pytest_asyncio/plugin.py", "symbol": "pytest_asyncio.plugin.pytest_pyfunc_call"}],
+      "overlap_anchors": [{"path": "pytest_asyncio/plugin.py", "symbol": "pytest_asyncio.plugin._synchronize_coroutine"}],
       "evaluator": "evaluators/pytest-asyncio/pyfunc-810-dynamic-marker.py",
       "reference_patch": "references/pytest-asyncio/pyfunc-810-dynamic-marker.patch"
     },
@@ -66,7 +66,7 @@
         "When integrated with #810, dynamically added markers forward timeout through the same synchronizer.",
         "Existing loop_scope, scope, and loop_factories marker kwargs remain accepted."
       ],
-      "overlap_anchors": [{"path": "pytest_asyncio/plugin.py", "symbol": "pytest_asyncio.plugin.pytest_pyfunc_call"}],
+      "overlap_anchors": [{"path": "pytest_asyncio/plugin.py", "symbol": "pytest_asyncio.plugin._synchronize_coroutine"}],
       "evaluator": "evaluators/pytest-asyncio/pyfunc-215-timeout-marker.py",
       "reference_patch": "references/pytest-asyncio/pyfunc-215-timeout-marker.patch"
     },

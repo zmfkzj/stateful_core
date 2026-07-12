@@ -1227,6 +1227,26 @@ class QualificationTests(unittest.TestCase):
             {"src/pkg/__init__.py:pkg.from_timestamp"},
         )
 
+    def test_changed_anchors_include_decorated_function_decorators(self) -> None:
+        source = self.root / "symbol-workspace" / "src" / "pkg" / "decorated.py"
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            "@pytest.fixture(scope='session')\n"
+            "def shared() -> str:\n"
+            "    return 'base'\n",
+            encoding="utf-8",
+        )
+        anchors = [(source, "src/pkg/decorated.py", "pkg.decorated.shared")]
+        expected = {"src/pkg/decorated.py:pkg.decorated.shared"}
+        self.assertEqual(
+            self.mod.changed_anchor_symbols(source, anchors, [(1, 1)]),
+            expected,
+        )
+        self.assertEqual(
+            self.mod.changed_anchor_symbols(source, anchors, [(2, 1)]),
+            expected,
+        )
+
     def test_qualify_reports_malformed_matching_archive(self) -> None:
         contents = b"not a tar archive"
         digest = hashlib.sha256(contents).hexdigest()
