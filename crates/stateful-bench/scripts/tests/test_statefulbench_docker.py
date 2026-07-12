@@ -154,5 +154,66 @@ class DockerRuntimeTests(unittest.TestCase):
         self.assertIn("usage: statefulbench-container-entry", completed.stderr)
 
 
+
+class DockerQualificationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.mod = load_script("statefulbench_docker.py")
+
+    def setUp(self) -> None:
+        self.runtime = self.mod.DockerRuntime(
+            binary="/usr/local/bin/docker",
+            image="statefulbench-realworld:local",
+            image_id="sha256:abc",
+            repo_digests=("statefulbench@sha256:def",),
+            platform="linux/arm64",
+        )
+
+    def test_qualification_command_mounts_repo_read_only_and_cache_artifacts_rw(self) -> None:
+        command = self.mod.qualification_command(
+            runtime=self.runtime,
+            repo_root=Path("/repo"),
+            manifest=Path("/repo/datasets/statefulbench-realworld/manifest.json"),
+            cache=Path("/runs/cache"),
+            repositories=("requests",),
+        )
+
+        self.assertIn("type=bind,source=/repo,target=/benchmark,readonly", command)
+        self.assertIn("type=bind,source=/runs/cache,target=/cache", command)
+        self.assertNotIn("/Users/arthur", " ".join(command))
+        self.assertIn("STATEFULBENCH_DOCKER_INNER=qualification", command)
+        self.assertEqual(command.count("--repo"), 1)
+
+    def test_qualification_command_rejects_unsafe_mount_boundaries(self) -> None:
+        with self.assertRaisesRegex(ValueError, "manifest"):
+            self.mod.qualification_command(
+                self.runtime,
+                Path("/repo"),
+                Path("/outside/manifest.json"),
+                Path("/runs/cache"),
+                (),
+            )
+        with self.assertRaisesRegex(ValueError, "cache"):
+            self.mod.qualification_command(
+                self.runtime,
+                Path("/repo"),
+                Path("/repo/cache"),
+                Path("/repo/cache"),
+                (),
+            )
+
+    def test_run_qualification_container_propagates_docker_status(self) -> None:
+        completed = subprocess.CompletedProcess([], 23, "", "failed")
+        status = self.mod.run_qualification_container(
+            self.runtime,
+            Path("/repo"),
+            Path("/repo/manifest.json"),
+            Path("/runs/cache"),
+            ("requests",),
+            runner=Mock(return_value=completed),
+        )
+
+        self.assertEqual(status, 23)
+
 if __name__ == "__main__":
     unittest.main()

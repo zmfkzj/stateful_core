@@ -53,3 +53,70 @@ def docker_command(runtime: DockerRuntime, subcommand: str, *args: str) -> list[
     if subcommand in {"build", "create", "run"}:
         command.append(f"--platform={runtime.platform}")
     return [*command, *args]
+
+
+def qualification_command(
+    runtime: DockerRuntime,
+    repo_root: Path,
+    manifest: Path,
+    cache: Path,
+    repositories: tuple[str, ...],
+) -> list[str]:
+    root = repo_root.resolve()
+    manifest_path = manifest.resolve()
+    cache_path = cache.resolve()
+    if not manifest_path.is_relative_to(root):
+        raise ValueError("manifest must be inside the repository root")
+    if cache_path.is_relative_to(root):
+        raise ValueError("cache must be outside the read-only repository root")
+    container_manifest = Path("/benchmark") / manifest_path.relative_to(root)
+    command = docker_command(
+        runtime,
+        "run",
+        "--rm",
+        "--mount",
+        f"type=bind,source={root},target=/benchmark,readonly",
+        "--mount",
+        f"type=bind,source={cache_path},target=/cache",
+        "--env",
+        "STATEFULBENCH_DOCKER_INNER=qualification",
+        "--env",
+        f"STATEFULBENCH_IMAGE_ID={runtime.image_id}",
+        "--env",
+        f"STATEFULBENCH_IMAGE_PLATFORM={runtime.platform}",
+        "--env",
+        f"STATEFULBENCH_IMAGE_REPO_DIGESTS={json.dumps(runtime.repo_digests)}",
+        "--env",
+        "PYTHONDONTWRITEBYTECODE=1",
+        runtime.image,
+        "python3",
+        "/benchmark/crates/stateful-bench/scripts/statefulbench_realworld.py",
+        "qualify",
+        "--manifest",
+        str(container_manifest),
+        "--cache",
+        "/cache",
+        "--docker-image",
+        runtime.image,
+        "--docker-bin",
+        "docker",
+    )
+    for repository in repositories:
+        command.extend(("--repo", repository))
+    return command
+
+
+def run_qualification_container(
+    runtime: DockerRuntime,
+    repo_root: Path,
+    manifest: Path,
+    cache: Path,
+    repositories: tuple[str, ...],
+    *,
+    runner=subprocess.run,
+) -> int:
+    completed = runner(
+        qualification_command(runtime, repo_root, manifest, cache, repositories),
+        check=False,
+    )
+    return completed.returncode

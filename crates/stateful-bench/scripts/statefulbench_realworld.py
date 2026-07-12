@@ -34,6 +34,14 @@ _LITE_SPEC.loader.exec_module(_LITE)
 AgentHandle = _LITE.AgentHandle
 RunConfig = _LITE.RunConfig
 
+_DOCKER_PATH = Path(__file__).with_name("statefulbench_docker.py")
+_DOCKER_SPEC = importlib.util.spec_from_file_location("statefulbench_docker_for_realworld", _DOCKER_PATH)
+if _DOCKER_SPEC is None or _DOCKER_SPEC.loader is None:
+    raise RuntimeError(f"cannot import Docker runtime from {_DOCKER_PATH}")
+_DOCKER = importlib.util.module_from_spec(_DOCKER_SPEC)
+sys.modules[_DOCKER_SPEC.name] = _DOCKER
+_DOCKER_SPEC.loader.exec_module(_DOCKER)
+
 
 _REPOSITORY_FIELDS = frozenset(
     {
@@ -1304,6 +1312,82 @@ def _write_json_atomically(path: Path, value: dict) -> None:
             temporary.unlink(missing_ok=True)
 
 
+def _receipt_path(cache_dir: Path, key: str) -> Path:
+    _require_key({"key": key}, "key")
+    root = (cache_dir / "qualification" / "receipts").resolve()
+    path = (root / f"{key}.json").resolve()
+    if not path.is_relative_to(root):
+        raise ValueError("repository key escapes qualification receipts")
+    return path
+
+
+def _runtime_provenance(runtime: _DOCKER.DockerRuntime) -> dict:
+    return {
+        "image": runtime.image,
+        "image_id": runtime.image_id,
+        "repo_digests": list(runtime.repo_digests),
+        "platform": runtime.platform,
+    }
+
+
+def _qualification_identity(
+    repo: dict,
+    manifest: Path,
+    corpus: Path,
+    runtime: _DOCKER.DockerRuntime,
+) -> dict:
+    return {
+        "key": repo["key"],
+        "manifest_sha256": _sha256(manifest),
+        "corpus_sha256": _sha256(corpus),
+        "archive_sha256": repo["archive_sha256"],
+        "commit": repo["commit"],
+        **_runtime_provenance(runtime),
+    }
+
+
+def write_qualification_receipt(
+    cache_dir: Path,
+    repo: dict,
+    manifest: Path,
+    corpus: Path,
+    runtime: _DOCKER.DockerRuntime,
+) -> dict:
+    path = _receipt_path(cache_dir, repo["key"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    receipt = {
+        **_qualification_identity(repo, manifest, corpus, runtime),
+        "qualified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "qualified": True,
+    }
+    _write_json_atomically(path, receipt)
+    return receipt
+
+
+def remove_qualification_receipt(cache_dir: Path, key: str) -> None:
+    _receipt_path(cache_dir, key).unlink(missing_ok=True)
+
+
+def load_qualification_receipt(
+    cache_dir: Path,
+    repo: dict,
+    manifest: Path,
+    corpus: Path,
+    runtime: _DOCKER.DockerRuntime,
+) -> dict:
+    path = _receipt_path(cache_dir, repo["key"])
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"qualification receipt is unavailable for {repo['key']}") from error
+    if type(receipt) is not dict or receipt.get("qualified") is not True:
+        raise ValueError(f"qualification receipt is invalid for {repo['key']}")
+    for field, expected in _qualification_identity(repo, manifest, corpus, runtime).items():
+        if receipt.get(field) != expected:
+            raise ValueError(f"qualification receipt {field} does not match current identity")
+    return receipt
+
+
 def _write_run_result(out_dir: Path, result: dict) -> None:
     result_dir = (
         out_dir
@@ -1666,6 +1750,30 @@ def _parse_repositories(value: str) -> list[str]:
     return values
 
 
+def _inner_qualification_runtime(
+    image: str, docker_bin: str
+) -> _DOCKER.DockerRuntime:
+    image_id = os.environ.get("STATEFULBENCH_IMAGE_ID")
+    platform = os.environ.get("STATEFULBENCH_IMAGE_PLATFORM")
+    if not image_id or not image_id.startswith("sha256:"):
+        raise ValueError("inner qualification requires inspected image ID provenance")
+    if not platform or not platform.startswith("linux/"):
+        raise ValueError("inner qualification requires inspected Linux platform provenance")
+    try:
+        repo_digests = json.loads(os.environ.get("STATEFULBENCH_IMAGE_REPO_DIGESTS", "[]"))
+    except json.JSONDecodeError as error:
+        raise ValueError("inner qualification has invalid image digest provenance") from error
+    if type(repo_digests) is not list or any(type(item) is not str for item in repo_digests):
+        raise ValueError("inner qualification has invalid image digest provenance")
+    return _DOCKER.DockerRuntime(
+        binary=docker_bin,
+        image=image,
+        image_id=image_id,
+        repo_digests=tuple(repo_digests),
+        platform=platform,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1687,7 +1795,32 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--omp-bin", default="omp")
     run.add_argument("--stateful-binary", default=shutil.which("stateful"))
     run.add_argument("--timeout-s", type=int, default=900)
+    for command in (qualify, run):
+        command.add_argument("--docker-bin", default="docker")
+        command.add_argument("--docker-image", required=True)
     arguments = parser.parse_args(argv)
+    inner_qualification = (
+        arguments.command == "qualify"
+        and os.environ.get("STATEFULBENCH_DOCKER_INNER") == "qualification"
+    )
+
+    if arguments.command == "qualify" and not inner_qualification:
+        try:
+            repo_root = Path(__file__).resolve().parents[3]
+            if arguments.cache.resolve().is_relative_to(repo_root):
+                raise ValueError("cache must be outside the read-only repository root")
+            runtime = _DOCKER.inspect_runtime(arguments.docker_bin, arguments.docker_image)
+            arguments.cache.mkdir(parents=True, exist_ok=True)
+            return _DOCKER.run_qualification_container(
+                runtime,
+                repo_root,
+                arguments.manifest,
+                arguments.cache,
+                tuple(arguments.repo or ()),
+            )
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            print(f"Docker qualification failed: {error}", file=sys.stderr)
+            return 1
 
     if arguments.command == "run":
         if arguments.trials < 1:
@@ -1698,8 +1831,18 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("parallel-on requires a resolvable stateful binary; pass --stateful-binary")
         try:
             omp_binary = _LITE.resolve_omp_binary(arguments.omp_bin)
-        except ValueError as error:
+            runtime = _DOCKER.inspect_runtime(arguments.docker_bin, arguments.docker_image)
+        except (RuntimeError, ValueError) as error:
             parser.error(str(error))
+    else:
+        try:
+            runtime = _inner_qualification_runtime(
+                arguments.docker_image, arguments.docker_bin
+            )
+        except ValueError as error:
+            print(f"Docker qualification failed: {error}", file=sys.stderr)
+            return 1
+
     manifest = load_manifest(arguments.manifest)
     dataset_root = arguments.manifest.parent.resolve()
     repositories = repo_entries(manifest)
@@ -1713,6 +1856,20 @@ def main(argv: list[str] | None = None) -> int:
         selected = repositories
 
     if arguments.command == "run":
+        corpora: dict[str, dict] = {}
+        try:
+            for repo in selected:
+                corpus_path = dataset_root / repo["corpus"]
+                corpus = load_corpus(corpus_path)
+                if not _corpus_matches_repository(repo, corpus):
+                    raise ValueError("corpus repository does not match manifest key")
+                load_qualification_receipt(
+                    arguments.cache, repo, arguments.manifest, corpus_path, runtime
+                )
+                corpora[repo["key"]] = corpus
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            print(f"qualification receipt validation failed: {error}", file=sys.stderr)
+            return 1
         cfg = RunConfig(
             tasks=10,
             timeout_s=arguments.timeout_s,
@@ -1724,17 +1881,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         results = []
         for repo in selected:
-            try:
-                corpus = load_corpus(dataset_root / repo["corpus"])
-                if not _corpus_matches_repository(repo, corpus):
-                    raise ValueError("corpus repository does not match manifest key")
-            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
-                for trial in range(1, arguments.trials + 1):
-                    for arm in arguments.arms:
-                        result = _empty_run_result(repo, arm, trial, str(error))
-                        _write_run_result(arguments.out, result)
-                        results.append(result)
-                continue
+            corpus = corpora[repo["key"]]
             for trial in range(1, arguments.trials + 1):
                 for arm in arguments.arms:
                     try:
@@ -1767,11 +1914,17 @@ def main(argv: list[str] | None = None) -> int:
 
     results = []
     for repo in selected:
+        remove_qualification_receipt(arguments.cache, repo["key"])
+        corpus_path = dataset_root / repo["corpus"]
         try:
-            corpus = load_corpus(dataset_root / repo["corpus"])
+            corpus = load_corpus(corpus_path)
             if not _corpus_matches_repository(repo, corpus):
                 raise ValueError("corpus repository does not match manifest key")
             result = qualify_repository(repo, corpus, dataset_root, arguments.cache)
+            if _qualified(result):
+                write_qualification_receipt(
+                    arguments.cache, repo, arguments.manifest, corpus_path, runtime
+                )
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             result = {
                 "key": repo["key"],
@@ -1784,7 +1937,7 @@ def main(argv: list[str] | None = None) -> int:
                 "artifacts": {},
             }
         results.append(result)
-    print(json.dumps({"repositories": results}, sort_keys=True))
+    print(json.dumps({"runtime": _runtime_provenance(runtime), "repositories": results}, sort_keys=True))
     return 0 if all(_qualified(result) for result in results) else 1
 
 

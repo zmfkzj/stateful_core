@@ -1268,8 +1268,17 @@ class QualificationTests(unittest.TestCase):
 
 
     def _qualify(self) -> tuple[int, dict]:
+        runtime_env = {
+            "STATEFULBENCH_DOCKER_INNER": "qualification",
+            "STATEFULBENCH_IMAGE_ID": "sha256:fixture",
+            "STATEFULBENCH_IMAGE_PLATFORM": "linux/arm64",
+            "STATEFULBENCH_IMAGE_REPO_DIGESTS": "[]",
+        }
         stdout = io.StringIO()
-        with contextlib.redirect_stdout(stdout):
+        with (
+            mock.patch.dict(self.mod.os.environ, runtime_env, clear=False),
+            contextlib.redirect_stdout(stdout),
+        ):
             status = self.mod.main(
                 [
                     "qualify",
@@ -1279,9 +1288,177 @@ class QualificationTests(unittest.TestCase):
                     str(self.cache),
                     "--repo",
                     "fixture",
+                    "--docker-image",
+                    "statefulbench-realworld:local",
                 ]
             )
         return status, json.loads(stdout.getvalue())
+
+    def test_qualification_receipt_is_atomic_and_fails_closed_on_stale_identity(self) -> None:
+        repository = self.mod.load_manifest(self.manifest)["repositories"][0]
+        corpus = self.dataset / repository["corpus"]
+        manifest_text = self.manifest.read_text(encoding="utf-8")
+        corpus_text = corpus.read_text(encoding="utf-8")
+        runtime = self.mod._DOCKER.DockerRuntime(
+            binary="/docker",
+            image="statefulbench-realworld:local",
+            image_id="sha256:abc",
+            repo_digests=("statefulbench@sha256:def",),
+            platform="linux/arm64",
+        )
+
+        receipt = self.mod.write_qualification_receipt(
+            self.cache, repository, self.manifest, corpus, runtime
+        )
+        self.assertEqual(
+            self.mod.load_qualification_receipt(
+                self.cache, repository, self.manifest, corpus, runtime
+            ),
+            receipt,
+        )
+        receipt_path = self.cache / "qualification" / "receipts" / "fixture.json"
+        self.assertTrue(receipt_path.is_file())
+
+        self.manifest.write_text("{}\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "manifest"):
+            self.mod.load_qualification_receipt(
+                self.cache, repository, self.manifest, corpus, runtime
+            )
+
+        self.manifest.write_text(manifest_text, encoding="utf-8")
+        corpus.write_text("{}\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "corpus"):
+            self.mod.load_qualification_receipt(
+                self.cache, repository, self.manifest, corpus, runtime
+            )
+
+        corpus.write_text(corpus_text, encoding="utf-8")
+        stale_archive = {**repository, "archive_sha256": "f" * 64}
+        with self.assertRaisesRegex(ValueError, "archive"):
+            self.mod.load_qualification_receipt(
+                self.cache, stale_archive, self.manifest, corpus, runtime
+            )
+        stale_runtime = self.mod._DOCKER.DockerRuntime(
+            binary="/docker",
+            image=runtime.image,
+            image_id="sha256:def",
+            repo_digests=runtime.repo_digests,
+            platform=runtime.platform,
+        )
+        with self.assertRaisesRegex(ValueError, "image"):
+            self.mod.load_qualification_receipt(
+                self.cache, repository, self.manifest, corpus, stale_runtime
+            )
+        stale_platform = self.mod._DOCKER.DockerRuntime(
+            binary="/docker",
+            image=runtime.image,
+            image_id=runtime.image_id,
+            repo_digests=runtime.repo_digests,
+            platform="linux/amd64",
+        )
+        with self.assertRaisesRegex(ValueError, "platform"):
+            self.mod.load_qualification_receipt(
+                self.cache, repository, self.manifest, corpus, stale_platform
+            )
+
+    def test_failed_qualification_removes_existing_receipt(self) -> None:
+        repository = self.mod.load_manifest(self.manifest)["repositories"][0]
+        runtime = self.mod._DOCKER.DockerRuntime(
+            binary="docker",
+            image="statefulbench-realworld:local",
+            image_id="sha256:fixture",
+            repo_digests=(),
+            platform="linux/arm64",
+        )
+        self.mod.write_qualification_receipt(
+            self.cache,
+            repository,
+            self.manifest,
+            self.dataset / repository["corpus"],
+            runtime,
+        )
+        (self.dataset / "evaluators" / "task-0.py").write_text(
+            "pass\n", encoding="utf-8"
+        )
+
+        status, _ = self._qualify()
+
+        self.assertEqual(status, 1)
+        self.assertFalse(
+            (self.cache / "qualification" / "receipts" / "fixture.json").exists()
+        )
+
+    def test_outer_qualification_only_runs_the_docker_gate(self) -> None:
+        runtime = self.mod._DOCKER.DockerRuntime(
+            binary="/docker",
+            image="statefulbench-realworld:local",
+            image_id="sha256:abc",
+            repo_digests=(),
+            platform="linux/arm64",
+        )
+        with (
+            mock.patch.object(self.mod._DOCKER, "inspect_runtime", return_value=runtime),
+            mock.patch.object(
+                self.mod._DOCKER, "run_qualification_container", return_value=17
+            ) as run_container,
+            mock.patch.object(
+                self.mod, "qualify_repository", side_effect=AssertionError("host qualification")
+            ),
+        ):
+            status = self.mod.main(
+                [
+                    "qualify",
+                    "--manifest",
+                    str(MANIFEST),
+                    "--cache",
+                    str(self.cache),
+                    "--repo",
+                    "requests",
+                    "--docker-image",
+                    runtime.image,
+                ]
+            )
+
+        self.assertEqual(status, 17)
+        self.assertEqual(run_container.call_args.args[4], ("requests",))
+
+    def test_run_rejects_missing_receipt_before_creating_rows(self) -> None:
+        runtime = self.mod._DOCKER.DockerRuntime(
+            binary="/docker",
+            image="statefulbench-realworld:local",
+            image_id="sha256:abc",
+            repo_digests=(),
+            platform="linux/arm64",
+        )
+        out = self.root / "out"
+        with (
+            mock.patch.object(self.mod._DOCKER, "inspect_runtime", return_value=runtime),
+            mock.patch.object(self.mod._LITE, "resolve_omp_binary", return_value="/omp"),
+            mock.patch.object(
+                self.mod, "run_repo_arm", side_effect=AssertionError("must not run")
+            ),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            status = self.mod.main(
+                [
+                    "run",
+                    "--manifest",
+                    str(self.manifest),
+                    "--cache",
+                    str(self.cache),
+                    "--out",
+                    str(out),
+                    "--repos",
+                    "fixture",
+                    "--arms",
+                    "sequential",
+                    "--docker-image",
+                    runtime.image,
+                ]
+            )
+
+        self.assertEqual(status, 1)
+        self.assertFalse(out.exists())
 
     def test_qualify_rejects_base_green_evaluator(self) -> None:
         evaluator = self.dataset / "evaluators" / "task-0.py"
