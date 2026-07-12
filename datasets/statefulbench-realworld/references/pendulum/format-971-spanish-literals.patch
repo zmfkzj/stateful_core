@@ -1,0 +1,26 @@
+diff --git a/src/pendulum/formatting/formatter.py b/src/pendulum/formatting/formatter.py
+--- a/src/pendulum/formatting/formatter.py
++++ b/src/pendulum/formatting/formatter.py
+@@ -376,6 +376,13 @@ class Formatter:
+         :return: The parsed elements
+         """
+         escaped_fmt = re.escape(fmt)
++        literal_blocks: list[str] = []
++
++        def _replace_literal(match: Match[str]) -> str:
++            literal_blocks.append(match.group(0)[2:-2])
++            return f"\x00{len(literal_blocks) - 1}\x00"
++
++        escaped_fmt = re.sub(r"\\\[.*?\\\]", _replace_literal, escaped_fmt)
+ 
+         if not self._FROM_FORMAT_RE.search(escaped_fmt):
+             raise ValueError("The given time string does not match the given format")
+@@ -404,6 +411,8 @@ class Formatter:
+         pattern = self._FROM_FORMAT_RE.sub(
+             lambda m: self._replace_tokens(m.group(0), loaded_locale), escaped_fmt
+         )
++        for index, literal in enumerate(literal_blocks):
++            pattern = pattern.replace(f"\x00{index}\x00", literal)
+ 
+         if not re.fullmatch(pattern, time):
+             raise ValueError(f"String does not match format {fmt}")

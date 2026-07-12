@@ -1,0 +1,55 @@
+diff --git a/src/pendulum/__init__.py b/src/pendulum/__init__.py
+--- a/src/pendulum/__init__.py
++++ b/src/pendulum/__init__.py
+@@ -271,11 +271,12 @@ def from_format(
+     fmt: str,
+     tz: str | Timezone = UTC,
+     locale: str | None = None,
++    strict: bool = False,
+ ) -> DateTime:
+     """
+     Creates a DateTime instance from a specific format.
+     """
+-    parts = _formatter.parse(string, fmt, now(tz=tz), locale=locale)
++    parts = _formatter.parse(string, fmt, now(tz=tz), locale=locale, strict=strict)
+     if parts["tz"] is None:
+         parts["tz"] = tz
+ 
+diff --git a/src/pendulum/formatting/formatter.py b/src/pendulum/formatting/formatter.py
+--- a/src/pendulum/formatting/formatter.py
++++ b/src/pendulum/formatting/formatter.py
+@@ -364,6 +364,7 @@ class Formatter:
+         fmt: str,
+         now: pendulum.DateTime,
+         locale: str | None = None,
++        strict: bool = False,
+     ) -> dict[str, Any]:
+         """
+         Parses a time string matching a given format as a tuple.
+@@ -402,7 +403,7 @@ class Formatter:
+         }
+ 
+         pattern = self._FROM_FORMAT_RE.sub(
+-            lambda m: self._replace_tokens(m.group(0), loaded_locale), escaped_fmt
++            lambda m: self._replace_tokens(m.group(0), loaded_locale, strict), escaped_fmt
+         )
+ 
+         if not re.fullmatch(pattern, time):
+@@ -663,7 +664,7 @@ class Formatter:
+         if value is None:
+             raise ValueError("Invalid date")
+ 
+-    def _replace_tokens(self, token: str, locale: Locale) -> str:
++    def _replace_tokens(self, token: str, locale: Locale, strict: bool = False) -> str:
+         if token.startswith("[") and token.endswith("]"):
+             return token[1:-1]
+         elif token.startswith("\\"):
+@@ -686,6 +687,8 @@ class Formatter:
+                 )
+         else:
+             candidates = cast("Sequence[str]", self._REGEX_TOKENS[token])
++            if strict and isinstance(candidates, tuple):
++                candidates = candidates[1:]
+ 
+         if not candidates:
+             raise ValueError(f"Unsupported token: {token}")

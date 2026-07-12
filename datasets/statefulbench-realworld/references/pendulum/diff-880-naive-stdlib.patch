@@ -1,0 +1,13 @@
+diff --git a/src/pendulum/datetime.py b/src/pendulum/datetime.py
+index da89b13..b47e18c 100644
+--- a/src/pendulum/datetime.py
++++ b/src/pendulum/datetime.py
+@@ -708,6 +708,8 @@ class DateTime(datetime.datetime, Date):
+         """
+         if dt is None:
+             dt = self.now(self.tz)
++        elif self.tzinfo is None and dt.tzinfo is None:
++            dt = self.instance(dt, tz=None)
+ 
+         return Interval(self, dt, absolute=abs)
+ 

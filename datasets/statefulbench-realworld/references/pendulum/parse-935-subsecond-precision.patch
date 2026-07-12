@@ -1,0 +1,26 @@
+diff --git a/src/pendulum/parser.py b/src/pendulum/parser.py
+index 55ac9fe..8a40e7a 100644
+--- a/src/pendulum/parser.py
++++ b/src/pendulum/parser.py
+@@ -2,6 +2,7 @@ from __future__ import annotations
+ 
+ import datetime
+ import os
++import re
+ import typing as t
+ 
+ import pendulum
+@@ -29,6 +30,12 @@ except ImportError:
+     RustDuration = None  # type: ignore[assignment,misc]
+ 
+ 
+ def parse(text: str, **options: t.Any) -> Date | Time | DateTime | Duration:
++    text = re.sub(
++        r"([.,]\d{9})\d+(?=(?:Z|[+-]\d{2}(?::?\d{2})?)?$)",
++        r"\1",
++        text,
++    )
++
+     # Use the mock now value if it exists
+     options["now"] = options.get("now")
+ 

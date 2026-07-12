@@ -1,0 +1,55 @@
+diff --git a/src/pendulum/datetime.py b/src/pendulum/datetime.py
+--- a/src/pendulum/datetime.py
++++ b/src/pendulum/datetime.py
+@@ -701,7 +701,10 @@
+     # DIFFERENCES
+ 
+     def diff(  # type: ignore[override]
+-        self, dt: datetime.datetime | None = None, abs: bool = True
++        self,
++        dt: datetime.datetime | None = None,
++        abs: bool = True,
++        units: tuple[str, ...] | None = None,
+     ) -> Interval[datetime.datetime]:
+         """
+         Returns the difference between two DateTime objects represented as an Interval.
+@@ -709,7 +712,9 @@
+         if dt is None:
+             dt = self.now(self.tz)
+ 
+-        return Interval(self, dt, absolute=abs)
++        interval = Interval(self, dt, absolute=abs)
++        interval._in_words_units = units
++        return interval
+ 
+     def diff_for_humans(  # type: ignore[override]
+         self,
+diff --git a/src/pendulum/interval.py b/src/pendulum/interval.py
+--- a/src/pendulum/interval.py
++++ b/src/pendulum/interval.py
+@@ -244,7 +244,12 @@
+     def in_days(self) -> int:
+         return self._delta.total_days
+ 
+-    def in_words(self, locale: str | None = None, separator: str = " ") -> str:
++    def in_words(
++        self,
++        locale: str | None = None,
++        separator: str = " ",
++        units: tuple[str, ...] | None = None,
++    ) -> str:
+         """
+         Get the current interval in words in the current locale.
+ 
+@@ -264,6 +269,11 @@
+             ("minute", self.minutes),
+             ("second", self.remaining_seconds),
+         ]
++        if units is None:
++            units = getattr(self, "_in_words_units", None)
++        if units is not None:
++            intervals = [interval for interval in intervals if interval[0] in units]
++
+         loaded_locale: Locale = Locale.load(locale or pendulum.get_locale())
+         parts = []
+         for interval in intervals:

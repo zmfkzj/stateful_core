@@ -1,0 +1,257 @@
+diff --git a/src/pendulum/__init__.py b/src/pendulum/__init__.py
+index 16ae086..e5f9b50 100644
+--- a/src/pendulum/__init__.py
++++ b/src/pendulum/__init__.py
+@@ -31,6 +31,7 @@ from pendulum.helpers import week_ends_at
+ from pendulum.helpers import week_starts_at
+ from pendulum.interval import Interval
+ from pendulum.parser import parse as parse
++from pendulum.parser import parse_dt as parse_dt
+ from pendulum.time import Time
+ from pendulum.tz import UTC
+ from pendulum.tz import fixed_timezone
+@@ -271,30 +272,50 @@ def from_format(
+     fmt: str,
+     tz: str | Timezone = UTC,
+     locale: str | None = None,
++    strict: bool = False,
+ ) -> DateTime:
+     """
+     Creates a DateTime instance from a specific format.
+     """
+-    parts = _formatter.parse(string, fmt, now(tz=tz), locale=locale)
++    parts = _formatter.parse(string, fmt, now(tz=tz), locale=locale, strict=strict)
+     if parts["tz"] is None:
+         parts["tz"] = tz
+ 
+     return datetime(**parts)
+ 
+ 
+-def from_timestamp(timestamp: int | float, tz: str | Timezone = UTC) -> DateTime:
++def from_timestamp(
++    timestamp: int | float,
++    tz: str | Timezone = UTC,
++    *,
++    calendar: Any | None = None,
++) -> DateTime | Any:
+     """
+     Create a DateTime instance from a timestamp.
+     """
+-    dt = _datetime.datetime.fromtimestamp(timestamp, tz=UTC)
++    try:
++        native = _datetime.datetime.fromtimestamp(timestamp, tz=UTC)
++    except (OSError, OverflowError):
++        native = _datetime.datetime(1970, 1, 1, tzinfo=UTC) + _datetime.timedelta(
++            seconds=timestamp
++        )
+ 
+     dt = datetime(
+-        dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, dt.microsecond
++        native.year,
++        native.month,
++        native.day,
++        native.hour,
++        native.minute,
++        native.second,
++        native.microsecond,
+     )
+ 
+     if tz is not UTC or tz != "UTC":
+         dt = dt.in_timezone(tz)
+ 
++    if calendar is not None:
++        return calendar(dt)
++
+     return dt
+ 
+ 
+@@ -423,6 +444,7 @@ __all__ = [
+     "naive",
+     "now",
+     "parse",
++    "parse_dt",
+     "set_local_timezone",
+     "set_locale",
+     "test_local_timezone",
+diff --git a/src/pendulum/datetime.py b/src/pendulum/datetime.py
+index da89b13..4ab22d7 100644
+--- a/src/pendulum/datetime.py
++++ b/src/pendulum/datetime.py
+@@ -685,7 +685,11 @@ class DateTime(datetime.datetime, Date):
+         elif isinstance(delta, pendulum.Duration):
+             return self.add(**delta._signature)  # type: ignore[attr-defined]
+ 
+-        return self.add(seconds=delta.total_seconds())
++        return self.add(
++            days=delta.days,
++            seconds=delta.seconds,
++            microseconds=delta.microseconds,
++        )
+ 
+     def _subtract_timedelta(self, delta: datetime.timedelta) -> Self:
+         """
+@@ -701,15 +705,22 @@ class DateTime(datetime.datetime, Date):
+     # DIFFERENCES
+ 
+     def diff(  # type: ignore[override]
+-        self, dt: datetime.datetime | None = None, abs: bool = True
++        self,
++        dt: datetime.datetime | None = None,
++        abs: bool = True,
++        units: tuple[str, ...] | None = None,
+     ) -> Interval[datetime.datetime]:
+         """
+         Returns the difference between two DateTime objects represented as an Interval.
+         """
+         if dt is None:
+             dt = self.now(self.tz)
++        elif self.tzinfo is None and dt.tzinfo is None:
++            dt = self.instance(dt, tz=None)
+ 
+-        return Interval(self, dt, absolute=abs)
++        interval = Interval(self, dt, absolute=abs)
++        interval._in_words_units = units
++        return interval
+ 
+     def diff_for_humans(  # type: ignore[override]
+         self,
+diff --git a/src/pendulum/formatting/formatter.py b/src/pendulum/formatting/formatter.py
+index b09977d..9d654aa 100644
+--- a/src/pendulum/formatting/formatter.py
++++ b/src/pendulum/formatting/formatter.py
+@@ -364,6 +364,7 @@ class Formatter:
+         fmt: str,
+         now: pendulum.DateTime,
+         locale: str | None = None,
++        strict: bool = False,
+     ) -> dict[str, Any]:
+         """
+         Parses a time string matching a given format as a tuple.
+@@ -376,6 +377,13 @@ class Formatter:
+         :return: The parsed elements
+         """
+         escaped_fmt = re.escape(fmt)
++        literal_blocks: list[str] = []
++
++        def _replace_literal(match: Match[str]) -> str:
++            literal_blocks.append(match.group(0)[2:-2])
++            return f"\x00{len(literal_blocks) - 1}\x00"
++
++        escaped_fmt = re.sub(r"\\\[.*?\\\]", _replace_literal, escaped_fmt)
+ 
+         if not self._FROM_FORMAT_RE.search(escaped_fmt):
+             raise ValueError("The given time string does not match the given format")
+@@ -402,8 +410,10 @@ class Formatter:
+         }
+ 
+         pattern = self._FROM_FORMAT_RE.sub(
+-            lambda m: self._replace_tokens(m.group(0), loaded_locale), escaped_fmt
++            lambda m: self._replace_tokens(m.group(0), loaded_locale, strict), escaped_fmt
+         )
++        for index, literal in enumerate(literal_blocks):
++            pattern = pattern.replace(f"\x00{index}\x00", literal)
+ 
+         if not re.fullmatch(pattern, time):
+             raise ValueError(f"String does not match format {fmt}")
+@@ -663,7 +673,7 @@ class Formatter:
+         if value is None:
+             raise ValueError("Invalid date")
+ 
+-    def _replace_tokens(self, token: str, locale: Locale) -> str:
++    def _replace_tokens(self, token: str, locale: Locale, strict: bool = False) -> str:
+         if token.startswith("[") and token.endswith("]"):
+             return token[1:-1]
+         elif token.startswith("\\"):
+@@ -686,6 +696,8 @@ class Formatter:
+                 )
+         else:
+             candidates = cast("Sequence[str]", self._REGEX_TOKENS[token])
++            if strict and isinstance(candidates, tuple):
++                candidates = candidates[1:]
+ 
+         if not candidates:
+             raise ValueError(f"Unsupported token: {token}")
+diff --git a/src/pendulum/interval.py b/src/pendulum/interval.py
+index c5e0713..d14f585 100644
+--- a/src/pendulum/interval.py
++++ b/src/pendulum/interval.py
+@@ -244,7 +244,12 @@ class Interval(Duration, Generic[_T]):
+     def in_days(self) -> int:
+         return self._delta.total_days
+ 
+-    def in_words(self, locale: str | None = None, separator: str = " ") -> str:
++    def in_words(
++        self,
++        locale: str | None = None,
++        separator: str = " ",
++        units: tuple[str, ...] | None = None,
++    ) -> str:
+         """
+         Get the current interval in words in the current locale.
+ 
+@@ -264,6 +269,10 @@ class Interval(Duration, Generic[_T]):
+             ("minute", self.minutes),
+             ("second", self.remaining_seconds),
+         ]
++        if units is None:
++            units = getattr(self, "_in_words_units", None)
++        if units is not None:
++            intervals = [interval for interval in intervals if interval[0] in units]
+         loaded_locale: Locale = Locale.load(locale or pendulum.get_locale())
+         parts = []
+         for interval in intervals:
+diff --git a/src/pendulum/parser.py b/src/pendulum/parser.py
+index 833bae3..00fdae2 100644
+--- a/src/pendulum/parser.py
++++ b/src/pendulum/parser.py
+@@ -2,19 +2,21 @@ from __future__ import annotations
+ 
+ import datetime
+ import os
++import re
+ import typing as t
+ 
+ import pendulum
+ 
++from pendulum.datetime import DateTime
+ from pendulum.duration import Duration
+ from pendulum.parsing import _Interval
+ from pendulum.parsing import parse as base_parse
++from pendulum.parsing.exceptions import ParserError
+ from pendulum.tz.timezone import UTC
+ 
+ 
+ if t.TYPE_CHECKING:
+     from pendulum.date import Date
+-    from pendulum.datetime import DateTime
+     from pendulum.interval import Interval
+     from pendulum.time import Time
+ 
+@@ -30,12 +32,27 @@ except ImportError:
+ 
+ 
+ def parse(text: str, **options: t.Any) -> Date | Time | DateTime | Duration:
++    text = re.sub(
++        r"([.,]\d{9})\d+(?=(?:Z|[+-]\d{2}(?::?\d{2})?)?$)",
++        r"\1",
++        text,
++    )
++
+     # Use the mock now value if it exists
+     options["now"] = options.get("now")
+ 
+     return _parse(text, **options)
+ 
+ 
++def parse_dt(text: str, **options: t.Any) -> DateTime:
++    parsed = parse(text, **options)
++
++    if not isinstance(parsed, DateTime):
++        raise ParserError("The parsed value is not a datetime")
++
++    return parsed
++
++
+ def _parse(
+     text: str, **options: t.Any
+ ) -> Date | DateTime | Time | Duration | Interval[DateTime]:

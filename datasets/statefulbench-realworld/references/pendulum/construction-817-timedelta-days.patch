@@ -1,0 +1,15 @@
+diff --git a/src/pendulum/datetime.py b/src/pendulum/datetime.py
+--- a/src/pendulum/datetime.py
++++ b/src/pendulum/datetime.py
+@@ -685,7 +685,11 @@ class DateTime(datetime.datetime, Date):
+         elif isinstance(delta, pendulum.Duration):
+             return self.add(**delta._signature)  # type: ignore[attr-defined]
+ 
+-        return self.add(seconds=delta.total_seconds())
++        return self.add(
++            days=delta.days,
++            seconds=delta.seconds,
++            microseconds=delta.microseconds,
++        )
+ 
+     def _subtract_timedelta(self, delta: datetime.timedelta) -> Self:
