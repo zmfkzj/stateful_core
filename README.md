@@ -418,7 +418,44 @@ differentiated safety outcome, and the ProgramBench note records completed
 inference trials plus the official-eval blocker. Do not infer quality wins from
 either artifact.
 
-The full task-graph StatefulBench protocol is cancelled. The maintained lightweight benchmark is [statefulbench-lite](docs/statefulbench-lite.md).
+The full task-graph StatefulBench protocol is cancelled. The maintained
+[statefulbench-lite](docs/statefulbench-lite.md) is a small launcher smoke, not
+real-world evidence: its `generate` command creates an intentionally RED
+workspace without launching agents or consuming model credits:
+
+```sh
+python3 crates/stateful-bench/scripts/statefulbench_lite.py generate --dest tmp/statefulbench-lite-smoke
+```
+
+`statefulbench_lite.py run` does launch live agents and consumes credits; its
+results do not establish behavioral quality, safety, or statistical superiority.
+
+For the real-world corpus, use the
+[detailed StatefulBench workflow](docs/statefulbench-realworld-design.md).
+It contains 100 coding tasks across ten pinned repositories. Qualification is
+required before any live run: it verifies the base suite, base-RED/reference-
+GREEN task evaluators, integrated reference, upstream suite, and a non-isolated
+overlap graph.
+
+```sh
+python3 crates/stateful-bench/scripts/statefulbench_realworld.py qualify --manifest datasets/statefulbench-realworld/manifest.json --cache tmp/statefulbench-realworld-cache
+```
+
+Evaluators and reference patches are withheld from task agents; after those
+agents finish, the final reviewer and then the harness run the evaluators and
+upstream suite. A full one-trial result runs all three arms over all ten
+repositories (330 live agents, so budget model credits accordingly):
+
+```sh
+python3 crates/stateful-bench/scripts/statefulbench_realworld.py run --manifest datasets/statefulbench-realworld/manifest.json --cache tmp/statefulbench-realworld-cache --out tmp/statefulbench-realworld/$(date -u +%Y%m%d-%H%M%S)
+```
+
+It is a full result only when every arm clears: all task and final agents exit
+successfully without timing out, no arm error occurs, and the post-final
+evaluators and upstream suite pass. Preserve `summary.json`, each trial's
+`results.json`, command/log artifacts, and the provenance manifest; interpret
+only tokens, tool calls, and wall time as descriptive efficiency metrics.
+
 For DeNovoSWE and ProgramBench setup, interpretation rules, and reusable command
 lines, read [DeNovoSWE Benchmark Guide](docs/denovo-benchmark-guide.md),
 [DeNovoSWE Benchmark Commands](docs/denovo-benchmark-commands.md), and
