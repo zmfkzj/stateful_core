@@ -8,7 +8,7 @@
       "sources": [
         "https://github.com/python-jsonschema/jsonschema/issues/1511"
       ],
-      "source_hash": "09c946c39f2bd6337a936c682c50254212d3582a5c27c9d36616eab3669f84d5",
+      "source_hash": "6932f8624bfa35f7b51e04f03ee83ad1325ef9edc808e4b0cbcb4298943b472d",
       "prompt": "Prevent duration format validation from leaking decimal.Overflow. A duration parser overflow must be reported as a normal format failure with its cause, while valid and malformed durations retain their existing outcomes.",
       "acceptance": [
         "A valid duration such as P1D continues to conform.",
@@ -31,7 +31,7 @@
       "sources": [
         "https://github.com/python-jsonschema/jsonschema/issues/1496"
       ],
-      "source_hash": "21e8f30ef83b40e2422927ce3169b9c6ab2fb6a635e2cdabfaf3b5bd45efeb7d",
+      "source_hash": "7ae21ab2d6cbfb0155b64bbbce33d7f6d4daf2169cb7fc33c2b0f3c6474e15c8",
       "prompt": "Allow FormatChecker.checks to register multiple checkers for one format without overwriting earlier registrations. FormatChecker.check must run registered checkers in registration order and reject as soon as any checker fails. Preserve the documented public FormatChecker.checkers mapping: each value remains an unpackable (callable, raises) pair.",
       "acceptance": [
         "Two checkers registered for one format both run, in registration order, for a conforming instance.",
@@ -55,7 +55,7 @@
       "sources": [
         "https://github.com/python-jsonschema/jsonschema/issues/1465"
       ],
-      "source_hash": "1d65aa971a95f8e876917763f30a20fce7739fdf6cee04c6ea09c1072391bcab",
+      "source_hash": "626ee35a93d233a4080185c88abceed56904d99ab56d5a975add873b8f0f7085",
       "prompt": "Fix issue #1465 in jsonschema._format.FormatChecker. Date-time format checking must accept RFC3339 timestamps whose four-digit year is 0000 without weakening calendar or timezone validation.",
       "acceptance": [
         "A normal leap-day RFC3339 timestamp such as 2024-02-29T12:34:56Z remains valid for the date-time format.",
@@ -80,7 +80,7 @@
       "sources": [
         "https://github.com/python-jsonschema/jsonschema/issues/1142"
       ],
-      "source_hash": "4beb542e09abc3d196998fa0093623ece2da45dc7baa15460b809b871420fcc0",
+      "source_hash": "7c71ab57df9a04dfe88d47f96969e678163d8e051d1090a71bd54625bd3445c3",
       "prompt": "Implement issue #1142 through jsonschema._format.FormatChecker and the schema keyword validators. Accept an optional regex implementation with compile, search, and error attributes; use it for regex-format validation and for schema pattern and patternProperties validation, while preserving the built-in implementation by default.",
       "acceptance": [
         "Without an injected implementation, standard-library regular expressions such as ^[a-z]+$ remain valid for the regex format.",
@@ -105,7 +105,7 @@
       "sources": [
         "https://github.com/python-jsonschema/jsonschema/issues/191"
       ],
-      "source_hash": "27f716c2cb49a683300bcab0c5f59874f4e808260c974d2efe90fede42ec501e",
+      "source_hash": "31697696fdb7044df7a055cf1b721a41caa85daa621c5870ef7297d25df51287",
       "prompt": "Fix Jsonschema issue #191 at jsonschema.exceptions.ValidationError. A generated error's schema is the local subschema, so relative_schema_path must be relative to that schema rather than the root schema. Keep the legacy schema_path value and absolute_schema_path root-relative for callers that use them, including errors nested under applicator context. Preserve direct-construction and create_from behavior.",
       "acceptance": [
         "For an additionalProperties failure in a deeply nested object, relative_schema_path is [additionalProperties] relative to error.schema while schema_path and absolute_schema_path retain the complete root path.",
@@ -128,7 +128,7 @@
       "sources": [
         "https://github.com/python-jsonschema/jsonschema/issues/1218"
       ],
-      "source_hash": "199cfcbf271d660b1e15d5393b5ef716b246bc4926924d4a86dbd05c4db605c4",
+      "source_hash": "b78e633fd33f70b36718f4737e2c6e6adb33157058e8d460dd127d3b3c63dade",
       "prompt": "Implement Jsonschema issue #1218 at jsonschema.exceptions.ValidationError. Add an optional reason property for an explicitly supplied concise, instance-free explanation. Populate concise instance-free reasons at actual keyword error sites; the type keyword must report its expected type without the rejected instance. An omitted constructor reason must stay None rather than copying the potentially sensitive message; retain empty strings verbatim. Preserve legacy message, str(error), positional construction, Exception.args, and create_from behavior.",
       "acceptance": [
         "An explicitly supplied reason is exposed unchanged while the legacy message and its first Exception.args entry remain unchanged and may contain the rejected instance.",
@@ -151,7 +151,7 @@
       "sources": [
         "https://github.com/python-jsonschema/jsonschema/issues/442"
       ],
-      "source_hash": "415c77619efc07eb93daed703eeccdb7eeb91536e8452d9f91a86a5af68297c4",
+      "source_hash": "4cbff9a2c778fb82aefea9aa16331256dc747fb10efcbac37226d22e134903d8",
       "prompt": "Fix issue #442 in jsonschema.exceptions.ErrorTree. Preserve every ValidationError at a tree node even when multiple errors have the same validator. Keep ErrorTree.errors backward-compatible as the representative latest error, expose every error through all_errors as a validator-to-tuple mapping, and count every preserved error in total_errors.",
       "acceptance": [
         "Two root-level ValidationErrors with validator anyOf are both retained in ErrorTree.all_errors[anyOf] in insertion order.",
@@ -174,7 +174,7 @@
       "sources": [
         "https://github.com/python-jsonschema/jsonschema/issues/1363"
       ],
-      "source_hash": "7bb583eb7ce0336a13cdb81467788884f6b028a35651997b88422e9893bb9aa1",
+      "source_hash": "6277bbbb78065b15770944b2cb77f1607f200fea9c3268c77b764def65782fc6",
       "prompt": "Implement feature #1363 by enriching each emitted uniqueItems ValidationError with ordered duplicate_item_contexts tuples of (first_index, duplicate_index, item), using JSON Schema equality. ErrorTree.duplicate_item_contexts is only a backward-compatible projection of that direct error metadata and must not recompute it.",
       "acceptance": [
         "A uniqueItems ValidationError for [red, blue, red] directly exposes duplicate_item_contexts [(0, 2, red)].",
@@ -198,7 +198,7 @@
       "sources": [
         "https://github.com/python-jsonschema/jsonschema/issues/1257"
       ],
-      "source_hash": "f6dc3c52c7c92addf8f7f7dcf50ba652e06f57afaeb6359f312095fa872eb423",
+      "source_hash": "71b4fcc09d0f2aaed8ea10a0c1a5e18c69de6691e402236a1700a04526e5a249",
       "prompt": "Fix issue #1257 in jsonschema.exceptions.best_match. When equally relevant alternatives of an anyOf or oneOf fail at sibling instance paths, retain the applicator summary error rather than arbitrarily selecting a child merely by its path ordering. Preserve the documented custom key argument behavior and empty-input result.",
       "acceptance": [
         "For equally relevant anyOf alternatives that fail at sibling properties, best_match returns the anyOf summary ValidationError rather than one arbitrary type child.",
@@ -221,7 +221,7 @@
       "sources": [
         "https://github.com/python-jsonschema/jsonschema/issues/1002"
       ],
-      "source_hash": "ea1b14e71e449d40de95d35ab872cc0f3aa557855ca19584925c090b5ebd7cfd",
+      "source_hash": "9a08e5e7fee91a45b5e7e50c5d7d124c76877213c7f12e7400d57b566cd0350c",
       "prompt": "Implement enhancement #1002 in jsonschema.exceptions.best_match. For a versioned anyOf, rank each numeric alternative's representative error before comparing alternatives, so a matching version branch's detailed error (such as description not being a string) wins over an unrelated deeper error or a failed const discriminator from another version. For boolean or otherwise non-indexed child errors, retain the legacy raw-context ranking rather than assuming a branch index. Preserve the generic anyOf summary when alternatives remain equally relevant and preserve caller-supplied key behavior.",
       "acceptance": [
         "For the issue's versioned anyOf shape, best_match returns the v1 description type ValidationError rather than the generic anyOf summary.",

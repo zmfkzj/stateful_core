@@ -81,6 +81,13 @@ class ManifestTests(unittest.TestCase):
             self.assertTrue(all(isinstance(part, str) and part for part in entry["suite"]))
             self.assertEqual(entry["corpus"], f"repos/{entry['key']}.json")
 
+    def test_manifest_loads_all_frozen_corpora(self) -> None:
+        manifest = self.mod.load_manifest(MANIFEST)
+        for repository in self.mod.repo_entries(manifest):
+            with self.subTest(repository=repository["key"]):
+                corpus = self.mod.load_corpus(MANIFEST.parent / repository["corpus"])
+                self.assertTrue(self.mod._corpus_matches_repository(repository, corpus))
+
 
     def test_manifest_setup_declares_test_dependencies(self) -> None:
         sources = {
@@ -558,6 +565,7 @@ class CorpusTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.dataset_root = Path(self.tempdir.name) / "statefulbench-realworld"
         self.corpus_path = self.dataset_root / "repos" / "fixture.json"
+        self.issue_snapshot_path = self.dataset_root / "issues" / "fixture.json"
         self.corpus_path.parent.mkdir(parents=True)
         self.mod = load_script("statefulbench_realworld.py")
         self.write_data(self.corpus_data())
@@ -574,7 +582,7 @@ class CorpusTests(unittest.TestCase):
                     "key": f"task-{index}",
                     "kind": "bug" if index < 5 else "feature",
                     "sources": [f"https://github.com/example/project/issues/{index}"],
-                    "source_hash": f"{index:064x}",
+                    "source_hash": hashlib.sha256(f"body {index}".encode("utf-8")).hexdigest(),
                     "prompt": f"Implement task {index}.",
                     "acceptance": ["normal behavior", "boundary behavior", "error behavior"],
                     "overlap_anchors": [
@@ -601,12 +609,36 @@ class CorpusTests(unittest.TestCase):
 
     def write_data(self, data: dict) -> None:
         self.corpus_path.write_text(json.dumps(data), encoding="utf-8")
+        self.issue_snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        self.issue_snapshot_path.write_text(
+            json.dumps(
+                {
+                    "issues": [
+                        {
+                            "html_url": f"https://github.com/example/project/issues/{index}",
+                            "body": f"body {index}",
+                        }
+                        for index in range(10)
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
 
     def test_load_corpus_accepts_balanced_connected_tasks(self) -> None:
         corpus = self.mod.load_corpus(self.corpus_path)
 
         self.assertEqual(corpus["repository"], "fixture")
         self.assertEqual(len(corpus["tasks"]), 10)
+
+    def test_load_corpus_accepts_list_issue_snapshot(self) -> None:
+        self.write_data(self.corpus_data())
+        snapshot = json.loads(self.issue_snapshot_path.read_text(encoding="utf-8"))
+        self.issue_snapshot_path.write_text(
+            json.dumps(snapshot["issues"]), encoding="utf-8"
+        )
+
+        self.mod.load_corpus(self.corpus_path)
 
     def test_load_corpus_accepts_canonical_github_source_ports(self) -> None:
         for source in (
@@ -619,6 +651,43 @@ class CorpusTests(unittest.TestCase):
                 self.write_data(data)
 
                 self.mod.load_corpus(self.corpus_path)
+
+    def test_load_corpus_rejects_source_hash_mismatch(self) -> None:
+        data = self.corpus_data()
+        data["tasks"][0]["source_hash"] = "0" * 64
+        self.write_data(data)
+
+        with self.assertRaisesRegex(ValueError, "source_hash"):
+            self.mod.load_corpus(self.corpus_path)
+
+    def test_load_corpus_rejects_missing_issue_snapshot_source(self) -> None:
+        self.write_data(self.corpus_data())
+        snapshot = json.loads(self.issue_snapshot_path.read_text(encoding="utf-8"))
+        snapshot["issues"].pop(0)
+        self.issue_snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "source"):
+            self.mod.load_corpus(self.corpus_path)
+
+    def test_load_corpus_rejects_duplicate_issue_snapshot_source(self) -> None:
+        self.write_data(self.corpus_data())
+        snapshot = json.loads(self.issue_snapshot_path.read_text(encoding="utf-8"))
+        duplicate = snapshot["issues"][0].copy()
+        duplicate["html_url"] = "https://github.com/EXAMPLE/PROJECT/issues/0"
+        snapshot["issues"].append(duplicate)
+        self.issue_snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            self.mod.load_corpus(self.corpus_path)
+
+    def test_load_corpus_rejects_non_string_issue_snapshot_body(self) -> None:
+        self.write_data(self.corpus_data())
+        snapshot = json.loads(self.issue_snapshot_path.read_text(encoding="utf-8"))
+        snapshot["issues"][0]["body"] = None
+        self.issue_snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "body"):
+            self.mod.load_corpus(self.corpus_path)
 
 
     def test_load_corpus_rejects_duplicate_task_keys(self) -> None:

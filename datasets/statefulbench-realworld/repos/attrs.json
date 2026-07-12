@@ -8,7 +8,7 @@
       "sources": [
         "https://github.com/python-attrs/attrs/issues/1288"
       ],
-      "source_hash": "995dd04a70123707906c9810b219615976e804f9afba442a049fc6c7656079f8",
+      "source_hash": "d66ef321e9fed59af664f199464e53f729bb5977f439a8705c626169e0930745",
       "prompt": "Fix issue #1288 in attr._make._ClassBuilder._create_slots_class. A cached_property on a slotted attrs base must be resolved before a child class's __getattr__ fallback. Generate a descriptor that uses the slot for caching while preserving child __getattr__ for unknown names.",
       "acceptance": [
         "A cached_property inherited by a plain child with __getattr__ returns its computed value instead of calling the child's fallback.",
@@ -30,7 +30,7 @@
       "sources": [
         "https://github.com/python-attrs/attrs/issues/1294"
       ],
-      "source_hash": "e0a94d9ae42b37d3ffcfa3b798780a31ed5560d50a7180660338635a70d6f776",
+      "source_hash": "5f32f850c2dc064e35354f42ebc3544924b797fbf4d9e74426adf608d9e2d93a",
       "prompt": "Implement issue #1294 in attr._make._ClassBuilder._create_slots_class. Add the benchmark-defined slot documentation extension: an attribute metadata entry slot_doc supplies that attribute's slot docstring. Emit the slotted class namespace with Python's dict-valued __slots__, use None for attributes without slot_doc, and preserve ordinary slot read/write behavior.",
       "acceptance": [
         "metadata={'slot_doc': '...'} produces the same text through inspect.getdoc() on the generated slot descriptor.",
@@ -52,7 +52,7 @@
       "sources": [
         "https://github.com/python-attrs/attrs/issues/1333"
       ],
-      "source_hash": "f3165fcecc13e066ef9862340d57ff8608effa15e7368e1a911f6967b0eeb288",
+      "source_hash": "3dab557b30369916c88a8cf192a0b786bf98540ff925b5776404d8d6ce5a04a6",
       "prompt": "Fix issue #1333 in attr._make._ClassBuilder._create_slots_class. For slotted attrs classes, an overriding functools.cached_property must use storage distinct from its inherited descriptor so parent access through super() remains independently cached.",
       "acceptance": [
         "The inherited property is readable through super() before and after the overriding property, in either access order.",
@@ -74,7 +74,7 @@
       "sources": [
         "https://github.com/python-attrs/attrs/issues/1532"
       ],
-      "source_hash": "7db258dcab0e108517db76b6663e5a622d01aae9173fd9e36011941b0283a765",
+      "source_hash": "891909c00160578d296258bcc8f93ee4d9f5b85a9a2281c07ce359f6b8e515e4",
       "prompt": "Implement issue #1532 in attr._make._ClassBuilder._create_slots_class. Give each slotted attrs class that declares functools.cached_property methods a public __attrs_cached_properties__ mapping from each directly declared cached-property name to its original function, before any slot descriptor wrapping.",
       "acceptance": [
         "A slotted attrs class with a cached_property exposes __attrs_cached_properties__.",
@@ -96,7 +96,7 @@
       "sources": [
         "https://github.com/python-attrs/attrs/issues/1549"
       ],
-      "source_hash": "95d072502c59b89b20d1b29e02457b522534a9f68a5e82332c3fe43056502ec0",
+      "source_hash": "0afef6aa09ceffd12aa79610253af0123f3979e2f0b8881b41d251dd272d44e9",
       "prompt": "Fix attrs issue #1549 in attr._make._ClassBuilder.build_class. When an attrs subclass overrides a method previously registered with an inherited field's @field.default decorator, its generated initializer must call the override.",
       "acceptance": [
         "A decorated Parent field default still returns the Parent value.",
@@ -118,7 +118,7 @@
       "sources": [
         "https://github.com/python-attrs/attrs/issues/1335"
       ],
-      "source_hash": "a87acea0f9562119485aab338e6141006e476f3efa0aa5fec735cb17f9fddd71",
+      "source_hash": "41b9a332543712b95529140ef31d488fe9c868e400c3f750e193d7a2779ef211",
       "prompt": "Implement a benchmark-defined, opt-in extension in attr._make._ClassBuilder.build_class. It is motivated by open feature discussion #1335 but does not reproduce or fix that issue's class-header keyword request, because build_class runs after class creation. For a decorated subclass, forward the class body's __attrs_init_subclass_kwargs__ mapping as keyword arguments to an inherited __attrs_init_subclass__ hook after the generated class is created.",
       "acceptance": [
         "The benchmark-defined __attrs_init_subclass_kwargs__ mapping supplies required keyword-only arguments to the inherited hook.",
@@ -140,7 +140,7 @@
       "sources": [
         "https://github.com/python-attrs/attrs/issues/1462"
       ],
-      "source_hash": "a92d7ce64c7808244cae622d4786ed6d6d6b844786eea237c1e332c0fac911fb",
+      "source_hash": "8c9d21d5d78e72886b1d6c59e1f5c2336b8421e1f25af06755ea407e59dfafb2",
       "prompt": "Implement the benchmark-defined unsafe_identity_hash extension motivated by issue #1462. A class with class-body custom __eq__ remains unhashable by default. Permit an explicit unsafe_identity_hash=True opt-in only for a custom identity-equality class, installing object.__hash__; reject its combination with generated hash options.",
       "acceptance": [
         "The source-shaped frozen class with custom value equality remains unhashable by default.",
@@ -163,7 +163,7 @@
       "sources": [
         "https://github.com/python-attrs/attrs/issues/1452"
       ],
-      "source_hash": "af0713ead7cbd2d2db52725504d0328f5f5d25c1f4ffe15044819937ea3c81b9",
+      "source_hash": "23f0b20c86ef0a6df9c4946166f2a95668919eb209bbb3a72345b41c5b267ec2",
       "prompt": "Implement the class-level equality extension requested by issue #1452. Generate __attrs_eq__ through the attrs equality generator so a custom __eq__ can add a special case and then delegate ordinary comparisons.",
       "acceptance": [
         "A class-defined __eq__ can delegate ordinary comparisons to self.__attrs_eq__(other).",
@@ -185,7 +185,7 @@
       "sources": [
         "https://github.com/python-attrs/attrs/issues/1575"
       ],
-      "source_hash": "154ace510124a69c43a59834a2f27e57f370028d39a2ed6a29acbd336fa00169",
+      "source_hash": "64bda05fe5fedfaf46a100d183241c29718a7182b51a627d12c79f2b9efd89cc",
       "prompt": "Fix attrs issue #1575 in attr._make._transform_attrs. When Python 3.14 annotation retrieval supplies an unresolved ForwardRef for a ClassVar imported only under TYPE_CHECKING, inspect its raw forward argument before class-variable filtering without evaluating arbitrary annotations.",
       "acceptance": [
         "An unresolved TYPE_CHECKING-only ClassVar is not an attrs field.",
@@ -207,7 +207,7 @@
       "sources": [
         "https://github.com/python-attrs/attrs/issues/1543"
       ],
-      "source_hash": "b614a477b95594b755c284a5a8fc5a007a48fc6b3af8ed36ca06acb9c25dc387",
+      "source_hash": "c310b0debce8d79bd74a8ebe09b696ed3ebf738d51e79ca66ce346e2f0571a63",
       "prompt": "Implement attrs issue #1543 in attr._make._transform_attrs. Treat third-party subclasses of attr._make._CountingAttr as field descriptors throughout auto-attrib and legacy discovery.",
       "acceptance": [
         "A _CountingAttr subclass retains its primitive default rather than becoming the default.",

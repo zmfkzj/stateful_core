@@ -6,7 +6,7 @@
       "key": "requests-body-6992-multipart-content-type",
       "kind": "bug",
       "sources": ["https://github.com/psf/requests/issues/6992"],
-      "source_hash": "b46d1bcb56211be5025999e0fceae6aa75b4803c830ff6db486b72e8d0557f8b",
+      "source_hash": "a1d5c22bee5e16d833f6195f18ed6952dcb58664e88243b6ff5231bea92b8a5a",
       "prompt": "Fix Requests issue #6992 in src/requests/models.py at requests.models.PreparedRequest.prepare_body. When files cause a multipart body to be encoded, replace any caller- or Session-supplied Content-Type with the encoder's multipart/form-data value so its boundary matches the body. Preserve explicitly supplied Content-Type for requests without files, and preserve existing multipart input validation.",
       "acceptance": [
         "A POST with form data, files, and Content-Type: application/json is encoded as multipart/form-data, and its declared boundary occurs in the body.",
@@ -22,7 +22,7 @@
       "key": "requests-body-6294-zero-byte-framing",
       "kind": "feature",
       "sources": ["https://github.com/psf/requests/issues/6294"],
-      "source_hash": "c0766f7610681dc3487761b04ea4a87041f1746aea33f7b3de8b7206f248cecf",
+      "source_hash": "ffdd2fbe6bb78785df70f1d25974ae7cbb024bbb61acefb56825b0a1f3bf94ed",
       "prompt": "Add an explicit zero-length stream framing extension in src/requests/models.py at requests.models.PreparedRequest.prepare_body. For a seekable stream with a known length of zero, set Content-Length: 0 instead of automatically adding Transfer-Encoding: chunked. This extension is motivated by issue #6294, an upstream regression report; it deliberately does not reclassify that report as a feature. Keep exact framing for non-empty known-length streams and retain the existing streamed-body/files error.",
       "acceptance": [
         "An empty BytesIO PUT has Content-Length: 0 and no Transfer-Encoding header.",
@@ -38,7 +38,7 @@
       "key": "requests-7040-custom-ssl-context",
       "kind": "bug",
       "sources": ["https://github.com/psf/requests/issues/7040"],
-      "source_hash": "cf666d7f1e319d3ab1bb9c134d306e2dda1944e6834e70adb36d614dd74426b1",
+      "source_hash": "759ea80fe0e747ac9625882169ae33b206e2dd8fa80085aeed0055c17e2dc1bf",
       "prompt": "Fix the custom SSLContext regression in HTTPAdapter.cert_verify. HTTPS requests using a truthy connection ssl_context must still require certificate verification but must not overwrite its CA file or directory settings; ordinary connections and disabled verification retain their existing behavior.",
       "acceptance": [
         "An HTTPS request with verify=True and a truthy conn.ssl_context sets conn.cert_reqs to CERT_REQUIRED without assigning conn.ca_certs or conn.ca_cert_dir.",
@@ -54,7 +54,7 @@
       "key": "requests-7564-missing-tls-material",
       "kind": "feature",
       "sources": ["https://github.com/psf/requests/issues/7564"],
-      "source_hash": "32e6e3a0dd1af0034c7546c962e551deb7c9795f01b2472a191c0446763f711d",
+      "source_hash": "abe7a6beb506a1353481845ae3c811f8e44b7629c2d9c9a10975fa9e381e4b7c",
       "prompt": "Make missing client TLS certificate and private-key paths raise structured FileNotFoundError values from HTTPAdapter.cert_verify. Preserve the errno, filename, and a clear certificate/key-specific message while retaining normal client-certificate and no-certificate behavior.",
       "acceptance": [
         "A missing client certificate raises FileNotFoundError with errno.ENOENT, its path in filename, and a TLS certificate file message.",
@@ -70,7 +70,7 @@
       "key": "requests-6885-redirect-body-replay",
       "kind": "bug",
       "sources": ["https://github.com/psf/requests/issues/6885"],
-      "source_hash": "12ed0aba720f1cb7e925507e627ac188663e86a228069d9f1214033a99dc89fe",
+      "source_hash": "c8bd4f43082970901177e1955fe1fc493ef8c290fe47a58e5b8f427f9121d699",
       "prompt": "Fix issue #6885 in requests.sessions.SessionRedirectMixin.resolve_redirects. When consuming a 307 or 308 redirect response encounters the TLS EOF represented by requests.exceptions.SSLError, release the old response through the existing raw-read fallback and continue redirect handling. A seekable PUT payload must be rewound and replayed intact; do not alter non-redirect request behavior.",
       "acceptance": [
         "A requests.exceptions.SSLError raised while consuming a redirect response follows the existing raw-read fallback instead of aborting resolution.",
@@ -86,7 +86,7 @@
       "key": "requests-7574-query-redirect-semantics",
       "kind": "feature",
       "sources": ["https://github.com/psf/requests/issues/7574"],
-      "source_hash": "fa28c073f01f235c92b71d91473f33f040cf6261c76e4797ab28b87a6b18fd98",
+      "source_hash": "bc13865fc5f725ba28d7ba3e6cd07eec0b1ad2c9a3f2c7ffa58f8d00a4544997",
       "prompt": "Implement RFC 10008 section 2.5 redirect semantics for arbitrary QUERY requests in requests.sessions.SessionRedirectMixin.resolve_redirects. Preserve QUERY and its entity on 301, 302, 307, and 308 redirects; keep the existing 303 conversion to a bodyless GET. Preserve existing semantics for every other method.",
       "acceptance": [
         "A QUERY request retains method, Content-Type, Content-Length, and body on a 301 redirect.",
@@ -103,7 +103,7 @@
       "key": "cookies-escaped-quotes",
       "kind": "bug",
       "sources": ["https://github.com/psf/requests/issues/6890"],
-      "source_hash": "373d16124647cc70f14f3ffef542ad67a5b5891c2091d61d1948fa4b324f3f97",
+      "source_hash": "6b634762cb8c71666a3a0877a5dd7a3567fab11f73f5d5cb5d40d6094211399a",
       "prompt": "Fix issue #6890 in both requests.cookies.RequestsCookieJar.set_cookie and requests.sessions.Session.prepare_request. Preserve cookie values verbatim, including surrounding and escaped quotes; do not slice or otherwise normalize them. Also prepare Session requests from generic CookieJars without routing session cookies through a RequestsCookieJar, so the Cookie header retains those values.",
       "acceptance": [
         "A plain cookie value remains unchanged when RequestsCookieJar stores it and when Session prepares it.",
@@ -118,7 +118,7 @@
       "key": "cookies-cookie-policy",
       "kind": "feature",
       "sources": ["https://github.com/psf/requests/issues/7122"],
-      "source_hash": "83970284322eb64996d869b847df5c1873f46977f4a3b2beb8d0d84ffb724e4e",
+      "source_hash": "2bb3fd98be3589341dd52417b81362e7368458c324df0f4f71610baf08783086",
       "prompt": "Add a Session.prepare_request cookie-policy preservation extension: when a generic session CookieJar merges with request cookies, retain and honor its caller-provided CookiePolicy. This extension is motivated by issue #7122, an upstream regression report; it deliberately does not reclassify that report as a feature.",
       "acceptance": [
         "An allowing caller-provided policy permits a secure cookie on HTTP during session preparation.",
@@ -133,7 +133,7 @@
       "key": "proxy-6205-adapter-settings",
       "kind": "bug",
       "sources": ["https://github.com/psf/requests/issues/6205"],
-      "source_hash": "78e82c75f4cc4fba46689b818184a63c567636924b819920680fb9f7c8d68b61",
+      "source_hash": "92f4970b8874b13694c06251fa227b279c54aa5216d9947d317864d3fd042732",
       "prompt": "Fix Requests issue #6205 through requests.adapters.HTTPAdapter.proxy_manager_for while retaining the existing requests.adapters.HTTPAdapter.send translation of LocationValueError and ProxySchemeUnknown to requests.InvalidURL. A SOCKS proxy manager must receive the adapter's non-manager pool settings before normal connection lookup caches it; do not duplicate manager-owned sizing settings.",
       "acceptance": [
         "A socks5 proxied HTTPS send propagates a custom ssl_version from poolmanager.connection_pool_kw to the created SOCKS proxy manager.",
@@ -149,7 +149,7 @@
       "key": "proxy-6900-sni-settings",
       "kind": "feature",
       "sources": ["https://github.com/psf/requests/issues/6900"],
-      "source_hash": "8576bdb467bfb7bc5e5eec36cba0ed6fc92e69bb34d2c472846fdc2e60e0fa30",
+      "source_hash": "7f0e39ddbe9422f895cfe222ee113fc7dfadc75c0010c82c143fe11e276eb7f0",
       "prompt": "Add a proxy SNI propagation extension through requests.adapters.HTTPAdapter.proxy_manager_for while retaining requests.adapters.HTTPAdapter.send's translation of LocationValueError and ProxySchemeUnknown to requests.InvalidURL. Preserve custom SNI settings from an adapter's connection pool when routing a private HTTPS request through an HTTP proxy, while keeping the request's self-signed CA bundle in the target connection pool settings. This extension is motivated by issue #6900, an upstream regression report; it deliberately does not reclassify that report as a feature.",
       "acceptance": [
         "A proxied HTTPS send propagates custom assert_hostname to the created proxy manager.",

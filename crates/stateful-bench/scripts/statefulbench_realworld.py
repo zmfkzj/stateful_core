@@ -430,29 +430,67 @@ def _canonical_evaluator_path(entry: dict, dataset_root: Path) -> Path:
         raise ValueError("evaluator path must remain below the evaluators directory")
     return resolved
 
-def _require_github_sources(entry: dict) -> None:
+def _canonical_github_issue_url(source: object) -> str:
+    if type(source) is not str or not source:
+        raise ValueError("sources must contain exactly one GitHub issue URL")
+    try:
+        parsed = urlsplit(source)
+        parts = parsed.path.split("/")
+        valid = (
+            parsed.scheme == "https"
+            and parsed.hostname == "github.com"
+            and parsed.port in (None, 443)
+            and not parsed.username
+            and not parsed.password
+            and not parsed.query
+            and not parsed.fragment
+            and len(parts) == 5
+            and parts[0] == ""
+            and _GITHUB_COMPONENT.fullmatch(parts[1])
+            and _GITHUB_COMPONENT.fullmatch(parts[2])
+            and parts[3] == "issues"
+            and parts[4].isdigit()
+        )
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError("sources must contain exactly one GitHub issue URL")
+    return f"https://github.com/{parts[1].lower()}/{parts[2].lower()}/issues/{int(parts[4])}"
+
+
+def _require_github_source(entry: dict) -> str:
     sources = entry["sources"]
-    if type(sources) is not list or not sources:
-        raise ValueError("sources must be a non-empty array")
-    for source in sources:
-        if type(source) is not str or not source:
-            raise ValueError("sources must be a non-empty array")
-        try:
-            parsed = urlsplit(source)
-            valid = (
-                parsed.scheme == "https"
-                and parsed.hostname == "github.com"
-                and parsed.port in (None, 443)
-                and parsed.path
-                and not parsed.username
-                and not parsed.password
-                and not parsed.query
-                and not parsed.fragment
-            )
-        except ValueError:
-            valid = False
-        if not valid:
-            raise ValueError("sources must be GitHub HTTPS URLs")
+    if type(sources) is not list or len(sources) != 1:
+        raise ValueError("sources must contain exactly one GitHub issue URL")
+    return _canonical_github_issue_url(sources[0])
+
+
+def _issue_bodies(path: Path) -> dict[str, object]:
+    try:
+        snapshot = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("issue snapshot is not valid JSON") from error
+    if type(snapshot) is list:
+        issues = snapshot
+    elif type(snapshot) is dict and type(snapshot.get("issues")) is list:
+        issues = snapshot["issues"]
+    else:
+        raise ValueError("issue snapshot must contain an issues array")
+
+    bodies: dict[str, object] = {}
+    for issue in issues:
+        if type(issue) is not dict:
+            raise ValueError("issue snapshot entries must be objects")
+        html_url = issue.get("html_url")
+        if type(html_url) is not str:
+            raise ValueError("issue snapshot source URL must be a string")
+        if urlsplit(html_url).path.split("/")[3:4] == ["pull"]:
+            continue
+        url = _canonical_github_issue_url(html_url)
+        if url in bodies:
+            raise ValueError(f"duplicate issue snapshot source: {url}")
+        bodies[url] = issue.get("body")
+    return bodies
 
 
 def _require_acceptance(entry: dict) -> None:
@@ -483,7 +521,7 @@ def _require_production_source_path(anchor: dict) -> str:
 
 
 def _validate_task(
-    entry: object, dataset_root: Path, keys: set[str]
+    entry: object, dataset_root: Path, keys: set[str], issue_bodies: dict[str, str]
 ) -> tuple[str, set[tuple[str, str]]]:
     if type(entry) is not dict:
         raise ValueError("task entry must be an object")
@@ -497,9 +535,17 @@ def _validate_task(
     if _require_string(entry, "kind") not in {"bug", "feature"}:
         raise ValueError("kind must be bug or feature")
     _require_string(entry, "prompt")
-    _require_github_sources(entry)
-    if not _HEX_64.fullmatch(_require_string(entry, "source_hash")):
+    source = _require_github_source(entry)
+    source_hash = _require_string(entry, "source_hash")
+    if not _HEX_64.fullmatch(source_hash):
         raise ValueError("source_hash has invalid SHA format")
+    if source not in issue_bodies:
+        raise ValueError(f"source is missing from issue snapshot: {source}")
+    body = issue_bodies[source]
+    if type(body) is not str:
+        raise ValueError(f"issue snapshot body must be a string: {source}")
+    if source_hash != hashlib.sha256(body.encode("utf-8")).hexdigest():
+        raise ValueError(f"source_hash does not match frozen issue body: {source}")
     _require_acceptance(entry)
     _canonical_evaluator_path(entry, dataset_root)
     _require_dataset_path(entry, "reference_patch", dataset_root)
@@ -529,6 +575,8 @@ def load_corpus(path: Path) -> dict:
     _require_string(corpus, "final_prompt")
     dataset_root = path.parent.parent.resolve()
     _require_dataset_path(corpus, "issue_snapshot", dataset_root)
+    issue_snapshot = (dataset_root / corpus["issue_snapshot"]).resolve()
+    issue_bodies = _issue_bodies(issue_snapshot)
     _require_dataset_path(corpus, "integrated_reference_patch", dataset_root)
     evaluators = corpus["evaluators"]
     if type(evaluators) is not list or not evaluators:
@@ -542,7 +590,9 @@ def load_corpus(path: Path) -> dict:
     if type(tasks) is not list or len(tasks) != 10:
         raise ValueError("corpus must contain exactly ten tasks")
     keys: set[str] = set()
-    task_anchors = [_validate_task(task, dataset_root, keys) for task in tasks]
+    task_anchors = [
+        _validate_task(task, dataset_root, keys, issue_bodies) for task in tasks
+    ]
     if evaluators != [task["evaluator"] for task in tasks]:
         raise ValueError("evaluators must exactly match task evaluators")
     kinds = [task["kind"] for task in tasks]

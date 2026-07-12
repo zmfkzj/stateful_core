@@ -6,7 +6,7 @@
       "key": "loop-factory-868-current-loop",
       "kind": "feature",
       "sources": ["https://github.com/pytest-dev/pytest-asyncio/issues/868"],
-      "source_hash": "c28682e74bde094eb40e0c42500a2c3452b7b2edf946415caae33e060d3c24e7",
+      "source_hash": "32aac5ac12eb8bed866c80e5a3c05686ed096068e64a0137a55cf73935bbf0e0",
       "prompt": "Implement issue #868 in pytest_asyncio.plugin._create_scoped_runner_fixture. A scoped asyncio runner must preserve the event loop that was current before the runner was created and restore it after teardown, including custom loop-factory runs.",
       "acceptance": [
         "A pre-existing current event loop is restored after a function-scoped async test completes.",
@@ -22,7 +22,7 @@
       "key": "loop-factory-622-loop-change-warning",
       "kind": "feature",
       "sources": ["https://github.com/pytest-dev/pytest-asyncio/issues/622"],
-      "source_hash": "bb26044bdcf6e1e552b0113d5783eedb3bc59cfe8ea5ba88c2a57b40b0569fca",
+      "source_hash": "5b1ccb1c6c4e4bf587ce9d35a582e5ec9fcc8f8531034f03e77fe78f25029248",
       "prompt": "Implement issue #622 in pytest_asyncio.plugin._create_scoped_runner_fixture. When a test replaces the runner's current event loop, emit a RuntimeWarning after safely closing the runner so loop-affinity failures are diagnosable.",
       "acceptance": [
         "Replacing the current event loop during an async test emits a RuntimeWarning identifying the loop change.",
@@ -38,7 +38,7 @@
       "key": "pyfunc-810-dynamic-marker",
       "kind": "bug",
       "sources": ["https://github.com/pytest-dev/pytest-asyncio/issues/810"],
-      "source_hash": "6e509513d3f9a9ce7cf0093d6d7262b5bac093d0b308c990e5861a6b6df0686b",
+      "source_hash": "cf51bb24b9498777c7ac34653e82f055c9d99baf3b7d8444059a6028bf03020b",
       "prompt": "Fix issue #810 in pytest_asyncio.plugin.pytest_pyfunc_call. In strict mode, a coroutine that receives pytest.mark.asyncio from pytest_collection_modifyitems after collection must execute through the configured scoped runner, preserving its loop policy, named hook loop factory, and context rather than falling through to pytest's unsupported-async-function failure. The standalone patch must accept asyncio(timeout=...) alongside loop marker kwargs and use the same cancellation-aware synchronizer for regular and late-marked coroutines, so it remains semantically compatible with #215. Resolve a late loop_factories=['name'] selection after collection rather than relying on pytest_generate_tests parametrization. Preserve the warning for genuinely synchronous marked tests.",
       "acceptance": [
         "A coroutine marked by pytest_collection_modifyitems runs through the configured scoped runner in strict mode.",
@@ -56,7 +56,7 @@
       "key": "pyfunc-215-timeout-marker",
       "kind": "feature",
       "sources": ["https://github.com/pytest-dev/pytest-asyncio/issues/215"],
-      "source_hash": "76420acfcad765b3af2bae48d7284bc5cafbb5e3a52a510f4e80a791112eceef",
+      "source_hash": "4a7399118e74965a02158410bf873147e2ce37f9a6e6c014f73990a24d777090",
       "prompt": "Implement feature #215 in pytest_asyncio.plugin.pytest_pyfunc_call. Support pytest.mark.asyncio(timeout=<seconds>) by bounding the marked coroutine with asyncio's cancellation-aware timeout behavior. A timeout must surface as TimeoutError and wait for cancellation cleanup before pytest continues to the next test. Keep existing loop-scope marker kwargs working. In the #810 late-marker integration path, that path must forward its timeout to this synchronizer rather than creating separate timeout behavior.",
       "acceptance": [
         "pytest.mark.asyncio(timeout=0.01) is accepted during collection rather than rejected as an unknown marker kwarg.",
@@ -74,7 +74,7 @@
       "key": "config-1033-nested-config-warning",
       "kind": "bug",
       "sources": ["https://github.com/pytest-dev/pytest-asyncio/issues/1033"],
-      "source_hash": "abf0e4e80460fa6dab0800975ac26a6bc1664be84145000710ee81d9fab05cb1",
+      "source_hash": "5165cc20a3ccc100e5d3016a54a5b02023d1a20d4f199f721e4fe5d01ec50b31",
       "prompt": "Fix issue #1033 in pytest_asyncio's default fixture-loop-scope configuration block. A nested pytest configuration that leaves asyncio_default_fixture_loop_scope unset must not emit the retired deprecation warning, while the selected outer pytest configuration retains its explicit value.",
       "acceptance": [
         "An outer pyproject.toml setting asyncio_default_fixture_loop_scope=module remains the value returned by pytest's actual config parser.",
@@ -90,7 +90,7 @@
       "key": "config-924-default-fixture-loop-scope",
       "kind": "feature",
       "sources": ["https://github.com/pytest-dev/pytest-asyncio/issues/924"],
-      "source_hash": "0881d824b39d9139042f0a7fcaa6aa95186bf44fd82a5081c38e337392cbc3f4",
+      "source_hash": "b612b2581c129def31014d3ef38543696e5d2db2ce1a64c7c7c6deb9bdb54be9",
       "prompt": "Implement issue #924 in pytest_asyncio's default fixture-loop-scope configuration block. Finalize the deprecation by making function the default asyncio_default_fixture_loop_scope and remove the obsolete unset warning without overriding explicit pytest configuration.",
       "acceptance": [
         "With no asyncio_default_fixture_loop_scope setting, pytest's actual config parser returns function.",
@@ -107,7 +107,7 @@
       "key": "fixture-yield-1083-taskgroup",
       "kind": "bug",
       "sources": ["https://github.com/pytest-dev/pytest-asyncio/issues/1083"],
-      "source_hash": "de6e51f29d6a0e6f12413b09be1183dfa1f16fbd2beaf9e8a277add58e5dc62d",
+      "source_hash": "ad9390a1e4215528c448ec3281ce8619f1fc281c5cda30aa92e472f5c6225a12",
       "prompt": "Make async-generator fixture teardown report a TaskGroup child failure that occurs after the fixture yields. Keep the generator's owning task alive until teardown so TaskGroup cancellation reaches that task, cancel sibling tasks, and propagate the original failure instead of hanging.",
       "acceptance": [
         "A TaskGroup child failure after an async-generator fixture yields makes fixture teardown fail promptly rather than hang.",
@@ -126,7 +126,7 @@
       "key": "fixture-yield-1191-cancel-scope",
       "kind": "bug",
       "sources": ["https://github.com/pytest-dev/pytest-asyncio/issues/1191"],
-      "source_hash": "087c2dcf88f49df55bf8f3a38ee44b11d3d71c6fb5cc31adb56cb02d7477b293",
+      "source_hash": "c33b8b8ddea81a8ed567d30e0d395451506e5a6a224f2ec8b1e21d04e2ab5929",
       "prompt": "Run the setup and teardown portions of every async-generator fixture in one task. This must allow task-bound context managers, including anyio.CancelScope, to leave in the same task in which they entered.",
       "acceptance": [
         "An async-generator fixture can enter and exit a task-bound synchronous context manager without a different-task error.",
@@ -144,7 +144,7 @@
       "key": "policy-796-nonasync-parametrization",
       "kind": "bug",
       "sources": ["https://github.com/pytest-dev/pytest-asyncio/issues/796"],
-      "source_hash": "2843cbfb38bdecde061a3827fa8ed678f1bfa333deb325dcdecbe0d1b7216955",
+      "source_hash": "40c7183485c92a97084cf55e3f700fd09619061b0207c22fa32a53d47ef34f53",
       "prompt": "Fix issue #796 at pytest_asyncio.plugin.event_loop_policy. A parametrized user event_loop_policy override must run every pytest.mark.asyncio test once per policy, but it must not parametrize unrelated synchronous tests. Preserve the event_loop_policy fixture override contract and the existing runner lifecycle.",
       "acceptance": [
         "A session-scoped parametrized event_loop_policy override creates one collected execution per policy for a pytest.mark.asyncio test.",
@@ -160,7 +160,7 @@
       "key": "policy-1032-ini-loop-factory",
       "kind": "feature",
       "sources": ["https://github.com/pytest-dev/pytest-asyncio/issues/1032"],
-      "source_hash": "d1785533c54014a4b9c53af275e7484f97be98e4a3e05fdff92c4ddda4b7aa84",
+      "source_hash": "ee6d75d1bb45ec84b82bf2e70ed7e7ab9fc09989928a6cfceeed8fca392c79d8",
       "prompt": "Implement the benchmark-defined asyncio_loop_factory feature extension in pytest_asyncio.plugin.event_loop_policy. This concrete API is motivated by the open discussion in issue #1032; it is not an upstream-specified API. An ini value module:callable selects the callable used to create Runner loops; validate malformed, missing, and non-callable targets with a pytest UsageError. Existing user event_loop_policy fixture overrides must continue to take precedence.",
       "acceptance": [
         "The benchmark-defined asyncio_loop_factory setting accepts a module:callable value without an unknown-configuration warning.",
