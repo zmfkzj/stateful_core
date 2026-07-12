@@ -293,8 +293,8 @@ class ManifestTests(unittest.TestCase):
         ):
             with self.subTest(option=option):
                 data = self.load_data()
-                entry = next(repo for repo in data["repositories"] if repo["key"] == "watchdog")
-                entry["suite"] = ["python", "-m", "pytest", option, value]
+                entry = next(repo for repo in data["repositories"] if repo["key"] == "pendulum")
+                entry["suite"] = ["python", "-m", "pytest", "-q", option, value]
                 entry["metadata"] = {
                     "exclusions": {
                         f"{option}={value}": "Pinned runtime reason.",
@@ -304,6 +304,22 @@ class ManifestTests(unittest.TestCase):
                 self.write_data(data)
 
                 with self.assertRaisesRegex(ValueError, "suite exclusions must have a value"):
+                    self.mod.load_manifest(self.manifest_path)
+
+    def test_load_manifest_rejects_unapproved_pytest_selection(self) -> None:
+        for addition in (
+            ["-k", "not slow"],
+            ["--ignore-glob=tests/test_*.py"],
+            ["tests/test_requests.py"],
+            ["-o", "addopts=-k not_slow"],
+        ):
+            with self.subTest(addition=addition):
+                data = self.load_data()
+                entry = next(repo for repo in data["repositories"] if repo["key"] == "pendulum")
+                entry["suite"] = ["python", "-m", "pytest", "-q", *addition]
+                self.write_data(data)
+
+                with self.assertRaisesRegex(ValueError, "suite must be an audited pytest argv"):
                     self.mod.load_manifest(self.manifest_path)
 
 
@@ -1044,6 +1060,10 @@ class QualificationTests(unittest.TestCase):
             for name, contents in {
                 "target.py": b"value = 'base'\n",
                 "suite.txt": b"base\n",
+                "pytest.py": (
+                    b"from pathlib import Path\n"
+                    b"raise SystemExit(0 if 'base' in Path('target.py').read_text() else 1)\n"
+                ),
             }.items():
                 member = tarfile.TarInfo(f"fixture/{name}")
                 member.size = len(contents)
@@ -1061,11 +1081,7 @@ class QualificationTests(unittest.TestCase):
             "archive_sha256": digest,
             "python": "3.14.6",
             "setup": [sys.executable, "-c", "pass"],
-            "suite": [
-                sys.executable,
-                "-c",
-                "from pathlib import Path; assert 'base' in Path('target.py').read_text()",
-            ],
+            "suite": ["python", "-m", "pytest", "-q"],
             "corpus": "repos/fixture.json",
         }
         manifest = {
@@ -1130,25 +1146,15 @@ class QualificationTests(unittest.TestCase):
         self.assertFalse(result["repositories"][0]["integrated_green"])
 
     def test_qualify_rejects_upstream_suite_failure(self) -> None:
-        manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
-        manifest["repositories"][0]["suite"] = [sys.executable, "-c", "raise SystemExit(1)"]
-        self.manifest.write_text(json.dumps(manifest), encoding="utf-8")
-
-        status, result = self._qualify()
+        with mock.patch.object(self.mod, "_run_suite", side_effect=[True, False]):
+            status, result = self._qualify()
 
         self.assertEqual(status, 1)
         self.assertFalse(result["repositories"][0]["upstream_green"])
 
     def test_qualify_rejects_base_suite_failure(self) -> None:
-        manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
-        manifest["repositories"][0]["suite"] = [
-            sys.executable,
-            "-c",
-            "from pathlib import Path; assert 'integrated' in Path('suite.txt').read_text()",
-        ]
-        self.manifest.write_text(json.dumps(manifest), encoding="utf-8")
-
-        status, result = self._qualify()
+        with mock.patch.object(self.mod, "_run_suite", return_value=False):
+            status, result = self._qualify()
 
         self.assertEqual(status, 1)
         self.assertFalse(result["repositories"][0]["base_suite_green"])
@@ -1636,6 +1642,36 @@ class RealWorldRunnerTests(unittest.TestCase):
 
         self.assertTrue(result["cleared"], result)
         self.assertEqual(seen_environments, [expected_env] * 12)
+
+    def test_runner_replaces_untrusted_denied_root_with_manifest_root(self) -> None:
+        events = []
+        expected_root = self.dataset.resolve()
+
+        def launch(arm_dir, workspace, agent_id, prompt_path, mode, cfg):
+            self.assertEqual(cfg.denied_read_paths, (expected_root,))
+            return self.fake_launch(events)(arm_dir, workspace, agent_id, prompt_path, mode, cfg)
+
+        result = self.mod.run_repo_arm(
+            self.repo,
+            self.corpus,
+            self.dataset,
+            self.root / "cache",
+            self.root / "out",
+            "parallel-off",
+            self.mod.RunConfig(
+                tasks=10,
+                stateful_binary="/tmp/stateful",
+                denied_read_paths=(self.root / "untrusted-root",),
+            ),
+            launch=launch,
+            workspace_factory=self.workspace,
+            archive_loader=lambda *_: self.root / "archive.tar.gz",
+            setup=lambda *_: True,
+            evaluator=lambda *_: True,
+            suite=lambda *_: True,
+        )
+
+        self.assertTrue(result["cleared"], result)
 
     def test_final_mutation_of_injected_evaluator_cannot_change_grading(self) -> None:
         events = []

@@ -85,9 +85,10 @@ def wrap_omp_with_denied_reads(command: list[str], denied_read_paths: tuple[Path
     if sandbox_exec is None:
         raise RuntimeError("sandbox-exec is required to deny real-world dataset reads")
     denied_rules = [
-        f'(deny file-read* (literal "{_sandbox_literal(path)}"))'
-        f'\n(deny file-read* (subpath "{_sandbox_literal(path)}"))'
+        f'(deny {operation} (literal "{_sandbox_literal(path)}"))'
+        f'\n(deny {operation} (subpath "{_sandbox_literal(path)}"))'
         for path in denied_read_paths
+        for operation in ("file-read*", "file-write*")
     ]
     profile = "\n".join(["(version 1)", "(allow default)", "(allow network*)", *denied_rules])
     return [str(Path(sandbox_exec).absolute()), "-p", profile, *command]
@@ -406,6 +407,28 @@ def arm_stateful_server(arm_dir: Path, cfg: RunConfig):
                     process.wait()
 
 
+_AGENT_ENV_ALLOWLIST = frozenset(
+    {
+        "CURL_CA_BUNDLE",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "PATH",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "TERM",
+        "TMPDIR",
+        "TZ",
+        "VIRTUAL_ENV",
+    }
+)
+
+
+def _agent_base_environment(launch_env: dict[str, str] | None) -> dict[str, str]:
+    source = os.environ if launch_env is None else launch_env
+    return {name: source[name] for name in _AGENT_ENV_ALLOWLIST if name in source}
+
 def launch_agent(
     arm_dir: Path,
     workspace: Path,
@@ -414,9 +437,8 @@ def launch_agent(
     mode: str,
     cfg: RunConfig,
 ) -> AgentHandle:
-    env = omp_environment(arm_dir, agent_id)
-    if cfg.launch_env:
-        env.update(cfg.launch_env)
+    base_env = _agent_base_environment(cfg.launch_env)
+    env = omp_environment(arm_dir, agent_id, base_env or {"PATH": os.defpath})
     if cfg.stateful_runtime_env:
         env.update(cfg.stateful_runtime_env)
     copy_openai_codex_auth(Path.home(), Path(env["HOME"]))
@@ -446,29 +468,49 @@ def launch_agent(
     return AgentHandle(popen=popen, agent_id=agent_id, started_monotonic=time.monotonic())
 
 
-def _cleanup_agent_group(popen: subprocess.Popen) -> None:
+_CLEANUP_WAIT_S = 5
+
+
+def _cleanup_agent_group(popen: subprocess.Popen) -> dict[str, str | None]:
+    errors = []
     for group_signal in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(popen.pid, group_signal)
-        except (PermissionError, ProcessLookupError):
+        except PermissionError:
+            errors.append(
+                f"Permission denied while sending {group_signal.name} to agent process group"
+            )
+        except ProcessLookupError:
             pass
+    return {"error": "; ".join(errors) or None}
 
 
 def _wait_agent(handle: AgentHandle, arm_dir: Path, kind: str, cfg: RunConfig) -> tuple[dict, float]:
     timed_out = False
+    completed: int | None = None
+    cleanup_errors: list[str] = []
     try:
         try:
             completed = handle.popen.wait(timeout=cfg.timeout_s)
         except subprocess.TimeoutExpired:
             timed_out = True
-            _cleanup_agent_group(handle.popen)
-            completed = handle.popen.wait()
+            cleanup = _cleanup_agent_group(handle.popen)
+            if cleanup["error"] is not None:
+                cleanup_errors.append(cleanup["error"])
+            try:
+                completed = handle.popen.wait(timeout=_CLEANUP_WAIT_S)
+            except subprocess.TimeoutExpired:
+                cleanup_errors.append(
+                    f"agent process did not exit within {_CLEANUP_WAIT_S}s of cleanup"
+                )
     finally:
-        _cleanup_agent_group(handle.popen)
+        cleanup = _cleanup_agent_group(handle.popen)
+        if cleanup["error"] is not None:
+            cleanup_errors.append(cleanup["error"])
     ended = time.monotonic()
     exit_code = getattr(handle.popen, "returncode", None)
     if exit_code is None:
-        exit_code = completed
+        exit_code = completed if completed is not None else -1
     usage = usage_from_log(arm_dir / "logs" / f"{handle.agent_id}.stdout.log")
     return (
         {
@@ -476,6 +518,7 @@ def _wait_agent(handle: AgentHandle, arm_dir: Path, kind: str, cfg: RunConfig) -
             "kind": kind,
             "exit_code": exit_code,
             "timed_out": timed_out,
+            "cleanup_error": "; ".join(dict.fromkeys(cleanup_errors)) or None,
             "wall_time_s": max(0.0, ended - getattr(handle, "started_monotonic", ended)),
             **usage,
         },
@@ -557,6 +600,8 @@ def run_arm(
                 handle = start_task(spec)
                 record, ended = _wait_agent(handle, arm_dir, "task", cfg)
                 agents.append(record)
+                if record["cleanup_error"] is not None:
+                    raise RuntimeError(f"task agent {record['agent_id']} cleanup failed: {record['cleanup_error']}")
                 task_ended = ended
         else:
             for spec in specs:
@@ -564,6 +609,8 @@ def run_arm(
             for handle in task_handles:
                 record, ended = _wait_agent(handle, arm_dir, "task", cfg)
                 agents.append(record)
+                if record["cleanup_error"] is not None:
+                    raise RuntimeError(f"task agent {record['agent_id']} cleanup failed: {record['cleanup_error']}")
                 task_ended = ended if task_ended is None else max(task_ended, ended)
 
         final_handle = launch(arm_dir, workspace, "final", final_prompt, mode, cfg)
@@ -571,6 +618,8 @@ def run_arm(
         arm_started = final_started if arm_started is None else min(arm_started, final_started)
         final_record, final_ended = _wait_agent(final_handle, arm_dir, "final", cfg)
         agents.append(final_record)
+        if final_record["cleanup_error"] is not None:
+            raise RuntimeError(f"final agent cleanup failed: {final_record['cleanup_error']}")
     except Exception as exc:
         error = str(exc)
         for handle in task_handles:
@@ -588,7 +637,7 @@ def run_arm(
         error = str(exc)
 
     post_suite_ok = False
-    if final_ended is not None:
+    if final_ended is not None and error is None:
         post_suite_ok = suite_run(
             [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", "."],
             cwd=workspace,

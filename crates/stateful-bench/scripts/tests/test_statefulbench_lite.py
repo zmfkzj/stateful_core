@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import closing, contextmanager
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -22,7 +23,7 @@ class _FakePopen:
         self.exit_code = exit_code
         self.timed_out = timed_out
         self.returncode = None
-        self.pid = 1
+        self.pid = 999999
         self._timed_out_once = False
 
     def wait(self, timeout=None):
@@ -187,7 +188,7 @@ class StatefulBenchLiteTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "--omp-bin"):
                 self.mod.resolve_omp_binary("missing-omp")
 
-    def test_denied_read_wrapper_blocks_dataset_but_keeps_runtime_access(self):
+    def test_denied_read_wrapper_blocks_dataset_reads_and_writes(self):
         denied = Path("/datasets/statefulbench-realworld").resolve()
         with patch.object(self.mod.shutil, "which", return_value="/usr/bin/sandbox-exec"):
             command = self.mod.wrap_omp_with_denied_reads(
@@ -199,9 +200,10 @@ class StatefulBenchLiteTests(unittest.TestCase):
         profile = command[2]
         self.assertIn("(allow default)", profile)
         self.assertIn("(allow network*)", profile)
-        self.assertIn(f'(deny file-read* (literal "{denied}"))', profile)
-        self.assertIn(f'(deny file-read* (subpath "{denied}"))', profile)
-        self.assertLess(profile.index("(allow default)"), profile.index("(deny file-read*"))
+        for operation in ("file-read*", "file-write*"):
+            self.assertIn(f'(deny {operation} (literal "{denied}"))', profile)
+            self.assertIn(f'(deny {operation} (subpath "{denied}"))', profile)
+            self.assertLess(profile.index("(allow default)"), profile.index(f"(deny {operation}"))
         self.assertEqual(command[3:], ["/opt/omp/bin/omp", "--mode", "json"])
 
     def test_wait_agent_reaps_group_after_normal_parent_exit(self):
@@ -226,14 +228,64 @@ class StatefulBenchLiteTests(unittest.TestCase):
                 )
 
         self.assertEqual(record["exit_code"], 0)
+        self.assertIsNone(record["cleanup_error"])
         self.assertEqual(
             events,
             [
                 ("wait", "normal"),
-                ("killpg", 1, self.mod.signal.SIGTERM),
-                ("killpg", 1, self.mod.signal.SIGKILL),
+                ("killpg", 999999, self.mod.signal.SIGTERM),
+                ("killpg", 999999, self.mod.signal.SIGKILL),
             ],
         )
+
+    def test_wait_agent_timeout_signal_denial_is_bounded_and_recorded(self):
+        wait_timeouts = []
+
+        class Process:
+            pid = 999999
+            returncode = None
+
+            def wait(self, timeout=None):
+                wait_timeouts.append(timeout)
+                if len(wait_timeouts) == 1:
+                    raise subprocess.TimeoutExpired("timed-out", timeout)
+                self.returncode = 0
+                return self.returncode
+
+        handle = SimpleNamespace(
+            popen=Process(),
+            agent_id="timed-out",
+            started_monotonic=time.monotonic(),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            arm_dir = Path(temp_dir)
+            (arm_dir / "logs").mkdir()
+            (arm_dir / "logs" / "timed-out.stdout.log").write_text("", encoding="utf-8")
+            with patch.object(self.mod.os, "killpg", side_effect=PermissionError("denied")):
+                record, _ = self.mod._wait_agent(
+                    handle, arm_dir, "task", self.mod.RunConfig(timeout_s=1)
+                )
+
+        self.assertTrue(record["timed_out"])
+        self.assertIn("Permission denied", record["cleanup_error"])
+        self.assertEqual(wait_timeouts, [1, self.mod._CLEANUP_WAIT_S])
+
+    def test_cleanup_denial_after_normal_exit_aborts_before_grading(self):
+        suite_run = Mock(return_value=subprocess.CompletedProcess([], 0))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(self.mod.os, "killpg", side_effect=PermissionError("denied")):
+                result = self.mod.run_arm(
+                    "sequential",
+                    Path(temp_dir),
+                    self.mod.RunConfig(tasks=2),
+                    launch=_fake_launch([]),
+                    suite_run=suite_run,
+                )
+
+        self.assertIn("cleanup failed", result["error"])
+        self.assertFalse(result["cleared"])
+        self.assertFalse(result["post_suite_ok"])
+        suite_run.assert_not_called()
 
     def test_sequential_serializes_and_parallel_overlaps(self):
         task_ids = [f"task-{spec['key']}" for spec in self.mod.TASK_SPECS]
@@ -355,6 +407,95 @@ class StatefulBenchLiteTests(unittest.TestCase):
         process.terminate.assert_called_once_with()
         process.wait.assert_called_once_with(timeout=5)
 
+    def test_launch_agent_isolates_host_secrets_but_preserves_runtime_environment(self):
+        process = Mock()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            launch_env = {
+                "PATH": "/workspace/bin:/usr/bin",
+                "VIRTUAL_ENV": str(workspace / ".venv"),
+                "OPENAI_API_KEY": "launch-secret",
+                "PYTHONPATH": "/host/python",
+            }
+
+            def environment(_arm_dir, _agent_id, base_env):
+                return {
+                    **base_env,
+                    "HOME": str(root / "home"),
+                    "PI_CODING_AGENT_DIR": str(root / "agent"),
+                }
+
+            with (
+                patch.dict(
+                    self.mod.os.environ,
+                    {
+                        "OPENAI_API_KEY": "host-secret",
+                        "AWS_SECRET_ACCESS_KEY": "aws-secret",
+                        "GITHUB_TOKEN": "github-secret",
+                        "PYTHONPATH": "/host/pythonpath",
+                    },
+                    clear=False,
+                ),
+                patch.object(self.mod, "omp_environment", side_effect=environment),
+                patch.object(self.mod, "copy_openai_codex_auth"),
+                patch.object(self.mod, "copy_stateful_omp_agent_db"),
+                patch.object(self.mod, "prepare_environment"),
+                patch.object(self.mod, "omp_command", return_value=["omp"]),
+                patch.object(self.mod.subprocess, "Popen", return_value=process) as popen,
+            ):
+                self.mod.launch_agent(
+                    root,
+                    workspace,
+                    "task",
+                    root / "task.prompt.txt",
+                    "stateful",
+                    self.mod.RunConfig(
+                        launch_env=launch_env,
+                        stateful_runtime_env={"STATEFUL_SERVER_TOKEN": "runtime-token"},
+                    ),
+                )
+
+        launched_env = popen.call_args.kwargs["env"]
+        self.assertEqual(launched_env["PATH"], "/workspace/bin:/usr/bin")
+        self.assertEqual(launched_env["VIRTUAL_ENV"], str(workspace / ".venv"))
+        self.assertEqual(launched_env["STATEFUL_SERVER_TOKEN"], "runtime-token")
+        for name in ("OPENAI_API_KEY", "AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "PYTHONPATH"):
+            self.assertNotIn(name, launched_env)
+
+    def test_launch_agent_uses_safe_path_for_explicit_empty_environment(self):
+        process = Mock()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = root / "workspace"
+            workspace.mkdir()
+
+            def environment(_arm_dir, _agent_id, base_env):
+                self.assertEqual(base_env, {"PATH": os.defpath})
+                return {
+                    **base_env,
+                    "HOME": str(root / "home"),
+                    "PI_CODING_AGENT_DIR": str(root / "agent"),
+                }
+
+            with (
+                patch.object(self.mod, "omp_environment", side_effect=environment),
+                patch.object(self.mod, "copy_openai_codex_auth"),
+                patch.object(self.mod, "copy_stateful_omp_agent_db"),
+                patch.object(self.mod, "prepare_environment"),
+                patch.object(self.mod, "omp_command", return_value=["omp"]),
+                patch.object(self.mod.subprocess, "Popen", return_value=process),
+            ):
+                self.mod.launch_agent(
+                    root,
+                    workspace,
+                    "task",
+                    root / "task.prompt.txt",
+                    "no-state",
+                    self.mod.RunConfig(launch_env={}),
+                )
+
     def test_launch_agent_merges_workspace_virtualenv_environment_before_popen(self):
         process = Mock()
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -367,7 +508,15 @@ class StatefulBenchLiteTests(unittest.TestCase):
                 "PATH": f"{venv / 'bin'}:/usr/bin",
             }
             with (
-                patch.object(self.mod, "omp_environment", return_value={"HOME": str(root / "home"), "PI_CODING_AGENT_DIR": str(root / "agent")}),
+                patch.object(
+                    self.mod,
+                    "omp_environment",
+                    side_effect=lambda _arm_dir, _agent_id, base_env: {
+                        **base_env,
+                        "HOME": str(root / "home"),
+                        "PI_CODING_AGENT_DIR": str(root / "agent"),
+                    },
+                ),
                 patch.object(self.mod, "copy_openai_codex_auth"),
                 patch.object(self.mod, "copy_stateful_omp_agent_db"),
                 patch.object(self.mod, "prepare_environment"),

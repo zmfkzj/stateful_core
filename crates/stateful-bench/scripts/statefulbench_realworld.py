@@ -253,6 +253,29 @@ def _suite_exclusions(suite: list[str]) -> set[str]:
     return exclusions
 
 
+def _require_suite_argv(entry: dict) -> None:
+    suite = entry["suite"]
+    _require_argv(entry, "suite")
+    if suite[:4] != ["python", "-m", "pytest", "-q"]:
+        raise ValueError("suite must be an audited pytest argv")
+    index = 4
+    if entry["key"] == "watchdog":
+        watchdog_options = ["-p", "no:cov", "-o", "addopts=--showlocals -vvv"]
+        if suite[index : index + len(watchdog_options)] != watchdog_options:
+            raise ValueError("suite must be an audited pytest argv")
+        index += len(watchdog_options)
+    while index < len(suite):
+        argument = suite[index]
+        if argument in {"--deselect", "--ignore"}:
+            if index + 1 == len(suite) or not suite[index + 1] or suite[index + 1].startswith("-"):
+                raise ValueError("suite exclusions must have a value")
+            index += 2
+        elif argument.startswith(("--deselect=", "--ignore=")):
+            index += 1
+        else:
+            raise ValueError("suite must be an audited pytest argv")
+
+
 
 def _require_environment(entry: dict) -> None:
     if "environment" not in entry:
@@ -315,8 +338,8 @@ def _validate_repository(entry: object, manifest_dir: Path, keys: set[str]) -> N
             raise ValueError(f"{field} has invalid SHA format")
     if _require_string(entry, "python") != "3.14.6":
         raise ValueError("python must be 3.14.6")
-    for field in ("setup", "suite"):
-        _require_argv(entry, field)
+    _require_argv(entry, "setup")
+    _require_suite_argv(entry)
     _require_environment(entry)
     _require_metadata(entry)
 
@@ -1156,6 +1179,8 @@ def run_repo_arm(
     if arm not in {"sequential", "parallel-off", "parallel-on"}:
         raise ValueError(f"unknown arm: {arm}")
     trial = cfg.trial
+    manifest_dir = manifest_dir.resolve()
+    cfg = replace(cfg, denied_read_paths=(manifest_dir,))
     if arm == "parallel-on" and not cfg.stateful_binary:
         result = _empty_run_result(
             repo, arm, trial, "parallel-on requires a resolvable stateful binary"
@@ -1221,6 +1246,10 @@ def run_repo_arm(
                     for task, prompt in tasks:
                         record, ended = wait(start(task, prompt), "task")
                         agents.append(record)
+                        if record["cleanup_error"] is not None:
+                            raise RuntimeError(
+                                f"task agent {record['agent_id']} cleanup failed: {record['cleanup_error']}"
+                            )
                         task_ended = ended
                 else:
                     handles = []
@@ -1229,6 +1258,10 @@ def run_repo_arm(
                     for handle in handles:
                         record, ended = wait(handle, "task")
                         agents.append(record)
+                        if record["cleanup_error"] is not None:
+                            raise RuntimeError(
+                                f"task agent {record['agent_id']} cleanup failed: {record['cleanup_error']}"
+                            )
                         task_ended = ended if task_ended is None else max(task_ended, ended)
 
                 evaluator_paths = _inject_evaluators(corpus, manifest_dir, workspace)
@@ -1239,6 +1272,8 @@ def run_repo_arm(
                 arm_started = final_started if arm_started is None else min(arm_started, final_started)
                 final_record, final_ended = wait(final_handle, "final")
                 agents.append(final_record)
+                if final_record["cleanup_error"] is not None:
+                    raise RuntimeError(f"final agent cleanup failed: {final_record['cleanup_error']}")
 
                 if any(_sha256(path) != digest for path, digest in evaluator_hashes.items()):
                     raise RuntimeError("canonical evaluator changed during agent execution")
@@ -1502,6 +1537,7 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as error:
             parser.error(str(error))
     manifest = load_manifest(arguments.manifest)
+    dataset_root = arguments.manifest.parent.resolve()
     repositories = repo_entries(manifest)
     wanted = arguments.repos if arguments.command == "run" else arguments.repo
     if wanted:
@@ -1520,12 +1556,12 @@ def main(argv: list[str] | None = None) -> int:
             thinking=arguments.thinking,
             omp_bin=omp_binary,
             stateful_binary=arguments.stateful_binary,
-            denied_read_paths=(Path("datasets/statefulbench-realworld").resolve(),),
+            denied_read_paths=(dataset_root,),
         )
         results = []
         for repo in selected:
             try:
-                corpus = load_corpus(arguments.manifest.parent / repo["corpus"])
+                corpus = load_corpus(dataset_root / repo["corpus"])
                 if not _corpus_matches_repository(repo, corpus):
                     raise ValueError("corpus repository does not match manifest key")
             except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
@@ -1541,7 +1577,7 @@ def main(argv: list[str] | None = None) -> int:
                         result = run_repo_arm(
                             repo,
                             corpus,
-                            arguments.manifest.parent,
+                            dataset_root,
                             arguments.cache,
                             arguments.out,
                             arm,
@@ -1568,10 +1604,10 @@ def main(argv: list[str] | None = None) -> int:
     results = []
     for repo in selected:
         try:
-            corpus = load_corpus(arguments.manifest.parent / repo["corpus"])
+            corpus = load_corpus(dataset_root / repo["corpus"])
             if not _corpus_matches_repository(repo, corpus):
                 raise ValueError("corpus repository does not match manifest key")
-            result = qualify_repository(repo, corpus, arguments.manifest.parent, arguments.cache)
+            result = qualify_repository(repo, corpus, dataset_root, arguments.cache)
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             result = {
                 "key": repo["key"],
