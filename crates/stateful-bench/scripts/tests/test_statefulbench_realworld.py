@@ -302,6 +302,16 @@ class CorpusTests(unittest.TestCase):
 
 
 
+    def test_load_corpus_rejects_test_only_anchor_paths(self) -> None:
+        data = self.corpus_data()
+        data["tasks"][0]["overlap_anchors"] = [
+            {"path": "tests/test_module.py", "symbol": "tests.test_module.target"}
+        ]
+        self.write_data(data)
+
+        with self.assertRaisesRegex(ValueError, "production"):
+            self.mod.load_corpus(self.corpus_path)
+
 class ArchiveTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -729,21 +739,38 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(status, 0, result)
 
     def test_changed_anchors_require_hunks_to_touch_the_symbol(self) -> None:
-        workspace = self.root / "symbol-workspace"
-        workspace.mkdir()
-        source = workspace / "target.py"
+        source = self.root / "symbol-workspace" / "src" / "pkg" / "mod.py"
+        source.parent.mkdir(parents=True)
         source.write_text(
-            "def first():\n    return 'base'\n\n\ndef second():\n    return 'base'\n",
+            "class Class:\n"
+            "    def first(self):\n"
+            "        return 'base'\n\n"
+            "    def second(self):\n"
+            "        return 'base'\n",
             encoding="utf-8",
         )
         self.assertEqual(
             self.mod.changed_anchor_symbols(
                 source,
-                [(source, "target.first"), (source, "target.second")],
-                [(5, 1)],
+                [
+                    (source, "src/pkg/mod.py", "pkg.mod.Class.first"),
+                    (source, "src/pkg/mod.py", "pkg.mod.Class.second"),
+                ],
+                [(6, 1)],
             ),
-            {"target.py:target.second"},
+            {"src/pkg/mod.py:pkg.mod.Class.second"},
         )
+        package_init = source.parent / "__init__.py"
+        package_init.write_text("def from_timestamp():\n    return 'base'\n", encoding="utf-8")
+        self.assertEqual(
+            self.mod.changed_anchor_symbols(
+                package_init,
+                [(package_init, "src/pkg/__init__.py", "pkg.from_timestamp")],
+                [(2, 1)],
+            ),
+            {"src/pkg/__init__.py:pkg.from_timestamp"},
+        )
+
     def test_qualify_reports_malformed_matching_archive(self) -> None:
         contents = b"not a tar archive"
         digest = hashlib.sha256(contents).hexdigest()
@@ -762,33 +789,31 @@ class QualificationTests(unittest.TestCase):
         self.assertIn("archive", repository["error"])
         self.assertTrue((self.cache / "qualification" / "fixture" / "artifacts").is_dir())
 
-
     def test_qualify_rejects_task_without_changed_shared_anchor(self) -> None:
         evaluator = self.dataset / "evaluators" / "task-0.py"
         evaluator.write_text(
             "import sys\nfrom pathlib import Path\n"
-            "assert 'task-0' in (Path(sys.argv[1]) / 'lonely.txt').read_text()\n",
+            "assert 'task-0' in (Path(sys.argv[1]) / 'lonely.py').read_text()\n",
             encoding="utf-8",
         )
         corpus_path = self.dataset / "repos" / "fixture.json"
         corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
         corpus["tasks"][0]["overlap_anchors"].append(
-            {"path": "lonely.txt", "symbol": "lonely"}
+            {"path": "lonely.py", "symbol": "lonely.value"}
         )
         corpus_path.write_text(json.dumps(corpus), encoding="utf-8")
         (self.dataset / "references" / "task-0.patch").write_text(
-            self._patch("base", "base task-0", "lonely.txt"),
+            self._patch("base", "base task-0", "lonely.py"),
             encoding="utf-8",
         )
         integrated = self.dataset / "references" / "integrated.patch"
         integrated.write_text(
             self._patch("base", "base " + " ".join(f"task-{index}" for index in range(1, 10)))
-            + self._patch("base", "base task-0", "lonely.txt")
+            + self._patch("base", "base task-0", "lonely.py")
             + self._patch("base", "integrated", "suite.txt"),
             encoding="utf-8",
         )
-        archive = self.cache.glob("*.tar.gz")
-        archive_path = next(archive)
+        archive_path = next(self.cache.glob("*.tar.gz"))
         archive_path.unlink()
         archive_bytes = io.BytesIO()
         with tarfile.open(fileobj=archive_bytes, mode="w:gz") as source:
@@ -797,7 +822,7 @@ class QualificationTests(unittest.TestCase):
             source.addfile(root)
             for name, contents in {
                 "target.py": b"value = 'base'\n",
-                "lonely.txt": b"base\n",
+                "lonely.py": b"value = 'base'\n",
                 "suite.txt": b"base\n",
             }.items():
                 member = tarfile.TarInfo(f"fixture/{name}")
@@ -815,7 +840,9 @@ class QualificationTests(unittest.TestCase):
 
         self.assertEqual(status, 1, result)
         repository = result["repositories"][0]
-        self.assertEqual(repository["tasks"][0]["changed_anchors"], [])
+        self.assertEqual(
+            repository["tasks"][0]["changed_anchors"], ["lonely.py:lonely.value"]
+        )
         self.assertEqual(repository["isolated_tasks"], ["task-0"])
         self.assertTrue((self.cache / "qualification" / "fixture" / "artifacts").is_dir())
 if __name__ == "__main__":

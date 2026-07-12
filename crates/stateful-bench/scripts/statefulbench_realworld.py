@@ -276,6 +276,23 @@ def _require_acceptance(entry: dict) -> None:
     ):
         raise ValueError("acceptance must contain at least three non-empty strings")
 
+def _require_production_source_path(anchor: dict) -> str:
+    path = _require_string(anchor, "path")
+    candidate = Path(path)
+    parts = path.replace("\\", "/").split("/")
+    if (
+        candidate.is_absolute()
+        or ".." in candidate.parts
+        or candidate.suffix != ".py"
+        or {"docs", "tests", "generated"} & set(parts)
+        or candidate.name.startswith("test_")
+        or candidate.name == "conftest.py"
+    ):
+        raise ValueError("overlap anchor path must identify production Python source")
+    return path
+
+
+
 
 def _validate_task(
     entry: object, dataset_root: Path, keys: set[str]
@@ -306,7 +323,7 @@ def _validate_task(
     for anchor in anchors:
         if type(anchor) is not dict or set(anchor) != _ANCHOR_FIELDS:
             raise ValueError("overlap_anchors entries must contain path and symbol")
-        pairs.add((_require_string(anchor, "path"), _require_string(anchor, "symbol")))
+        pairs.add((_require_production_source_path(anchor), _require_string(anchor, "symbol")))
     return key, pairs
 
 
@@ -486,13 +503,14 @@ def _patch_hunks(diff: str) -> dict[str, list[tuple[int, int]]]:
 
 
 def changed_anchor_symbols(
-    source: Path, anchors: list[tuple[Path, str]], hunks: list[tuple[int, int]]
+    source: Path,
+    anchors: list[tuple[Path, str, str]],
+    hunks: list[tuple[int, int]],
 ) -> set[str]:
     try:
         tree = ast.parse(source.read_text(encoding="utf-8"))
     except (OSError, SyntaxError):
         return set()
-    module = source.with_suffix("").name
     ranges: dict[str, tuple[int, int]] = {}
 
     class Symbols(ast.NodeVisitor):
@@ -500,7 +518,7 @@ def changed_anchor_symbols(
             self.scope: list[str] = []
 
         def _record(self, name: str, node: ast.AST) -> None:
-            ranges[".".join((module, *self.scope, name))] = (
+            ranges[".".join((*self.scope, name))] = (
                 node.lineno,
                 node.end_lineno or node.lineno,
             )
@@ -532,12 +550,21 @@ def changed_anchor_symbols(
 
     Symbols().visit(tree)
     changed: set[str] = set()
-    for anchor_source, symbol in anchors:
-        if anchor_source != source or symbol not in ranges:
+    for anchor_source, path, symbol in anchors:
+        if anchor_source != source:
             continue
-        first, last = ranges[symbol]
-        if any(count and start <= last and start + count - 1 >= first for start, count in hunks):
-            changed.add(f"{source.name}:{symbol}")
+        target = symbol.split(maxsplit=1)[0]
+        matching_ranges = [
+            source_range
+            for local_name, source_range in ranges.items()
+            if target == local_name or target.endswith(f".{local_name}")
+        ]
+        if any(
+            count and start <= last and start + count - 1 >= first
+            for first, last in matching_ranges
+            for start, count in hunks
+        ):
+            changed.add(f"{path}:{symbol}")
     return changed
 
 
@@ -558,7 +585,7 @@ def _apply_patch(
     if applied.returncode != 0:
         return False, {}
     changed = _run_logged(
-        ["git", "diff", "--cached", "--unified=0"],
+        ["git", "diff", "--no-ext-diff", "--cached", "--unified=0"],
         workspace,
         artifacts,
         artifact_dir,
@@ -701,7 +728,11 @@ def _qualify_task(
                     changed_anchor_symbols(
                         workspace / anchor["path"],
                         [
-                            (workspace / candidate["path"], candidate["symbol"])
+                            (
+                                workspace / candidate["path"],
+                                candidate["path"],
+                                candidate["symbol"],
+                            )
                             for candidate in task["overlap_anchors"]
                         ],
                         changed_hunks.get(anchor["path"], []),
