@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import contextlib
 import importlib.util
 import io
 import json
@@ -469,5 +470,233 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual((first / "pyproject.toml").read_bytes(), (second / "pyproject.toml").read_bytes())
         self.assertEqual((first / "src" / "module.py").read_bytes(), (second / "src" / "module.py").read_bytes())
         self.assertNotEqual((first / "src" / "module.py").stat().st_ino, (second / "src" / "module.py").stat().st_ino)
+
+
+class QualificationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tempdir.name)
+        self.cache = self.root / "cache"
+        self.dataset = self.root / "dataset"
+        self.mod = load_script("statefulbench_realworld.py")
+        self.manifest = self._write_fixture()
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    def _patch(self, before: str, after: str, path: str = "target.txt") -> str:
+        return (
+            f"diff --git a/{path} b/{path}\n"
+            f"--- a/{path}\n"
+            f"+++ b/{path}\n"
+            "@@ -1 +1 @@\n"
+            f"-{before}\n"
+            f"+{after}\n"
+        )
+
+    def _write_fixture(self) -> Path:
+        tasks = []
+        target = "base"
+        for index in range(10):
+            key = f"task-{index}"
+            target = f"{target} {key}"
+            evaluator = self.dataset / "evaluators" / f"{key}.py"
+            evaluator.parent.mkdir(parents=True, exist_ok=True)
+            evaluator.write_text(
+                "import sys\nfrom pathlib import Path\n"
+                f"assert {key!r} in (Path(sys.argv[1]) / 'target.txt').read_text()\n",
+                encoding="utf-8",
+            )
+            patch = self.dataset / "references" / f"{key}.patch"
+            patch.parent.mkdir(parents=True, exist_ok=True)
+            patch.write_text(self._patch("base", f"base {key}"), encoding="utf-8")
+            tasks.append(
+                {
+                    "key": key,
+                    "kind": "bug" if index < 5 else "feature",
+                    "sources": [f"https://github.com/example/project/issues/{index}"],
+                    "source_hash": f"{index:064x}",
+                    "prompt": key,
+                    "acceptance": ["normal", "boundary", "error"],
+                    "overlap_anchors": [{"path": "target.txt", "symbol": "target"}],
+                    "evaluator": f"evaluators/{key}.py",
+                    "reference_patch": f"references/{key}.patch",
+                }
+            )
+        (self.dataset / "references" / "integrated.patch").write_text(
+            self._patch("base", target)
+            + self._patch("base", "integrated", "suite.txt"),
+            encoding="utf-8",
+        )
+        corpus = {
+            "repository": "fixture",
+            "issue_snapshot": "issues/fixture.json",
+            "tasks": tasks,
+            "final_prompt": "fix",
+            "evaluators": [task["evaluator"] for task in tasks],
+            "integrated_reference_patch": "references/integrated.patch",
+        }
+        corpus_path = self.dataset / "repos" / "fixture.json"
+        corpus_path.parent.mkdir(parents=True, exist_ok=True)
+        corpus_path.write_text(json.dumps(corpus), encoding="utf-8")
+
+        archive_bytes = io.BytesIO()
+        with tarfile.open(fileobj=archive_bytes, mode="w:gz") as archive:
+            root = tarfile.TarInfo("fixture")
+            root.type = tarfile.DIRTYPE
+            archive.addfile(root)
+            for name, contents in {
+                "target.txt": b"base\n",
+                "suite.txt": b"base\n",
+            }.items():
+                member = tarfile.TarInfo(f"fixture/{name}")
+                member.size = len(contents)
+                archive.addfile(member, io.BytesIO(contents))
+        contents = archive_bytes.getvalue()
+        digest = hashlib.sha256(contents).hexdigest()
+        self.cache.mkdir()
+        (self.cache / f"{digest}.tar.gz").write_bytes(contents)
+        repository = {
+            "key": "fixture",
+            "requested_url": "https://github.com/example/fixture",
+            "canonical_url": "https://github.com/example/fixture",
+            "commit": "0" * 40,
+            "archive_url": "https://github.com/example/fixture/archive.tar.gz",
+            "archive_sha256": digest,
+            "python": "3.14.6",
+            "setup": [sys.executable, "-c", "pass"],
+            "suite": [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; assert 'integrated' in Path('suite.txt').read_text()",
+            ],
+            "corpus": "repos/fixture.json",
+        }
+        manifest = {
+            "schema_version": 1,
+            "generated_at": "now",
+            "repositories": [
+                {**repository, "key": f"fixture-{index}"} for index in range(10)
+            ],
+        }
+        manifest["repositories"][0]["key"] = "fixture"
+        manifest_path = self.dataset / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        return manifest_path
+
+    def _qualify(self) -> tuple[int, dict]:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            status = self.mod.main(
+                [
+                    "qualify",
+                    "--manifest",
+                    str(self.manifest),
+                    "--cache",
+                    str(self.cache),
+                    "--repo",
+                    "fixture",
+                ]
+            )
+        return status, json.loads(stdout.getvalue())
+
+    def test_qualify_rejects_base_green_evaluator(self) -> None:
+        evaluator = self.dataset / "evaluators" / "task-0.py"
+        evaluator.write_text("pass\n", encoding="utf-8")
+
+        status, result = self._qualify()
+
+        self.assertEqual(status, 1)
+        self.assertFalse(result["repositories"][0]["tasks"][0]["base_red"])
+
+    def test_qualify_rejects_reference_red_evaluator(self) -> None:
+        (self.dataset / "references" / "task-0.patch").write_text(
+            self._patch("base", "base wrong"),
+            encoding="utf-8",
+        )
+
+        status, result = self._qualify()
+
+        self.assertEqual(status, 1)
+        self.assertFalse(result["repositories"][0]["tasks"][0]["reference_green"])
+
+    def test_qualify_rejects_integrated_evaluator_failure(self) -> None:
+        integrated = self.dataset / "references" / "integrated.patch"
+        integrated.write_text(
+            self._patch("base", "base " + " ".join(f"task-{index}" for index in range(1, 10)))
+            + self._patch("base", "integrated", "suite.txt"),
+            encoding="utf-8",
+        )
+
+        status, result = self._qualify()
+
+        self.assertEqual(status, 1)
+        self.assertFalse(result["repositories"][0]["integrated_green"])
+
+    def test_qualify_rejects_upstream_suite_failure(self) -> None:
+        manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
+        manifest["repositories"][0]["suite"] = [sys.executable, "-c", "raise SystemExit(1)"]
+        self.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+
+        status, result = self._qualify()
+
+        self.assertEqual(status, 1)
+        self.assertFalse(result["repositories"][0]["upstream_green"])
+
+    def test_qualify_rejects_task_without_changed_shared_anchor(self) -> None:
+        evaluator = self.dataset / "evaluators" / "task-0.py"
+        evaluator.write_text(
+            "import sys\nfrom pathlib import Path\n"
+            "assert 'task-0' in (Path(sys.argv[1]) / 'lonely.txt').read_text()\n",
+            encoding="utf-8",
+        )
+        corpus_path = self.dataset / "repos" / "fixture.json"
+        corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+        corpus["tasks"][0]["overlap_anchors"].append(
+            {"path": "lonely.txt", "symbol": "lonely"}
+        )
+        corpus_path.write_text(json.dumps(corpus), encoding="utf-8")
+        (self.dataset / "references" / "task-0.patch").write_text(
+            self._patch("base", "base task-0", "lonely.txt"),
+            encoding="utf-8",
+        )
+        integrated = self.dataset / "references" / "integrated.patch"
+        integrated.write_text(
+            self._patch("base", "base " + " ".join(f"task-{index}" for index in range(1, 10)))
+            + self._patch("base", "base task-0", "lonely.txt")
+            + self._patch("base", "integrated", "suite.txt"),
+            encoding="utf-8",
+        )
+        archive = self.cache.glob("*.tar.gz")
+        archive_path = next(archive)
+        archive_path.unlink()
+        archive_bytes = io.BytesIO()
+        with tarfile.open(fileobj=archive_bytes, mode="w:gz") as source:
+            root = tarfile.TarInfo("fixture")
+            root.type = tarfile.DIRTYPE
+            source.addfile(root)
+            for name, contents in {
+                "target.txt": b"base\n",
+                "lonely.txt": b"base\n",
+                "suite.txt": b"base\n",
+            }.items():
+                member = tarfile.TarInfo(f"fixture/{name}")
+                member.size = len(contents)
+                source.addfile(member, io.BytesIO(contents))
+        archive_bytes = archive_bytes.getvalue()
+        digest = hashlib.sha256(archive_bytes).hexdigest()
+        (self.cache / f"{digest}.tar.gz").write_bytes(archive_bytes)
+        manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
+        for repository in manifest["repositories"]:
+            repository["archive_sha256"] = digest
+        self.manifest.write_text(json.dumps(manifest), encoding="utf-8")
+
+        status, result = self._qualify()
+
+        self.assertEqual(status, 1, result)
+        repository = result["repositories"][0]
+        self.assertEqual(repository["tasks"][0]["changed_anchors"], ["lonely.txt:lonely"])
+        self.assertEqual(repository["isolated_tasks"], ["task-0"])
+        self.assertTrue((self.cache / "qualification" / "fixture" / "artifacts").is_dir())
 if __name__ == "__main__":
     unittest.main()

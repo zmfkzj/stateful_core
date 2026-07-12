@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import argparse
+import contextlib
 import hashlib
 import json
 import os
 import re
 import tarfile
+import shutil
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from urllib import request
@@ -335,3 +340,336 @@ def repo_entries(manifest: dict) -> tuple[dict, ...]:
     if type(manifest) is not dict or type(manifest.get("repositories")) is not list:
         raise ValueError("manifest repositories must be an array")
     return tuple(manifest["repositories"])
+
+
+def _run_logged(
+    argv: list[str],
+    cwd: Path,
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+    label: str,
+) -> subprocess.CompletedProcess[str]:
+    completed = subprocess.run(
+        argv,
+        cwd=cwd,
+        capture_output=True,
+        check=False,
+        encoding="utf-8",
+        errors="replace",
+    )
+    number = len(artifacts)
+    stdout = artifact_dir / f"{number:03d}.stdout.log"
+    stderr = artifact_dir / f"{number:03d}.stderr.log"
+    stdout.write_text(completed.stdout, encoding="utf-8")
+    stderr.write_text(completed.stderr, encoding="utf-8")
+    artifacts[label] = {"stdout": str(stdout), "stderr": str(stderr)}
+    return completed
+
+
+@contextlib.contextmanager
+def _fresh_workspace(
+    repo: dict,
+    archive: Path,
+    cache_dir: Path,
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+    label: str,
+):
+    with tempfile.TemporaryDirectory(prefix="statefulbench-qualify-", dir=cache_dir) as temporary:
+        workspace = Path(temporary) / "workspace"
+        try:
+            extract_workspace(archive, repo["archive_sha256"], workspace)
+        except ValueError as error:
+            error_path = artifact_dir / f"{len(artifacts):03d}.extract.stderr.log"
+            error_path.write_text(f"{error}\n", encoding="utf-8")
+            artifacts[f"{label}:extract"] = {"stdout": "", "stderr": str(error_path)}
+            yield None
+            return
+        initialized = _run_logged(
+            ["git", "init"], workspace, artifacts, artifact_dir, f"{label}:git-init"
+        )
+        indexed = _run_logged(
+            ["git", "add", "-A"], workspace, artifacts, artifact_dir, f"{label}:git-add"
+        )
+        committed = _run_logged(
+            [
+                "git",
+                "-c",
+                "user.email=statefulbench@local",
+                "-c",
+                "user.name=StatefulBench",
+                "commit",
+                "-m",
+                "seed workspace",
+            ],
+            workspace,
+            artifacts,
+            artifact_dir,
+            f"{label}:git-commit",
+        )
+        yield (
+            workspace
+            if initialized.returncode == 0
+            and indexed.returncode == 0
+            and committed.returncode == 0
+            else None
+        )
+
+
+def _apply_patch(
+    workspace: Path,
+    patch: Path,
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+    label: str,
+) -> tuple[bool, set[str]]:
+    applied = _run_logged(
+        ["git", "apply", "--index", str(patch)],
+        workspace,
+        artifacts,
+        artifact_dir,
+        f"{label}:git-apply",
+    )
+    if applied.returncode != 0:
+        return False, set()
+    changed = _run_logged(
+        ["git", "diff", "--cached", "--name-only"],
+        workspace,
+        artifacts,
+        artifact_dir,
+        f"{label}:git-diff",
+    )
+    return changed.returncode == 0, set(changed.stdout.splitlines())
+
+
+def _run_setup(
+    repo: dict,
+    workspace: Path,
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+    label: str,
+) -> bool:
+    return (
+        _run_logged(repo["setup"], workspace, artifacts, artifact_dir, f"{label}:setup").returncode
+        == 0
+    )
+
+
+def _run_evaluator(
+    evaluator: Path,
+    workspace: Path,
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+    label: str,
+) -> bool:
+    return (
+        _run_logged(
+            [sys.executable, str(evaluator), str(workspace)],
+            workspace,
+            artifacts,
+            artifact_dir,
+            f"{label}:evaluator",
+        ).returncode
+        == 0
+    )
+
+
+def _qualify_task(
+    repo: dict,
+    task: dict,
+    dataset_root: Path,
+    archive: Path,
+    cache_dir: Path,
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+) -> dict:
+    evaluator = dataset_root / task["evaluator"]
+    base_red = False
+    with _fresh_workspace(
+        repo, archive, cache_dir, artifacts, artifact_dir, f"{task['key']}:base"
+    ) as workspace:
+        if workspace is not None:
+            base_red = _run_setup(
+                repo, workspace, artifacts, artifact_dir, f"{task['key']}:base"
+            ) and not _run_evaluator(
+                evaluator, workspace, artifacts, artifact_dir, f"{task['key']}:base"
+            )
+
+    reference_green = False
+    changed_paths: set[str] = set()
+    with _fresh_workspace(
+        repo, archive, cache_dir, artifacts, artifact_dir, f"{task['key']}:reference"
+    ) as workspace:
+        if workspace is not None:
+            applied, changed_paths = _apply_patch(
+                workspace,
+                dataset_root / task["reference_patch"],
+                artifacts,
+                artifact_dir,
+                f"{task['key']}:reference",
+            )
+            reference_green = applied and _run_setup(
+                repo, workspace, artifacts, artifact_dir, f"{task['key']}:reference"
+            )
+            if reference_green:
+                reference_green = _run_evaluator(
+                    evaluator,
+                    workspace,
+                    artifacts,
+                    artifact_dir,
+                    f"{task['key']}:reference",
+                )
+    changed_anchors = sorted(
+        f"{anchor['path']}:{anchor['symbol']}"
+        for anchor in task["overlap_anchors"]
+        if anchor["path"] in changed_paths
+    )
+    return {
+        "key": task["key"],
+        "base_red": base_red,
+        "reference_green": reference_green,
+        "changed_anchors": changed_anchors,
+    }
+
+
+def _qualify_integration(
+    repo: dict,
+    corpus: dict,
+    dataset_root: Path,
+    archive: Path,
+    cache_dir: Path,
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+) -> tuple[bool, bool]:
+    integrated_green = False
+    upstream_green = False
+    with _fresh_workspace(
+        repo, archive, cache_dir, artifacts, artifact_dir, "integrated"
+    ) as workspace:
+        if workspace is not None:
+            applied, _ = _apply_patch(
+                workspace,
+                dataset_root / corpus["integrated_reference_patch"],
+                artifacts,
+                artifact_dir,
+                "integrated",
+            )
+            setup_green = applied and _run_setup(
+                repo, workspace, artifacts, artifact_dir, "integrated"
+            )
+            evaluator_results = [
+                _run_evaluator(
+                    dataset_root / evaluator,
+                    workspace,
+                    artifacts,
+                    artifact_dir,
+                    f"integrated:{index}",
+                )
+                for index, evaluator in enumerate(corpus["evaluators"])
+            ] if setup_green else []
+            integrated_green = setup_green and all(evaluator_results)
+            upstream_green = setup_green and (
+                _run_logged(
+                    repo["suite"],
+                    workspace,
+                    artifacts,
+                    artifact_dir,
+                    "integrated:upstream-suite",
+                ).returncode
+                == 0
+            )
+    return integrated_green, upstream_green
+
+
+def qualify_repository(repo: dict, corpus: dict, manifest_dir: Path, cache_dir: Path) -> dict:
+    output_dir = cache_dir / "qualification" / repo["key"]
+    shutil.rmtree(output_dir, ignore_errors=True)
+    artifact_dir = output_dir / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    artifacts: dict[str, dict[str, str]] = {}
+    dataset_root = manifest_dir.resolve()
+    archive = ensure_archive(repo, cache_dir)
+    tasks = [
+        _qualify_task(
+            repo, task, dataset_root, archive, cache_dir, artifacts, artifact_dir
+        )
+        for task in corpus["tasks"]
+    ]
+    integrated_green, upstream_green = _qualify_integration(
+        repo, corpus, dataset_root, archive, cache_dir, artifacts, artifact_dir
+    )
+    changed_sets = [set(task["changed_anchors"]) for task in tasks]
+    isolated_tasks = [
+        task["key"]
+        for index, task in enumerate(tasks)
+        if not any(
+            changed_sets[index] & other
+            for other_index, other in enumerate(changed_sets)
+            if other_index != index
+        )
+    ]
+    return {
+        "key": repo["key"],
+        "tasks": tasks,
+        "integrated_green": integrated_green,
+        "upstream_green": upstream_green,
+        "isolated_tasks": isolated_tasks,
+        "artifacts": artifacts,
+    }
+
+
+def _qualified(result: dict) -> bool:
+    return (
+        not result.get("error")
+        and all(task["base_red"] and task["reference_green"] for task in result["tasks"])
+        and result["integrated_green"]
+        and result["upstream_green"]
+        and not result["isolated_tasks"]
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    commands = parser.add_subparsers(dest="command", required=True)
+    qualify = commands.add_parser(
+        "qualify", help="qualify archived real-world reference corpora"
+    )
+    qualify.add_argument("--manifest", type=Path, required=True)
+    qualify.add_argument("--cache", type=Path, required=True)
+    qualify.add_argument("--repo", action="append")
+    arguments = parser.parse_args(argv)
+
+    manifest = load_manifest(arguments.manifest)
+    repositories = repo_entries(manifest)
+    if arguments.repo:
+        selected = tuple(
+            repo for repo in repositories if repo["key"] in set(arguments.repo)
+        )
+        missing = sorted(set(arguments.repo) - {repo["key"] for repo in selected})
+        if missing:
+            parser.error(f"unknown repository key: {', '.join(missing)}")
+    else:
+        selected = repositories
+
+    results = []
+    for repo in selected:
+        try:
+            corpus = load_corpus(arguments.manifest.parent / repo["corpus"])
+            result = qualify_repository(repo, corpus, arguments.manifest.parent, arguments.cache)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            result = {
+                "key": repo["key"],
+                "error": str(error),
+                "tasks": [],
+                "integrated_green": False,
+                "upstream_green": False,
+                "isolated_tasks": [],
+                "artifacts": {},
+            }
+        results.append(result)
+    print(json.dumps({"repositories": results}, sort_keys=True))
+    return 0 if all(_qualified(result) for result in results) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
