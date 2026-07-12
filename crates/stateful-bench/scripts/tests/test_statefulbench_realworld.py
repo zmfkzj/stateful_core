@@ -1156,7 +1156,7 @@ class QualificationTests(unittest.TestCase):
                     "key": key,
                     "kind": "bug" if index < 5 else "feature",
                     "sources": [f"https://github.com/example/project/issues/{index}"],
-                    "source_hash": f"{index:064x}",
+                    "source_hash": hashlib.sha256(f"body {index}".encode("utf-8")).hexdigest(),
                     "prompt": key,
                     "acceptance": ["normal", "boundary", "error"],
                     "overlap_anchors": [{"path": "target.py", "symbol": "target.value"}],
@@ -1177,6 +1177,20 @@ class QualificationTests(unittest.TestCase):
             "evaluators": [task["evaluator"] for task in tasks],
             "integrated_reference_patch": "references/integrated.patch",
         }
+        issue_snapshot = self.dataset / "issues" / "fixture.json"
+        issue_snapshot.parent.mkdir(parents=True, exist_ok=True)
+        issue_snapshot.write_text(
+            json.dumps(
+                [
+                    {
+                        "html_url": f"https://github.com/example/project/issues/{index}",
+                        "body": f"body {index}",
+                    }
+                    for index in range(10)
+                ]
+            ),
+            encoding="utf-8",
+        )
         corpus_path = self.dataset / "repos" / "fixture.json"
         corpus_path.parent.mkdir(parents=True, exist_ok=True)
         corpus_path.write_text(json.dumps(corpus), encoding="utf-8")
