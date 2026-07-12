@@ -12,7 +12,7 @@ def main() -> None:
     checkout = Path(sys.argv[1]).resolve()
     sys.path.insert(0, str(checkout / "src"))
 
-    from attrs import define
+    from attr import define
 
     calls = []
 
