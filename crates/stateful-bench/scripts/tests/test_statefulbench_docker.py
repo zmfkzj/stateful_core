@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import runpy
 import subprocess
 import tempfile
 import unittest
+import sys
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -122,6 +124,19 @@ class DockerRuntimeTests(unittest.TestCase):
         fork.assert_called_once_with()
         waitpid.assert_called_once_with(99, 0)
         setsid.assert_not_called()
+
+    def test_entrypoint_main_exits_with_group_leader_child_failure(self) -> None:
+        with (
+            patch.object(os, "fork", return_value=99),
+            patch.object(os, "getpid", return_value=42),
+            patch.object(os, "getpgrp", return_value=42),
+            patch.object(os, "waitpid", return_value=(99, 3 << 8)),
+            patch.object(sys, "argv", ["entry", "/tmp/agent.pid.json", "/usr/bin/env", "true"]),
+        ):
+            with self.assertRaises(SystemExit) as exited:
+                runpy.run_path(self.entry.__file__, run_name="__main__")
+
+        self.assertEqual(exited.exception.code, 3)
 
 
 if __name__ == "__main__":

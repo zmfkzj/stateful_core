@@ -24,4 +24,4 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    main(os.sys.argv)
+    raise SystemExit(main(os.sys.argv))
