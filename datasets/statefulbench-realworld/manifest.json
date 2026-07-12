@@ -10,7 +10,7 @@
       "archive_url": "https://github.com/psf/requests/archive/f361ead047be5cb873174218582f7d8b9fcd9f49.tar.gz",
       "archive_sha256": "7f60df8524d7a042f604a4176cc64777f6543037ab96dc4adaaabff55ada28fd",
       "python": "3.14.6",
-      "setup": ["python", "-m", "pip", "install", "-e", "."],
+      "setup": ["python", "-m", "pip", "install", "--group", "test", "-e", "."],
       "suite": ["python", "-m", "pytest", "-q"],
       "corpus": "repos/requests.json"
     },
@@ -22,7 +22,7 @@
       "archive_url": "https://github.com/python-jsonschema/jsonschema/archive/97c044c48d6c6c08f88142ad27edc590f2a2cb07.tar.gz",
       "archive_sha256": "1d5bef7a24de2bec70a7840fef22cbaa5b169cf5159a0194635a7720eaa19a75",
       "python": "3.14.6",
-      "setup": ["python", "-m", "pip", "install", "-e", "."],
+      "setup": ["python", "-m", "pip", "install", "--group", "test", "-e", ".", "pytest"],
       "suite": ["python", "-m", "pytest", "-q"],
       "corpus": "repos/jsonschema.json"
     },
@@ -34,7 +34,7 @@
       "archive_url": "https://github.com/pytest-dev/pytest-asyncio/archive/66253978d8518925d3f5d2c12615fd7005b63080.tar.gz",
       "archive_sha256": "6715e3e9991cce7fb56ab50e19ceee46c5528ed4817ff9375eab8ab23612cf1d",
       "python": "3.14.6",
-      "setup": ["python", "-m", "pip", "install", "-e", "."],
+      "setup": ["python", "-m", "pip", "install", "-e", ".[testing]", "pytest<9"],
       "suite": ["python", "-m", "pytest", "-q"],
       "corpus": "repos/pytest-asyncio.json"
     },
@@ -46,7 +46,7 @@
       "archive_url": "https://github.com/pytest-dev/pytest-xdist/archive/f63b6a25b4eb932385c6ee4651eac5c08fbd3a20.tar.gz",
       "archive_sha256": "d035858bc41d5aa126e54a3edf8af4a4e871d0b7e5383211da767ab50ad6d511",
       "python": "3.14.6",
-      "setup": ["python", "-m", "pip", "install", "-e", "."],
+      "setup": ["python", "-m", "pip", "install", "-e", ".[testing]", "pytest<9"],
       "suite": ["python", "-m", "pytest", "-q"],
       "corpus": "repos/pytest-xdist.json"
     },
@@ -58,7 +58,7 @@
       "archive_url": "https://github.com/pallets/click/archive/b67832c2167e5b0ff6764a8c04a0a9087e697b5a.tar.gz",
       "archive_sha256": "bc2f89f9b4687d51ca6ff592f6de34a9f8f97c49b4637c84eabd6a8df16ed1d2",
       "python": "3.14.6",
-      "setup": ["python", "-m", "pip", "install", "-e", "."],
+      "setup": ["python", "-m", "pip", "install", "--group", "tests", "-e", "."],
       "suite": ["python", "-m", "pytest", "-q"],
       "corpus": "repos/click.json"
     },
@@ -70,7 +70,7 @@
       "archive_url": "https://github.com/jschneier/django-storages/archive/ca89a94a7462a2423df460e7bfd5f847457042ca.tar.gz",
       "archive_sha256": "e0a0a36d3b1470776b6463e5dcd44c805fd31ccd3090110ea16936c176d90fab",
       "python": "3.14.6",
-      "setup": ["python", "-m", "pip", "install", "-e", "."],
+      "setup": ["python", "-m", "pip", "install", "-e", ".[azure,boto3,dropbox,google,libcloud,sftp]", "cryptography", "moto", "pytest", "pytest-cov", "rsa"],
       "suite": ["python", "-m", "pytest", "-q"],
       "corpus": "repos/django-storages.json"
     },
@@ -82,7 +82,7 @@
       "archive_url": "https://github.com/python-attrs/attrs/archive/45de9beb093d2142517ab7d1ebda6522e3d3c4ac.tar.gz",
       "archive_sha256": "b330a639611e08fcfd54baaf3780d364c5e9bec44ab33fda961f0fe6956daffd",
       "python": "3.14.6",
-      "setup": ["python", "-m", "pip", "install", "-e", "."],
+      "setup": ["python", "-m", "pip", "install", "--group", "tests", "-e", "."],
       "suite": ["python", "-m", "pytest", "-q"],
       "corpus": "repos/attrs.json"
     },
@@ -94,7 +94,7 @@
       "archive_url": "https://github.com/gorakhargosh/watchdog/archive/c9edf3296d9edb9afded6adfaf3987e87ca8f928.tar.gz",
       "archive_sha256": "a6e12fd17e2706161733cf111e7cd899a15b7e8a8f66540239c57e1a60d3d40d",
       "python": "3.14.6",
-      "setup": ["python", "-m", "pip", "install", "-e", "."],
+      "setup": ["python", "-m", "pip", "install", "-r", "requirements-tests.txt", "-e", ".[watchmedo]"],
       "suite": ["python", "-m", "pytest", "-q"],
       "corpus": "repos/watchdog.json"
     },
@@ -106,7 +106,7 @@
       "archive_url": "https://github.com/python-pendulum/pendulum/archive/5ad098bc7b74d660679f0606673728042b9d4aca.tar.gz",
       "archive_sha256": "d49ad8f8c6f43a18c3744dec61730fb369cf91dc77bb1c23df3360ae76d11397",
       "python": "3.14.6",
-      "setup": ["python", "-m", "pip", "install", "-e", "."],
+      "setup": ["python", "-m", "pip", "install", "-e", ".[test]", "pytest", "pytest-benchmark"],
       "suite": ["python", "-m", "pytest", "-q"],
       "corpus": "repos/pendulum.json"
     },
@@ -118,7 +118,7 @@
       "archive_url": "https://github.com/authlib/authlib/archive/5cb26721a39f74a196304e90fa5ae8d31925fd4a.tar.gz",
       "archive_sha256": "c7e7818a31fd3ee7be4e370786974f92eb6c4f90f24efeeb6d3ea02fb0aca6e2",
       "python": "3.14.6",
-      "setup": ["python", "-m", "pip", "install", "-e", "."],
+      "setup": ["python", "-m", "pip", "install", "--group", "dev", "--group", "clients", "--group", "django", "--group", "flask", "--group", "jose", "-e", ".", "joserfc==1.6.0"],
       "suite": ["python", "-m", "pytest", "-q"],
       "corpus": "repos/authlib.json"
     }

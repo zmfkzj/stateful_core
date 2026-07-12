@@ -82,6 +82,25 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(entry["corpus"], f"repos/{entry['key']}.json")
 
 
+    def test_manifest_setup_declares_test_dependencies(self) -> None:
+        sources = {
+            "requests": ("--group", "test"),
+            "jsonschema": ("--group", "test", "pytest"),
+            "pytest-asyncio": (".[testing]", "pytest<9"),
+            "pytest-xdist": (".[testing]", "pytest<9"),
+            "click": ("--group", "tests"),
+            "django-storages": ("pytest",),
+            "attrs": ("--group", "tests"),
+            "watchdog": ("-r", "requirements-tests.txt"),
+            "pendulum": ("pytest", "pytest-benchmark"),
+            "authlib": ("--group", "dev", "joserfc==1.6.0"),
+        }
+        entries = self.mod.repo_entries(self.mod.load_manifest(self.manifest_path))
+
+        for entry in entries:
+            with self.subTest(repository=entry["key"]):
+                self.assertTrue(set(sources[entry["key"]]).issubset(entry["setup"]))
+
     def test_manifest_repository_matches_full_corpus_identity(self) -> None:
         repo = self.mod.repo_entries(self.mod.load_manifest(self.manifest_path))[0]
         corpus = self.mod.load_corpus(MANIFEST.parent / repo["corpus"])
