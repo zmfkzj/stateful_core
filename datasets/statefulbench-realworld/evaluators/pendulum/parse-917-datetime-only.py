@@ -23,6 +23,9 @@ def main() -> None:
     import pendulum
     import pendulum.parser as parser
     from pendulum.parsing.exceptions import ParserError
+    annotation = inspect.signature(parser.parse).return_annotation
+    assert "Interval" in str(annotation), annotation
+
 
     parse_dt = pendulum.parse_dt
     source = inspect.getsource(parser.parse_dt)

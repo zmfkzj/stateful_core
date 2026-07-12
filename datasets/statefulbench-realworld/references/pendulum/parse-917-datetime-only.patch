@@ -38,7 +38,15 @@ index 55ac9fe..6502ae0 100644
 -    from pendulum.datetime import DateTime
      from pendulum.interval import Interval
      from pendulum.time import Time
-@@ -36,6 +37,15 @@ def parse(text: str, **options: t.Any) -> Date | Time | DateTime | Duration:
+@@ -31,11 +32,22 @@
+ 
+-def parse(text: str, **options: t.Any) -> Date | Time | DateTime | Duration:
++def parse(
++    text: str, **options: t.Any
++) -> Date | Time | DateTime | Duration | Interval[DateTime]:
+     # Use the mock now value if it exists
+     options["now"] = options.get("now")
+ 
      return _parse(text, **options)
  
  

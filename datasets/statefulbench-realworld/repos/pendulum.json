@@ -23,11 +23,11 @@
       "kind": "feature",
       "sources": ["https://github.com/python-pendulum/pendulum/issues/917"],
       "source_hash": "32893aa2715ecf5359ad9a5399fe6daa6e3fc95641105cff99cfbc43338d0ebc",
-      "prompt": "Implement the strict-overlap adaptation of #917. Expose pendulum.parse_dt(text, **options) as a DateTime-only API in the parser dispatcher block: route through the existing parse() dispatcher, preserve precision and timezone behavior, and raise ParserError when parsing yields a non-DateTime such as an interval.",
+      "prompt": "Implement the strict-overlap adaptation of #917. Expose pendulum.parse_dt(text, **options) as a DateTime-only API in the parser dispatcher block: correct parse()'s return annotation to include its existing Interval result, route parse_dt through that dispatcher, preserve precision and timezone behavior, and raise ParserError when parsing yields a non-DateTime such as an interval.",
       "acceptance": [
         "pendulum.parse_dt is publicly importable and returns a Pendulum DateTime for UTC input.",
         "It preserves microseconds and a +05:30 numeric timezone offset.",
-        "It routes through pendulum.parser.parse rather than duplicating parsing behavior.",
+        "pendulum.parser.parse correctly annotates its existing Interval result, and parse_dt routes through that dispatcher rather than duplicating parsing behavior.",
         "It raises ParserError instead of returning an Interval for an ISO interval."
       ],
       "overlap_anchors": [{"path": "src/pendulum/parser.py", "symbol": "pendulum.parser.parse dispatcher block"}],

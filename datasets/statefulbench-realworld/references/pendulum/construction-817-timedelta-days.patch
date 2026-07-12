@@ -1,7 +1,7 @@
 diff --git a/src/pendulum/datetime.py b/src/pendulum/datetime.py
 --- a/src/pendulum/datetime.py
 +++ b/src/pendulum/datetime.py
-@@ -685,7 +685,14 @@ class DateTime(datetime.datetime, Date):
+@@ -685,6 +685,13 @@ class DateTime(datetime.datetime, Date):
          elif isinstance(delta, pendulum.Duration):
              return self.add(**delta._signature)  # type: ignore[attr-defined]
  

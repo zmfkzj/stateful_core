@@ -246,10 +246,13 @@ diff --git a/src/pendulum/parser.py b/src/pendulum/parser.py
      from pendulum.interval import Interval
      from pendulum.time import Time
  
-@@ -30,10 +32,25 @@
+@@ -30,12 +32,29 @@
  
  
- def parse(text: str, **options: t.Any) -> Date | Time | DateTime | Duration:
+-def parse(text: str, **options: t.Any) -> Date | Time | DateTime | Duration:
++def parse(
++    text: str, **options: t.Any
++) -> Date | Time | DateTime | Duration | Interval[DateTime]:
 +    text = re.sub(
 +        r"([.,]\d{9})\d+(?=(?:Z|[+-]\d{2}(?::?\d{2})?)?$)",
 +        r"\1",
