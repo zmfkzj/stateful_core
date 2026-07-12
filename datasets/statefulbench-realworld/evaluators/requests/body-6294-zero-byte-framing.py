@@ -49,6 +49,16 @@ def main() -> None:
     post.prepare(method="POST", url="https://example.test/object", data=io.BytesIO())
     assert post.headers.get("Content-Length") == "0", post.headers
     assert "Transfer-Encoding" not in post.headers, post.headers
+    # Preserve the established authenticated-stream wire framing.
+    authenticated = PreparedRequest()
+    authenticated.prepare(
+        method="POST",
+        url="https://example.test/object",
+        data=io.BytesIO(),
+        auth=("user", "pass"),
+    )
+    assert "Content-Length" not in authenticated.headers, authenticated.headers
+    assert authenticated.headers.get("Transfer-Encoding") == "chunked", authenticated.headers
 
 
 if __name__ == "__main__":

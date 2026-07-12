@@ -13,7 +13,7 @@ diff --git a/pytest_asyncio/plugin.py b/pytest_asyncio/plugin.py
  
  def _create_scoped_runner_fixture(scope: _ScopeName) -> Callable:
      @pytest.fixture(
-@@ -1031,34 +1036,52 @@ def _create_scoped_runner_fixture(scope: _ScopeName) -> Callable:
+@@ -1031,34 +1036,54 @@ def _create_scoped_runner_fixture(scope: _ScopeName) -> Callable:
          _asyncio_loop_factory,
          request: FixtureRequest,
      ) -> Iterator[Runner]:
@@ -57,7 +57,9 @@ diff --git a/pytest_asyncio/plugin.py b/pytest_asyncio/plugin.py
 -                            _RUNNER_TEARDOWN_WARNING % traceback.format_exc(),
 -                            RuntimeWarning,
 +                        current_loop = None
-+                    return current_loop is not runner_loop
++                    return scope == "function" and current_loop not in (
++                        None, runner_loop, old_loop
++                    )
 +
 +                try:
 +                    yield runner

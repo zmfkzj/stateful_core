@@ -77,6 +77,7 @@ def _run_pytest(repo: Path, test: str, *, timeout: float = 3) -> subprocess.Comp
             None,
         )
         environment = os.environ.copy()
+        environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
         environment["PYTHONPATH"] = os.pathsep.join(
             filter(
                 None,

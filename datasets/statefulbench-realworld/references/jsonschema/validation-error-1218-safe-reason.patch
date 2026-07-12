@@ -43,3 +43,11 @@ index 2e5d4ca..948fa47 100644
          )
          return {attr: getattr(self, attr) for attr in attrs}
  
+@@ -200,6 +202,7 @@
+ class ValidationError(_Error):
+     """
+     An instance was invalid under a provided schema.
+     """
+ 
++    reason: str | None
+     _word_for_schema_in_error_message = "schema"

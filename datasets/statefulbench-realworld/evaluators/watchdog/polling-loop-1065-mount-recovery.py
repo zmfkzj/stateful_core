@@ -11,7 +11,7 @@ from pathlib import Path
 def main(checkout: str) -> None:
     sys.path.insert(0, str(Path(checkout) / "src"))
 
-    from watchdog.events import FileCreatedEvent
+    from watchdog.events import DirDeletedEvent, FileCreatedEvent
     from watchdog.observers.api import EventQueue, ObservedWatch
     from watchdog.observers.polling import PollingEmitter
 
@@ -56,6 +56,15 @@ def main(checkout: str) -> None:
             pass
         else:
             raise AssertionError("non-OSError snapshot failures must still propagate")
+
+        def missing_snapshot():
+            raise FileNotFoundError("watched directory was removed")
+
+        emitter._take_snapshot = missing_snapshot
+        emitter.queue_events(0)
+        event, _watch, *_ = event_queue.get_nowait()
+        assert event == DirDeletedEvent(str(root)), "permanent deletion must retain the legacy root deletion event"
+        assert not emitter.should_keep_running(), "permanent deletion must stop the polling emitter"
 
         emitter.stop()
         assert not emitter.should_keep_running(), "explicit stop must still stop the polling emitter"

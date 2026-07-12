@@ -92,11 +92,12 @@ def main(repo: Path) -> None:
     scheduler.schedule()
 
     assert fast.sent == [[0]] and slow.sent == [[1]]
-    assert fast.shutdown_calls == slow.shutdown_calls == 0
+    # WorkerController.shutdown queues a graceful remote shutdown marker; it
+    # does not abort the work that was already sent to each worker.
+    assert fast.shutdown_calls == slow.shutdown_calls == 1
 
     scheduler.mark_test_complete(fast, 0)
-    assert fast.shutdown_calls == 1
-    assert slow.shutdown_calls == 0
+    assert fast.shutdown_calls == slow.shutdown_calls == 1
     assert slow.sent == [[1]]
     assert scheduler.has_pending
 

@@ -1,5 +1,5 @@
 diff --git a/src/watchdog/observers/api.py b/src/watchdog/observers/api.py
-index 71416f1..8899798 100644
+index 71416f1..62718f2 100644
 --- a/src/watchdog/observers/api.py
 +++ b/src/watchdog/observers/api.py
 @@ -147,7 +147,7 @@ def watch(self) -> ObservedWatch:
@@ -16,7 +16,7 @@ index 71416f1..8899798 100644
          """
          if self._event_filter is None or any(isinstance(event, cls) for cls in self._event_filter):
 -            self._event_queue.put((event, self.watch))
-+            self._event_queue.put((event, self.watch, origin_pid))
++            self._event_queue.put((event, self.watch, origin_pid) if origin_pid is not None else (event, self.watch))
  
      def queue_events(self, timeout: float) -> None:
          """Override this method to populate the event queue with events
@@ -91,7 +91,7 @@ index 71416f1..8899798 100644
 +                        handler(event)
          event_queue.task_done()
 diff --git a/src/watchdog/observers/polling.py b/src/watchdog/observers/polling.py
-index 5f6ddb1..7fcba30 100644
+index 5f6ddb1..9192ecc 100644
 --- a/src/watchdog/observers/polling.py
 +++ b/src/watchdog/observers/polling.py
 @@ -55,10 +55,12 @@ def __init__(
@@ -146,13 +146,17 @@ index 5f6ddb1..7fcba30 100644
  
      def queue_events(self, timeout: float) -> None:
          # We don't want to hit the disk continuously.
-@@ -86,32 +119,11 @@ def queue_events(self, timeout: float) -> None:
+@@ -85,33 +118,16 @@ def queue_events(self, timeout: float) -> None:
+             # Update snapshot.
              try:
                  new_snapshot = self._take_snapshot()
-             except OSError:
--                self.queue_event(DirDeletedEvent(self.watch.path))
--                self.stop()
+-            except OSError:
++            except FileNotFoundError:
+                 self.queue_event(DirDeletedEvent(self.watch.path))
+                 self.stop()
                  return
++            except OSError:
++                return
  
              events = DirectorySnapshotDiff(self._snapshot, new_snapshot)
              self._snapshot = new_snapshot

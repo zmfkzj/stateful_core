@@ -156,8 +156,8 @@ index 73162dc..031e3c9 100644
          # Check that more work is available
          if not self.workqueue:
 -            node.shutdown()
-+            if not self._pending_of(self.assigned_work[node]):
-+                node.shutdown()
++            # `shutdown` queues a graceful remote marker for sent work.
++            node.shutdown()
              return
  
          self.log("Number of units waiting for node:", len(self.workqueue))

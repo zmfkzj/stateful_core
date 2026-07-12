@@ -86,14 +86,14 @@ class ManifestTests(unittest.TestCase):
         sources = {
             "requests": ("--group", "test"),
             "jsonschema": ("--group", "test", "pytest"),
-            "pytest-asyncio": (".[testing]", "pytest<9"),
-            "pytest-xdist": (".[testing]", "pytest<9"),
+            "pytest-asyncio": (".[testing]", "pytest==8.4.2"),
+            "pytest-xdist": (".[testing]", "pytest==8.4.2"),
             "click": ("--group", "tests"),
             "django-storages": ("pytest",),
             "attrs": ("--group", "tests"),
             "watchdog": ("-r", "requirements-tests.txt"),
             "pendulum": ("pytest", "pytest-benchmark"),
-            "authlib": ("--group", "dev", "joserfc==1.6.0"),
+            "authlib": ("--group", "dev", "joserfc==1.6.1"),
         }
         entries = self.mod.repo_entries(self.mod.load_manifest(self.manifest_path))
 
@@ -101,6 +101,50 @@ class ManifestTests(unittest.TestCase):
             with self.subTest(repository=entry["key"]):
                 self.assertTrue(set(sources[entry["key"]]).issubset(entry["setup"]))
 
+    def test_manifest_declares_source_proven_environments_and_safe_suites(self) -> None:
+        entries = {
+            entry["key"]: entry
+            for entry in self.mod.repo_entries(self.mod.load_manifest(self.manifest_path))
+        }
+
+        self.assertEqual(
+            entries["django-storages"]["environment"],
+            {
+                "DJANGO_SETTINGS_MODULE": "tests.settings",
+                "AWS_CONFIG_FILE": "tests/no_such_file.conf",
+            },
+        )
+        self.assertEqual(
+            entries["attrs"]["environment"],
+            {"SETUPTOOLS_SCM_PRETEND_VERSION": "26.1.1.dev24"},
+        )
+        self.assertEqual(
+            entries["watchdog"]["suite"],
+            [
+                "python",
+                "-m",
+                "pytest",
+                "-q",
+                "-p",
+                "no:cov",
+                "-o",
+                "addopts=",
+                "--ignore=tests/test_emitter.py",
+                "--ignore=tests/test_fsevents.py",
+                "-k",
+                "not test_tricks_from_file",
+            ],
+        )
+        self.assertEqual(
+            entries["pytest-asyncio"]["suite"],
+            [
+                "python",
+                "-m",
+                "pytest",
+                "-q",
+                "--deselect=tests/test_set_event_loop.py::test_asyncio_run_after_async_fixture_does_not_leak_loop",
+            ],
+        )
     def test_manifest_repository_matches_full_corpus_identity(self) -> None:
         repo = self.mod.repo_entries(self.mod.load_manifest(self.manifest_path))[0]
         corpus = self.mod.load_corpus(MANIFEST.parent / repo["corpus"])
@@ -147,11 +191,59 @@ class ManifestTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(ValueError, "key"):
                     self.mod.load_manifest(self.manifest_path)
+
+    def test_load_manifest_validates_optional_environment_map(self) -> None:
+        data = self.load_data()
+        data["repositories"][0]["environment"] = {"PROJECT_SETTING": "enabled"}
+        self.write_data(data)
+
+        self.assertEqual(
+            self.mod.load_manifest(self.manifest_path)["repositories"][0]["environment"],
+            {"PROJECT_SETTING": "enabled"},
+        )
+
+        for value in (["not", "a", "map"], {"bad-name": "value"}, {"PYTHONPATH": "unsafe"}):
+            with self.subTest(value=value):
+                data = self.load_data()
+                data["repositories"][0]["environment"] = value
+                self.write_data(data)
+                with self.assertRaisesRegex(ValueError, "environment"):
+                    self.mod.load_manifest(self.manifest_path)
     def test_verified_python_rejects_manifest_version_mismatch(self) -> None:
         with mock.patch.object(
             self.mod.sys, "version_info", (3, 14, 5, "final", 0)
         ), self.assertRaisesRegex(ValueError, "python"):
             self.mod.verified_python("3.14.6")
+
+    def test_workspace_environment_is_isolated_writable_and_retains_rust_toolchain(self) -> None:
+        workspace = Path(self.tempdir.name) / "workspace"
+        venv = workspace / ".statefulbench-venv"
+        cargo_bin = Path("/host/rust/bin")
+        with mock.patch.dict(
+            self.mod.os.environ,
+            {
+                "PYTHONPATH": "/host/python",
+                "UNRELATED_HOST_SETTING": "discard",
+                "RUSTUP_HOME": "/host/rustup",
+            },
+            clear=True,
+        ), mock.patch.object(
+            self.mod.shutil,
+            "which",
+            side_effect=lambda name: str(cargo_bin / name),
+        ):
+            environment = self.mod._sanitized_environment(venv, workspace)
+
+        self.assertEqual(environment["VIRTUAL_ENV"], str(venv))
+        self.assertEqual(environment["HOME"], str(workspace / ".statefulbench-home"))
+        self.assertEqual(environment["PIP_CACHE_DIR"], str(workspace / ".statefulbench-pip-cache"))
+        self.assertEqual(environment["TMPDIR"], str(workspace / ".statefulbench-tmp"))
+        self.assertEqual(environment["CARGO_HOME"], str(workspace / ".statefulbench-cargo-home"))
+        self.assertEqual(environment["RUSTUP_HOME"], "/host/rustup")
+        self.assertTrue(all(Path(environment[name]).is_dir() for name in ("HOME", "PIP_CACHE_DIR", "TMPDIR", "CARGO_HOME")))
+        self.assertTrue(environment["PATH"].startswith(f"{venv / 'bin'}:{cargo_bin}"))
+        self.assertNotIn("PYTHONPATH", environment)
+        self.assertNotIn("UNRELATED_HOST_SETTING", environment)
 
 
 
@@ -818,12 +910,16 @@ class QualificationTests(unittest.TestCase):
         self.assertIn("repository", result["repositories"][0]["error"])
 
     def test_qualify_uses_isolated_sanitized_virtualenv(self) -> None:
+        manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
+        manifest["repositories"][0]["environment"] = {"PROJECT_SETTING": "enabled"}
+        self.manifest.write_text(json.dumps(manifest), encoding="utf-8")
         evaluator = self.dataset / "evaluators" / "task-0.py"
         evaluator.write_text(
             "import os\nimport sys\nfrom pathlib import Path\n"
             "assert Path(sys.prefix).resolve() == Path(os.environ['VIRTUAL_ENV']).resolve()\n"
             "assert 'PYTHONPATH' not in os.environ\n"
             "assert 'PYTHONHOME' not in os.environ\n"
+            "assert os.environ['PROJECT_SETTING'] == 'enabled'\n"
             "assert 'task-0' in (Path(sys.argv[1]) / 'target.py').read_text()\n",
             encoding="utf-8",
         )
@@ -1213,20 +1309,27 @@ class RealWorldRunnerTests(unittest.TestCase):
         self.assertEqual([event[1] for event in events if event[0] == "wait"], ["task-0", "task-1", "task-2"])
         self.assertNotIn(("launch", "final"), events)
 
-    def test_agents_receive_workspace_virtualenv_environment(self) -> None:
+    def test_repository_environment_reaches_setup_evaluators_suite_and_agents(self) -> None:
         events = []
+        seen_environments = []
         venv = self.root / "workspace-venv"
-        expected_env = {"VIRTUAL_ENV": str(venv), "PATH": f"{venv / 'bin'}:/usr/bin"}
+        workspace_env = {"VIRTUAL_ENV": str(venv), "PATH": f"{venv / 'bin'}:/usr/bin"}
+        self.repo["environment"] = {"PROJECT_SETTING": "enabled"}
+        expected_env = {**workspace_env, "PROJECT_SETTING": "enabled"}
 
         @contextlib.contextmanager
         def workspace(*_args):
             workspace = self.root / "workspace-with-venv"
             workspace.mkdir(exist_ok=True)
-            yield workspace, Path(sys.executable), expected_env
+            yield workspace, Path(sys.executable), workspace_env
 
         def launch(arm_dir, workspace, agent_id, prompt_path, mode, cfg):
             self.assertEqual(cfg.launch_env, expected_env)
             return self.fake_launch(events)(arm_dir, workspace, agent_id, prompt_path, mode, cfg)
+
+        def check_environment(*args):
+            seen_environments.append(args[3])
+            return True
 
         result = self.mod.run_repo_arm(
             self.repo,
@@ -1239,12 +1342,13 @@ class RealWorldRunnerTests(unittest.TestCase):
             launch=launch,
             workspace_factory=workspace,
             archive_loader=lambda *_: self.root / "archive.tar.gz",
-            setup=lambda *_: True,
-            evaluator=lambda *_: True,
-            suite=lambda *_: True,
+            setup=check_environment,
+            evaluator=lambda *args: check_environment(None, None, None, args[3]),
+            suite=check_environment,
         )
 
         self.assertTrue(result["cleared"], result)
+        self.assertEqual(seen_environments, [expected_env] * 12)
 
     def test_final_mutation_of_injected_evaluator_cannot_change_grading(self) -> None:
         events = []

@@ -14,6 +14,7 @@ DEPS = Path("/private/tmp/statefulbench-realworld-curation/pytest-asyncio-deps")
 
 def run_pytest(project: Path, checkout: Path) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
+    environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
     environment["PYTHONPATH"] = os.pathsep.join(
         (str(checkout), str(DEPS), environment.get("PYTHONPATH", ""))
     )

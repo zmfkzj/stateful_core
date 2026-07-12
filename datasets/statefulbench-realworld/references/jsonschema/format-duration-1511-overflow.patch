@@ -9,6 +9,15 @@ diff --git a/jsonschema/_format.py b/jsonschema/_format.py
  from datetime import date, datetime
  from uuid import UUID
  import ipaddress
+@@ -135,7 +136,8 @@
+         func, raises = self.checkers[format]
+         result, cause = None, None
+         try:
+             result = func(instance)
+         except raises as e:
++            result = False
+             cause = e
+         if not result:
 @@ -524,7 +525,7 @@ with suppress(ImportError):
      @_checks_drafts(
          draft201909="duration",

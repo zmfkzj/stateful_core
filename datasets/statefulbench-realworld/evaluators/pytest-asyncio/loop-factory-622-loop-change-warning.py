@@ -48,6 +48,7 @@ def main() -> None:
             "        original_loop.close()\n"
         )
         env = os.environ | {
+            "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
             "PYTHONPATH": os.pathsep.join((str(repo), str(work), os.environ.get("PYTHONPATH", ""))),
         }
 

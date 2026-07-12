@@ -4,10 +4,10 @@ diff --git a/src/xdist/scheduler/loadscope.py b/src/xdist/scheduler/loadscope.py
 @@ -324,3 +324,4 @@ class LoadScopeScheduling:
          if not self.workqueue:
 -            node.shutdown()
-+            if not self._pending_of(self.assigned_work[node]):
-+                node.shutdown()
++            # `shutdown` queues a graceful remote marker for sent work.
++            node.shutdown()
              return
-@@ -401,10 +402,5 @@ class LoadScopeScheduling:
+@@ -401,10 +403,5 @@ class LoadScopeScheduling:
          for node in self.nodes:
              self._reschedule(node)
  

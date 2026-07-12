@@ -29,7 +29,7 @@ index 38b75e4..24b265b 100644
      )
      parser.addini(
          "asyncio_default_test_loop_scope",
-@@ -271,15 +278,37 @@ def _collect_hook_loop_factories(
+@@ -271,15 +278,39 @@ def _collect_hook_loop_factories(
          raise pytest.UsageError(_INVALID_LOOP_FACTORIES)
      return factories
  
@@ -37,7 +37,9 @@ index 38b75e4..24b265b 100644
 +    asyncio_marker = item.get_closest_marker("asyncio")
 +    if asyncio_marker is None:
 +        return None
-+    _, selected_factory_names = _parse_asyncio_marker(asyncio_marker)
++    _, selected_factory_names = _parse_asyncio_marker(
++        asyncio_marker, warn_on_scope=False
++    )
 +    if selected_factory_names is None:
 +        return None
 +    hook_factories = _collect_hook_loop_factories(item.config, item)
@@ -243,7 +245,27 @@ index 38b75e4..24b265b 100644
          runner.run(coro, context=context)
  
      return inner
-@@ -997,11 +1093,12 @@ def _parse_asyncio_marker(
+@@ -968,14 +1066,17 @@ Use the "pytest_asyncio_loop_factories" hook to customize event loop creation.\
+ 
+ 
+ def _parse_asyncio_marker(
+-    asyncio_marker: Mark,
++    asyncio_marker: Mark, *, warn_on_scope: bool = True
+ ) -> tuple[_ScopeName | None, Sequence[str] | None]:
+     assert asyncio_marker.name == "asyncio"
+     _validate_asyncio_marker(asyncio_marker)
+     if "scope" in asyncio_marker.kwargs:
+         if "loop_scope" in asyncio_marker.kwargs:
+             raise pytest.UsageError(_DUPLICATE_LOOP_SCOPE_DEFINITION_ERROR)
+-        warnings.warn(PytestDeprecationWarning(_MARKER_SCOPE_KWARG_DEPRECATION_WARNING))
++        if warn_on_scope:
++            warnings.warn(
++                PytestDeprecationWarning(_MARKER_SCOPE_KWARG_DEPRECATION_WARNING)
++            )
+     scope = asyncio_marker.kwargs.get("loop_scope") or asyncio_marker.kwargs.get(
+         "scope"
+     )
+@@ -997,11 +1098,12 @@ def _parse_asyncio_marker(
  def _validate_asyncio_marker(asyncio_marker: Mark) -> None:
      if asyncio_marker.args or (
          asyncio_marker.kwargs
@@ -259,7 +281,7 @@ index 38b75e4..24b265b 100644
          )
          raise ValueError(msg)
  
-@@ -1019,6 +1116,10 @@ Please ensure that your tests don't close the event loop. \
+@@ -1019,6 +1121,10 @@ Please ensure that your tests don't close the event loop. \
  Here is the traceback of the exception triggered during teardown:
  %s
  """
@@ -270,7 +292,7 @@ index 38b75e4..24b265b 100644
  
  
  def _create_scoped_runner_fixture(scope: _ScopeName) -> Callable:
-@@ -1031,34 +1132,56 @@ def _create_scoped_runner_fixture(scope: _ScopeName) -> Callable:
+@@ -1031,34 +1137,58 @@ def _create_scoped_runner_fixture(scope: _ScopeName) -> Callable:
          _asyncio_loop_factory,
          request: FixtureRequest,
      ) -> Iterator[Runner]:
@@ -318,7 +340,9 @@ index 38b75e4..24b265b 100644
 -                            _RUNNER_TEARDOWN_WARNING % traceback.format_exc(),
 -                            RuntimeWarning,
 +                        current_loop = None
-+                    return current_loop is not runner_loop
++                    return scope == "function" and current_loop not in (
++                        None, runner_loop, old_loop
++                    )
 +
 +                try:
 +                    yield runner
@@ -350,7 +374,7 @@ index 38b75e4..24b265b 100644
  
      return _scoped_runner
  
-@@ -1074,12 +1197,46 @@ def _asyncio_loop_factory(request: FixtureRequest) -> LoopFactory | None:
+@@ -1074,12 +1204,46 @@ def _asyncio_loop_factory(request: FixtureRequest) -> LoopFactory | None:
      return getattr(request, "param", None)
  
  

@@ -1,12 +1,32 @@
 diff --git a/src/requests/models.py b/src/requests/models.py
 --- a/src/requests/models.py
 +++ b/src/requests/models.py
-@@ -624,7 +624,7 @@ class PreparedRequest(RequestEncodingMixin, RequestHooksMixin):
+@@ -444,6 +444,15 @@ class PreparedRequest(RequestEncodingMixin, RequestHooksMixin):
+         self.prepare_body(data, files, json)
+         self.prepare_auth(auth, url)
+ 
++        if (
++            auth is not None
++            and self.headers.get("Content-Length") == "0"
++            and getattr(data, "seek", None) is not None
++            and getattr(data, "tell", None) is not None
++        ):
++            self.headers.pop("Content-Length")
++            self.headers["Transfer-Encoding"] = "chunked"
++
+         # Note that prepare_auth must be last to enable authentication schemes
+         # such as OAuth to work on a fully prepared request.
+ 
+@@ -624,7 +633,11 @@ class PreparedRequest(RequestEncodingMixin, RequestHooksMixin):
                      "Streamed bodies and files are mutually exclusive."
                  )
  
 -            if length:
-+            if length is not None:
++            if length or (
++                length == 0
++                and getattr(data, "seek", None) is not None
++                and getattr(data, "tell", None) is not None
++            ):
                  self.headers["Content-Length"] = builtin_str(length)
              else:
                  self.headers["Transfer-Encoding"] = "chunked"

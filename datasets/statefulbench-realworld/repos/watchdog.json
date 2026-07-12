@@ -135,9 +135,10 @@
       "kind": "bug",
       "sources": ["https://github.com/gorakhargosh/watchdog/issues/1065"],
       "source_hash": "587b34f435af093087b91e63e341f43854c9f58dd316b5052a7272f066649848",
-      "prompt": "Fix Watchdog issue #1065 in watchdog.observers.polling.PollingEmitter.queue_events. A transient OSError while taking a polling snapshot, such as an unavailable SMB mount, must leave the emitter running and queue no synthetic deletion. The next successful polling interval must diff against the last successful snapshot and emit its ordinary events. Preserve the stopped-event gate and let non-OSError snapshot failures propagate.",
+      "prompt": "Fix Watchdog issue #1065 in watchdog.observers.polling.PollingEmitter.queue_events. A transient OSError while taking a polling snapshot, such as an unavailable SMB mount, must leave the emitter running and queue no synthetic deletion. A FileNotFoundError remains a permanent watched-root removal and must retain the existing root deletion event and stopped emitter. The next successful polling interval must diff against the last successful snapshot and emit its ordinary events. Preserve the stopped-event gate and let non-OSError snapshot failures propagate.",
       "acceptance": [
         "A transient OSError from _take_snapshot returns from that interval without stopping PollingEmitter or queuing a root DirDeletedEvent.",
+        "A FileNotFoundError retains the existing root DirDeletedEvent and stops PollingEmitter.",
         "A later successful snapshot is compared with the last successful snapshot and detects a file created while the mount was unavailable.",
         "queue_events remains interruptible by stopped_event and does not call _take_snapshot after an explicit stop.",
         "Snapshot failures that are not OSError still propagate.",

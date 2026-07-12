@@ -1,11 +1,16 @@
 diff --git a/src/watchdog/observers/polling.py b/src/watchdog/observers/polling.py
 --- a/src/watchdog/observers/polling.py
 +++ b/src/watchdog/observers/polling.py
-@@ -85,9 +85,7 @@ class PollingEmitter(EventEmitter):
+@@ -85,9 +85,11 @@ class PollingEmitter(EventEmitter):
              # Update snapshot.
              try:
                  new_snapshot = self._take_snapshot()
-             except OSError:
+-            except OSError:
++            except FileNotFoundError:
++                self.queue_event(DirDeletedEvent(self.watch.path))
++                self.stop()
++                return
++            except OSError:
 -                self.queue_event(DirDeletedEvent(self.watch.path))
 -                self.stop()
                  return

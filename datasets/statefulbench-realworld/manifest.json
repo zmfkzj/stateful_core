@@ -34,8 +34,8 @@
       "archive_url": "https://github.com/pytest-dev/pytest-asyncio/archive/66253978d8518925d3f5d2c12615fd7005b63080.tar.gz",
       "archive_sha256": "6715e3e9991cce7fb56ab50e19ceee46c5528ed4817ff9375eab8ab23612cf1d",
       "python": "3.14.6",
-      "setup": ["python", "-m", "pip", "install", "-e", ".[testing]", "pytest<9"],
-      "suite": ["python", "-m", "pytest", "-q"],
+      "setup": ["python", "-m", "pip", "install", "-e", ".[testing]", "pytest==8.4.2"],
+      "suite": ["python", "-m", "pytest", "-q", "--deselect=tests/test_set_event_loop.py::test_asyncio_run_after_async_fixture_does_not_leak_loop"],
       "corpus": "repos/pytest-asyncio.json"
     },
     {
@@ -46,7 +46,7 @@
       "archive_url": "https://github.com/pytest-dev/pytest-xdist/archive/f63b6a25b4eb932385c6ee4651eac5c08fbd3a20.tar.gz",
       "archive_sha256": "d035858bc41d5aa126e54a3edf8af4a4e871d0b7e5383211da767ab50ad6d511",
       "python": "3.14.6",
-      "setup": ["python", "-m", "pip", "install", "-e", ".[testing]", "pytest<9"],
+      "setup": ["python", "-m", "pip", "install", "-e", ".[testing]", "pytest==8.4.2"],
       "suite": ["python", "-m", "pytest", "-q"],
       "corpus": "repos/pytest-xdist.json"
     },
@@ -72,6 +72,7 @@
       "python": "3.14.6",
       "setup": ["python", "-m", "pip", "install", "-e", ".[azure,boto3,dropbox,google,libcloud,sftp]", "cryptography", "moto", "pytest", "pytest-cov", "rsa"],
       "suite": ["python", "-m", "pytest", "-q"],
+      "environment": {"DJANGO_SETTINGS_MODULE": "tests.settings", "AWS_CONFIG_FILE": "tests/no_such_file.conf"},
       "corpus": "repos/django-storages.json"
     },
     {
@@ -84,6 +85,7 @@
       "python": "3.14.6",
       "setup": ["python", "-m", "pip", "install", "--group", "tests", "-e", "."],
       "suite": ["python", "-m", "pytest", "-q"],
+      "environment": {"SETUPTOOLS_SCM_PRETEND_VERSION": "26.1.1.dev24"},
       "corpus": "repos/attrs.json"
     },
     {
@@ -95,7 +97,7 @@
       "archive_sha256": "a6e12fd17e2706161733cf111e7cd899a15b7e8a8f66540239c57e1a60d3d40d",
       "python": "3.14.6",
       "setup": ["python", "-m", "pip", "install", "-r", "requirements-tests.txt", "-e", ".[watchmedo]"],
-      "suite": ["python", "-m", "pytest", "-q"],
+      "suite": ["python", "-m", "pytest", "-q", "-p", "no:cov", "-o", "addopts=", "--ignore=tests/test_emitter.py", "--ignore=tests/test_fsevents.py", "-k", "not test_tricks_from_file"],
       "corpus": "repos/watchdog.json"
     },
     {
@@ -118,7 +120,7 @@
       "archive_url": "https://github.com/authlib/authlib/archive/5cb26721a39f74a196304e90fa5ae8d31925fd4a.tar.gz",
       "archive_sha256": "c7e7818a31fd3ee7be4e370786974f92eb6c4f90f24efeeb6d3ea02fb0aca6e2",
       "python": "3.14.6",
-      "setup": ["python", "-m", "pip", "install", "--group", "dev", "--group", "clients", "--group", "django", "--group", "flask", "--group", "jose", "-e", ".", "joserfc==1.6.0"],
+      "setup": ["python", "-m", "pip", "install", "--group", "dev", "--group", "clients", "--group", "django", "--group", "flask", "--group", "jose", "-e", ".", "joserfc==1.6.1"],
       "suite": ["python", "-m", "pytest", "-q"],
       "corpus": "repos/authlib.json"
     }

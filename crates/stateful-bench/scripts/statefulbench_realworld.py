@@ -48,6 +48,11 @@ _REPOSITORY_FIELDS = frozenset(
         "corpus",
     }
 )
+_OPTIONAL_REPOSITORY_FIELDS = frozenset({"environment"})
+_ENVIRONMENT_NAME = re.compile(r"[A-Z_][A-Z0-9_]*")
+_PROTECTED_ENVIRONMENT_NAMES = frozenset(
+    {"HOME", "PIP_CACHE_DIR", "TMPDIR", "CARGO_HOME", "VIRTUAL_ENV", "PATH", "RUSTUP_HOME"}
+)
 _HEX_40 = re.compile(r"[0-9a-f]{40}")
 _HEX_64 = re.compile(r"[0-9a-f]{64}")
 
@@ -211,11 +216,27 @@ def _require_argv(entry: dict, field: str) -> None:
     if type(value) is not list or not value or any(type(part) is not str or not part for part in value):
         raise ValueError(f"{field} must be a non-empty argv array")
 
+def _require_environment(entry: dict) -> None:
+    if "environment" not in entry:
+        return
+    environment = entry["environment"]
+    if type(environment) is not dict:
+        raise ValueError("environment must be an object")
+    for name, value in environment.items():
+        if (
+            type(name) is not str
+            or not _ENVIRONMENT_NAME.fullmatch(name)
+            or name in _PROTECTED_ENVIRONMENT_NAMES
+            or name.startswith("PYTHON")
+            or type(value) is not str
+        ):
+            raise ValueError("environment contains an unsafe setting")
+
 
 def _validate_repository(entry: object, manifest_dir: Path, keys: set[str]) -> None:
     if type(entry) is not dict:
         raise ValueError("repository entry must be an object")
-    if set(entry) != _REPOSITORY_FIELDS:
+    if not _REPOSITORY_FIELDS.issubset(entry) or set(entry) - _REPOSITORY_FIELDS - _OPTIONAL_REPOSITORY_FIELDS:
         raise ValueError("repository entry fields are invalid")
 
     key = _require_key(entry, "key")
@@ -233,6 +254,7 @@ def _validate_repository(entry: object, manifest_dir: Path, keys: set[str]) -> N
         raise ValueError("python must be 3.14.6")
     for field in ("setup", "suite"):
         _require_argv(entry, field)
+    _require_environment(entry)
 
     corpus = Path(_require_string(entry, "corpus"))
     resolved_corpus = (manifest_dir / corpus).resolve()
@@ -460,17 +482,38 @@ def _run_logged(
     return completed
 
 
-def _sanitized_environment(venv: Path | None = None) -> dict[str, str]:
-    env = dict(os.environ)
-    for name in ("PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONUSERBASE"):
-        env.pop(name, None)
-    if venv is None:
-        env.pop("VIRTUAL_ENV", None)
-        env["PATH"] = os.defpath
-    else:
+def _sanitized_environment(
+    venv: Path | None = None, workspace: Path | None = None
+) -> dict[str, str]:
+    path_parts = [str(venv / "bin")] if venv is not None else []
+    for executable in ("rustc", "cargo"):
+        if executable_path := shutil.which(executable):
+            path_parts.append(str(Path(executable_path).resolve().parent))
+    path_parts.extend(os.defpath.split(os.pathsep))
+    env = {"PATH": os.pathsep.join(dict.fromkeys(path_parts))}
+    if venv is not None:
         env["VIRTUAL_ENV"] = str(venv)
-        env["PATH"] = f"{venv / 'bin'}{os.pathsep}{os.defpath}"
+    rustup_home = os.environ.get("RUSTUP_HOME")
+    if rustup_home is None:
+        candidate = Path.home() / ".rustup"
+        rustup_home = str(candidate) if candidate.is_dir() else None
+    if rustup_home:
+        env["RUSTUP_HOME"] = rustup_home
+    if workspace is not None:
+        locations = {
+            "HOME": workspace / ".statefulbench-home",
+            "PIP_CACHE_DIR": workspace / ".statefulbench-pip-cache",
+            "TMPDIR": workspace / ".statefulbench-tmp",
+            "CARGO_HOME": workspace / ".statefulbench-cargo-home",
+        }
+        for name, location in locations.items():
+            location.mkdir(parents=True, exist_ok=True)
+            env[name] = str(location)
     return env
+
+
+def _repository_environment(repo: dict, environment: dict[str, str]) -> dict[str, str]:
+    return {**environment, **repo.get("environment", {})}
 
 
 def _venv_argv(argv: list[str], python: Path) -> list[str]:
@@ -528,11 +571,11 @@ def _fresh_workspace(
             artifacts,
             artifact_dir,
             f"{label}:venv",
-            env=_sanitized_environment(),
+            env=_sanitized_environment(workspace=workspace),
         )
         python = venv / "bin" / "python"
         yield (
-            (workspace, python, _sanitized_environment(venv))
+            (workspace, python, _repository_environment(repo, _sanitized_environment(venv, workspace)))
             if initialized.returncode == 0
             and indexed.returncode == 0
             and committed.returncode == 0
@@ -1063,6 +1106,7 @@ def run_repo_arm(
             if materialized is None:
                 raise RuntimeError("unable to create benchmark workspace")
             workspace, python, env = materialized
+            env = _repository_environment(repo, env)
             if not setup(repo, workspace, python, env, artifacts, artifact_dir, "run"):
                 raise RuntimeError("repository setup failed")
             mode = "stateful" if arm == "parallel-on" else "no-state"
@@ -1070,7 +1114,7 @@ def run_repo_arm(
             with server_context as runtime_env:
                 runtime_cfg = replace(
                     cfg,
-                    launch_env={name: env[name] for name in ("VIRTUAL_ENV", "PATH") if name in env},
+                    launch_env={name: value for name, value in env.items() if name != "HOME"},
                     stateful_runtime_env=runtime_env or None,
                 )
 

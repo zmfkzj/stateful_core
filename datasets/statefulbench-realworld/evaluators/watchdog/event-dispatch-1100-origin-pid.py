@@ -32,6 +32,10 @@ def main(checkout: str) -> None:
 
     event_without_origin = FileCreatedEvent("/watched/unknown-origin")
     emitter.queue_event(event_without_origin)
+    queued = observer.event_queue.get_nowait()
+    observer.event_queue.task_done()
+    assert queued == (event_without_origin, watch), "events without metadata must retain the legacy queue shape"
+    observer.event_queue.put(queued)
     observer.dispatch_events(observer.event_queue)
     assert event_without_origin.origin_pid is None, "events without an origin PID must expose None"
 

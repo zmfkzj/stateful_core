@@ -15,6 +15,7 @@ def run_pytest(project: Path, checkout: Path) -> subprocess.CompletedProcess[str
     if not test_dependencies.exists():
         raise RuntimeError(f"missing pytest dependency bundle: {test_dependencies}")
     environment = os.environ.copy()
+    environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
     environment["PYTHONPATH"] = os.pathsep.join(
         [str(checkout), str(test_dependencies), environment.get("PYTHONPATH", "")]
     )
@@ -37,10 +38,7 @@ def run_pytest(project: Path, checkout: Path) -> subprocess.CompletedProcess[str
 
 def main() -> None:
     checkout = Path(sys.argv[1]).resolve()
-    curation_root = checkout.parent.parent if checkout.name == "policy" else checkout.parent
-    with tempfile.TemporaryDirectory(
-        dir=curation_root / "pytest-asyncio-pairs" / "policy"
-    ) as temporary:
+    with tempfile.TemporaryDirectory() as temporary:
         project = Path(temporary)
         metadata = project / "pytest_asyncio-0.0.0.dist-info"
         metadata.mkdir()

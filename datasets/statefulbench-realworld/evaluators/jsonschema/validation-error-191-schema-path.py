@@ -65,6 +65,31 @@ def main() -> None:
     assert child.relative_schema_path == deque(["type"]), child.relative_schema_path
     assert child.schema_path == deque([0, "type"]), child.schema_path
     assert child.absolute_schema_path == deque(["anyOf", 0, "type"])
+    # Compatibility: drafts with the historic composite-error contract retain
+    # their existing relative paths.
+    from jsonschema import Draft202012Validator, Draft3Validator, Draft4Validator
+
+    draft4_child = next(
+        Draft4Validator({"anyOf": [{"type": "integer"}]}).iter_errors("secret"),
+    ).context[0]
+    assert draft4_child.relative_schema_path == deque([0, "type"])
+
+    draft3_child = next(
+        Draft3Validator({"type": [{"type": "integer"}]}).iter_errors("secret"),
+    ).context[0]
+    assert draft3_child.relative_schema_path == deque([0, "type"])
+
+    # Reference resolution remains backward compatible for callers which use
+    # its root-relative path to locate siblings around the reference site.
+    ref_schema = {
+        "$defs": {"foo": {"required": ["bar"]}},
+        "properties": {"aprop": {"$ref": "#/$defs/foo", "required": ["baz"]}},
+    }
+    ref_errors = list(Draft202012Validator(ref_schema).iter_errors({"aprop": {}}))
+    assert [error.relative_schema_path for error in ref_errors] == [
+        deque(["properties", "aprop", "required"]),
+        deque(["properties", "aprop", "required"]),
+    ]
 
 
 if __name__ == "__main__":

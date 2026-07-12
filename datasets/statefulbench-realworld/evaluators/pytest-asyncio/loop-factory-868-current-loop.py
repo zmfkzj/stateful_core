@@ -44,6 +44,7 @@ def main() -> None:
             "    assert type(asyncio.get_running_loop()).__name__ == 'CustomEventLoop'\n"
         )
         env = os.environ | {
+            "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
             "PYTHONPATH": os.pathsep.join((str(repo), str(work), os.environ.get("PYTHONPATH", ""))),
         }
         result = subprocess.run(
