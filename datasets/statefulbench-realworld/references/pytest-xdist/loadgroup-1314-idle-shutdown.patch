@@ -1,20 +1,27 @@
 diff --git a/src/xdist/scheduler/loadscope.py b/src/xdist/scheduler/loadscope.py
 --- a/src/xdist/scheduler/loadscope.py
 +++ b/src/xdist/scheduler/loadscope.py
-@@ -324,3 +324,4 @@ class LoadScopeScheduling:
+@@ -132,3 +132,3 @@ class LoadScopeScheduling:
+         for assigned_unit in self.assigned_work.values():
+-            if self._pending_of(assigned_unit) >= 2:
++            if self._pending_of(assigned_unit) > 0:
+                 return False
+@@ -324,3 +324,5 @@ class LoadScopeScheduling:
          if not self.workqueue:
--            node.shutdown()
-+            # `shutdown` queues a graceful remote marker for sent work.
-+            node.shutdown()
++            # This queues a FIFO marker; assigned runtests stay ahead of it.
++            # Removing it makes a worker block while waiting for its next command.
+             node.shutdown()
              return
-@@ -401,10 +403,5 @@ class LoadScopeScheduling:
+@@ -401,9 +401,10 @@ class LoadScopeScheduling:
          for node in self.nodes:
              self._reschedule(node)
  
 -        # Initial distribution sent all tests, start node shutdown
--        if not self.workqueue:
--            for node in self.nodes:
--                node.shutdown()
--
++        # Initial distribution enqueued every test command before this marker.
++        # WorkerController sends commands through a FIFO channel.
+         if not self.workqueue:
+             for node in self.nodes:
+                 node.shutdown()
+ 
      def _check_nodes_have_same_collection(self) -> bool:
          """Return True if all nodes have collected the same items.

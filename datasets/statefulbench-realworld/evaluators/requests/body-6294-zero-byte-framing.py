@@ -49,7 +49,8 @@ def main() -> None:
     post.prepare(method="POST", url="https://example.test/object", data=io.BytesIO())
     assert post.headers.get("Content-Length") == "0", post.headers
     assert "Transfer-Encoding" not in post.headers, post.headers
-    # Preserve the established authenticated-stream wire framing.
+    # Authentication must not reclassify an explicitly zero-length seekable
+    # stream as chunked.
     authenticated = PreparedRequest()
     authenticated.prepare(
         method="POST",
@@ -57,8 +58,8 @@ def main() -> None:
         data=io.BytesIO(),
         auth=("user", "pass"),
     )
-    assert "Content-Length" not in authenticated.headers, authenticated.headers
-    assert authenticated.headers.get("Transfer-Encoding") == "chunked", authenticated.headers
+    assert authenticated.headers.get("Content-Length") == "0", authenticated.headers
+    assert "Transfer-Encoding" not in authenticated.headers, authenticated.headers
 
 
 if __name__ == "__main__":

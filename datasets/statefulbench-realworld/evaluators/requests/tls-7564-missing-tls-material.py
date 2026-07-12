@@ -34,24 +34,14 @@ def main() -> None:
     missing_certificate = "/definitely/missing/client.pem"
     expect_missing(adapter, (missing_certificate, None), missing_certificate, "TLS certificate file")
     legacy_certificate = "/definitely/missing/legacy.pem"
-    try:
-        adapter.cert_verify(connection(), "https://example.test", False, legacy_certificate)
-    except OSError as error:
-        assert type(error) is OSError
-        assert str(error) == (
-            "Could not find the TLS certificate file, "
-            f"invalid path: {legacy_certificate}"
-        )
-    else:
-        raise AssertionError("legacy certificate paths must retain their OSError")
+    expect_missing(
+        adapter,
+        legacy_certificate,
+        legacy_certificate,
+        "TLS certificate file",
+    )
     legacy_key = "/definitely/missing/legacy.key"
-    try:
-        adapter.cert_verify(connection(), "https://example.test", False, (".", legacy_key))
-    except OSError as error:
-        assert type(error) is OSError
-        assert str(error) == f"Could not find the TLS key file, invalid path: {legacy_key}"
-    else:
-        raise AssertionError("legacy directory certificate tuples must retain their OSError")
+    expect_missing(adapter, (".", legacy_key), legacy_key, "TLS key file")
 
 
 

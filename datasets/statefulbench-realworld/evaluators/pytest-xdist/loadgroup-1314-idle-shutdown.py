@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise early idle-worker shutdown with deterministic scheduler nodes."""
+"""Exercise queued idle-worker shutdown with deterministic scheduler nodes."""
 from __future__ import annotations
 
 import argparse
@@ -19,18 +19,43 @@ class Config:
 
 
 class Node:
+    """Model WorkerController's FIFO commands, not process termination."""
+
     def __init__(self, name: str) -> None:
         self.gateway = SimpleNamespace(id=name)
-        self.shutting_down = False
+        self._down = False
+        self._shutdown_sent = False
         self.sent: list[list[int]] = []
+        self.commands: list[tuple[str, list[int]]] = []
         self.shutdown_calls = 0
+
+    @property
+    def shutting_down(self) -> bool:
+        return self._down or self._shutdown_sent
 
     def send_runtest_some(self, indices: list[int]) -> None:
         self.sent.append(indices)
+        self.commands.append(("runtests", indices))
 
     def shutdown(self) -> None:
-        self.shutting_down = True
-        self.shutdown_calls += 1
+        if not self._down:
+            self.commands.append(("shutdown", []))
+            self.shutdown_calls += 1
+            self._shutdown_sent = True
+
+    def queued_indices(self) -> list[int]:
+        """Return runnable commands before the graceful shutdown marker."""
+        indices: list[int] = []
+        shutdown_seen = False
+        for name, payload in self.commands:
+            if name == "runtests":
+                assert not shutdown_seen, "shutdown was queued before assigned work"
+                indices.extend(payload)
+            else:
+                assert name == "shutdown" and payload == []
+                shutdown_seen = True
+        assert shutdown_seen, "worker has no graceful shutdown marker"
+        return indices
 
 
 def load_scheduler(repo: Path) -> type:
@@ -91,18 +116,29 @@ def main(repo: Path) -> None:
         scheduler.add_node_collection(node, collection)
     scheduler.schedule()
 
+    # WorkerController.shutdown queues a FIFO marker. It may be sent more than
+    # once by the scheduler, but every marker follows the assigned runtests
+    # command and therefore cannot terminate assigned work prematurely.
     assert fast.sent == [[0]] and slow.sent == [[1]]
-    # WorkerController.shutdown queues a graceful remote shutdown marker; it
-    # does not abort the work that was already sent to each worker.
-    assert fast.shutdown_calls == slow.shutdown_calls == 1
+    assert fast.shutdown_calls > 0 and slow.shutdown_calls > 0
+    assert fast.queued_indices() == [0]
+    assert slow.queued_indices() == [1]
+    assert scheduler.tests_finished is False
+    assert scheduler.has_pending
 
+    # A queued marker lets the worker report its final test without asking the
+    # scheduler for a post-completion shutdown command.
+    fast_shutdown_calls = fast.shutdown_calls
+    slow_shutdown_calls = slow.shutdown_calls
     scheduler.mark_test_complete(fast, 0)
-    assert fast.shutdown_calls == slow.shutdown_calls == 1
-    assert slow.sent == [[1]]
+    assert fast.shutdown_calls == fast_shutdown_calls
+    assert slow.shutdown_calls == slow_shutdown_calls
+    assert slow.queued_indices() == [1]
+    assert scheduler.tests_finished is False
     assert scheduler.has_pending
 
     scheduler.mark_test_complete(slow, 1)
-    assert slow.shutdown_calls == 1
+    assert slow.shutdown_calls == slow_shutdown_calls
     assert scheduler.tests_finished
     assert scheduler.has_pending is False
 

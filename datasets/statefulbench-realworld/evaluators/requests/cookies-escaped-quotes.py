@@ -51,7 +51,7 @@ def main() -> None:
     assert direct["direct"] == '"159\\"687"'
     transport_escaped = RequestsCookieJar()
     transport_escaped.set_cookie(cookie("transport", '"\\"bar:baz\\""'))
-    assert transport_escaped["transport"] == '"bar:baz"'
+    assert transport_escaped["transport"] == '"\\"bar:baz\\""'
 
 
     plain = http.cookiejar.CookieJar()

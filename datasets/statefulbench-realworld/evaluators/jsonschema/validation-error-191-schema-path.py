@@ -65,31 +65,90 @@ def main() -> None:
     assert child.relative_schema_path == deque(["type"]), child.relative_schema_path
     assert child.schema_path == deque([0, "type"]), child.schema_path
     assert child.absolute_schema_path == deque(["anyOf", 0, "type"])
-    # Compatibility: drafts with the historic composite-error contract retain
-    # their existing relative paths.
-    from jsonschema import Draft202012Validator, Draft3Validator, Draft4Validator
+    # Every draft's context children are local to their own schemas. Their
+    # legacy schema paths and root-relative absolute paths are unchanged.
+    from jsonschema import (
+        Draft201909Validator,
+        Draft202012Validator,
+        Draft3Validator,
+        Draft4Validator,
+        Draft6Validator,
+        Draft7Validator,
+    )
 
-    draft4_child = next(
-        Draft4Validator({"anyOf": [{"type": "integer"}]}).iter_errors("secret"),
-    ).context[0]
-    assert draft4_child.relative_schema_path == deque([0, "type"])
+    for Validator, child_schema, absolute_path in (
+        (
+            Draft202012Validator,
+            {"anyOf": [{"type": "integer"}]},
+            deque(["anyOf", 0, "type"]),
+        ),
+        (
+            Draft201909Validator,
+            {"anyOf": [{"type": "integer"}]},
+            deque(["anyOf", 0, "type"]),
+        ),
+        (
+            Draft7Validator,
+            {"anyOf": [{"type": "integer"}]},
+            deque(["anyOf", 0, "type"]),
+        ),
+        (
+            Draft6Validator,
+            {"anyOf": [{"type": "integer"}]},
+            deque(["anyOf", 0, "type"]),
+        ),
+        (
+            Draft4Validator,
+            {"anyOf": [{"type": "integer"}]},
+            deque(["anyOf", 0, "type"]),
+        ),
+        (
+            Draft3Validator,
+            {"type": [{"type": "integer"}]},
+            deque(["type", 0, "type"]),
+        ),
+    ):
+        parent = next(Validator(child_schema).iter_errors("secret"))
+        child = parent.context[0]
+        assert child.relative_schema_path == deque(["type"])
+        assert child.schema_path == deque([0, "type"])
+        assert child.absolute_schema_path == absolute_path
 
-    draft3_child = next(
-        Draft3Validator({"type": [{"type": "integer"}]}).iter_errors("secret"),
-    ).context[0]
-    assert draft3_child.relative_schema_path == deque([0, "type"])
-
-    # Reference resolution remains backward compatible for callers which use
-    # its root-relative path to locate siblings around the reference site.
-    ref_schema = {
-        "$defs": {"foo": {"required": ["bar"]}},
-        "properties": {"aprop": {"$ref": "#/$defs/foo", "required": ["baz"]}},
-    }
-    ref_errors = list(Draft202012Validator(ref_schema).iter_errors({"aprop": {}}))
-    assert [error.relative_schema_path for error in ref_errors] == [
-        deque(["properties", "aprop", "required"]),
-        deque(["properties", "aprop", "required"]),
-    ]
+    # Every draft also keeps errors yielded through a $ref local to their
+    # referenced schemas. The public paths continue to name the reference
+    # site, which is the root-relative location callers use.
+    for Validator, definitions_key in (
+        (Draft202012Validator, "$defs"),
+        (Draft201909Validator, "$defs"),
+        (Draft7Validator, "definitions"),
+        (Draft6Validator, "definitions"),
+        (Draft4Validator, "definitions"),
+        (Draft3Validator, "definitions"),
+    ):
+        ref_schema = {
+            definitions_key: {"foo": {"type": "integer"}},
+            "properties": {
+                "aprop": {
+                    "$ref": f"#/{definitions_key}/foo",
+                    "type": "string",
+                },
+            },
+        }
+        errors = list(Validator(ref_schema).iter_errors({"aprop": None}))
+        target_error = errors[0]
+        assert target_error.schema is ref_schema[definitions_key]["foo"]
+        assert target_error.relative_schema_path == deque(["type"])
+        assert target_error.schema_path == deque(["properties", "aprop", "type"])
+        assert target_error.absolute_schema_path == target_error.schema_path
+        if Validator is Draft202012Validator:
+            assert len(errors) == 2
+            inline_error = errors[1]
+            assert inline_error.schema is ref_schema["properties"]["aprop"]
+            assert inline_error.relative_schema_path == deque(["type"])
+            assert inline_error.schema_path == deque(
+                ["properties", "aprop", "type"],
+            )
+            assert inline_error.absolute_schema_path == inline_error.schema_path
 
 
 if __name__ == "__main__":

@@ -1,7 +1,10 @@
 diff --git a/src/requests/cookies.py b/src/requests/cookies.py
+index 24dd9a7..f980ff7 100644
 --- a/src/requests/cookies.py
 +++ b/src/requests/cookies.py
-@@ -382,8 +382,8 @@ class RequestsCookieJar(CookieJar, MutableMapping[str, str | None]):
+@@ -380,12 +380,6 @@ class RequestsCookieJar(CookieJar, MutableMapping[str, str | None]):  # type: ig
+         remove_cookie_by_name(self, name)
+ 
      def set_cookie(self, cookie: Cookie, *args: Any, **kwargs: Any) -> None:
 -        if (
 -            (value := cookie.value) is not None
@@ -9,19 +12,14 @@ diff --git a/src/requests/cookies.py b/src/requests/cookies.py
 -            and value.endswith('"')
 -        ):
 -            cookie.value = value.replace('\\"', "")
-+        if (
-+            (value := cookie.value) is not None
-+            and value.startswith('"\\"')
-+            and value.endswith('\\""')
-+        ):
-+            cookie.value = value[0] + value[3:-3] + value[-1]
          return super().set_cookie(cookie, *args, **kwargs)
-
+ 
+     def update(  # type: ignore[override]
 diff --git a/src/requests/sessions.py b/src/requests/sessions.py
+index d11355b..0fd6553 100644
 --- a/src/requests/sessions.py
 +++ b/src/requests/sessions.py
-@@ -21,7 +21,8 @@ from ._types import is_prepared as _is_prepared
- from .adapters import HTTPAdapter
+@@ -22,6 +22,7 @@ from .adapters import HTTPAdapter
  from .auth import _basic_auth_str
  from .compat import cookielib, urljoin, urlparse
  from .cookies import (
@@ -29,7 +27,8 @@ diff --git a/src/requests/sessions.py b/src/requests/sessions.py
      RequestsCookieJar,
      cookiejar_from_dict,
      extract_cookies_to_jar,
-@@ -529,8 +529,6 @@ class Session(SessionRedirectMixin):
+@@ -528,9 +529,7 @@ class Session(SessionRedirectMixin):
+             cookies = cookiejar_from_dict(cookies)
  
          # Merge with session cookies
 -        merged_cookies = merge_cookies(
@@ -38,4 +37,5 @@ diff --git a/src/requests/sessions.py b/src/requests/sessions.py
 +        merged_cookies = merge_cookies(_copy_cookie_jar(self.cookies), cookies)
  
          # Set environment's basic authentication if not explicitly set.
+         auth = request.auth
          auth = request.auth

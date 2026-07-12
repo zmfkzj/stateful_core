@@ -56,12 +56,12 @@
       "kind": "feature",
       "sources": ["https://github.com/pytest-dev/pytest-xdist/issues/1314"],
       "source_hash": "270105883ca88353ea3055d66ef2420d22970d0496a88f028d21797d58a0f01f",
-      "prompt": "Implement issue #1314 in the LoadScopeScheduling._reschedule lifecycle inherited by LoadGroupScheduling. Do not shut down workers merely because the global unassigned queue is empty. Shut a worker down immediately after its own assigned work is exhausted and no unassigned work remains, while workers that still own pending grouped tests continue running. Remove the initial-distribution shutdown that would terminate active workers before they become idle.",
+      "prompt": "Implement issue #1314 in the LoadScopeScheduling._reschedule lifecycle inherited by LoadGroupScheduling. Do not treat WorkerController.shutdown as immediate process termination: it appends a FIFO shutdown command and sets shutting_down before the worker consumes it. Retain the empty-workqueue shutdown calls, including initial-distribution shutdown after every runtests command has been enqueued; removing them deadlocks a worker waiting for its next command. Make tests_finished false while any assigned grouped test remains pending, even when that worker already has a queued graceful shutdown marker.",
       "acceptance": [
-        "After initial loadgroup dispatch empties the global work queue, workers with assigned tests are not shut down early.",
-        "A worker is shut down as soon as it reports its final assigned test complete when no unassigned work remains.",
-        "Another worker with a pending grouped test remains alive, retains its assigned test, and shuts down only after reporting that test complete.",
-        "The scheduler finishes with no pending work, and the primary production change is at LoadScopeScheduling._reschedule."
+        "After loadgroup dispatch exhausts the global queue, each assigned worker's runtests command precedes its queued shutdown marker, so every assigned grouped test remains runnable.",
+        "A queued graceful shutdown marker is not treated as premature termination and no post-final-report shutdown contract is required.",
+        "tests_finished remains false while either worker has a pending grouped test, then becomes true only after both assigned tests are reported complete.",
+        "The reference preserves the LoadScopeScheduling._reschedule shutdown path and updates its completion accounting without leaving pending work."
       ],
       "overlap_anchors": [{"path": "src/xdist/scheduler/loadscope.py", "symbol": "xdist.scheduler.loadscope.LoadScopeScheduling._reschedule"}],
       "evaluator": "evaluators/pytest-xdist/loadgroup-1314-idle-shutdown.py",

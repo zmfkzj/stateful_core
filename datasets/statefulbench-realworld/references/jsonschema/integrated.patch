@@ -366,48 +366,23 @@ diff --git a/jsonschema/validators.py b/jsonschema/validators.py
 index 98ddf6b..0a5682f 100644
 --- a/jsonschema/validators.py
 +++ b/jsonschema/validators.py
-@@ -213,6 +213,9 @@ def create(
-     """
-     # preemptively don't shadow the `Validator.format_checker` local
-     format_checker_arg = format_checker
-+    local_schema_paths = (
-+        meta_schema.get("$schema") == "https://json-schema.org/draft/2020-12/schema"
-+    )
- 
-     specification = referencing.jsonschema.specification_with(
-         dialect_id=id_of(meta_schema) or "urn:unknown-dialect",
-@@ -391,6 +394,14 @@ def create(
+@@ -390,7 +390,9 @@ def create(
+                         type_checker=self.TYPE_CHECKER,
                      )
                      if k not in {"if", "$ref"}:
                          error.schema_path.appendleft(k)
-+                        if (
-+                            not local_schema_paths
-+                            or error.schema is _schema
-+                            or getattr(error, "_ref_path", False)
-+                        ):
++                        if error.schema is _schema:
 +                            error.relative_schema_path.appendleft(k)
-+                    elif k == "$ref":
-+                        error._ref_path = True
                      yield error
  
          def descend(
-@@ -439,8 +450,19 @@ def create(
+@@ -438,7 +440,9 @@ def create(
+                         type_checker=evolved.TYPE_CHECKER,
                      )
-+                    if "$ref" in schema:
-+                        error._ref_path = True
                      if k not in {"if", "$ref"}:
                          error.schema_path.appendleft(k)
-+                        if not local_schema_paths or error.schema is schema:
++                        if error.schema is schema:
 +                            error.relative_schema_path.appendleft(k)
-+                    elif k == "$ref":
-+                        error._ref_path = True
                      if path is not None:
                          error.path.appendleft(path)
                      if schema_path is not None:
-                         error.schema_path.appendleft(schema_path)
-+                        if (
-+                            not local_schema_paths
-+                            or getattr(error, "_ref_path", False)
-+                        ):
-+                            error.relative_schema_path.appendleft(schema_path)
-                     yield error
