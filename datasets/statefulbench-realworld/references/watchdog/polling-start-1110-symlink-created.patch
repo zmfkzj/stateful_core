@@ -1,0 +1,12 @@
+diff --git a/src/watchdog/observers/polling.py b/src/watchdog/observers/polling.py
+index 4e5e0c34..c38d4d9d 100644
+--- a/src/watchdog/observers/polling.py
++++ b/src/watchdog/observers/polling.py
+@@ -55,7 +55,7 @@ class PollingEmitter(EventEmitter):
+         *,
+         timeout: float = DEFAULT_EMITTER_TIMEOUT,
+         event_filter: list[type[FileSystemEvent]] | None = None,
+-        stat: Callable[[str], os.stat_result] = os.stat,
++        stat: Callable[[str], os.stat_result] = os.lstat,
+         listdir: Callable[[str | None], Iterator[os.DirEntry]] = os.scandir,
+     ) -> None:

@@ -1,0 +1,32 @@
+diff --git a/src/watchdog/observers/api.py b/src/watchdog/observers/api.py
+index 4e7bc2a..fd6393a 100644
+--- a/src/watchdog/observers/api.py
++++ b/src/watchdog/observers/api.py
+@@ -147,6 +147,6 @@ class EventEmitter(BaseThread):
+         return self._watch
+ 
+-    def queue_event(self, event: FileSystemEvent) -> None:
++    def queue_event(self, event: FileSystemEvent, *, origin_pid: int | None = None) -> None:
+         """Queues a single event.
+ 
+         :param event:
+@@ -157,8 +157,8 @@ class EventEmitter(BaseThread):
+         :class:`watchdog.events.FileSystemEvent`
+             or a subclass.
+         """
+         if self._event_filter is None or any(isinstance(event, cls) for cls in self._event_filter):
+-            self._event_queue.put((event, self.watch))
++            self._event_queue.put((event, self.watch, origin_pid))
+ 
+     def queue_events(self, timeout: float) -> None:
+         """Override this method to populate the event queue with events
+@@ -416,7 +416,8 @@ class BaseObserver(EventDispatcher):
+             event_queue.task_done()
+             return
+ 
+-        event, watch = entry
++        event, watch, *origin = entry
++        event.origin_pid = origin[0] if origin else None
+ 
+         with self._lock:
+             # To allow unschedule/stop and safe removal of event handlers

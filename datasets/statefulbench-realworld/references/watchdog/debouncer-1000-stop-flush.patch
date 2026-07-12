@@ -1,0 +1,13 @@
+--- a/src/watchdog/utils/event_debouncer.py
++++ b/src/watchdog/utils/event_debouncer.py
+@@ -61,6 +61,9 @@ class EventDebouncer(BaseThread):
+-                if not self.should_keep_running():
++                if not self.should_keep_running() and not self._events:
+                     break
+ 
+                 events = self._events
+                 self._events = []
+                 self.events_callback(events)
++
++                if not self.should_keep_running():
++                    break

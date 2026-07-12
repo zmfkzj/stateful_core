@@ -1,0 +1,75 @@
+diff --git a/src/watchdog/observers/polling.py b/src/watchdog/observers/polling.py
+index 4e5e0c34..ca91a77d 100644
+--- a/src/watchdog/observers/polling.py
++++ b/src/watchdog/observers/polling.py
+@@ -57,8 +57,10 @@
+         event_filter: list[type[FileSystemEvent]] | None = None,
+         stat: Callable[[str], os.stat_result] = os.stat,
+         listdir: Callable[[str | None], Iterator[os.DirEntry]] = os.scandir,
++        emit_on_start: bool = False,
+     ) -> None:
+         super().__init__(event_queue, watch, timeout=timeout, event_filter=event_filter)
++        self._emit_on_start = emit_on_start
+         self._snapshot: DirectorySnapshot = EmptyDirectorySnapshot()
+         self._lock = threading.Lock()
+         self._take_snapshot: Callable[[], DirectorySnapshot] = lambda: DirectorySnapshot(
+@@ -70,7 +72,30 @@
+ 
+     def on_thread_start(self) -> None:
+         self._snapshot = self._take_snapshot()
++        if self._emit_on_start:
++            self._queue_snapshot_events(DirectorySnapshotDiff(EmptyDirectorySnapshot(), self._snapshot))
+ 
++    def _queue_snapshot_events(self, events: DirectorySnapshotDiff) -> None:
++        # Files.
++        for src_path in events.files_deleted:
++            self.queue_event(FileDeletedEvent(src_path))
++        for src_path in events.files_modified:
++            self.queue_event(FileModifiedEvent(src_path))
++        for src_path in events.files_created:
++            self.queue_event(FileCreatedEvent(src_path))
++        for src_path, dest_path in events.files_moved:
++            self.queue_event(FileMovedEvent(src_path, dest_path))
++
++        # Directories.
++        for src_path in events.dirs_deleted:
++            self.queue_event(DirDeletedEvent(src_path))
++        for src_path in events.dirs_modified:
++            self.queue_event(DirModifiedEvent(src_path))
++        for src_path in events.dirs_created:
++            self.queue_event(DirCreatedEvent(src_path))
++        for src_path, dest_path in events.dirs_moved:
++            self.queue_event(DirMovedEvent(src_path, dest_path))
++
+     def queue_events(self, timeout: float) -> None:
+         # We don't want to hit the disk continuously.
+         # timeout behaves like an interval for polling emitters.
+@@ -93,25 +118,6 @@
+             events = DirectorySnapshotDiff(self._snapshot, new_snapshot)
+             self._snapshot = new_snapshot
+-
+-            # Files.
+-            for src_path in events.files_deleted:
+-                self.queue_event(FileDeletedEvent(src_path))
+-            for src_path in events.files_modified:
+-                self.queue_event(FileModifiedEvent(src_path))
+-            for src_path in events.files_created:
+-                self.queue_event(FileCreatedEvent(src_path))
+-            for src_path, dest_path in events.files_moved:
+-                self.queue_event(FileMovedEvent(src_path, dest_path))
+-
+-            # Directories.
+-            for src_path in events.dirs_deleted:
+-                self.queue_event(DirDeletedEvent(src_path))
+-            for src_path in events.dirs_modified:
+-                self.queue_event(DirModifiedEvent(src_path))
+-            for src_path in events.dirs_created:
+-                self.queue_event(DirCreatedEvent(src_path))
+-            for src_path, dest_path in events.dirs_moved:
+-                self.queue_event(DirMovedEvent(src_path, dest_path))
+-
+-
++            self._queue_snapshot_events(events)
++
++
+ class PollingObserver(BaseObserver):

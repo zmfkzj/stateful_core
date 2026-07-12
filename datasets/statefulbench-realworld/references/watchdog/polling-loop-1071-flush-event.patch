@@ -1,0 +1,22 @@
+diff --git a/src/watchdog/observers/polling.py b/src/watchdog/observers/polling.py
+--- a/src/watchdog/observers/polling.py
++++ b/src/watchdog/observers/polling.py
+@@ -94,10 +94,18 @@ class PollingEmitter(EventEmitter):
+             self._snapshot = new_snapshot
+ 
+             # Files.
++            if self._event_filter is not None:
++                from watchdog.events import FileClosedEvent
++
++                emit_flush_events = FileClosedEvent in self._event_filter
++            else:
++                emit_flush_events = False
+             for src_path in events.files_deleted:
+                 self.queue_event(FileDeletedEvent(src_path))
+             for src_path in events.files_modified:
+                 self.queue_event(FileModifiedEvent(src_path))
++                if emit_flush_events:
++                    self.queue_event(FileClosedEvent(src_path))
+             for src_path in events.files_created:
+                 self.queue_event(FileCreatedEvent(src_path))
+             for src_path, dest_path in events.files_moved:
