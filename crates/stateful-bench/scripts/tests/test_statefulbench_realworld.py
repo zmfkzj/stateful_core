@@ -249,6 +249,64 @@ class ManifestTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "metadata exclusion"):
             self.mod.load_manifest(self.manifest_path)
+
+    def test_load_manifest_rejects_undocumented_suite_exclusion(self) -> None:
+        data = self.load_data()
+        entry = next(repo for repo in data["repositories"] if repo["key"] == "watchdog")
+        entry["suite"].append("--ignore=tests")
+        self.write_data(data)
+
+        with self.assertRaisesRegex(ValueError, "suite exclusions"):
+            self.mod.load_manifest(self.manifest_path)
+
+    def test_load_manifest_rejects_suite_exclusions_without_metadata(self) -> None:
+        data = self.load_data()
+        entry = next(repo for repo in data["repositories"] if repo["key"] == "watchdog")
+        del entry["metadata"]
+        self.write_data(data)
+
+        with self.assertRaisesRegex(ValueError, "suite exclusions"):
+            self.mod.load_manifest(self.manifest_path)
+
+    def test_load_manifest_accepts_two_argument_suite_exclusions(self) -> None:
+        data = self.load_data()
+        entry = next(repo for repo in data["repositories"] if repo["key"] == "watchdog")
+        index = entry["suite"].index("--ignore=tests/test_emitter.py")
+        entry["suite"][index : index + 1] = ["--ignore", "tests/test_emitter.py"]
+        self.write_data(data)
+
+        self.mod.load_manifest(self.manifest_path)
+
+    def test_load_manifest_rejects_duplicate_suite_exclusions(self) -> None:
+        data = self.load_data()
+        entry = next(repo for repo in data["repositories"] if repo["key"] == "watchdog")
+        entry["suite"].append("--ignore=tests/test_emitter.py")
+        self.write_data(data)
+
+        with self.assertRaisesRegex(ValueError, "suite exclusions"):
+            self.mod.load_manifest(self.manifest_path)
+
+    def test_load_manifest_rejects_option_as_split_exclusion_value(self) -> None:
+        for option, value in (
+            ("--ignore", "--deselect=tests/test_emitter.py"),
+            ("--deselect", "--ignore=tests/test_emitter.py"),
+        ):
+            with self.subTest(option=option):
+                data = self.load_data()
+                entry = next(repo for repo in data["repositories"] if repo["key"] == "watchdog")
+                entry["suite"] = ["python", "-m", "pytest", option, value]
+                entry["metadata"] = {
+                    "exclusions": {
+                        f"{option}={value}": "Pinned runtime reason.",
+                        value: "Pinned runtime reason.",
+                    }
+                }
+                self.write_data(data)
+
+                with self.assertRaisesRegex(ValueError, "suite exclusions must have a value"):
+                    self.mod.load_manifest(self.manifest_path)
+
+
     def test_manifest_repository_matches_full_corpus_identity(self) -> None:
         repo = self.mod.repo_entries(self.mod.load_manifest(self.manifest_path))[0]
         corpus = self.mod.load_corpus(MANIFEST.parent / repo["corpus"])

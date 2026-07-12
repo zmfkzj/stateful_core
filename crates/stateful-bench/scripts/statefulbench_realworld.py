@@ -231,6 +231,29 @@ def _require_argv(entry: dict, field: str) -> None:
     if type(value) is not list or not value or any(type(part) is not str or not part for part in value):
         raise ValueError(f"{field} must be a non-empty argv array")
 
+
+def _suite_exclusions(suite: list[str]) -> set[str]:
+    exclusions: set[str] = set()
+    for index, argument in enumerate(suite):
+        if argument in {"--deselect", "--ignore"}:
+            if (
+                index + 1 == len(suite)
+                or not suite[index + 1]
+                or suite[index + 1].startswith("--")
+            ):
+                raise ValueError("suite exclusions must have a value")
+            exclusion = f"{argument}={suite[index + 1]}"
+        elif argument.startswith(("--deselect=", "--ignore=")):
+            exclusion = argument
+        else:
+            continue
+        if exclusion.endswith("=") or exclusion in exclusions:
+            raise ValueError("suite exclusions must be unique")
+        exclusions.add(exclusion)
+    return exclusions
+
+
+
 def _require_environment(entry: dict) -> None:
     if "environment" not in entry:
         return
@@ -248,7 +271,10 @@ def _require_environment(entry: dict) -> None:
             raise ValueError("environment contains an unsafe setting")
 
 def _require_metadata(entry: dict) -> None:
+    suite_exclusions = _suite_exclusions(entry["suite"])
     if "metadata" not in entry:
+        if suite_exclusions:
+            raise ValueError("suite exclusions require metadata")
         return
     metadata = entry["metadata"]
     if type(metadata) is not dict or set(metadata) != {"exclusions"}:
@@ -260,11 +286,14 @@ def _require_metadata(entry: dict) -> None:
         if (
             type(exclusion) is not str
             or not exclusion.startswith(("--deselect=", "--ignore="))
-            or exclusion not in entry["suite"]
+            or exclusion.endswith("=")
+            or exclusion not in suite_exclusions
             or type(reason) is not str
             or not reason
         ):
             raise ValueError("metadata exclusion must name a suite exclusion and reason")
+    if set(exclusions) != suite_exclusions:
+        raise ValueError("suite exclusions must exactly match metadata exclusions")
 
 
 def _validate_repository(entry: object, manifest_dir: Path, keys: set[str]) -> None:
