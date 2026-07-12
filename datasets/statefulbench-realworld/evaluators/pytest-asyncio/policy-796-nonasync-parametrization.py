@@ -10,11 +10,6 @@ import tempfile
 
 
 def main() -> None:
-    checkout = Path(sys.argv[1]).resolve()
-    curation_root = checkout.parent.parent if checkout.name == "policy" else checkout.parent
-    dependencies = curation_root / "pytest-asyncio-deps"
-    if not dependencies.exists():
-        raise RuntimeError(f"missing pytest dependency bundle: {dependencies}")
     with tempfile.TemporaryDirectory() as temporary:
         project = Path(temporary)
         metadata = project / "pytest_asyncio-0.0.0.dist-info"
@@ -74,9 +69,6 @@ async def test_async(request):
         )
         environment = os.environ.copy()
         environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
-        environment["PYTHONPATH"] = os.pathsep.join(
-            [str(checkout), str(dependencies), environment.get("PYTHONPATH", "")]
-        )
         result = subprocess.run(
             [
                 sys.executable,

@@ -9,16 +9,9 @@ import sys
 import tempfile
 
 
-def run_pytest(project: Path, checkout: Path) -> subprocess.CompletedProcess[str]:
-    curation_root = checkout.parent.parent if checkout.name == "policy" else checkout.parent
-    test_dependencies = curation_root / "pytest-asyncio-deps"
-    if not test_dependencies.exists():
-        raise RuntimeError(f"missing pytest dependency bundle: {test_dependencies}")
+def run_pytest(project: Path) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
-    environment["PYTHONPATH"] = os.pathsep.join(
-        [str(checkout), str(test_dependencies), environment.get("PYTHONPATH", "")]
-    )
     return subprocess.run(
         [
             sys.executable,
@@ -37,7 +30,6 @@ def run_pytest(project: Path, checkout: Path) -> subprocess.CompletedProcess[str
 
 
 def main() -> None:
-    checkout = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory() as temporary:
         project = Path(temporary)
         metadata = project / "pytest_asyncio-0.0.0.dist-info"
@@ -73,7 +65,7 @@ async def test_uses_configured_loop_factory():
     assert type(asyncio.get_running_loop()).__name__ == \"ConfiguredLoop\"
 """
         )
-        configured = run_pytest(project, checkout)
+        configured = run_pytest(project)
         assert configured.returncode == 0, configured.stdout + configured.stderr
         configured_output = configured.stdout + configured.stderr
         assert "1 passed" in configured_output, configured_output
@@ -107,7 +99,7 @@ async def test_user_policy_override_is_preserved():
     assert type(asyncio.get_running_loop()).__name__ == "OverrideLoop"
 """
         )
-        overridden = run_pytest(project, checkout)
+        overridden = run_pytest(project)
         assert overridden.returncode == 0, overridden.stdout + overridden.stderr
         (project / "conftest.py").unlink()
 
@@ -116,7 +108,7 @@ async def test_user_policy_override_is_preserved():
 asyncio_loop_factory = loop_config:missing_factory
 """
         )
-        invalid = run_pytest(project, checkout)
+        invalid = run_pytest(project)
         invalid_output = invalid.stdout + invalid.stderr
         assert invalid.returncode == 4, invalid_output
         assert "asyncio_loop_factory" in invalid_output, invalid_output
@@ -127,7 +119,7 @@ asyncio_loop_factory = loop_config:missing_factory
 asyncio_loop_factory = loop_config:not_a_factory
 """
         )
-        noncallable = run_pytest(project, checkout)
+        noncallable = run_pytest(project)
         noncallable_output = noncallable.stdout + noncallable.stderr
         assert noncallable.returncode == 4, noncallable_output
         assert "asyncio_loop_factory" in noncallable_output, noncallable_output
@@ -138,7 +130,7 @@ asyncio_loop_factory = loop_config:not_a_factory
 asyncio_loop_factory = loop_config
 """
         )
-        malformed = run_pytest(project, checkout)
+        malformed = run_pytest(project)
         malformed_output = malformed.stdout + malformed.stderr
         assert malformed.returncode == 4, malformed_output
         assert "asyncio_loop_factory" in malformed_output, malformed_output
