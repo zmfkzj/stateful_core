@@ -14,7 +14,7 @@ def main() -> None:
     sys.path.insert(0, str(args.repo))
 
     from authlib.oauth2.client import OAuth2Client
-    from authlib.oauth2.rfc6749.errors import MismatchingStateException
+    from authlib.oauth2.rfc6749.errors import MismatchingStateException, OAuth2Error
 
     class RecordingClient(OAuth2Client):
         def __init__(self, **kwargs):
@@ -47,6 +47,31 @@ def main() -> None:
         pass
     else:
         raise AssertionError("callback state mismatch must be rejected")
+    assert len(client.requests) == 1
+
+    # Authorization-server errors are callbacks, not token endpoints; credentials
+    # must never be sent to a callback URL.
+    try:
+        client.fetch_token(
+            "https://client.test/callback?error=access_denied"
+            "&error_description=user+denied&state=csrf-state"
+        )
+    except OAuth2Error as error:
+        assert error.error == "access_denied"
+        assert error.description == "user denied"
+    else:
+        raise AssertionError("OAuth error callback must be rejected")
+    assert len(client.requests) == 1
+
+    # Ambiguous authorization codes are invalid before any credentialed request.
+    try:
+        client.fetch_token(
+            "https://client.test/callback?code=first&code=second&state=csrf-state"
+        )
+    except ValueError as error:
+        assert str(error) == "authorization response has multiple code parameters"
+    else:
+        raise AssertionError("duplicate callback codes must be rejected")
     assert len(client.requests) == 1
 
     # OAuth authorization-code responses use query, not fragment, parameters.

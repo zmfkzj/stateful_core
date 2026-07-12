@@ -82,11 +82,12 @@
       "kind": "bug",
       "sources": ["https://github.com/authlib/authlib/issues/678"],
       "source_hash": "69d724578507d28300e0e3a18d603d34765c86f5fe46676c5861ce50c75f7b3d",
-      "prompt": "Use open issue #678 as the strict-overlap substitution for #819, whose async convenience methods cannot share OAuth2Client.fetch_token. Fix authlib.oauth2.client.OAuth2Client.fetch_token to accept a distinct callback URL containing exactly one authorization-code query parameter when a token_endpoint is configured. Parse it with standard URL handling, preserve state validation, reject fragment codes, and leave the configured endpoint and its own query intact rather than using the issue's unsafe string splitting.",
+      "prompt": "Use open issue #678 as the strict-overlap substitution for #819, whose async convenience methods cannot share OAuth2Client.fetch_token. Fix authlib.oauth2.client.OAuth2Client.fetch_token to accept a distinct callback URL containing exactly one authorization-code query parameter when a token_endpoint is configured. Parse it with standard URL handling, preserve state validation, reject fragment and duplicate codes, recognize OAuth error callbacks before a token request can send client credentials, and leave the configured endpoint and its own query intact rather than using the issue's unsafe string splitting.",
       "acceptance": [
         "An encoded query code in a callback URL exchanges at the configured token endpoint.",
         "A callback state mismatch raises MismatchingStateException before a token request.",
-        "Fragment codes and duplicate query code parameters are rejected while the configured endpoint remains unchanged."
+        "An OAuth error callback raises OAuth2Error before a token request can send configured client credentials.",
+        "Fragment codes and duplicate query code parameters are rejected before a token request while the configured endpoint remains unchanged."
       ],
       "overlap_anchors": [{"path": "authlib/oauth2/client.py", "symbol": "authlib.oauth2.client.OAuth2Client.fetch_token"}],
       "evaluator": "evaluators/authlib/fetch-token-678-callback-url.py",
@@ -97,11 +98,13 @@
       "kind": "bug",
       "sources": ["https://github.com/authlib/authlib/issues/650"],
       "source_hash": "9e3f0df3b294e74c44d10f6121b6e98ee30c88b5502fc02facdcbf55a1e38268",
-      "prompt": "Implement Authlib issue #650 in authlib.integrations.httpx_client.oauth2_client.AsyncOAuth2Client._fetch_token. After a successful explicit client-credentials token fetch, retain that endpoint only when metadata has no token_endpoint so an expired token can be fetched automatically. Do not overwrite an explicit endpoint or record a failed response.",
+      "prompt": "Implement Authlib issue #650 in authlib.integrations.httpx_client.oauth2_client.AsyncOAuth2Client._fetch_token. Preserve the explicit endpoint argument before GET query rewriting. After a successful explicit client-credentials fetch, retain that original endpoint only when metadata has no token_endpoint so an expired token can be fetched automatically. Do not overwrite a configured endpoint or record endpoint metadata for an OAuth-error response.",
       "acceptance": [
-        "A successful fetch_token(url) records url only when no token_endpoint is configured.",
-        "An expired client_credentials token is re-fetched before a protected request.",
-        "The awaited update callback receives the new token and old access token while configured endpoints remain unchanged."
+        "A successful GET fetch_token(url) records the original URL, without generated token parameters, only when no token_endpoint is configured.",
+        "An expired client_credentials token is re-fetched with POST at that clean endpoint before the protected request.",
+        "An explicit fetch from a different URL leaves the configured token_endpoint unchanged.",
+        "An OAuth-error response records no token_endpoint metadata.",
+        "The awaited update callback receives the new token and old access token."
       ],
       "overlap_anchors": [{"path": "authlib/integrations/httpx_client/oauth2_client.py", "symbol": "authlib.integrations.httpx_client.oauth2_client.AsyncOAuth2Client._fetch_token"}],
       "evaluator": "evaluators/authlib/async-client-650-client-credentials.py",

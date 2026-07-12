@@ -67,7 +67,15 @@ index a157b7e..d79aae2 100644
  import typing
  from contextlib import asynccontextmanager
  
-@@ -171,9 +172,13 @@ class AsyncOAuth2Client(_OAuth2Client, httpx.AsyncClient):
+@@ -153,6 +154,7 @@ class AsyncOAuth2Client(_OAuth2Client, httpx.AsyncClient):
+         method="POST",
+         **kwargs,
+     ):
++        endpoint = url
+         if method.upper() == "POST":
+             resp = await self.post(
+                 url, data=dict(url_decode(body)), headers=headers, auth=auth, **kwargs
+@@ -171,9 +173,13 @@ class AsyncOAuth2Client(_OAuth2Client, httpx.AsyncClient):
              resp = await self.get(url, headers=headers, auth=auth, **kwargs)
  
          for hook in self.compliance_hook["access_token_response"]:
@@ -77,8 +85,8 @@ index a157b7e..d79aae2 100644
  
 -        return self.parse_response_token(resp)
 +        token = self.parse_response_token(resp)
-+        if url and self.metadata.get("token_endpoint") is None:
-+            self.metadata["token_endpoint"] = url
++        if endpoint and self.metadata.get("token_endpoint") is None:
++            self.metadata["token_endpoint"] = endpoint
 +        return token
  
      async def _refresh_token(
@@ -87,13 +95,14 @@ diff --git a/authlib/oauth2/client.py b/authlib/oauth2/client.py
 index 340c11b..a6f4964 100644
 --- a/authlib/oauth2/client.py
 +++ b/authlib/oauth2/client.py
-@@ -1,3 +1,5 @@
+@@ -1,3 +1,6 @@
 +from urllib.parse import urlsplit
 +
  from authlib.common.security import generate_token
  from authlib.common.urls import url_decode
++from .rfc6749.errors import MismatchingStateException
  
-@@ -212,6 +214,24 @@ class OAuth2Client:
+@@ -212,6 +214,32 @@ class OAuth2Client:
          state = state or self.state
          # implicit  grant_type
          authorization_response = kwargs.pop("authorization_response", None)
@@ -109,8 +118,16 @@ index 340c11b..a6f4964 100644
 +                        )
 +                query = url_decode(callback.query)
 +                code_count = sum(key == "code" for key, _ in query)
++                params = dict(query)
 +                if code_count > 1:
 +                    raise ValueError("authorization response has multiple code parameters")
++                if "error" in params:
++                    if state and params.get("state") != state:
++                        raise MismatchingStateException()
++                    raise self.oauth_error_class(
++                        error=params["error"],
++                        description=params.get("error_description"),
++                    )
 +                if code_count:
 +                    authorization_response = url
 +                    url = None

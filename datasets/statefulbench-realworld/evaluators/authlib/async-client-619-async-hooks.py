@@ -51,23 +51,49 @@ def main() -> None:
 
     async def scenario() -> None:
         events = []
+        expected_inputs = {}
 
-        async def first(response):
-            events.append("first:start")
+        def synchronous(response):
+            assert response.json()["access_token"] == expected_inputs[synchronous]
+            events.append("sync")
+            return httpx.Response(
+                200,
+                json={"access_token": "sync", "token_type": "Bearer"},
+                request=response.request,
+            )
+
+        async def asynchronous(response):
+            assert response.json()["access_token"] == expected_inputs[asynchronous]
+            events.append("async:start")
             await asyncio.sleep(0)
-            events.append("first:end")
-            return response
-
+            events.append("async:end")
+            return httpx.Response(
+                200,
+                json={"access_token": "async", "token_type": "Bearer"},
+                request=response.request,
+            )
 
         async with AsyncOAuth2Client(
             "client-id", "client-secret", transport=httpx.MockTransport(handler)
         ) as client:
-            client.register_compliance_hook("access_token_response", first)
+            client.register_compliance_hook("access_token_response", synchronous)
+            client.register_compliance_hook("access_token_response", asynchronous)
+            hooks = tuple(client.compliance_hook["access_token_response"])
+            token_value = "raw"
+            expected_events = []
+            for hook in hooks:
+                expected_inputs[hook] = token_value
+                token_value = "sync" if hook is synchronous else "async"
+                expected_events.extend(
+                    ["sync"]
+                    if hook is synchronous
+                    else ["async:start", "async:end"]
+                )
             token = await client.fetch_token(
                 "https://issuer.test/token", grant_type="client_credentials"
             )
-            assert token["access_token"] == "raw"
-        assert events == ["first:start", "first:end"]
+            assert token["access_token"] == token_value
+        assert events == expected_events
 
         class HookFailure(Exception):
             pass

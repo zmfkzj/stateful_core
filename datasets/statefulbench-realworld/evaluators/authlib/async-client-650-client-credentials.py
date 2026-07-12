@@ -44,13 +44,30 @@ def main() -> None:
     async def scenario() -> None:
         calls = []
         updates = []
+        endpoint = "https://issuer.test/token?fixed=1"
 
         async def handler(request):
-            calls.append((request.method, str(request.url), request.headers.get("Authorization")))
+            calls.append(
+                (
+                    request.method,
+                    str(request.url),
+                    request.headers.get("Authorization"),
+                )
+            )
+            if request.url.path == "/failed":
+                return httpx.Response(
+                    400,
+                    json={"error": "invalid_client"},
+                    request=request,
+                )
             if request.url.path == "/token":
                 return httpx.Response(
                     200,
-                    json={"access_token": f"token-{len(calls)}", "token_type": "Bearer", "expires_in": 3600},
+                    json={
+                        "access_token": f"token-{len(calls)}",
+                        "token_type": "Bearer",
+                        "expires_in": 3600,
+                    },
                     request=request,
                 )
             assert request.url.path == "/resource"
@@ -68,18 +85,61 @@ def main() -> None:
             update_token=update_token,
             transport=httpx.MockTransport(handler),
         ) as client:
-            await client.fetch_token("https://issuer.test/token")
+            await client.fetch_token(endpoint, method="GET")
+            assert client.metadata["token_endpoint"] == endpoint
             client.token["expires_at"] = 0
             response = await client.get("https://service.test/resource")
             assert response.json() == {"ok": True}
 
-        assert [url for _, url, _ in calls] == [
-            "https://issuer.test/token",
-            "https://issuer.test/token",
-            "https://service.test/resource",
-        ]
+        assert [method for method, _, _ in calls] == ["GET", "POST", "GET"]
+        assert calls[0][1].startswith(f"{endpoint}&")
+        assert calls[1][1] == endpoint
+        assert calls[-1][1] == "https://service.test/resource"
         assert calls[-1][2] == "Bearer token-2"
         assert updates == [("token-2", "token-1")]
+
+        configured_endpoint = "https://configured.test/token?fixed=1"
+        explicit_endpoint = "https://different.test/token?fixed=2"
+        configured_calls = []
+
+        async def configured_handler(request):
+            configured_calls.append((request.method, str(request.url)))
+            if request.url.path == "/token":
+                return httpx.Response(
+                    200,
+                    json={"access_token": "configured", "token_type": "Bearer", "expires_in": 3600},
+                    request=request,
+                )
+            return httpx.Response(200, json={"ok": True}, request=request)
+
+        async with AsyncOAuth2Client(
+            "client-id",
+            "client-secret",
+            grant_type="client_credentials",
+            token={"access_token": "old", "token_type": "Bearer", "expires_at": 0},
+            token_endpoint=configured_endpoint,
+            transport=httpx.MockTransport(configured_handler),
+        ) as client:
+            await client.fetch_token(explicit_endpoint, method="GET")
+            assert client.metadata["token_endpoint"] == configured_endpoint
+            client.token["expires_at"] = 0
+            await client.get("https://service.test/resource")
+
+        assert configured_calls[0][0] == "GET"
+        assert configured_calls[1] == ("POST", configured_endpoint)
+
+        async with AsyncOAuth2Client(
+            "client-id",
+            "client-secret",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            try:
+                await client.fetch_token("https://issuer.test/failed", method="GET")
+            except Exception:
+                pass
+            else:
+                raise AssertionError("OAuth error response must raise")
+            assert "token_endpoint" not in client.metadata
 
     asyncio.run(scenario())
 
