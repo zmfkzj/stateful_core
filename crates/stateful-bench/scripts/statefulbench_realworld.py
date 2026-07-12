@@ -4,17 +4,33 @@ import argparse
 import ast
 import contextlib
 import hashlib
+import importlib.util
 import json
 import os
 import re
-import tarfile
 import shutil
+import signal
 import subprocess
 import sys
+import tarfile
 import tempfile
+import time
+from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 from urllib import request
 from urllib.parse import urlsplit
+
+
+_LITE_PATH = Path(__file__).with_name("statefulbench_lite.py")
+_LITE_SPEC = importlib.util.spec_from_file_location("statefulbench_lite_for_realworld", _LITE_PATH)
+if _LITE_SPEC is None or _LITE_SPEC.loader is None:
+    raise RuntimeError(f"cannot import lite runner from {_LITE_PATH}")
+_LITE = importlib.util.module_from_spec(_LITE_SPEC)
+sys.modules[_LITE_SPEC.name] = _LITE
+_LITE_SPEC.loader.exec_module(_LITE)
+AgentHandle = _LITE.AgentHandle
+RunConfig = _LITE.RunConfig
 
 
 _REPOSITORY_FIELDS = frozenset(
@@ -377,6 +393,13 @@ def repo_entries(manifest: dict) -> tuple[dict, ...]:
     if type(manifest) is not dict or type(manifest.get("repositories")) is not list:
         raise ValueError("manifest repositories must be an array")
     return tuple(manifest["repositories"])
+
+
+def _corpus_matches_repository(repo: dict, corpus: dict) -> bool:
+    return corpus["repository"] in {
+        repo["key"],
+        urlsplit(repo["canonical_url"]).path.strip("/"),
+    }
 
 
 def _run_logged(
@@ -855,6 +878,210 @@ def _qualified(result: dict) -> bool:
     )
 
 
+def _runner_prompts(corpus: dict, arm_dir: Path) -> tuple[list[tuple[dict, Path]], Path]:
+    prompt_dir = arm_dir / "prompts"
+    prompt_dir.mkdir(parents=True, exist_ok=True)
+    tasks = []
+    for task in corpus["tasks"]:
+        prompt = prompt_dir / f"task-{task['key']}.prompt.txt"
+        prompt.write_text(
+            "You are working in a shared repository checkout. Other agents may edit concurrently.\n"
+            f"{task['prompt']}\n"
+            "Do not modify evaluator files.\n",
+            encoding="utf-8",
+        )
+        tasks.append((task, prompt))
+    final_prompt = prompt_dir / "final.prompt.txt"
+    specifications = "\n\n".join(
+        f"{task['key']}:\n{task['prompt']}" for task in corpus["tasks"]
+    )
+    final_prompt.write_text(
+        "You are the integration reviewer for this repository.\n"
+        f"{corpus['final_prompt']}\n\n"
+        "Evaluator scripts have been injected into .statefulbench-evaluators. "
+        "Run every evaluator and the upstream suite, then fix all failures.\n\n"
+        f"Task specifications:\n{specifications}\n",
+        encoding="utf-8",
+    )
+    return tasks, final_prompt
+
+
+def _inject_evaluators(corpus: dict, dataset_root: Path, workspace: Path) -> list[Path]:
+    injected = workspace / ".statefulbench-evaluators"
+    paths = []
+    for task in corpus["tasks"]:
+        relative = Path(task["evaluator"])
+        source = dataset_root / relative
+        destination = injected / relative.relative_to("evaluators")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+        paths.append(destination)
+    return paths
+
+
+def _empty_run_result(repo: dict, arm: str, trial: int, error: str | None = None) -> dict:
+    return {
+        "repository": repo["key"],
+        "arm": arm,
+        "trial": trial,
+        "cleared": False,
+        "error": error,
+        "arm_wall_time_s": 0.0,
+        "tasks_wall_time_s": 0.0,
+        "final_wall_time_s": 0.0,
+        "total_tokens": 0,
+        "total_tool_calls": 0,
+        "post_suite_ok": False,
+        "evaluators_ok": False,
+        "upstream_suite_ok": False,
+        "agents": [],
+        "artifacts": {},
+    }
+
+
+def run_repo_arm(
+    repo: dict,
+    corpus: dict,
+    manifest_dir: Path,
+    cache_dir: Path,
+    out_dir: Path,
+    arm: str,
+    cfg: RunConfig,
+    *,
+    launch=_LITE.launch_agent,
+    server=_LITE.arm_stateful_server,
+    workspace_factory=_fresh_workspace,
+    archive_loader=ensure_archive,
+    setup=_run_setup,
+    evaluator=_run_evaluator,
+    suite=_run_suite,
+) -> dict:
+    if arm not in {"sequential", "parallel-off", "parallel-on"}:
+        raise ValueError(f"unknown arm: {arm}")
+    trial = cfg.trial
+    if arm == "parallel-on" and not cfg.stateful_binary:
+        return _empty_run_result(repo, arm, trial, "parallel-on requires a resolvable stateful binary")
+
+    arm_dir = out_dir / repo["key"] / arm / f"trial-{trial}"
+    artifact_dir = arm_dir / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifacts: dict[str, dict[str, str]] = {}
+    tasks, final_prompt = _runner_prompts(corpus, arm_dir)
+    agents: list[dict] = []
+    task_started: float | None = None
+    task_ended: float | None = None
+    arm_started: float | None = None
+    final_started: float | None = None
+    final_ended: float | None = None
+    error: str | None = None
+    evaluators_ok = False
+    upstream_suite_ok = False
+
+    def wait(handle: AgentHandle, kind: str) -> tuple[dict, float]:
+        return _LITE._wait_agent(handle, arm_dir, kind, cfg)
+
+    try:
+        archive = archive_loader(repo, cache_dir)
+        with workspace_factory(
+            repo, archive, cache_dir, artifacts, artifact_dir, f"run:{arm}:trial-{trial}"
+        ) as materialized:
+            if materialized is None:
+                raise RuntimeError("unable to create benchmark workspace")
+            workspace, python, env = materialized
+            if not setup(repo, workspace, python, env, artifacts, artifact_dir, "run"):
+                raise RuntimeError("repository setup failed")
+            mode = "stateful" if arm == "parallel-on" else "no-state"
+            server_context = server(arm_dir, cfg) if arm == "parallel-on" else nullcontext({})
+            with server_context as runtime_env:
+                runtime_cfg = replace(cfg, stateful_runtime_env=runtime_env or None)
+
+                def start(task: dict, prompt: Path) -> AgentHandle:
+                    nonlocal task_started, arm_started
+                    handle = launch(arm_dir, workspace, task["key"], prompt, mode, runtime_cfg)
+                    started = getattr(handle, "started_monotonic", time.monotonic())
+                    task_started = started if task_started is None else min(task_started, started)
+                    arm_started = started if arm_started is None else min(arm_started, started)
+                    return handle
+
+                if arm == "sequential":
+                    for task, prompt in tasks:
+                        record, ended = wait(start(task, prompt), "task")
+                        agents.append(record)
+                        task_ended = ended
+                else:
+                    handles = [start(task, prompt) for task, prompt in tasks]
+                    for handle in handles:
+                        record, ended = wait(handle, "task")
+                        agents.append(record)
+                        task_ended = ended if task_ended is None else max(task_ended, ended)
+
+                evaluator_paths = _inject_evaluators(corpus, manifest_dir, workspace)
+                final_handle = launch(arm_dir, workspace, "final", final_prompt, mode, runtime_cfg)
+                final_started = getattr(final_handle, "started_monotonic", time.monotonic())
+                arm_started = final_started if arm_started is None else min(arm_started, final_started)
+                final_record, final_ended = wait(final_handle, "final")
+                agents.append(final_record)
+
+                evaluators_ok = all(
+                    evaluator(path, workspace, python, env, artifacts, artifact_dir, task["key"])
+                    for path, (task, _) in zip(evaluator_paths, tasks, strict=True)
+                )
+                upstream_suite_ok = suite(
+                    repo, workspace, python, env, artifacts, artifact_dir, "post-final"
+                )
+    except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
+        error = str(exc)
+
+    post_suite_ok = evaluators_ok and upstream_suite_ok
+    tasks_wall_time_s = (
+        0.0
+        if task_started is None or task_ended is None
+        else max(0.0, task_ended - task_started)
+    )
+    arm_end = final_ended if final_ended is not None else task_ended
+    arm_wall_time_s = (
+        0.0
+        if arm_started is None or arm_end is None
+        else max(0.0, arm_end - arm_started)
+    )
+    final_wall_time_s = (
+        0.0
+        if final_started is None or final_ended is None
+        else max(0.0, final_ended - final_started)
+    )
+    result = {
+        "repository": repo["key"],
+        "arm": arm,
+        "trial": trial,
+        "cleared": (
+            error is None
+            and post_suite_ok
+            and len(agents) == len(tasks) + 1
+            and all(record["exit_code"] == 0 and not record["timed_out"] for record in agents)
+        ),
+        "error": error,
+        "arm_wall_time_s": arm_wall_time_s,
+        "tasks_wall_time_s": tasks_wall_time_s,
+        "final_wall_time_s": final_wall_time_s,
+        "total_tokens": sum(record["total_tokens"] for record in agents),
+        "total_tool_calls": sum(record["tool_calls"] for record in agents),
+        "post_suite_ok": post_suite_ok,
+        "evaluators_ok": evaluators_ok,
+        "upstream_suite_ok": upstream_suite_ok,
+        "agents": agents,
+        "artifacts": artifacts,
+    }
+    (arm_dir / "results.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    return result
+
+
+def _parse_repositories(value: str) -> list[str]:
+    values = [item.strip() for item in value.split(",") if item.strip()]
+    if not values:
+        raise argparse.ArgumentTypeError("--repos must contain one or more repository keys")
+    return values
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
@@ -864,25 +1091,75 @@ def main(argv: list[str] | None = None) -> int:
     qualify.add_argument("--manifest", type=Path, required=True)
     qualify.add_argument("--cache", type=Path, required=True)
     qualify.add_argument("--repo", action="append")
+    run = commands.add_parser("run", help="run real-world three-arm corpus")
+    run.add_argument("--manifest", type=Path, required=True)
+    run.add_argument("--cache", type=Path, required=True)
+    run.add_argument("--out", type=Path, required=True)
+    run.add_argument("--repos", type=_parse_repositories)
+    run.add_argument("--arms", type=_LITE._parse_arms, default=_LITE._parse_arms("sequential,parallel-off,parallel-on"))
+    run.add_argument("--trials", type=int, default=1)
+    run.add_argument("--model", default="openai-codex/gpt-5.6-terra")
+    run.add_argument("--thinking", default="high")
+    run.add_argument("--omp-bin", default="omp")
+    run.add_argument("--stateful-binary", default=shutil.which("stateful"))
+    run.add_argument("--timeout-s", type=int, default=900)
     arguments = parser.parse_args(argv)
 
+    if arguments.command == "run":
+        if arguments.trials < 1:
+            parser.error("--trials must be at least 1")
+        if arguments.timeout_s < 1:
+            parser.error("--timeout-s must be at least 1")
+        if "parallel-on" in arguments.arms and not arguments.stateful_binary:
+            parser.error("parallel-on requires a resolvable stateful binary; pass --stateful-binary")
     manifest = load_manifest(arguments.manifest)
     repositories = repo_entries(manifest)
-    if arguments.repo:
-        selected = tuple(
-            repo for repo in repositories if repo["key"] in set(arguments.repo)
-        )
-        missing = sorted(set(arguments.repo) - {repo["key"] for repo in selected})
+    wanted = arguments.repos if arguments.command == "run" else arguments.repo
+    if wanted:
+        selected = tuple(repo for repo in repositories if repo["key"] in set(wanted))
+        missing = sorted(set(wanted) - {repo["key"] for repo in selected})
         if missing:
             parser.error(f"unknown repository key: {', '.join(missing)}")
     else:
         selected = repositories
 
+    if arguments.command == "run":
+        cfg = RunConfig(
+            tasks=10,
+            timeout_s=arguments.timeout_s,
+            model=arguments.model,
+            thinking=arguments.thinking,
+            omp_bin=arguments.omp_bin,
+            stateful_binary=arguments.stateful_binary,
+        )
+        results = []
+        for repo in selected:
+            try:
+                corpus = load_corpus(arguments.manifest.parent / repo["corpus"])
+                if not _corpus_matches_repository(repo, corpus):
+                    raise ValueError("corpus repository does not match manifest key")
+                for trial in range(1, arguments.trials + 1):
+                    for arm in arguments.arms:
+                        results.append(
+                            run_repo_arm(
+                                repo,
+                                corpus,
+                                arguments.manifest.parent,
+                                arguments.cache,
+                                arguments.out,
+                                arm,
+                                replace(cfg, trial=trial),
+                            )
+                        )
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                results.append(_empty_run_result(repo, "run", 0, str(error)))
+        return 0 if results and all(result["cleared"] for result in results) else 1
+
     results = []
     for repo in selected:
         try:
             corpus = load_corpus(arguments.manifest.parent / repo["corpus"])
-            if corpus["repository"] != repo["key"]:
+            if not _corpus_matches_repository(repo, corpus):
                 raise ValueError("corpus repository does not match manifest key")
             result = qualify_repository(repo, corpus, arguments.manifest.parent, arguments.cache)
         except (OSError, ValueError, subprocess.SubprocessError) as error:

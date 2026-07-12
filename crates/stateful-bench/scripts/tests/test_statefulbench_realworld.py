@@ -80,6 +80,12 @@ class ManifestTests(unittest.TestCase):
             self.assertTrue(all(isinstance(part, str) and part for part in entry["suite"]))
             self.assertEqual(entry["corpus"], f"repos/{entry['key']}.json")
 
+
+    def test_manifest_repository_matches_full_corpus_identity(self) -> None:
+        repo = self.mod.repo_entries(self.mod.load_manifest(self.manifest_path))[0]
+        corpus = self.mod.load_corpus(MANIFEST.parent / repo["corpus"])
+
+        self.assertTrue(self.mod._corpus_matches_repository(repo, corpus))
     def test_load_manifest_rejects_duplicate_keys(self) -> None:
         data = self.load_data()
         data["repositories"][1]["key"] = data["repositories"][0]["key"]
@@ -845,5 +851,164 @@ class QualificationTests(unittest.TestCase):
         )
         self.assertEqual(repository["isolated_tasks"], ["task-0"])
         self.assertTrue((self.cache / "qualification" / "fixture" / "artifacts").is_dir())
+
+
+class RealWorldRunnerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tempdir.name)
+        self.mod = load_script("statefulbench_realworld.py")
+        self.repo = {
+            "key": "fixture",
+            "archive_sha256": "0" * 64,
+            "python": "3.14.6",
+            "setup": ["python", "-c", "pass"],
+            "suite": ["python", "-c", "pass"],
+        }
+        self.corpus = {
+            "repository": "fixture",
+            "final_prompt": "repair every task",
+            "tasks": [
+                {
+                    "key": f"task-{index}",
+                    "prompt": f"implement task {index}",
+                    "evaluator": f"evaluators/task-{index}.py",
+                }
+                for index in range(10)
+            ],
+        }
+        self.dataset = self.root / "dataset"
+        for task in self.corpus["tasks"]:
+            evaluator = self.dataset / task["evaluator"]
+            evaluator.parent.mkdir(parents=True, exist_ok=True)
+            evaluator.write_text("print('evaluator')\n", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    @contextlib.contextmanager
+    def workspace(self, *_args):
+        workspace = self.root / "workspace"
+        workspace.mkdir(exist_ok=True)
+        yield workspace, Path(sys.executable), {}
+
+    def fake_launch(self, events, final_check=None, exit_codes=None):
+        exit_codes = exit_codes or {}
+
+        class Process:
+            def __init__(self, agent_id):
+                self.agent_id = agent_id
+                self.returncode = None
+                self.pid = 1
+
+            def wait(self, timeout=None):
+                events.append(("wait", self.agent_id))
+                self.returncode = exit_codes.get(self.agent_id, 0)
+                return self.returncode
+
+        def launch(arm_dir, workspace, agent_id, prompt_path, mode, cfg):
+            if agent_id == "final" and final_check is not None:
+                final_check(workspace)
+            events.append(("launch", agent_id, mode))
+            log = arm_dir / "logs" / f"{agent_id}.stdout.log"
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text("", encoding="utf-8")
+            return self.mod.AgentHandle(Process(agent_id), agent_id, 0.0)
+
+        return launch
+
+    def run_arm(self, arm, events, **kwargs):
+        suite_ok = kwargs.pop("suite_ok", True)
+        return self.mod.run_repo_arm(
+            self.repo,
+            self.corpus,
+            self.dataset,
+            self.root / "cache",
+            self.root / "out",
+            arm,
+            self.mod.RunConfig(tasks=10, stateful_binary="/tmp/stateful"),
+            launch=self.fake_launch(events, **kwargs.pop("launch_kwargs", {})),
+            workspace_factory=self.workspace,
+            archive_loader=lambda *_: self.root / "archive.tar.gz",
+            setup=lambda *_: True,
+            evaluator=lambda *_: True,
+            suite=lambda *_: suite_ok,
+            **kwargs,
+        )
+
+    def test_sequential_waits_then_injects_evaluators_before_final_with_eleven_records(self) -> None:
+        events = []
+
+        def evaluators_visible(workspace):
+            self.assertTrue((workspace / ".statefulbench-evaluators" / "task-0.py").is_file())
+            self.assertEqual(len([event for event in events if event[0] == "wait"]), 10)
+
+        result = self.run_arm(
+            "sequential",
+            events,
+            launch_kwargs={"final_check": evaluators_visible},
+        )
+
+        launches = [event[1] for event in events if event[0] == "launch"]
+        waits = [event[1] for event in events if event[0] == "wait"]
+        self.assertEqual(launches, [f"task-{index}" for index in range(10)] + ["final"])
+        self.assertEqual(waits, [f"task-{index}" for index in range(10)] + ["final"])
+        for index in range(9):
+            self.assertLess(
+                events.index(("wait", f"task-{index}")),
+                events.index(("launch", f"task-{index + 1}", "no-state")),
+            )
+        self.assertTrue(result["cleared"])
+        self.assertEqual(len(result["agents"]), 11)
+        self.assertTrue((self.root / "out" / "fixture" / "sequential" / "trial-1" / "results.json").is_file())
+
+    def test_parallel_launches_ten_before_waits_and_starts_one_stateful_server(self) -> None:
+        events = []
+
+        @contextlib.contextmanager
+        def server(*_args):
+            events.append(("server", "start"))
+            yield {"STATEFUL_SERVER_URL": "http://server"}
+            events.append(("server", "stop"))
+
+        result = self.run_arm("parallel-on", events, server=server)
+
+        first_wait = next(index for index, event in enumerate(events) if event[0] == "wait")
+        self.assertEqual(
+            [event[1] for event in events[:first_wait] if event[0] == "launch"],
+            [f"task-{index}" for index in range(10)],
+        )
+        self.assertEqual([event for event in events if event[0] == "server"], [("server", "start"), ("server", "stop")])
+        self.assertTrue(result["cleared"])
+        self.assertEqual(len(result["agents"]), 11)
+
+    def test_post_suite_or_agent_failure_prevents_cleared(self) -> None:
+        suite_events = []
+        suite_failed = self.run_arm("parallel-off", suite_events, suite_ok=False)
+        agent_events = []
+        agent_failed = self.run_arm(
+            "parallel-off",
+            agent_events,
+            launch_kwargs={"exit_codes": {"task-5": 1}},
+        )
+
+        self.assertFalse(suite_failed["cleared"])
+        self.assertFalse(suite_failed["post_suite_ok"])
+        self.assertFalse(agent_failed["cleared"])
+        self.assertEqual(len(suite_failed["agents"]), 11)
+        self.assertEqual(len(agent_failed["agents"]), 11)
+
+    def test_run_help_lists_required_realworld_arguments(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout), self.assertRaises(SystemExit) as raised:
+            self.mod.main(["run", "--help"])
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("--manifest", stdout.getvalue())
+        self.assertIn("--cache", stdout.getvalue())
+        self.assertIn("--out", stdout.getvalue())
+        self.assertIn("--repos", stdout.getvalue())
+        self.assertIn("--arms", stdout.getvalue())
+        self.assertIn("--trials", stdout.getvalue())
 if __name__ == "__main__":
     unittest.main()
