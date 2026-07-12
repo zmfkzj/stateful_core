@@ -13,7 +13,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/opt/bun/bin:/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin \
     PYTHONDONTWRITEBYTECODE=1
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bash bubblewrap ca-certificates curl git build-essential pkg-config \
+    && apt-get install -y --no-install-recommends bash bubblewrap ca-certificates curl git build-essential pkg-config unzip \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://bun.sh/install | bash \
     && bun install -g "@oh-my-pi/pi-coding-agent@${OMP_VERSION}" \
