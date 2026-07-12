@@ -245,10 +245,12 @@ index db386ac..eac6ab3 100644
              init=init,
              slots=slots,
              frozen=frozen,
+
 diff --git a/tests/test_slots.py b/tests/test_slots.py
 --- a/tests/test_slots.py
 +++ b/tests/test_slots.py
-@@ -785,10 +785,7 @@ def test_slots_cached_property_works_on_frozen_instances():
+@@ -785,9 +785,6 @@ def test_slots_cached_property_works_on_frozen_instances():
+     assert A(x=1).f == 1
  
  
 -@pytest.mark.xfail(
@@ -257,9 +259,7 @@ diff --git a/tests/test_slots.py b/tests/test_slots.py
  def test_slots_cached_property_infers_type():
      """
      Infers type of cached property on Python 3.13 and earlier.
-    See also #1431.
-    """
-@@ -1034,7 +1031,7 @@
+@@ -1034,7 +1031,7 @@ def test_slots_sub_class_avoids_duplicated_slots():
              return self.x * 2
  
      assert B(1).f == 2
@@ -268,7 +268,7 @@ diff --git a/tests/test_slots.py b/tests/test_slots.py
  
  
  def test_slots_sub_class_with_actual_slot():
-@@ -1055,7 +1052,7 @@
+@@ -1055,7 +1052,7 @@ def test_slots_sub_class_with_actual_slot():
          f: int = attr.ib()
  
      assert B(1, 2).f == 2
