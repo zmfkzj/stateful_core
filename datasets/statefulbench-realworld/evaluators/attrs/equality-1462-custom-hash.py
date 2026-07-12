@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate safe custom-equality hashing for attrs issue #1462."""
+"""Evaluate opt-in identity hashing for custom equality in #1462."""
 
 from __future__ import annotations
 
@@ -10,43 +10,60 @@ from pathlib import Path
 def main(checkout: str) -> None:
     sys.path.insert(0, str(Path(checkout) / "src"))
 
-    from attrs import define, field
-
-    ne_marker = object()
+    from attrs import define
 
     @define(frozen=True)
-    class SafeValue:
-        value: str = field(eq=str.casefold)
+    class C:
+        x: int
 
-        def __eq__(self, other):
-            return self.__attrs_eq__(other)
+        def __eq__(self, value):
+            return self.x in (0, value)
 
-        def __ne__(self, other):
-            return other is ne_marker
-
-    same = SafeValue("One")
-    assert same == SafeValue("one")
-    assert same.__attrs_eq__(object()) is NotImplemented
-    assert same != ne_marker
-    assert SafeValue.__hash__ is None
+    zero = C(0)
+    assert zero == C(1)
+    assert C.__hash__ is None
     try:
-        hash(same)
+        hash(zero)
     except TypeError:
         pass
     else:
-        raise AssertionError("custom equality must remain unhashable by default")
+        raise AssertionError("custom value equality must remain unhashable by default")
 
-    @define(frozen=True, unsafe_hash=True)
-    class ExplicitlyHashable:
-        value: str = field(eq=str.casefold)
+    @define(frozen=True, unsafe_identity_hash=True)
+    class Identity:
+        x: int
 
         def __eq__(self, other):
-            return self.__attrs_eq__(other)
+            return self is other
 
-    left = ExplicitlyHashable("One")
-    right = ExplicitlyHashable("one")
-    assert left == right
-    assert hash(left) == hash(right)
+    first = Identity(1)
+    second = Identity(1)
+    assert first == first
+    assert first != second
+    assert Identity.__hash__ is object.__hash__
+    hash(first)
+
+    try:
+
+        @define(frozen=True, unsafe_identity_hash=True)
+        class MissingCustomEquality:
+            x: int
+
+        raise AssertionError("identity hashing requires custom equality")
+    except TypeError:
+        pass
+
+    try:
+
+        @define(
+            frozen=True, unsafe_hash=True, unsafe_identity_hash=True
+        )
+        class ConflictingHash:
+            x: int
+
+        raise AssertionError("conflicting hash strategies must be rejected")
+    except TypeError:
+        pass
 
 
 if __name__ == "__main__":

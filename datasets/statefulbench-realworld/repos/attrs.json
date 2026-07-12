@@ -53,11 +53,11 @@
         "https://github.com/python-attrs/attrs/issues/1333"
       ],
       "source_hash": "f3165fcecc13e066ef9862340d57ff8608effa15e7368e1a911f6967b0eeb288",
-      "prompt": "Fix issue #1333 in attr._make._ClassBuilder._create_slots_class. For slotted attrs classes, an overriding functools.cached_property must be able to read its inherited cached property through super(). Preserve per-instance caching for parent and child values.",
+      "prompt": "Fix issue #1333 in attr._make._ClassBuilder._create_slots_class. For slotted attrs classes, an overriding functools.cached_property must use storage distinct from its inherited descriptor so parent access through super() remains independently cached.",
       "acceptance": [
-        "An overriding slotted cached_property can read its inherited property through super().",
-        "Parent and child cached-property functions each run once for a child instance.",
-        "A Parent instance still computes and caches its property normally."
+        "The inherited property is readable through super() before and after the overriding property, in either access order.",
+        "Parent and child cached-property functions each run once per child instance and retain distinct cached values.",
+        "A Parent instance still computes and caches its property normally, and cached-property return annotations remain present on pre-3.14 slotted classes."
       ],
       "overlap_anchors": [
         {
@@ -75,11 +75,11 @@
         "https://github.com/python-attrs/attrs/issues/1532"
       ],
       "source_hash": "7db258dcab0e108517db76b6663e5a622d01aae9173fd9e36011941b0283a765",
-      "prompt": "Implement issue #1532 in attr._make._ClassBuilder._create_slots_class. Give each slotted attrs class that declares functools.cached_property methods a public __attrs_cached_properties__ mapping from each directly declared cached-property name to its original function.",
+      "prompt": "Implement issue #1532 in attr._make._ClassBuilder._create_slots_class. Give each slotted attrs class that declares functools.cached_property methods a public __attrs_cached_properties__ mapping from each directly declared cached-property name to its original function, before any slot descriptor wrapping.",
       "acceptance": [
         "A slotted attrs class with a cached_property exposes __attrs_cached_properties__.",
         "The mapping contains exactly that class's directly declared cached-property names and callable original functions.",
-        "A child mapping contains only directly declared properties while the parent mapping remains unchanged."
+        "A child mapping contains only directly declared properties while the parent mapping remains unchanged, including when cached properties are transformed into slot descriptors."
       ],
       "overlap_anchors": [
         {
@@ -119,9 +119,9 @@
         "https://github.com/python-attrs/attrs/issues/1335"
       ],
       "source_hash": "a87acea0f9562119485aab338e6141006e476f3efa0aa5fec735cb17f9fddd71",
-      "prompt": "Implement the truthful #1335 extension in attr._make._ClassBuilder.build_class. For a decorated subclass, forward the class body's __attrs_init_subclass_kwargs__ mapping as keyword arguments to an inherited __attrs_init_subclass__ hook after the generated class is created.",
+      "prompt": "Implement a benchmark-defined, opt-in extension in attr._make._ClassBuilder.build_class. It is motivated by open feature discussion #1335 but does not reproduce or fix that issue's class-header keyword request, because build_class runs after class creation. For a decorated subclass, forward the class body's __attrs_init_subclass_kwargs__ mapping as keyword arguments to an inherited __attrs_init_subclass__ hook after the generated class is created.",
       "acceptance": [
-        "The mapping supplies required keyword-only arguments to the inherited hook.",
+        "The benchmark-defined __attrs_init_subclass_kwargs__ mapping supplies required keyword-only arguments to the inherited hook.",
         "Each supplied keyword is visible on the generated subclass and the hook runs exactly once.",
         "An inherited zero-argument hook still runs exactly once without a mapping."
       ],
@@ -141,11 +141,12 @@
         "https://github.com/python-attrs/attrs/issues/1462"
       ],
       "source_hash": "a92d7ce64c7808244cae622d4786ed6d6d6b844786eea237c1e332c0fac911fb",
-      "prompt": "Address issue #1462 by giving a class with a custom __eq__ an attrs-generated structural equality helper named __attrs_eq__. The helper preserves attrs field comparison rules and returns NotImplemented for another class.",
+      "prompt": "Implement the benchmark-defined unsafe_identity_hash extension motivated by issue #1462. A class with class-body custom __eq__ remains unhashable by default. Permit an explicit unsafe_identity_hash=True opt-in only for a custom identity-equality class, installing object.__hash__; reject its combination with generated hash options.",
       "acceptance": [
-        "A frozen attrs class with custom __eq__ can delegate to self.__attrs_eq__(other).",
-        "The helper honors configured equality keys and returns NotImplemented for another class.",
-        "A custom-equality class remains unhashable by default and unsafe_hash=True remains opt-in."
+        "The source-shaped frozen class with custom value equality remains unhashable by default.",
+        "unsafe_identity_hash=True explicitly installs object.__hash__ for a class whose custom __eq__ is identity equality.",
+        "unsafe_identity_hash=True rejects conflicting hash or unsafe_hash generation options.",
+        "unsafe_identity_hash=True rejects a class without a custom __eq__."
       ],
       "overlap_anchors": [
         {

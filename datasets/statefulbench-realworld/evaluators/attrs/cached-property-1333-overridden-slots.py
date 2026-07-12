@@ -36,11 +36,25 @@ class Child(Parent):
 
 
 parent = Parent()
-child = Child()
+super_first = Child()
+child_first = Child()
 
 assert parent.name == "Alice"
 assert parent.name == "Alice"
-assert child.name == "Bob (son of Alice)"
-assert child.name == "Bob (son of Alice)"
-assert parent_calls == 2, parent_calls
-assert child_calls == 1, child_calls
+
+assert super(Child, super_first).name == "Alice"
+assert super_first.name == "Bob (son of Alice)"
+assert super(Child, super_first).name == "Alice"
+assert super_first.name == "Bob (son of Alice)"
+
+assert child_first.name == "Bob (son of Alice)"
+assert super(Child, child_first).name == "Alice"
+assert child_first.name == "Bob (son of Alice)"
+assert super(Child, child_first).name == "Alice"
+
+if not hasattr(sys, "_clear_type_descriptors"):
+    assert Parent.__annotations__["name"] == "str"
+    assert Child.__annotations__["name"] == "str"
+
+assert parent_calls == 3, parent_calls
+assert child_calls == 2, child_calls

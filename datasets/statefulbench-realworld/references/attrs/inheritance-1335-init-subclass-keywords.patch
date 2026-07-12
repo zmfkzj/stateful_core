@@ -11,3 +11,4 @@ diff --git a/src/attr/_make.py b/src/attr/_make.py
 +            )
  
          return cls
+ 
