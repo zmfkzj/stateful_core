@@ -138,6 +138,21 @@ class DockerRuntimeTests(unittest.TestCase):
 
         self.assertEqual(exited.exception.code, 3)
 
+    def test_entrypoint_is_directly_executable_after_image_chmod(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            installed = Path(directory) / "statefulbench-container-entry"
+            installed.write_bytes(Path(self.entry.__file__).read_bytes())
+            installed.chmod(0o755)
+            completed = subprocess.run(
+                [str(installed)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn("usage: statefulbench-container-entry", completed.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
