@@ -25,6 +25,10 @@
         {
           "path": "storages/backends/s3.py",
           "symbol": "storages.backends.s3.S3Storage.connection"
+        },
+        {
+          "path": "storages/backends/s3.py",
+          "symbol": "storages.backends.s3.S3Storage"
         }
       ],
       "evaluator": "evaluators/django-storages/read-metadata-1493-refreshable-session.py",
@@ -49,6 +53,10 @@
         {
           "path": "storages/backends/s3.py",
           "symbol": "storages.backends.s3.S3Storage.connection"
+        },
+        {
+          "path": "storages/backends/s3.py",
+          "symbol": "storages.backends.s3.S3Storage"
         }
       ],
       "evaluator": "evaluators/django-storages/read-metadata-1472-connection-cache.py",
