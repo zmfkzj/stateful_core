@@ -39,11 +39,12 @@
       "kind": "bug",
       "sources": ["https://github.com/python-pendulum/pendulum/issues/971"],
       "source_hash": "448ee9a3fc5494487fe03248e43e73dac2e20331e76f3c0a45f16336576f48ff",
-      "prompt": "Fix issue #971 in pendulum.formatting.formatter.Formatter.parse. Preserve escaped multi-character literal blocks while tokenizing from_format formats, so locale words inside [brackets] are not interpreted as format tokens. Keep named timezones and fractional-second precision intact. #797 is base-green at the pinned commit; #972 was rejected because it is a pull request.",
+      "prompt": "Fix issue #971 in pendulum.formatting.formatter.Formatter.parse. Preserve escaped multi-character literal blocks while tokenizing from_format formats, so locale words inside [brackets] are not interpreted as format tokens. Restore literal-block contents as regex-safe literals, including metacharacters and backslashes. Keep named timezones and fractional-second precision intact. #797 is base-green at the pinned commit; #972 was rejected because it is a pull request.",
       "acceptance": [
         "from_format accepts [de] and [del] literal blocks with locale=\"es\" without treating their interior characters as format tokens.",
         "Repeated multi-character literal blocks do not create duplicate regex group names.",
         "A parsed named timezone and six-digit fractional seconds are preserved.",
+        "Literal blocks containing regex metacharacters or backslashes match exactly and do not admit non-literal replacements.",
         "The tokenizer change is contained in src/pendulum/formatting/formatter.py at Formatter.parse."
       ],
       "overlap_anchors": [{"path": "src/pendulum/formatting/formatter.py", "symbol": "pendulum.formatting.formatter.Formatter.parse"}],
@@ -55,11 +56,12 @@
       "kind": "feature",
       "sources": ["https://github.com/python-pendulum/pendulum/issues/795"],
       "source_hash": "2930118919c8b89b175caed07a4043f644a56fd1dcb74fe169aca3d1eabdf52b",
-      "prompt": "Implement issue #795 by adding strict=True to pendulum.from_format and threading it through pendulum.formatting.formatter.Formatter.parse. In strict mode, padded numeric format tokens must require their fixed widths; preserve permissive behavior by default and preserve locale, named timezone, and microsecond parsing.",
+      "prompt": "Implement issue #795 by adding strict=True to pendulum.from_format and threading it through pendulum.formatting.formatter.Formatter.parse. In strict mode, padded numeric format tokens must require their fixed widths, including direct SSSS, SSSSS, and SSSSSS fractional-second patterns; preserve permissive behavior by default and preserve locale, named timezone, and microsecond parsing.",
       "acceptance": [
         "from_format accepts strict=True and rejects one-digit month or day values for YYYY-MM-DD.",
         "Without strict=True, existing flexible-width numeric parsing remains accepted.",
         "Strict parsing accepts correctly padded locale-aware input and preserves a named timezone and six-digit fractional seconds.",
+        "Strict parsing rejects under-width values for direct SSSS, SSSSS, and SSSSSS fractional-second patterns while accepting each exact width.",
         "The shared tokenizer/parser behavior is implemented at src/pendulum/formatting/formatter.py in Formatter.parse."
       ],
       "overlap_anchors": [{"path": "src/pendulum/formatting/formatter.py", "symbol": "pendulum.formatting.formatter.Formatter.parse"}],
@@ -86,10 +88,11 @@
       "kind": "feature",
       "sources": ["https://github.com/python-pendulum/pendulum/issues/817"],
       "source_hash": "7183279c93261714506c7bc36ef7c7d32f5c740ca3eb74d92b4d332961a53a42",
-      "prompt": "Implement #817 in pendulum.datetime.DateTime._add_timedelta_. Native datetime.timedelta additions with day components must use the same calendar-day semantics as pendulum.Duration while retaining seconds and microseconds exactly.",
+      "prompt": "Implement #817 in pendulum.datetime.DateTime._add_timedelta_. Native datetime.timedelta additions with day components must use the same calendar-day semantics as pendulum.Duration while retaining seconds and microseconds exactly; normalized negative partial-day timedeltas must retain elapsed-time semantics.",
       "acceptance": [
         "Across the America/Los_Angeles fall-back boundary, DateTime + timedelta(days=6, seconds=5, microseconds=7) equals the corresponding pendulum.Duration addition.",
         "The result retains 09:00:05.123463 and the America/Los_Angeles timezone.",
+        "At the fall-back boundary, timedelta(seconds=-1) matches pendulum.duration(seconds=-1), including the 01:59:59 -07:00 instant.",
         "The production change is confined to DateTime._add_timedelta_."
       ],
       "overlap_anchors": [{"path": "src/pendulum/datetime.py", "symbol": "pendulum.datetime.DateTime._add_timedelta_"}],
@@ -149,10 +152,11 @@
       "kind": "feature",
       "sources": ["https://github.com/python-pendulum/pendulum/issues/788"],
       "source_hash": "77a117778372ce391e3d4a329dc4ed48ac167a8deb4942af020a99fe6e6f810e",
-      "prompt": "Authorized strict-overlap adaptation of issue #788: extend pendulum.datetime.DateTime.diff with an optional units tuple of interval unit names. Store that configuration on the Interval produced by diff, and have Interval.in_words use it by default while allowing an explicit in_words(units=...) override. The default output must remain unchanged; selected units suppress unselected nonzero units. Keep this configuration on the same DateTime.diff interval-production path as #880 rather than adding a parallel diff API.",
+      "prompt": "Authorized strict-overlap adaptation of issue #788: extend pendulum.datetime.DateTime.diff with an optional units tuple of interval unit names. Store that configuration on the Interval produced by diff, and have Interval.in_words use it by default while allowing an explicit in_words(units=...) override. The default output must remain unchanged; selected units suppress unselected nonzero units. If filtering leaves no nonzero selected component, render a localized zero of a selected unit; an empty selection renders empty output rather than an unselected seconds or microseconds fallback. Keep this configuration on the same DateTime.diff interval-production path as #880 rather than adding a parallel diff API.",
       "acceptance": [
         "DateTime.diff() without units still renders all nonzero interval units in in_words().",
         "DateTime.diff(end, units=(\"day\", \"hour\")).in_words() renders only the two requested units, and an hour-only selection suppresses days and minutes.",
+        "When selected units filter every nonzero component, in_words renders a localized zero of a selected unit; an empty unit selection renders empty output and never exposes an unselected seconds or microseconds fallback.",
         "An explicit Interval.in_words(units=...) argument overrides the units remembered from DateTime.diff.",
         "A DST spring-forward interval configured for hour words reports one hour, preserving the existing elapsed-time calculation."
       ],

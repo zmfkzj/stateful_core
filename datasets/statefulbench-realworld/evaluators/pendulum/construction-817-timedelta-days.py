@@ -31,6 +31,12 @@ def main() -> None:
     assert native == duration
     assert (native.hour, native.second, native.microsecond) == (9, 5, 123463)
     assert native.timezone_name == "America/Los_Angeles"
+    fall_back = pendulum.datetime(2022, 11, 6, 1, tz="America/Los_Angeles")
+    negative = fall_back + timedelta(seconds=-1)
+    negative_duration = fall_back + pendulum.duration(seconds=-1)
+    assert negative == negative_duration
+    assert (negative.hour, negative.minute, negative.second) == (1, 59, 59)
+    assert negative.utcoffset().total_seconds() == -7 * 60 * 60
 
 
 if __name__ == "__main__":

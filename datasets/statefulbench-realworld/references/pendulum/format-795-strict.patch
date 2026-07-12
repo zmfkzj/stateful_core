@@ -44,12 +44,15 @@ diff --git a/src/pendulum/formatting/formatter.py b/src/pendulum/formatting/form
          if token.startswith("[") and token.endswith("]"):
              return token[1:-1]
          elif token.startswith("\\"):
-@@ -686,6 +687,8 @@ class Formatter:
+@@ -686,6 +687,11 @@ class Formatter:
                  )
          else:
              candidates = cast("Sequence[str]", self._REGEX_TOKENS[token])
-+            if strict and isinstance(candidates, tuple):
-+                candidates = candidates[1:]
++            if strict:
++                if isinstance(candidates, tuple):
++                    candidates = candidates[1:]
++                elif token in {"SSSS", "SSSSS", "SSSSSS"}:
++                    candidates = rf"\d{{{len(token)}}}"
  
          if not candidates:
              raise ValueError(f"Unsupported token: {token}")

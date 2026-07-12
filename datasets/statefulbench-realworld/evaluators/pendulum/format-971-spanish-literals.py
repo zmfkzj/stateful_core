@@ -9,6 +9,14 @@ def main() -> None:
     sys.path.insert(0, str(checkout / "src"))
 
     import pendulum
+    def rejects(text: str, fmt: str) -> None:
+        try:
+            pendulum.from_format(text, fmt, tz="UTC")
+        except ValueError:
+            return
+
+        raise AssertionError(f"from_format accepted {text!r} for {fmt!r}")
+
 
     parsed = pendulum.from_format(
         "21 de noviembre del 2023 04:05:06.123456 Europe/Paris",
@@ -24,6 +32,18 @@ def main() -> None:
         tz="Pacific/Auckland",
     )
     assert repeated.isoformat() == "2023-11-21T00:00:00+13:00"
+
+    metacharacters = pendulum.from_format(
+        "2024.+03",
+        "YYYY[.+]MM",
+        tz="UTC",
+    )
+    assert metacharacters.isoformat() == "2024-03-01T00:00:00+00:00"
+    rejects("2024x03", "YYYY[.+]MM")
+
+    backslash = pendulum.from_format(r"2024\03", r"YYYY[\]MM", tz="UTC")
+    assert backslash.isoformat() == "2024-03-01T00:00:00+00:00"
+    rejects("2024x03", r"YYYY[\]MM")
 
 
 if __name__ == "__main__":

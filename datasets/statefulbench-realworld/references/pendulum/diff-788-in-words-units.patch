@@ -53,3 +53,18 @@ diff --git a/src/pendulum/interval.py b/src/pendulum/interval.py
          loaded_locale: Locale = Locale.load(locale or pendulum.get_locale())
          parts = []
          for interval in intervals:
+@@ -274,6 +284,14 @@ class Interval(Duration, Generic[_T]):
+                 )
+                 parts.append(translation.format(interval_count))
+ 
++        if not parts and units is not None:
++            if not intervals:
++                return ""
++
++            unit = f"units.{intervals[0][0]}.{loaded_locale.plural(0)}"
++            translation = loaded_locale.translation(unit)
++            parts.append(translation.format(0))
++
+         if not parts:
+             count: str | int = 0
+             if abs(self.microseconds) > 0:
