@@ -128,11 +128,10 @@ class ManifestTests(unittest.TestCase):
                 "-p",
                 "no:cov",
                 "-o",
-                "addopts=",
+                "addopts=--showlocals -vvv",
                 "--ignore=tests/test_emitter.py",
                 "--ignore=tests/test_fsevents.py",
-                "-k",
-                "not test_tricks_from_file",
+                "--deselect=tests/test_0_watchmedo.py::test_tricks_from_file",
             ],
         )
         self.assertEqual(
@@ -145,6 +144,78 @@ class ManifestTests(unittest.TestCase):
                 "--deselect=tests/test_set_event_loop.py::test_asyncio_run_after_async_fixture_does_not_leak_loop",
             ],
         )
+        exclusions = {
+            "requests": {
+                "--deselect=tests/test_requests.py::TestRequests::test_empty_stream_with_auth_does_not_set_content_length_header": (
+                    "Pinned Requests task contract restores chunked/no-Content-Length "
+                    "handling for authenticated empty seekable streams; upstream test "
+                    "asserts the superseded behavior."
+                ),
+                "--deselect=tests/test_requests.py::TestRequests::test_invalid_ssl_certificate_files": (
+                    "Pinned Requests task contract requires structured FileNotFoundError "
+                    "for all missing certificate forms; upstream test asserts legacy "
+                    "IOError text."
+                ),
+                "--deselect=tests/test_requests.py::TestRequests::test_cookie_quote_wrapped": (
+                    "Pinned Requests task contract preserves byte-for-byte escaped cookie "
+                    "quotes; upstream test asserts the superseded unwrapped value."
+                ),
+            },
+            "jsonschema": {
+                "--deselect=jsonschema/tests/test_validators.py::TestValidationErrorDetails::test_anyOf": (
+                    "Pinned jsonschema task contract includes the parent branch index in "
+                    "child relative_schema_path; upstream test asserts the superseded "
+                    "root-relative path."
+                ),
+                "--deselect=jsonschema/tests/test_validators.py::TestValidationErrorDetails::test_type": (
+                    "Pinned jsonschema task contract includes the parent branch index in "
+                    "child relative_schema_path; upstream test asserts the superseded "
+                    "root-relative path."
+                ),
+                "--deselect=jsonschema/tests/test_validators.py::TestValidationErrorDetails::test_ref_sibling": (
+                    "Pinned jsonschema task contract retains referenced-child "
+                    "relative_schema_path; upstream test asserts the superseded "
+                    "root/reference-site path."
+                ),
+            },
+            "pytest-asyncio": {
+                "--deselect=tests/test_set_event_loop.py::test_asyncio_run_after_async_fixture_does_not_leak_loop": (
+                    "Pinned CPython 3.14.6 with every supported pytest version reproduces "
+                    "pytest-asyncio's duplicate-plugin warning, promoted to error by this "
+                    "upstream test."
+                ),
+            },
+            "watchdog": {
+                "--ignore=tests/test_emitter.py": (
+                    "Pinned CPython 3.14.6 on the macOS sandbox crashes Watchdog's "
+                    "FSEvents-backed emitter tests."
+                ),
+                "--ignore=tests/test_fsevents.py": (
+                    "Pinned CPython 3.14.6 on the macOS sandbox cannot run native "
+                    "FSEvents stream tests without a crash."
+                ),
+                "--deselect=tests/test_0_watchmedo.py::test_tricks_from_file": (
+                    "Pinned CPython 3.14.6 on the macOS sandbox crashes "
+                    "test_tricks_from_file."
+                ),
+            },
+        }
+        for key, expected in exclusions.items():
+            with self.subTest(repository=key):
+                self.assertEqual(entries[key]["metadata"]["exclusions"], expected)
+                self.assertTrue(set(expected).issubset(entries[key]["suite"]))
+        self.assertNotIn("-k", entries["watchdog"]["suite"])
+        self.assertIn("addopts=--showlocals -vvv", entries["watchdog"]["suite"])
+    def test_load_manifest_rejects_exclusion_metadata_that_does_not_match_the_suite(self) -> None:
+        data = self.load_data()
+        entry = next(repo for repo in data["repositories"] if repo["key"] == "watchdog")
+        entry["metadata"]["exclusions"]["--deselect=tests/not-a-real-test.py::test_case"] = (
+            "Pinned runtime reason."
+        )
+        self.write_data(data)
+
+        with self.assertRaisesRegex(ValueError, "metadata exclusion"):
+            self.mod.load_manifest(self.manifest_path)
     def test_manifest_repository_matches_full_corpus_identity(self) -> None:
         repo = self.mod.repo_entries(self.mod.load_manifest(self.manifest_path))[0]
         corpus = self.mod.load_corpus(MANIFEST.parent / repo["corpus"])

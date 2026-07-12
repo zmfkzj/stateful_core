@@ -49,7 +49,7 @@ _REPOSITORY_FIELDS = frozenset(
         "corpus",
     }
 )
-_OPTIONAL_REPOSITORY_FIELDS = frozenset({"environment"})
+_OPTIONAL_REPOSITORY_FIELDS = frozenset({"environment", "metadata"})
 _ENVIRONMENT_NAME = re.compile(r"[A-Z_][A-Z0-9_]*")
 _PROTECTED_ENVIRONMENT_NAMES = frozenset(
     {"HOME", "PIP_CACHE_DIR", "TMPDIR", "CARGO_HOME", "VIRTUAL_ENV", "PATH", "RUSTUP_HOME"}
@@ -247,6 +247,25 @@ def _require_environment(entry: dict) -> None:
         ):
             raise ValueError("environment contains an unsafe setting")
 
+def _require_metadata(entry: dict) -> None:
+    if "metadata" not in entry:
+        return
+    metadata = entry["metadata"]
+    if type(metadata) is not dict or set(metadata) != {"exclusions"}:
+        raise ValueError("metadata must contain only exclusions")
+    exclusions = metadata["exclusions"]
+    if type(exclusions) is not dict or not exclusions:
+        raise ValueError("metadata exclusions must be a non-empty object")
+    for exclusion, reason in exclusions.items():
+        if (
+            type(exclusion) is not str
+            or not exclusion.startswith(("--deselect=", "--ignore="))
+            or exclusion not in entry["suite"]
+            or type(reason) is not str
+            or not reason
+        ):
+            raise ValueError("metadata exclusion must name a suite exclusion and reason")
+
 
 def _validate_repository(entry: object, manifest_dir: Path, keys: set[str]) -> None:
     if type(entry) is not dict:
@@ -270,6 +289,7 @@ def _validate_repository(entry: object, manifest_dir: Path, keys: set[str]) -> N
     for field in ("setup", "suite"):
         _require_argv(entry, field)
     _require_environment(entry)
+    _require_metadata(entry)
 
     corpus = Path(_require_string(entry, "corpus"))
     resolved_corpus = (manifest_dir / corpus).resolve()

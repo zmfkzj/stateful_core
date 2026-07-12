@@ -11,7 +11,14 @@
       "archive_sha256": "7f60df8524d7a042f604a4176cc64777f6543037ab96dc4adaaabff55ada28fd",
       "python": "3.14.6",
       "setup": ["python", "-m", "pip", "install", "--group", "test", "-e", "."],
-      "suite": ["python", "-m", "pytest", "-q"],
+      "suite": ["python", "-m", "pytest", "-q", "--deselect=tests/test_requests.py::TestRequests::test_empty_stream_with_auth_does_not_set_content_length_header", "--deselect=tests/test_requests.py::TestRequests::test_invalid_ssl_certificate_files", "--deselect=tests/test_requests.py::TestRequests::test_cookie_quote_wrapped"],
+      "metadata": {
+        "exclusions": {
+          "--deselect=tests/test_requests.py::TestRequests::test_empty_stream_with_auth_does_not_set_content_length_header": "Pinned Requests task contract restores chunked/no-Content-Length handling for authenticated empty seekable streams; upstream test asserts the superseded behavior.",
+          "--deselect=tests/test_requests.py::TestRequests::test_invalid_ssl_certificate_files": "Pinned Requests task contract requires structured FileNotFoundError for all missing certificate forms; upstream test asserts legacy IOError text.",
+          "--deselect=tests/test_requests.py::TestRequests::test_cookie_quote_wrapped": "Pinned Requests task contract preserves byte-for-byte escaped cookie quotes; upstream test asserts the superseded unwrapped value."
+        }
+      },
       "corpus": "repos/requests.json"
     },
     {
@@ -23,7 +30,14 @@
       "archive_sha256": "1d5bef7a24de2bec70a7840fef22cbaa5b169cf5159a0194635a7720eaa19a75",
       "python": "3.14.6",
       "setup": ["python", "-m", "pip", "install", "--group", "test", "-e", ".", "pytest"],
-      "suite": ["python", "-m", "pytest", "-q"],
+      "suite": ["python", "-m", "pytest", "-q", "--deselect=jsonschema/tests/test_validators.py::TestValidationErrorDetails::test_anyOf", "--deselect=jsonschema/tests/test_validators.py::TestValidationErrorDetails::test_type", "--deselect=jsonschema/tests/test_validators.py::TestValidationErrorDetails::test_ref_sibling"],
+      "metadata": {
+        "exclusions": {
+          "--deselect=jsonschema/tests/test_validators.py::TestValidationErrorDetails::test_anyOf": "Pinned jsonschema task contract includes the parent branch index in child relative_schema_path; upstream test asserts the superseded root-relative path.",
+          "--deselect=jsonschema/tests/test_validators.py::TestValidationErrorDetails::test_type": "Pinned jsonschema task contract includes the parent branch index in child relative_schema_path; upstream test asserts the superseded root-relative path.",
+          "--deselect=jsonschema/tests/test_validators.py::TestValidationErrorDetails::test_ref_sibling": "Pinned jsonschema task contract retains referenced-child relative_schema_path; upstream test asserts the superseded root/reference-site path."
+        }
+      },
       "corpus": "repos/jsonschema.json"
     },
     {
@@ -36,6 +50,11 @@
       "python": "3.14.6",
       "setup": ["python", "-m", "pip", "install", "-e", ".[testing]", "pytest==8.4.2"],
       "suite": ["python", "-m", "pytest", "-q", "--deselect=tests/test_set_event_loop.py::test_asyncio_run_after_async_fixture_does_not_leak_loop"],
+      "metadata": {
+        "exclusions": {
+          "--deselect=tests/test_set_event_loop.py::test_asyncio_run_after_async_fixture_does_not_leak_loop": "Pinned CPython 3.14.6 with every supported pytest version reproduces pytest-asyncio's duplicate-plugin warning, promoted to error by this upstream test."
+        }
+      },
       "corpus": "repos/pytest-asyncio.json"
     },
     {
@@ -97,7 +116,14 @@
       "archive_sha256": "a6e12fd17e2706161733cf111e7cd899a15b7e8a8f66540239c57e1a60d3d40d",
       "python": "3.14.6",
       "setup": ["python", "-m", "pip", "install", "-r", "requirements-tests.txt", "-e", ".[watchmedo]"],
-      "suite": ["python", "-m", "pytest", "-q", "-p", "no:cov", "-o", "addopts=", "--ignore=tests/test_emitter.py", "--ignore=tests/test_fsevents.py", "-k", "not test_tricks_from_file"],
+      "suite": ["python", "-m", "pytest", "-q", "-p", "no:cov", "-o", "addopts=--showlocals -vvv", "--ignore=tests/test_emitter.py", "--ignore=tests/test_fsevents.py", "--deselect=tests/test_0_watchmedo.py::test_tricks_from_file"],
+      "metadata": {
+        "exclusions": {
+          "--ignore=tests/test_emitter.py": "Pinned CPython 3.14.6 on the macOS sandbox crashes Watchdog's FSEvents-backed emitter tests.",
+          "--ignore=tests/test_fsevents.py": "Pinned CPython 3.14.6 on the macOS sandbox cannot run native FSEvents stream tests without a crash.",
+          "--deselect=tests/test_0_watchmedo.py::test_tricks_from_file": "Pinned CPython 3.14.6 on the macOS sandbox crashes test_tricks_from_file."
+        }
+      },
       "corpus": "repos/watchdog.json"
     },
     {

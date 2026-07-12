@@ -98,8 +98,10 @@ The checked-in corpus is an issue-derived, pinned dataset at
 have five bug tasks and five feature tasks: 100 coding tasks total. The
 manifest records requested and canonical URLs, commit and archive hashes,
 Python version, setup and upstream-suite commands, and the per-repository
-corpus path. Task records retain their issue-source URLs and frozen-source
-hashes.
+corpus path. `metadata.exclusions`, when present, maps an exact suite
+`--deselect` or `--ignore` argument to its audited reason; validation rejects
+notes that do not match the suite. Task records retain their issue-source URLs
+and frozen-source hashes.
 
 ### Freeze
 
