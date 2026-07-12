@@ -958,6 +958,19 @@ def _empty_run_result(repo: dict, arm: str, trial: int, error: str | None = None
     }
 
 
+def _write_run_result(out_dir: Path, result: dict) -> None:
+    result_dir = (
+        out_dir
+        / result["repository"]
+        / result["arm"]
+        / f"trial-{result['trial']}"
+    )
+    result_dir.mkdir(parents=True, exist_ok=True)
+    (result_dir / "results.json").write_text(
+        json.dumps(result, indent=2) + "\n", encoding="utf-8"
+    )
+
+
 def run_repo_arm(
     repo: dict,
     corpus: dict,
@@ -979,7 +992,11 @@ def run_repo_arm(
         raise ValueError(f"unknown arm: {arm}")
     trial = cfg.trial
     if arm == "parallel-on" and not cfg.stateful_binary:
-        return _empty_run_result(repo, arm, trial, "parallel-on requires a resolvable stateful binary")
+        result = _empty_run_result(
+            repo, arm, trial, "parallel-on requires a resolvable stateful binary"
+        )
+        _write_run_result(out_dir, result)
+        return result
 
     arm_dir = out_dir / repo["key"] / arm / f"trial-{trial}"
     artifact_dir = arm_dir / "artifacts"
@@ -1117,8 +1134,123 @@ def run_repo_arm(
         "agents": agents,
         "artifacts": artifacts,
     }
-    (arm_dir / "results.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    _write_run_result(out_dir, result)
     return result
+
+
+
+def _report_row(result: dict) -> dict:
+    return {
+        "repo": result["repository"],
+        "arm": result["arm"],
+        "trial": result["trial"],
+        "cleared": result["cleared"],
+        "wall_time_s": result["arm_wall_time_s"],
+        "tokens": result["total_tokens"],
+        "tool_calls": result["total_tool_calls"],
+        "error": result["error"],
+    }
+
+
+def build_run_summary(
+    repositories: tuple[dict, ...] | list[dict],
+    arms: list[str],
+    trials: int,
+    model: str,
+    thinking: str,
+    results: list[dict],
+    generated_at: str,
+) -> dict:
+    rows = [_report_row(result) for result in results]
+    aggregates = []
+    for repository in repositories:
+        key = repository["key"]
+        for arm in arms:
+            matching = [
+                row for row in rows if row["repo"] == key and row["arm"] == arm
+            ]
+            failures = [
+                {
+                    "repo": row["repo"],
+                    "arm": row["arm"],
+                    "trial": row["trial"],
+                    "error": row["error"],
+                }
+                for row in matching
+                if not row["cleared"]
+            ]
+            present_trials = {row["trial"] for row in matching}
+            failures.extend(
+                {
+                    "repo": key,
+                    "arm": arm,
+                    "trial": trial,
+                    "error": "missing result",
+                }
+                for trial in range(1, trials + 1)
+                if trial not in present_trials
+            )
+            original_rows = [
+                result
+                for result in results
+                if result["repository"] == key and result["arm"] == arm
+            ]
+            aggregates.append(
+                {
+                    "repo": key,
+                    "arm": arm,
+                    "row_count": len(matching),
+                    "cleared_count": sum(row["cleared"] for row in matching),
+                    "wall_time_s": sum(row["wall_time_s"] for row in matching),
+                    "tasks_wall_time_s": sum(
+                        result["tasks_wall_time_s"] for result in original_rows
+                    ),
+                    "final_wall_time_s": sum(
+                        result["final_wall_time_s"] for result in original_rows
+                    ),
+                    "tokens": sum(row["tokens"] for row in matching),
+                    "tool_calls": sum(row["tool_calls"] for row in matching),
+                    "failures": failures,
+                }
+            )
+    return {
+        "model": model,
+        "thinking": thinking,
+        "trials": trials,
+        "repositories": [
+            {
+                "key": repository["key"],
+                "source_sha": repository["commit"],
+                "archive_sha256": repository["archive_sha256"],
+            }
+            for repository in repositories
+        ],
+        "generated_at": generated_at,
+        "arms": rows,
+        "aggregates": aggregates,
+    }
+
+
+def _table(results: list[dict]) -> str:
+    lines = [
+        "| repository | arm | trial | cleared | wall_time_s | tokens | tool_calls | error |",
+        "| --- | --- | ---: | --- | ---: | ---: | ---: | --- |",
+    ]
+    for row in map(_report_row, results):
+        error = "" if row["error"] is None else str(row["error"]).replace("|", "\\|")
+        lines.append(
+            "| {repo} | {arm} | {trial} | {cleared} | {wall:.3f} | {tokens} | {tools} | {error} |".format(
+                repo=row["repo"],
+                arm=row["arm"],
+                trial=row["trial"],
+                cleared=row["cleared"],
+                wall=row["wall_time_s"],
+                tokens=row["tokens"],
+                tools=row["tool_calls"],
+                error=error,
+            )
+        )
+    return "\n".join(lines)
 
 
 def _parse_repositories(value: str) -> list[str]:
@@ -1184,21 +1316,43 @@ def main(argv: list[str] | None = None) -> int:
                 corpus = load_corpus(arguments.manifest.parent / repo["corpus"])
                 if not _corpus_matches_repository(repo, corpus):
                     raise ValueError("corpus repository does not match manifest key")
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
                 for trial in range(1, arguments.trials + 1):
                     for arm in arguments.arms:
-                        results.append(
-                            run_repo_arm(
-                                repo,
-                                corpus,
-                                arguments.manifest.parent,
-                                arguments.cache,
-                                arguments.out,
-                                arm,
-                                replace(cfg, trial=trial),
-                            )
+                        result = _empty_run_result(repo, arm, trial, str(error))
+                        _write_run_result(arguments.out, result)
+                        results.append(result)
+                continue
+            for trial in range(1, arguments.trials + 1):
+                for arm in arguments.arms:
+                    try:
+                        result = run_repo_arm(
+                            repo,
+                            corpus,
+                            arguments.manifest.parent,
+                            arguments.cache,
+                            arguments.out,
+                            arm,
+                            replace(cfg, trial=trial),
                         )
-            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
-                results.append(_empty_run_result(repo, "run", 0, str(error)))
+                    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                        result = _empty_run_result(repo, arm, trial, str(error))
+                    _write_run_result(arguments.out, result)
+                    results.append(result)
+        summary = build_run_summary(
+            selected,
+            arguments.arms,
+            arguments.trials,
+            cfg.model,
+            cfg.thinking,
+            results,
+            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        )
+        arguments.out.mkdir(parents=True, exist_ok=True)
+        (arguments.out / "summary.json").write_text(
+            json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+        )
+        print(_table(results))
         return 0 if results and all(result["cleared"] for result in results) else 1
 
     results = []

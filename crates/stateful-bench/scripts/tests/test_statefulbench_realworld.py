@@ -1143,5 +1143,223 @@ class RealWorldRunnerTests(unittest.TestCase):
         self.assertIn("--repos", stdout.getvalue())
         self.assertIn("--arms", stdout.getvalue())
         self.assertIn("--trials", stdout.getvalue())
+
+class RealWorldReportingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tempdir.name)
+        self.mod = load_script("statefulbench_realworld.py")
+        self.repositories = [
+            {
+                "key": "alpha",
+                "commit": "a" * 40,
+                "archive_sha256": "b" * 64,
+                "corpus": "repos/alpha.json",
+            },
+            {
+                "key": "bravo",
+                "commit": "c" * 40,
+                "archive_sha256": "d" * 64,
+                "corpus": "repos/bravo.json",
+            },
+        ]
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    @staticmethod
+    def result(
+        repository: str,
+        arm: str,
+        trial: int,
+        *,
+        cleared: bool = True,
+        error: str | None = None,
+        wall: float = 0.0,
+        tokens: int = 0,
+        tools: int = 0,
+    ) -> dict:
+        return {
+            "repository": repository,
+            "arm": arm,
+            "trial": trial,
+            "cleared": cleared,
+            "error": error,
+            "arm_wall_time_s": wall,
+            "tasks_wall_time_s": wall / 2,
+            "final_wall_time_s": wall / 4,
+            "total_tokens": tokens,
+            "total_tool_calls": tools,
+        }
+
+    def test_summary_directly_sums_two_repository_rows_and_retains_exact_failures(self) -> None:
+        rows = [
+            self.result("alpha", "sequential", 1, wall=1.25, tokens=10, tools=2),
+            self.result("alpha", "sequential", 2, wall=2.5, tokens=20, tools=3),
+            self.result("alpha", "parallel-off", 1, wall=3.0, tokens=30, tools=4),
+            self.result(
+                "alpha",
+                "parallel-off",
+                2,
+                cleared=False,
+                error="final agent exited 1",
+                wall=4.0,
+                tokens=40,
+                tools=5,
+            ),
+            self.result("bravo", "sequential", 1, wall=5.0, tokens=50, tools=6),
+            self.result("bravo", "sequential", 2, wall=6.0, tokens=60, tools=7),
+            self.result("bravo", "parallel-off", 1, wall=7.0, tokens=70, tools=8),
+            self.result("bravo", "parallel-off", 2, wall=8.0, tokens=80, tools=9),
+        ]
+
+        summary = self.mod.build_run_summary(
+            self.repositories,
+            ["sequential", "parallel-off"],
+            2,
+            "model",
+            "thinking",
+            rows,
+            "2026-07-12T00:00:00Z",
+        )
+
+        self.assertEqual(
+            summary["repositories"][0],
+            {"key": "alpha", "source_sha": "a" * 40, "archive_sha256": "b" * 64},
+        )
+        self.assertEqual(
+            summary["arms"][3],
+            {
+                "repo": "alpha",
+                "arm": "parallel-off",
+                "trial": 2,
+                "cleared": False,
+                "wall_time_s": 4.0,
+                "tokens": 40,
+                "tool_calls": 5,
+                "error": "final agent exited 1",
+            },
+        )
+        alpha_sequential = summary["aggregates"][0]
+        self.assertEqual(alpha_sequential["repo"], "alpha")
+        self.assertEqual(alpha_sequential["arm"], "sequential")
+        self.assertEqual(alpha_sequential["row_count"], 2)
+        self.assertEqual(alpha_sequential["cleared_count"], 2)
+        self.assertEqual(alpha_sequential["wall_time_s"], 3.75)
+        self.assertEqual(alpha_sequential["tasks_wall_time_s"], 1.875)
+        self.assertEqual(alpha_sequential["final_wall_time_s"], 0.9375)
+        self.assertEqual(alpha_sequential["tokens"], 30)
+        self.assertEqual(alpha_sequential["tool_calls"], 5)
+        self.assertEqual(
+            summary["aggregates"][1]["failures"],
+            [{"repo": "alpha", "arm": "parallel-off", "trial": 2, "error": "final agent exited 1"}],
+        )
+        self.assertEqual(summary["model"], "model")
+        self.assertEqual(summary["thinking"], "thinking")
+        self.assertEqual(summary["trials"], 2)
+        self.assertEqual(summary["generated_at"], "2026-07-12T00:00:00Z")
+
+    def test_summary_marks_missing_scheduled_rows_without_inventing_metrics(self) -> None:
+        rows = [
+            self.result("alpha", "sequential", 1, wall=1.0, tokens=1, tools=1),
+            self.result("alpha", "parallel-off", 1, wall=2.0, tokens=2, tools=2),
+            self.result("bravo", "sequential", 1, wall=3.0, tokens=3, tools=3),
+        ]
+
+        summary = self.mod.build_run_summary(
+            self.repositories,
+            ["sequential", "parallel-off"],
+            1,
+            "model",
+            "thinking",
+            rows,
+            "2026-07-12T00:00:00Z",
+        )
+
+        missing = summary["aggregates"][3]
+        self.assertEqual(missing["repo"], "bravo")
+        self.assertEqual(missing["arm"], "parallel-off")
+        self.assertEqual(missing["row_count"], 0)
+        self.assertEqual(missing["cleared_count"], 0)
+        self.assertEqual(missing["wall_time_s"], 0.0)
+        self.assertEqual(missing["tokens"], 0)
+        self.assertEqual(missing["tool_calls"], 0)
+        self.assertEqual(
+            missing["failures"],
+            [{"repo": "bravo", "arm": "parallel-off", "trial": 1, "error": "missing result"}],
+        )
+
+    def test_run_persists_summary_and_prints_each_two_repository_arm_row(self) -> None:
+        out_dir = self.root / "out"
+        expected = [
+            self.result("alpha", "sequential", 1, wall=1.0, tokens=11, tools=2),
+            self.result("alpha", "parallel-off", 1, wall=2.0, tokens=12, tools=3),
+            self.result("bravo", "sequential", 1, wall=3.0, tokens=13, tools=4),
+            self.result(
+                "bravo",
+                "parallel-off",
+                1,
+                cleared=False,
+                error="repository setup failed",
+                wall=4.0,
+                tokens=14,
+                tools=5,
+            ),
+        ]
+        results = iter(expected)
+        stdout = io.StringIO()
+
+        with (
+            mock.patch.object(self.mod, "load_manifest", return_value={}),
+            mock.patch.object(self.mod, "repo_entries", return_value=tuple(self.repositories)),
+            mock.patch.object(
+                self.mod,
+                "load_corpus",
+                side_effect=lambda path: {"repository": path.stem},
+            ),
+            mock.patch.object(self.mod, "_corpus_matches_repository", return_value=True),
+            mock.patch.object(self.mod, "run_repo_arm", side_effect=lambda *_args: next(results)),
+            mock.patch.object(self.mod.time, "strftime", return_value="2026-07-12T00:00:00Z"),
+            contextlib.redirect_stdout(stdout),
+        ):
+            status = self.mod.main(
+                [
+                    "run",
+                    "--manifest",
+                    str(self.root / "manifest.json"),
+                    "--cache",
+                    str(self.root / "cache"),
+                    "--out",
+                    str(out_dir),
+                    "--repos",
+                    "alpha,bravo",
+                    "--arms",
+                    "sequential,parallel-off",
+                    "--model",
+                    "model",
+                    "--thinking",
+                    "thinking",
+                ]
+            )
+
+        self.assertEqual(status, 1)
+        summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["model"], "model")
+        self.assertEqual(summary["thinking"], "thinking")
+        self.assertEqual(summary["trials"], 1)
+        self.assertEqual(
+            summary["repositories"],
+            [
+                {"key": "alpha", "source_sha": "a" * 40, "archive_sha256": "b" * 64},
+                {"key": "bravo", "source_sha": "c" * 40, "archive_sha256": "d" * 64},
+            ],
+        )
+        self.assertEqual(
+            summary["aggregates"][3]["failures"],
+            [{"repo": "bravo", "arm": "parallel-off", "trial": 1, "error": "repository setup failed"}],
+        )
+        table = stdout.getvalue()
+        self.assertIn("| repository | arm | trial | cleared |", table)
+        self.assertIn("| bravo | parallel-off | 1 | False | 4.000 | 14 | 5 | repository setup failed |", table)
 if __name__ == "__main__":
     unittest.main()
