@@ -344,6 +344,7 @@ class ArchiveTests(unittest.TestCase):
         files: dict[str, bytes],
         *,
         symlink: str | None = None,
+        symlink_path: str = "link",
         hardlink: str | None = None,
         extra_root: bool = False,
     ) -> bytes:
@@ -357,7 +358,7 @@ class ArchiveTests(unittest.TestCase):
                 member.size = len(contents)
                 archive.addfile(member, io.BytesIO(contents))
             if symlink is not None:
-                member = tarfile.TarInfo("source/link")
+                member = tarfile.TarInfo(f"source/{symlink_path}")
                 member.type = tarfile.SYMTYPE
                 member.linkname = symlink
                 archive.addfile(member)
@@ -499,6 +500,35 @@ class ArchiveTests(unittest.TestCase):
 
         self.assertTrue((destination / "link").is_symlink())
         self.assertEqual((destination / "link").read_bytes(), b"linked content\n")
+        self.assertEqual((destination / "hardlink").read_bytes(), b"linked content\n")
+        self.assertEqual(
+            (destination / "hardlink").stat().st_ino,
+            (destination / "target.txt").stat().st_ino,
+        )
+
+    def test_extract_workspace_resolves_relative_symlinks_from_member_parent(self) -> None:
+        contents = self.archive_bytes(
+            {"target": b"linked content\n"},
+            symlink="../target",
+            symlink_path="sub/link",
+        )
+        archive, expected_sha256 = self.write_archive(contents)
+        destination = self.root / "relative-symlink"
+
+        self.mod.extract_workspace(archive, expected_sha256, destination)
+
+        self.assertEqual((destination / "sub" / "link").read_bytes(), b"linked content\n")
+
+    def test_extract_workspace_allows_normalized_hardlink_targets(self) -> None:
+        contents = self.archive_bytes(
+            {"target.txt": b"linked content\n"},
+            hardlink="source/dir/../target.txt",
+        )
+        archive, expected_sha256 = self.write_archive(contents)
+        destination = self.root / "normalized-hardlink"
+
+        self.mod.extract_workspace(archive, expected_sha256, destination)
+
         self.assertEqual((destination / "hardlink").read_bytes(), b"linked content\n")
         self.assertEqual(
             (destination / "hardlink").stat().st_ino,

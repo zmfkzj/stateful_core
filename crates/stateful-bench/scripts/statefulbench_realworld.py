@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import posixpath
 import re
 import shutil
 import signal
@@ -17,7 +18,7 @@ import tempfile
 import time
 from contextlib import nullcontext
 from dataclasses import replace
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from urllib import request
 from urllib.parse import urlsplit
 
@@ -117,14 +118,13 @@ def ensure_archive(repo: dict, cache_dir: Path, opener=request.urlopen) -> Path:
     return archive
 
 def _link_stays_within_root(member: tarfile.TarInfo, root: str) -> bool:
-    target = PurePosixPath(member.linkname)
-    if target.is_absolute():
-        return True
-    if not target.parts or ".." in target.parts:
+    target = member.linkname
+    if posixpath.isabs(target):
         return False
     if member.issym():
-        target = PurePosixPath(member.name).parent / target
-    return target.parts[0] == root
+        target = posixpath.join(posixpath.dirname(member.name), target)
+    target = posixpath.normpath(target)
+    return target == root or target.startswith(f"{root}/")
 
 
 def extract_workspace(archive: Path, expected_sha256: str, destination: Path) -> None:
