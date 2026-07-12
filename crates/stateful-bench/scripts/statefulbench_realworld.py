@@ -558,11 +558,12 @@ def _sanitized_environment(
     if venv is not None:
         env["VIRTUAL_ENV"] = str(venv)
     if workspace is not None:
+        runtime_root = workspace.parent / ".statefulbench-runtime"
         locations = {
-            "HOME": workspace / ".statefulbench-home",
-            "PIP_CACHE_DIR": workspace / ".statefulbench-pip-cache",
-            "TMPDIR": workspace / ".statefulbench-tmp",
-            "CARGO_HOME": workspace / ".statefulbench-cargo-home",
+            "HOME": runtime_root / "home",
+            "PIP_CACHE_DIR": runtime_root / "pip-cache",
+            "TMPDIR": runtime_root / "tmp",
+            "CARGO_HOME": runtime_root / "cargo-home",
         }
         for name, location in locations.items():
             location.mkdir(parents=True, exist_ok=True)

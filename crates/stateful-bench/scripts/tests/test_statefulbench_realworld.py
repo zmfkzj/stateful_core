@@ -324,13 +324,18 @@ class ManifestTests(unittest.TestCase):
         ) as rustup_which:
             environment = self.mod._sanitized_environment(venv, workspace)
 
+        runtime_root = workspace.parent / ".statefulbench-runtime"
         self.assertEqual(environment["VIRTUAL_ENV"], str(venv))
-        self.assertEqual(environment["HOME"], str(workspace / ".statefulbench-home"))
-        self.assertEqual(environment["PIP_CACHE_DIR"], str(workspace / ".statefulbench-pip-cache"))
-        self.assertEqual(environment["TMPDIR"], str(workspace / ".statefulbench-tmp"))
-        self.assertEqual(environment["CARGO_HOME"], str(workspace / ".statefulbench-cargo-home"))
+        self.assertEqual(environment["HOME"], str(runtime_root / "home"))
+        self.assertEqual(environment["PIP_CACHE_DIR"], str(runtime_root / "pip-cache"))
+        self.assertEqual(environment["TMPDIR"], str(runtime_root / "tmp"))
+        self.assertEqual(environment["CARGO_HOME"], str(runtime_root / "cargo-home"))
         self.assertNotIn("RUSTUP_HOME", environment)
-        self.assertTrue(all(Path(environment[name]).is_dir() for name in ("HOME", "PIP_CACHE_DIR", "TMPDIR", "CARGO_HOME")))
+        for name in ("HOME", "PIP_CACHE_DIR", "TMPDIR", "CARGO_HOME"):
+            location = Path(environment[name])
+            self.assertTrue(location.is_dir())
+            self.assertTrue(location.is_relative_to(runtime_root))
+            self.assertFalse(location.is_relative_to(workspace))
         self.assertEqual(environment["PATH"].split(":")[:2], [str(venv / "bin"), str(rust_bin.resolve())])
         rustup_which.assert_has_calls(
             [
