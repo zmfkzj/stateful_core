@@ -90,8 +90,16 @@
       "archive_sha256": "e0a0a36d3b1470776b6463e5dcd44c805fd31ccd3090110ea16936c176d90fab",
       "python": "3.14.6",
       "setup": ["python", "-m", "pip", "install", "-e", ".[azure,boto3,dropbox,google,libcloud,sftp]", "cryptography", "moto", "pytest", "pytest-cov", "rsa"],
-      "suite": ["python", "-m", "pytest", "-q"],
+      "suite": ["python", "-m", "pytest", "-q", "--deselect=tests/test_s3.py::S3StorageTests::test_auth_config", "--deselect=tests/test_s3.py::S3StorageTests::test_pickle_with_bucket", "--deselect=tests/test_s3.py::S3StorageTests::test_security_token", "--deselect=tests/test_s3.py::S3StorageTests::test_url_unsigned"],
       "environment": {"DJANGO_SETTINGS_MODULE": "tests.settings", "AWS_CONFIG_FILE": "tests/no_such_file.conf"},
+      "metadata": {
+        "exclusions": {
+          "--deselect=tests/test_s3.py::S3StorageTests::test_auth_config": "Pinned django-storages task contract removes legacy credential aliases; upstream test asserts the superseded behavior.",
+          "--deselect=tests/test_s3.py::S3StorageTests::test_pickle_with_bucket": "Pinned django-storages task contract defines the cache/pickle model; upstream test asserts the superseded behavior.",
+          "--deselect=tests/test_s3.py::S3StorageTests::test_security_token": "Pinned django-storages task contract removes the token alias; upstream test asserts the superseded behavior.",
+          "--deselect=tests/test_s3.py::S3StorageTests::test_url_unsigned": "Pinned django-storages task contract defines unsigned URL endpoint behavior; upstream test asserts the superseded behavior."
+        }
+      },
       "corpus": "repos/django-storages.json"
     },
     {

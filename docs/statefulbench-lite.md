@@ -103,6 +103,12 @@ corpus path. `metadata.exclusions`, when present, maps an exact suite
 notes that do not match the suite. Task records retain their issue-source URLs
 and frozen-source hashes.
 
+For django-storages, four exact `tests/test_s3.py::S3StorageTests` nodes are
+deselected because their upstream expectations are superseded by the corpus
+contracts for legacy credential alias removal, the cache/pickle model, token
+alias removal, and unsigned URL endpoint behavior. This is an auditable
+node-level list, not a broad test filter.
+
 ### Freeze
 
 Freeze is a reviewed dataset-authoring boundary, not a runner subcommand:

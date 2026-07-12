@@ -206,6 +206,39 @@ class ManifestTests(unittest.TestCase):
                 self.assertTrue(set(expected).issubset(entries[key]["suite"]))
         self.assertNotIn("-k", entries["watchdog"]["suite"])
         self.assertIn("addopts=--showlocals -vvv", entries["watchdog"]["suite"])
+
+    def test_django_storages_exclusions_bind_exact_nodes_to_suite(self) -> None:
+        entry = next(
+            entry
+            for entry in self.mod.repo_entries(self.mod.load_manifest(self.manifest_path))
+            if entry["key"] == "django-storages"
+        )
+        expected = {
+            "--deselect=tests/test_s3.py::S3StorageTests::test_auth_config": (
+                "Pinned django-storages task contract removes legacy credential aliases; "
+                "upstream test asserts the superseded behavior."
+            ),
+            "--deselect=tests/test_s3.py::S3StorageTests::test_pickle_with_bucket": (
+                "Pinned django-storages task contract defines the cache/pickle model; "
+                "upstream test asserts the superseded behavior."
+            ),
+            "--deselect=tests/test_s3.py::S3StorageTests::test_security_token": (
+                "Pinned django-storages task contract removes the token alias; upstream "
+                "test asserts the superseded behavior."
+            ),
+            "--deselect=tests/test_s3.py::S3StorageTests::test_url_unsigned": (
+                "Pinned django-storages task contract defines unsigned URL endpoint "
+                "behavior; upstream test asserts the superseded behavior."
+            ),
+        }
+
+        self.assertIn("metadata", entry)
+        self.assertEqual(entry["metadata"]["exclusions"], expected)
+        self.assertEqual(
+            entry["suite"],
+            ["python", "-m", "pytest", "-q", *expected],
+        )
+
     def test_load_manifest_rejects_exclusion_metadata_that_does_not_match_the_suite(self) -> None:
         data = self.load_data()
         entry = next(repo for repo in data["repositories"] if repo["key"] == "watchdog")
