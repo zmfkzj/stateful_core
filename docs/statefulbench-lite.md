@@ -21,6 +21,9 @@ Each arm, repository, and trial receives a fresh checkout. The final reviewer
 starts only after every task agent in its arm has been reaped. Do not compare
 arms that use different models, thinking settings, task selections, trial
 counts, or corpus revisions.
+An `--arms` selection must be a nonempty comma-separated list of distinct arm
+names.
+
 
 ## Synthetic smoke
 
@@ -72,6 +75,9 @@ Stateful binary. Synthetic output is rooted at the requested `--out` path:
     logs/<agent>.stdout.log
     logs/<agent>.stderr.log
 ```
+`results.json` and `summary.json` are published by atomic replacement, so a
+reader never receives a partially serialized JSON record.
+
 
 `parallel-on` also writes its arm-local server logs under
 `logs/stateful-server.{stdout,stderr}.log`.
@@ -116,8 +122,11 @@ commit the manifest, issue snapshots, task prompts, evaluators, and reference
 patches together before qualification or inference.
 `statefulbench_realworld.py --help` exposes only `qualify` and `run`; do not
 invent a `freeze` invocation or mutate a manifest after it has been qualified.
-The runner downloads source archives by pinned HTTPS URL and accepts only
-bytes matching the manifest's SHA-256.
+The manifest binds the canonical GitHub owner/repository and exact
+40-character commit to the archive URL; the requested URL remains provenance
+metadata. The runner accepts only archive bytes matching the manifest's
+SHA-256.
+
 
 ### Qualify all ten pinned repositories
 
@@ -134,7 +143,11 @@ python3 crates/stateful-bench/scripts/statefulbench_realworld.py qualify \
 To qualify one named repository while preparing or repairing the corpus, add
 `--repo <repository-key>`; the option may be repeated. The CLI does not
 automatically gate `run` on qualification, so complete qualification
-successfully before a live run. Qualification artifacts live at:
+successfully before a live run. Qualification isolates its Git patch operations
+from host system and global configuration and hooks, with fixed line-ending and
+whitespace checks, so host Git setup cannot change the qualification result.
+Qualification artifacts live at:
+
 
 ```text
 <cache>/

@@ -436,6 +436,10 @@ It contains 100 coding tasks across ten pinned repositories. Qualification is
 required before any live run: it verifies the base suite, base-RED/reference-
 GREEN task evaluators, integrated reference, upstream suite, and a non-isolated
 overlap graph.
+The manifest binds each downloaded archive to its canonical GitHub repository,
+exact commit, and SHA-256; qualification also ignores host Git configuration
+and hooks when checking reference patches.
+
 
 ```sh
 python3 crates/stateful-bench/scripts/statefulbench_realworld.py qualify --manifest datasets/statefulbench-realworld/manifest.json --cache tmp/statefulbench-realworld-cache
@@ -453,8 +457,10 @@ python3 crates/stateful-bench/scripts/statefulbench_realworld.py run --manifest 
 It is a full result only when every arm clears: all task and final agents exit
 successfully without timing out, no arm error occurs, and the post-final
 evaluators and upstream suite pass. Preserve `summary.json`, each trial's
-`results.json`, command/log artifacts, and the provenance manifest; interpret
-only tokens, tool calls, and wall time as descriptive efficiency metrics.
+`results.json`, command/log artifacts, and the provenance manifest.
+`results.json` and `summary.json` are published atomically, so automation
+never consumes partial JSON records. Interpret only tokens, tool calls, and
+wall time as descriptive efficiency metrics.
 
 For DeNovoSWE and ProgramBench setup, interpretation rules, and reusable command
 lines, read [DeNovoSWE Benchmark Guide](docs/denovo-benchmark-guide.md),
