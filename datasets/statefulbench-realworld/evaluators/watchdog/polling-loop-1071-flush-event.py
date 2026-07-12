@@ -20,8 +20,9 @@ def main(checkout: str) -> None:
         watched_file = root / "flushed.txt"
         watched_file.write_text("before")
         event_queue = EventQueue()
-        watch = ObservedWatch(root, recursive=True, event_filter=[FileClosedEvent])
-        emitter = PollingEmitter(event_queue, watch, timeout=0, event_filter=[FileClosedEvent])
+        event_filter = [FileModifiedEvent, FileClosedEvent]
+        watch = ObservedWatch(root, recursive=True, event_filter=event_filter)
+        emitter = PollingEmitter(event_queue, watch, timeout=0, event_filter=event_filter)
         emitter.on_thread_start()
 
         with watched_file.open("w") as file:
@@ -33,9 +34,10 @@ def main(checkout: str) -> None:
         while not event_queue.empty():
             event, _watch, *_ = event_queue.get_nowait()
             queued_events.append(event)
-        assert queued_events == [FileClosedEvent(str(watched_file))], (
-            "a FileClosedEvent filter must opt into one deterministic flush event for a changed file"
-        )
+        assert queued_events == [
+            FileModifiedEvent(str(watched_file)),
+            FileClosedEvent(str(watched_file)),
+        ], "a changed file must be modified before its opt-in deterministic close event"
         emitter.stop()
         default_queue = EventQueue()
         default_emitter = PollingEmitter(

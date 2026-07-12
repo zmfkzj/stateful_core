@@ -27,7 +27,7 @@
       "acceptance": [
         "Stopping after an event was queued invokes the callback once with that exact queued event.",
         "The debouncer thread exits and joins within the evaluator timeout.",
-        "Stopping with no queued events does not create an empty callback batch.",
+        "Stopping with no queued events exits and joins without invoking an empty callback batch.",
         "The production change is in src/watchdog/utils/event_debouncer.py at EventDebouncer.run."
       ],
       "overlap_anchors": [{"path": "src/watchdog/utils/event_debouncer.py", "symbol": "watchdog.utils.event_debouncer.EventDebouncer.run"}],
@@ -42,7 +42,7 @@
       "prompt": "Fix issue #1110 in watchdog.observers.polling.PollingEmitter. The default polling snapshot must preserve a symlink's own inode identity, so creating a symlink to an existing file emits FileCreatedEvent rather than FileMovedEvent. Keep injected stat functions unchanged for PollingObserverVFS and keep normal polling event dispatch order intact.",
       "acceptance": [
         "With fake snapshots for an existing target followed by a newly created symlink with a distinct link inode, PollingEmitter queues exactly FileCreatedEvent for the link and no move.",
-        "The default snapshot factory uses os.lstat while an explicitly injected stat function remains the one passed to DirectorySnapshot.",
+        "The default snapshot factory passes os.lstat to DirectorySnapshot, while a sentinel stat callable supplied to PollingEmitter is passed through unchanged.",
         "The change is confined to src/watchdog/observers/polling.py in PollingEmitter."
       ],
       "overlap_anchors": [{"path": "src/watchdog/observers/polling.py", "symbol": "watchdog.observers.polling.PollingEmitter"}],
@@ -57,7 +57,7 @@
       "prompt": "Implement the explicitly benchmark-defined #1010 issue-family extension in watchdog.observers.polling.PollingEmitter. Add an emit_on_start=False constructor option. When true, after the initial snapshot is captured, diff it from EmptyDirectorySnapshot and enqueue those events through the same PollingEmitter event-dispatch block used by polling diffs. The default remains silent; do not claim this emitter-only option is a public Observer API.",
       "acceptance": [
         "emit_on_start=False leaves startup silent.",
-        "emit_on_start=True queues initial file and directory creation events in the existing dispatch order, with FileCreatedEvent before DirCreatedEvent for the fake initial snapshot.",
+        "emit_on_start=True queues initial file and directory creation events in the existing dispatch order, with FileCreatedEvent before DirCreatedEvent for the fake initial snapshot; a FileCreatedEvent-only filter keeps the file and excludes the directory.",
         "Initial and later polling diffs route through one event-dispatch block, preserving event filters and event-type ordering.",
         "This is explicitly an issue-family extension because #1010 does not specify an API.",
         "The change is confined to src/watchdog/observers/polling.py in PollingEmitter."
@@ -154,8 +154,8 @@
       "source_hash": "dad1a88eb975ad95c64193d1798943b01a4bba486a84be34d527dba0790954b7",
       "prompt": "Implement the explicitly benchmark-defined #1071 issue-family extension in watchdog.observers.polling.PollingEmitter.queue_events. When event_filter explicitly requests the existing FileClosedEvent, queue exactly one FileClosedEvent after each detected FileModifiedEvent for that path; this is an opt-in polling flush-completion signal. Without that filter, preserve the existing event stream exactly. Do not claim to observe Python file.flush() directly.",
       "acceptance": [
-        "With event_filter=[FileClosedEvent], a changed file produces exactly one FileClosedEvent for its path during the polling interval.",
-        "The FileClosedEvent is queued after the ordinary FileModifiedEvent, allowing existing event filtering to retain the opt-in signal alone.",
+        "With event_filter=[FileModifiedEvent, FileClosedEvent], a changed file produces exactly one FileModifiedEvent followed by exactly one FileClosedEvent for its path during the polling interval.",
+        "The FileClosedEvent is queued immediately after its ordinary FileModifiedEvent, allowing event filtering to retain either or both opt-in events.",
         "Without an explicit FileClosedEvent filter, the polling emitter keeps its pre-existing event stream and does not add close/flush events.",
         "The extension is explicitly recorded as an issue-family extension rather than a claim that polling detects Python file.flush() calls.",
         "The production change is confined to watchdog.observers.polling.PollingEmitter.queue_events."

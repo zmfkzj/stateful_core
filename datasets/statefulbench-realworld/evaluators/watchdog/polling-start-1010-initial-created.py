@@ -58,6 +58,15 @@ def main() -> None:
         event_queue = queue.Queue()
         emitter = polling.PollingEmitter(event_queue, watch, emit_on_start=True)
         emitter.on_thread_start()
+
+        filtered_queue = queue.Queue()
+        filtered_emitter = polling.PollingEmitter(
+            filtered_queue,
+            watch,
+            emit_on_start=True,
+            event_filter=[FileCreatedEvent],
+        )
+        filtered_emitter.on_thread_start()
     finally:
         polling.DirectorySnapshot = original_snapshot
         polling.DirectorySnapshotDiff = original_diff
@@ -66,6 +75,7 @@ def main() -> None:
         (FileCreatedEvent, "/watch/ready.txt"),
         (DirCreatedEvent, "/watch/incoming"),
     ]
+    assert queued_types(filtered_queue) == [(FileCreatedEvent, "/watch/ready.txt")]
 
 
 if __name__ == "__main__":

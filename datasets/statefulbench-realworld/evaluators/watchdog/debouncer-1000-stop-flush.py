@@ -23,6 +23,25 @@ def main(checkout: str) -> None:
     from watchdog.events import FileModifiedEvent
     from watchdog.utils.event_debouncer import EventDebouncer
 
+    empty_received: list[list[FileModifiedEvent]] = []
+    empty_debouncer = EventDebouncer(60, empty_received.append)
+    empty_condition = SignalingCondition()
+    empty_debouncer._cond = empty_condition
+    empty_debouncer.start()
+    try:
+        if not empty_condition.waiting.wait(1):
+            raise AssertionError("EventDebouncer did not enter its initial condition wait")
+        empty_debouncer.stop()
+        empty_debouncer.join(1)
+        if empty_debouncer.is_alive():
+            raise AssertionError("EventDebouncer leaked after an empty stop")
+        if empty_received:
+            raise AssertionError(f"empty stop must not invoke the callback, got {empty_received!r}")
+    finally:
+        if empty_debouncer.is_alive():
+            empty_debouncer.stop()
+            empty_debouncer.join(1)
+
     received: list[list[FileModifiedEvent]] = []
     debouncer = EventDebouncer(60, received.append)
     condition = SignalingCondition()

@@ -41,12 +41,7 @@ def main() -> None:
     from watchdog.events import FileCreatedEvent
     from watchdog.observers.api import ObservedWatch
 
-    snapshots = iter(
-        (
-            Snapshot({"/watch/target": ((1, 1), False)}),
-            Snapshot({"/watch/target": ((1, 1), False), "/watch/target.link": ((2, 1), False)}),
-        )
-    )
+    snapshots = iter(())
     captured_stats = []
 
     def fake_directory_snapshot(path, *, recursive, stat, listdir):
@@ -56,14 +51,37 @@ def main() -> None:
     original_snapshot = polling.DirectorySnapshot
     polling.DirectorySnapshot = fake_directory_snapshot
     try:
+        snapshots = iter(
+            (
+                Snapshot({"/watch/target": ((1, 1), False)}),
+                Snapshot({"/watch/target": ((1, 1), False), "/watch/target.link": ((2, 1), False)}),
+            )
+        )
         event_queue = queue.Queue()
         emitter = polling.PollingEmitter(event_queue, ObservedWatch("/watch", recursive=True))
         emitter.on_thread_start()
         emitter.queue_events(0)
+
+        def sentinel_stat(path):
+            raise AssertionError(f"unexpected stat call for {path}")
+
+        snapshots = iter(
+            (
+                Snapshot({"/watch/target": ((1, 1), False)}),
+                Snapshot({"/watch/target": ((1, 1), False), "/watch/target.link": ((2, 1), False)}),
+            )
+        )
+        injected_emitter = polling.PollingEmitter(
+            queue.Queue(),
+            ObservedWatch("/watch", recursive=True),
+            stat=sentinel_stat,
+        )
+        injected_emitter.on_thread_start()
+        injected_emitter.queue_events(0)
     finally:
         polling.DirectorySnapshot = original_snapshot
 
-    assert captured_stats == [os.lstat, os.lstat], captured_stats
+    assert captured_stats == [os.lstat, os.lstat, sentinel_stat, sentinel_stat], captured_stats
     queued_event, queued_watch, *_ = event_queue.get_nowait()
     assert type(queued_event) is FileCreatedEvent
     assert queued_event.src_path == "/watch/target.link"
