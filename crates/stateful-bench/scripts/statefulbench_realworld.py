@@ -17,7 +17,7 @@ import tempfile
 import time
 from contextlib import nullcontext
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib import request
 from urllib.parse import urlsplit
 
@@ -116,6 +116,16 @@ def ensure_archive(repo: dict, cache_dir: Path, opener=request.urlopen) -> Path:
             temporary.unlink(missing_ok=True)
     return archive
 
+def _link_stays_within_root(member: tarfile.TarInfo, root: str) -> bool:
+    target = PurePosixPath(member.linkname)
+    if target.is_absolute():
+        return True
+    if not target.parts or ".." in target.parts:
+        return False
+    if member.issym():
+        target = PurePosixPath(member.name).parent / target
+    return target.parts[0] == root
+
 
 def extract_workspace(archive: Path, expected_sha256: str, destination: Path) -> None:
     if destination.exists():
@@ -136,8 +146,11 @@ def extract_workspace(archive: Path, expected_sha256: str, destination: Path) ->
                 raise ValueError("archive contains unsafe members")
             if not any(member.name.rstrip("/") == root and member.isdir() for member in members):
                 raise ValueError("archive root must be a directory")
-            if any(member.issym() or member.islnk() for member in members):
-                raise ValueError("archive contains link members")
+            if any(
+                (member.issym() or member.islnk()) and not _link_stays_within_root(member, root)
+                for member in members
+            ):
+                raise ValueError("archive contains unsafe members")
 
             with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
                 extracted = Path(temporary)

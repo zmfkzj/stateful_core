@@ -344,6 +344,7 @@ class ArchiveTests(unittest.TestCase):
         files: dict[str, bytes],
         *,
         symlink: str | None = None,
+        hardlink: str | None = None,
         extra_root: bool = False,
     ) -> bytes:
         output = io.BytesIO()
@@ -359,6 +360,11 @@ class ArchiveTests(unittest.TestCase):
                 member = tarfile.TarInfo("source/link")
                 member.type = tarfile.SYMTYPE
                 member.linkname = symlink
+                archive.addfile(member)
+            if hardlink is not None:
+                member = tarfile.TarInfo("source/hardlink")
+                member.type = tarfile.LNKTYPE
+                member.linkname = hardlink
                 archive.addfile(member)
             if extra_root:
                 root = tarfile.TarInfo("other")
@@ -480,10 +486,36 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(results[0].read_bytes(), contents)
         self.assertFalse(any((self.root / "cache").glob("*.tmp")))
 
+    def test_extract_workspace_allows_safe_internal_links(self) -> None:
+        contents = self.archive_bytes(
+            {"target.txt": b"linked content\n"},
+            symlink="target.txt",
+            hardlink="source/target.txt",
+        )
+        archive, expected_sha256 = self.write_archive(contents)
+        destination = self.root / "links"
+
+        self.mod.extract_workspace(archive, expected_sha256, destination)
+
+        self.assertTrue((destination / "link").is_symlink())
+        self.assertEqual((destination / "link").read_bytes(), b"linked content\n")
+        self.assertEqual((destination / "hardlink").read_bytes(), b"linked content\n")
+        self.assertEqual(
+            (destination / "hardlink").stat().st_ino,
+            (destination / "target.txt").stat().st_ino,
+        )
+
     def test_extract_workspace_rejects_unsafe_members_and_multiple_roots(self) -> None:
         cases = (
             ("traversal", self.archive_bytes({"../escape": b"no"})),
-            ("symlink", self.archive_bytes({"pyproject.toml": b"[project]\n"}, symlink="../escape")),
+            (
+                "relative symlink",
+                self.archive_bytes({"pyproject.toml": b"[project]\n"}, symlink="../escape"),
+            ),
+            (
+                "absolute symlink",
+                self.archive_bytes({"pyproject.toml": b"[project]\n"}, symlink="/escape"),
+            ),
             ("multiple roots", self.archive_bytes({"pyproject.toml": b"[project]\n"}, extra_root=True)),
         )
         for name, contents in cases:
