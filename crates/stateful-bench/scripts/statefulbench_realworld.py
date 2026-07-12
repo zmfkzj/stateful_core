@@ -953,9 +953,32 @@ def _empty_run_result(repo: dict, arm: str, trial: int, error: str | None = None
         "post_suite_ok": False,
         "evaluators_ok": False,
         "upstream_suite_ok": False,
+        "evaluator_results": [],
         "agents": [],
         "artifacts": {},
     }
+
+
+def _write_json_atomically(path: Path, value: dict) -> None:
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as output:
+            temporary = Path(output.name)
+            json.dump(value, output, indent=2)
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _write_run_result(out_dir: Path, result: dict) -> None:
@@ -966,9 +989,7 @@ def _write_run_result(out_dir: Path, result: dict) -> None:
         / f"trial-{result['trial']}"
     )
     result_dir.mkdir(parents=True, exist_ok=True)
-    (result_dir / "results.json").write_text(
-        json.dumps(result, indent=2) + "\n", encoding="utf-8"
-    )
+    _write_json_atomically(result_dir / "results.json", result)
 
 
 def run_repo_arm(
@@ -1012,6 +1033,7 @@ def run_repo_arm(
     error: str | None = None
     evaluators_ok = False
     upstream_suite_ok = False
+    evaluator_results: list[dict[str, bool | str]] = []
     pending: list[tuple[AgentHandle, str]] = []
 
 
@@ -1073,11 +1095,22 @@ def run_repo_arm(
 
                 if any(_sha256(path) != digest for path, digest in evaluator_hashes.items()):
                     raise RuntimeError("canonical evaluator changed during agent execution")
-                evaluator_results = [
-                    evaluator(path, workspace, python, env, artifacts, artifact_dir, task["key"])
-                    for path, (task, _) in zip(evaluator_paths, tasks, strict=True)
-                ]
-                evaluators_ok = all(evaluator_results)
+                for path, (task, _) in zip(evaluator_paths, tasks, strict=True):
+                    evaluator_results.append(
+                        {
+                            "key": task["key"],
+                            "ok": evaluator(
+                                path,
+                                workspace,
+                                python,
+                                env,
+                                artifacts,
+                                artifact_dir,
+                                task["key"],
+                            ),
+                        }
+                    )
+                evaluators_ok = all(result["ok"] for result in evaluator_results)
                 upstream_suite_ok = suite(
                     repo, workspace, python, env, artifacts, artifact_dir, "post-final"
                 )
@@ -1131,12 +1164,39 @@ def run_repo_arm(
         "post_suite_ok": post_suite_ok,
         "evaluators_ok": evaluators_ok,
         "upstream_suite_ok": upstream_suite_ok,
+        "evaluator_results": evaluator_results,
         "agents": agents,
         "artifacts": artifacts,
     }
     _write_run_result(out_dir, result)
     return result
 
+
+
+def _failure_reason(result: dict) -> str | None:
+    if result["error"] is not None:
+        return result["error"]
+    failures = []
+    for record in result.get("agents", []):
+        agent = f"{record['kind']} agent {record['agent_id']}"
+        if record["timed_out"]:
+            failures.append(f"{agent} timed out")
+        elif record["exit_code"] != 0:
+            failures.append(f"{agent} exited with code {record['exit_code']}")
+    if not result.get("evaluators_ok", True):
+        failed = [
+            status["key"]
+            for status in result.get("evaluator_results", [])
+            if not status["ok"]
+        ]
+        failures.append(
+            f"evaluator failed: {', '.join(failed)}" if failed else "evaluator failed"
+        )
+    if not result.get("upstream_suite_ok", True):
+        failures.append("upstream suite failed")
+    if failures:
+        return "; ".join(failures)
+    return "run did not clear" if not result["cleared"] else None
 
 
 def _report_row(result: dict) -> dict:
@@ -1148,7 +1208,7 @@ def _report_row(result: dict) -> dict:
         "wall_time_s": result["arm_wall_time_s"],
         "tokens": result["total_tokens"],
         "tool_calls": result["total_tool_calls"],
-        "error": result["error"],
+        "error": _failure_reason(result),
     }
 
 
@@ -1237,7 +1297,7 @@ def _table(results: list[dict]) -> str:
         "| --- | --- | ---: | --- | ---: | ---: | ---: | --- |",
     ]
     for row in map(_report_row, results):
-        error = "" if row["error"] is None else str(row["error"]).replace("|", "\\|")
+        error = "" if row["error"] is None else re.sub(r"\r\n?|\n", r"\\n", str(row["error"])).replace("|", "\\|")
         lines.append(
             "| {repo} | {arm} | {trial} | {cleared} | {wall:.3f} | {tokens} | {tools} | {error} |".format(
                 repo=row["repo"],
@@ -1349,9 +1409,7 @@ def main(argv: list[str] | None = None) -> int:
             time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         )
         arguments.out.mkdir(parents=True, exist_ok=True)
-        (arguments.out / "summary.json").write_text(
-            json.dumps(summary, indent=2) + "\n", encoding="utf-8"
-        )
+        _write_json_atomically(arguments.out / "summary.json", summary)
         print(_table(results))
         return 0 if results and all(result["cleared"] for result in results) else 1
 

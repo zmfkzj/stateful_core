@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import sys
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -903,18 +904,22 @@ class RealWorldRunnerTests(unittest.TestCase):
         workspace.mkdir(exist_ok=True)
         yield workspace, Path(sys.executable), {}
 
-    def fake_launch(self, events, final_check=None, exit_codes=None):
+    def fake_launch(self, events, final_check=None, exit_codes=None, timeout_agents=None):
         exit_codes = exit_codes or {}
+        timeout_agents = timeout_agents or set()
 
         class Process:
             def __init__(self, agent_id):
                 self.agent_id = agent_id
                 self.returncode = None
-                self.pid = 1
+                self.pid = 999999
 
             def wait(self, timeout=None):
                 events.append(("wait", self.agent_id))
-                self.returncode = exit_codes.get(self.agent_id, 0)
+                if self.agent_id in timeout_agents and self.returncode is None:
+                    self.returncode = -9
+                    raise subprocess.TimeoutExpired(self.agent_id, timeout)
+                self.returncode = exit_codes.get(self.agent_id, self.returncode or 0)
                 return self.returncode
 
         def launch(arm_dir, workspace, agent_id, prompt_path, mode, cfg):
@@ -1011,6 +1016,77 @@ class RealWorldRunnerTests(unittest.TestCase):
         self.assertEqual(len(suite_failed["agents"]), 11)
         self.assertEqual(len(agent_failed["agents"]), 11)
 
+
+    def test_failure_summary_derives_exact_agent_and_status_causes(self) -> None:
+        cases = (
+            (
+                "nonzero",
+                {"launch_kwargs": {"exit_codes": {"task-5": 1}}},
+                "task agent task-5 exited with code 1",
+            ),
+            (
+                "timeout",
+                {"launch_kwargs": {"timeout_agents": {"task-5"}}},
+                "task agent task-5 timed out",
+            ),
+            (
+                "evaluator",
+                {"evaluator": lambda path, *_: path.name != "task-0.py"},
+                "evaluator failed: task-0",
+            ),
+            ("suite", {"suite_ok": False}, "upstream suite failed"),
+            (
+                "all-statuses",
+                {
+                    "launch_kwargs": {
+                        "exit_codes": {"task-1": 1, "final": 2},
+                        "timeout_agents": {"task-5"},
+                    },
+                    "evaluator": lambda path, *_: path.name
+                    not in {"task-0.py", "task-2.py"},
+                    "suite_ok": False,
+                },
+                "task agent task-1 exited with code 1; task agent task-5 timed out; "
+                "final agent final exited with code 2; evaluator failed: task-0, task-2; "
+                "upstream suite failed",
+            ),
+        )
+        repository = {
+            "key": "fixture",
+            "commit": "0" * 40,
+            "archive_sha256": "0" * 64,
+        }
+        for name, kwargs, expected in cases:
+            with self.subTest(name=name), mock.patch.object(self.mod.os, "killpg"):
+                result = self.run_arm("parallel-off", [], **kwargs)
+                summary = self.mod.build_run_summary(
+                    [repository],
+                    ["parallel-off"],
+                    1,
+                    "model",
+                    "thinking",
+                    [result],
+                    "2026-07-12T00:00:00Z",
+                )
+
+            self.assertIsNone(result["error"])
+            self.assertEqual(summary["arms"][0]["error"], expected)
+            self.assertEqual(
+                summary["aggregates"][0]["failures"],
+                [
+                    {
+                        "repo": "fixture",
+                        "arm": "parallel-off",
+                        "trial": 1,
+                        "error": expected,
+                    }
+                ],
+            )
+            if name in {"nonzero", "timeout"}:
+                failed = result["agents"][5]
+                self.assertEqual(failed["agent_id"], "task-5")
+                self.assertEqual(failed["timed_out"], name == "timeout")
+                self.assertEqual(failed["exit_code"], -9 if name == "timeout" else 1)
 
     def test_parallel_launch_error_reaps_already_started_agents(self) -> None:
         events = []
@@ -1361,5 +1437,39 @@ class RealWorldReportingTests(unittest.TestCase):
         table = stdout.getvalue()
         self.assertIn("| repository | arm | trial | cleared |", table)
         self.assertIn("| bravo | parallel-off | 1 | False | 4.000 | 14 | 5 | repository setup failed |", table)
+
+    def test_result_write_is_atomic_and_preserves_prior_valid_json(self) -> None:
+        result = self.result("alpha", "sequential", 1, tokens=1)
+        self.mod._write_run_result(self.root, result)
+        target = self.root / "alpha" / "sequential" / "trial-1" / "results.json"
+        self.assertEqual(json.loads(target.read_text(encoding="utf-8")), result)
+        original = target.read_text(encoding="utf-8")
+
+        with mock.patch.object(self.mod.os, "replace", side_effect=OSError("replace failed")):
+            with self.assertRaisesRegex(OSError, "replace failed"):
+                self.mod._write_run_result(
+                    self.root, self.result("alpha", "sequential", 1, tokens=2)
+                )
+
+        self.assertEqual(target.read_text(encoding="utf-8"), original)
+
+    def test_table_normalizes_line_endings_and_escapes_pipes_in_one_physical_row(self) -> None:
+        table = self.mod._table(
+            [
+                self.result(
+                    "alpha",
+                    "sequential",
+                    1,
+                    cleared=False,
+                    error="first\r\nsecond|third",
+                )
+            ]
+        )
+
+        self.assertEqual(len(table.splitlines()), 3)
+        self.assertEqual(
+            table.splitlines()[-1],
+            "| alpha | sequential | 1 | False | 0.000 | 0 | 0 | first\\nsecond\\|third |",
+        )
 if __name__ == "__main__":
     unittest.main()
