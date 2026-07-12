@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import ast
 import contextlib
+import functools
 import hashlib
 import importlib.util
 import json
@@ -131,6 +132,18 @@ def _link_stays_within_root(member: tarfile.TarInfo, root: str) -> bool:
     target = posixpath.normpath(target)
     return target == root or target.startswith(f"{root}/")
 
+def _extracted_links_stay_within_root(root_directory: Path) -> bool:
+    try:
+        root = root_directory.resolve(strict=True)
+        if root_directory.is_symlink() or not root.is_dir():
+            return False
+        for path in root.rglob("*"):
+            if path.is_symlink() and not path.resolve().is_relative_to(root):
+                return False
+    except (OSError, RuntimeError):
+        return False
+    return True
+
 
 def extract_workspace(archive: Path, expected_sha256: str, destination: Path) -> None:
     if destination.exists():
@@ -164,6 +177,8 @@ def extract_workspace(archive: Path, expected_sha256: str, destination: Path) ->
                 except tarfile.TarError as error:
                     raise ValueError("archive contains unsafe members") from error
                 root_directory = extracted / root
+                if not _extracted_links_stay_within_root(root_directory):
+                    raise ValueError("archive contains unsafe members")
                 destination.mkdir()
                 for child in root_directory.iterdir():
                     child.replace(destination / child.name)
@@ -482,23 +497,46 @@ def _run_logged(
     return completed
 
 
+@functools.cache
+def _rust_tool_directories(workspace: Path | None) -> tuple[str, ...]:
+    rustup = shutil.which("rustup")
+    tool_paths: list[Path] = []
+    for executable in ("rustc", "cargo"):
+        resolved: Path | None = None
+        if rustup:
+            try:
+                completed = subprocess.run(
+                    [rustup, "which", executable],
+                    cwd=workspace,
+                    capture_output=True,
+                    check=False,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            except OSError:
+                completed = None
+            if completed is not None:
+                candidate = Path(completed.stdout.strip())
+                if completed.returncode == 0 and candidate.is_absolute():
+                    resolved = candidate.resolve()
+        if resolved is None:
+            candidate = shutil.which(executable)
+            if candidate:
+                resolved = Path(candidate).resolve()
+        if resolved is not None and resolved.is_file() and os.access(resolved, os.X_OK):
+            tool_paths.append(resolved)
+    return tuple(dict.fromkeys(str(path.parent) for path in tool_paths))
+
+
 def _sanitized_environment(
     venv: Path | None = None, workspace: Path | None = None
 ) -> dict[str, str]:
     path_parts = [str(venv / "bin")] if venv is not None else []
-    for executable in ("rustc", "cargo"):
-        if executable_path := shutil.which(executable):
-            path_parts.append(str(Path(executable_path).resolve().parent))
+    path_parts.extend(_rust_tool_directories(workspace))
     path_parts.extend(os.defpath.split(os.pathsep))
     env = {"PATH": os.pathsep.join(dict.fromkeys(path_parts))}
     if venv is not None:
         env["VIRTUAL_ENV"] = str(venv)
-    rustup_home = os.environ.get("RUSTUP_HOME")
-    if rustup_home is None:
-        candidate = Path.home() / ".rustup"
-        rustup_home = str(candidate) if candidate.is_dir() else None
-    if rustup_home:
-        env["RUSTUP_HOME"] = rustup_home
     if workspace is not None:
         locations = {
             "HOME": workspace / ".statefulbench-home",
@@ -1114,7 +1152,9 @@ def run_repo_arm(
             with server_context as runtime_env:
                 runtime_cfg = replace(
                     cfg,
-                    launch_env={name: value for name, value in env.items() if name != "HOME"},
+                    launch_env={
+                        name: value for name, value in env.items() if name not in {"HOME", "RUSTUP_HOME"}
+                    },
                     stateful_runtime_env=runtime_env or None,
                 )
 

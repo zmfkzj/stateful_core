@@ -215,10 +215,14 @@ class ManifestTests(unittest.TestCase):
         ), self.assertRaisesRegex(ValueError, "python"):
             self.mod.verified_python("3.14.6")
 
-    def test_workspace_environment_is_isolated_writable_and_retains_rust_toolchain(self) -> None:
+    def test_workspace_environment_isolated_without_rustup_and_has_resolved_rust_tools(self) -> None:
         workspace = Path(self.tempdir.name) / "workspace"
         venv = workspace / ".statefulbench-venv"
-        cargo_bin = Path("/host/rust/bin")
+        rust_bin = Path(self.tempdir.name) / "pendulum-toolchain" / "bin"
+        rust_bin.mkdir(parents=True)
+        rust_tools = {name: rust_bin / name for name in ("rustc", "cargo")}
+        for executable in rust_tools.values():
+            executable.touch(mode=0o755)
         with mock.patch.dict(
             self.mod.os.environ,
             {
@@ -228,10 +232,25 @@ class ManifestTests(unittest.TestCase):
             },
             clear=True,
         ), mock.patch.object(
-            self.mod.shutil,
-            "which",
-            side_effect=lambda name: str(cargo_bin / name),
-        ):
+            self.mod.shutil, "which", return_value="/host/bin/rustup"
+        ), mock.patch.object(
+            self.mod.subprocess,
+            "run",
+            side_effect=[
+                subprocess.CompletedProcess(
+                    ["/host/bin/rustup", "which", "rustc"],
+                    0,
+                    f"{rust_tools['rustc']}\n",
+                    "",
+                ),
+                subprocess.CompletedProcess(
+                    ["/host/bin/rustup", "which", "cargo"],
+                    0,
+                    f"{rust_tools['cargo']}\n",
+                    "",
+                ),
+            ],
+        ) as rustup_which:
             environment = self.mod._sanitized_environment(venv, workspace)
 
         self.assertEqual(environment["VIRTUAL_ENV"], str(venv))
@@ -239,11 +258,55 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(environment["PIP_CACHE_DIR"], str(workspace / ".statefulbench-pip-cache"))
         self.assertEqual(environment["TMPDIR"], str(workspace / ".statefulbench-tmp"))
         self.assertEqual(environment["CARGO_HOME"], str(workspace / ".statefulbench-cargo-home"))
-        self.assertEqual(environment["RUSTUP_HOME"], "/host/rustup")
+        self.assertNotIn("RUSTUP_HOME", environment)
         self.assertTrue(all(Path(environment[name]).is_dir() for name in ("HOME", "PIP_CACHE_DIR", "TMPDIR", "CARGO_HOME")))
-        self.assertTrue(environment["PATH"].startswith(f"{venv / 'bin'}:{cargo_bin}"))
+        self.assertEqual(environment["PATH"].split(":")[:2], [str(venv / "bin"), str(rust_bin.resolve())])
+        rustup_which.assert_has_calls(
+            [
+                mock.call(
+                    ["/host/bin/rustup", "which", "rustc"],
+                    capture_output=True,
+                    check=False,
+                    encoding="utf-8",
+                    errors="replace",
+                    cwd=workspace,
+                ),
+                mock.call(
+                    ["/host/bin/rustup", "which", "cargo"],
+                    capture_output=True,
+                    check=False,
+                    encoding="utf-8",
+                    errors="replace",
+                    cwd=workspace,
+                ),
+            ]
+        )
         self.assertNotIn("PYTHONPATH", environment)
         self.assertNotIn("UNRELATED_HOST_SETTING", environment)
+
+    def test_workspace_environment_falls_back_to_direct_resolved_rust_tools(self) -> None:
+        workspace = Path(self.tempdir.name) / "workspace"
+        rust_bin = Path(self.tempdir.name) / "direct-toolchain" / "bin"
+        rust_bin.mkdir(parents=True)
+        tools = {name: rust_bin / name for name in ("rustc", "cargo")}
+        for executable in tools.values():
+            executable.touch(mode=0o755)
+        with mock.patch.object(
+            self.mod.shutil,
+            "which",
+            side_effect=lambda name: {
+                "rustup": "/host/bin/rustup",
+                "rustc": str(tools["rustc"]),
+                "cargo": str(tools["cargo"]),
+            }.get(name),
+        ), mock.patch.object(
+            self.mod.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 1, "", "unavailable"),
+        ):
+            environment = self.mod._sanitized_environment(workspace=workspace)
+
+        self.assertEqual(environment["PATH"].split(":")[0], str(rust_bin.resolve()))
 
 
 
@@ -645,6 +708,31 @@ class ArchiveTests(unittest.TestCase):
             (destination / "hardlink").stat().st_ino,
             (destination / "target.txt").stat().st_ino,
         )
+
+    def test_extract_workspace_rejects_symlink_chain_escaping_root(self) -> None:
+        contents = io.BytesIO()
+        with tarfile.open(fileobj=contents, mode="w:gz") as source:
+            root = tarfile.TarInfo("source")
+            root.type = tarfile.DIRTYPE
+            source.addfile(root)
+            victim = tarfile.TarInfo("source/victim")
+            victim.size = len(b"victim")
+            source.addfile(victim, io.BytesIO(b"victim"))
+            directory = tarfile.TarInfo("source/dir")
+            directory.type = tarfile.SYMTYPE
+            directory.linkname = "."
+            source.addfile(directory)
+            link = tarfile.TarInfo("source/dir/link")
+            link.type = tarfile.SYMTYPE
+            link.linkname = "../victim"
+            source.addfile(link)
+        archive, expected_sha256 = self.write_archive(contents.getvalue())
+        destination = self.root / "symlink-chain"
+
+        with self.assertRaisesRegex(ValueError, "archive"):
+            self.mod.extract_workspace(archive, expected_sha256, destination)
+
+        self.assertFalse(destination.exists())
 
     def test_extract_workspace_rejects_unsafe_members_and_multiple_roots(self) -> None:
         cases = (
@@ -1308,6 +1396,38 @@ class RealWorldRunnerTests(unittest.TestCase):
         self.assertEqual([event[1] for event in events if event[0] == "launch"], ["task-0", "task-1", "task-2"])
         self.assertEqual([event[1] for event in events if event[0] == "wait"], ["task-0", "task-1", "task-2"])
         self.assertNotIn(("launch", "final"), events)
+
+    def test_agent_launch_environment_omits_rustup_home(self) -> None:
+        events = []
+        workspace_env = {"PATH": "/toolchain/bin:/usr/bin", "RUSTUP_HOME": "/host/rustup"}
+
+        @contextlib.contextmanager
+        def workspace(*_args):
+            workspace = self.root / "workspace-with-rustup"
+            workspace.mkdir(exist_ok=True)
+            yield workspace, Path(sys.executable), workspace_env
+
+        def launch(arm_dir, workspace, agent_id, prompt_path, mode, cfg):
+            self.assertNotIn("RUSTUP_HOME", cfg.launch_env)
+            return self.fake_launch(events)(arm_dir, workspace, agent_id, prompt_path, mode, cfg)
+
+        result = self.mod.run_repo_arm(
+            self.repo,
+            self.corpus,
+            self.dataset,
+            self.root / "cache",
+            self.root / "out",
+            "parallel-off",
+            self.mod.RunConfig(tasks=10, stateful_binary="/tmp/stateful"),
+            launch=launch,
+            workspace_factory=workspace,
+            archive_loader=lambda *_: self.root / "archive.tar.gz",
+            setup=lambda *_: True,
+            evaluator=lambda *_: True,
+            suite=lambda *_: True,
+        )
+
+        self.assertTrue(result["cleared"], result)
 
     def test_repository_environment_reaches_setup_evaluators_suite_and_agents(self) -> None:
         events = []
