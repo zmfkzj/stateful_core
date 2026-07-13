@@ -166,7 +166,7 @@ For every real worker, set `HOME` and `STATEFUL_HOME` to its same bind-mounted c
 **Proposed task/identity handshake.** Graph-mode Docker launch explicitly allowlists `STATEFUL_BENCH_TASK_ID`, `STATEFUL_BENCH_ATTEMPT_ID`, and `STATEFUL_BENCH_IDENTITY_PATH`; translate the last to a writable container-visible file in the mounted child home. At session start, the Stateful OMP extension atomically writes:
 
 ```json
-{"task_id":"T01","attempt_id":"<attempt>","session_id":"<session>","leaf_id":"<leaf>","actual_agent_id":"omp-<session>-<leaf>","workspace_id":"<workspace>"}
+{"task_id":"T01","attempt_id":"<attempt>","session_id":"<session>","actual_agent_id":"omp-<session>","workspace_id":"<workspace>"}
 ```
 
 using `ctx.sessionManager`. Freeze `stateful/agent-map.json`. It MUST form a bijection between started task/attempt pairs and actual OMP identities; blocked and unstarted tasks have no identity.
