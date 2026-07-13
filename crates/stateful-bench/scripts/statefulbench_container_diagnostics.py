@@ -182,7 +182,7 @@ def _sqlite_record(path: Path, expected: os.stat_result) -> dict:
         if connection is not None:
             connection.close()
         if temporary_dir is not None:
-            shutil.rmtree(temporary_dir, ignore_errors=True)
+            shutil.rmtree(temporary_dir)
     return record
 
 

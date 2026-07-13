@@ -597,6 +597,22 @@ class DockerDiagnosticTests(unittest.TestCase):
         self.assertEqual(snapshot["databases"]["agent.db"]["schemas"], ["safe_items"])
         self.assertEqual(snapshot["databases"]["agent.db"]["table_counts"], {"safe_items": 1})
 
+    def test_snapshot_fails_when_private_sqlite_copy_cannot_be_removed(self) -> None:
+        import sqlite3
+
+        database = self.home / "agent.db"
+        with sqlite3.connect(database) as connection:
+            connection.execute("create table safe_items (id integer)")
+        connection.close()
+
+        def cleanup(_path, *, ignore_errors=False):
+            if not ignore_errors:
+                raise OSError("private SQLite copy cleanup failed")
+
+        with patch.object(self.diagnostics.shutil, "rmtree", side_effect=cleanup):
+            with self.assertRaisesRegex(OSError, "private SQLite copy cleanup failed"):
+                self.diagnostics.snapshot_home(self.home)
+
     def test_snapshot_rejects_unsafe_sqlite_sidecar(self) -> None:
         import sqlite3
 
