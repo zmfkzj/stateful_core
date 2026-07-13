@@ -6,6 +6,7 @@ import runpy
 import subprocess
 import tempfile
 import unittest
+import time
 import sys
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -278,8 +279,193 @@ class DockerArmContainerTests(unittest.TestCase):
                 "orphan-container-id",
             ],
         )
+
+
+class DockerAgentLifecycleTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.mod = load_script("statefulbench_docker.py")
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tempdir.name)
+        runtime = self.mod.DockerRuntime(
+            binary="/usr/local/bin/docker",
+            image="statefulbench-realworld:local",
+            image_id="sha256:abc",
+            repo_digests=(),
+            platform="linux/arm64",
+        )
+        self.container = self.mod.ArmContainer(
+            runtime,
+            "container-1",
+            "statefulbench-fixture-parallel-off-1",
+            self.root / "workspace",
+            self.root / "runtime",
+        )
+        self.container.runtime_dir.mkdir()
+        self.prompt = self.root / "task.prompt.txt"
+        self.prompt.write_text("implement task\n", encoding="utf-8")
+        self.cfg = type(
+            "Config",
+            (),
+            {
+                "model": "model",
+                "thinking": "high",
+                "omp_bin": "/usr/local/bin/omp",
+                "timeout_s": 1,
+            },
+        )()
+        self.env = {"HOME": "/home/stateful", "STATEFUL_HOME": "/home/stateful/.stateful"}
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    def test_all_agents_use_same_home_and_workspace(self) -> None:
+        commands = []
+
+        def popen(command, **_kwargs):
+            commands.append(command)
+            return Mock(wait=Mock(return_value=0), returncode=0)
+        copy = Mock()
+        handles = [
+            self.mod.launch_agent(
+                self.container,
+                self.root,
+                agent_id,
+                self.prompt,
+                self.cfg,
+                self.env,
+                popen=popen,
+                copy=copy,
+            )
+            for agent_id in ("task-a", "task-b", "final")
+        ]
+
+        for command in commands:
+            self.assertIn("HOME=/home/stateful", command)
+            self.assertIn("-w", command)
+            self.assertIn("/workspace", command)
+            self.assertIn("-d", command)
+            self.assertIn("statefulbench-container-entry", " ".join(command))
+        self.assertEqual({handle.container_id for handle in handles}, {"container-1"})
+
+    def test_terminate_escalates_term_to_kill_and_requires_inner_death(self) -> None:
+        pid_record = self.container.runtime_dir / "pids" / "task-a.json"
+        pid_record.parent.mkdir()
+        pid_record.write_text('{"pid": 42, "pgid": 42}\n', encoding="utf-8")
+        handle = self.mod.DockerAgentHandle(
+            Mock(wait=Mock(return_value=0), returncode=0),
+            "task-a",
+            self.container.container_id,
+            pid_record,
+            0.0,
+        )
+        runner = Mock(
+            side_effect=[
+                subprocess.CompletedProcess([], 0, "", ""),
+                subprocess.CompletedProcess([], 0, "", ""),
+                subprocess.CompletedProcess([], 0, "", ""),
+                subprocess.CompletedProcess([], 1, "", ""),
+                subprocess.CompletedProcess([], 1, "", ""),
+            ]
+        )
+
+        cleanup_error = self.mod.terminate_agent_group(
+            self.container, handle, runner=runner, wait_s=0
+        )
+
+        self.assertIsNone(cleanup_error)
+        commands = [call.args[0] for call in runner.call_args_list]
+        self.assertIn(
+            ["/usr/local/bin/docker", "exec", "--workdir", "/workspace", "container-1", "kill", "-TERM", "-42"],
+            commands,
+        )
+        self.assertIn(
+            ["/usr/local/bin/docker", "exec", "--workdir", "/workspace", "container-1", "kill", "-KILL", "-42"],
+            commands,
+        )
+    def test_wait_requires_the_inner_process_group_to_be_gone(self) -> None:
+        pid_record = self.container.runtime_dir / "pids" / "task-a.json"
+        pid_record.parent.mkdir()
+        pid_record.write_text('{"pid": 42, "pgid": 42}\n', encoding="utf-8")
+        exit_record = pid_record.with_suffix(".exit")
+        exit_record.write_text("0\n", encoding="utf-8")
+        handle = self.mod.DockerAgentHandle(
+            Mock(wait=Mock(return_value=0), returncode=0),
+            "task-a",
+            self.container.container_id,
+            pid_record,
+            0.0,
+            exit_record,
+        )
+        runner = Mock(return_value=subprocess.CompletedProcess([], 1, "", ""))
+
+        record, _ = self.mod.wait_agent(
+            self.container, handle, self.root, "task", self.cfg, runner=runner
+        )
+
+        self.assertEqual(record["exit_code"], 0)
+        self.assertIsNone(record["cleanup_error"])
+        self.assertIn(
+            ["/usr/local/bin/docker", "exec", "--workdir", "/workspace", "container-1", "kill", "-0", "-42"],
+            [call.args[0] for call in runner.call_args_list],
+        )
+
+    def test_wait_reaps_a_timed_out_detached_docker_client(self) -> None:
+        pid_record = self.container.runtime_dir / "pids" / "task-a.json"
+        pid_record.parent.mkdir()
+        pid_record.write_text('{"pid": 42, "pgid": 42}\n', encoding="utf-8")
+        process = Mock(returncode=None)
+        process.wait.side_effect = [subprocess.TimeoutExpired("docker", 5), 0]
+        handle = self.mod.DockerAgentHandle(
+            process, "task-a", self.container.container_id, pid_record, time.monotonic()
+        )
+
+        record, _ = self.mod.wait_agent(
+            self.container,
+            handle,
+            self.root,
+            "task",
+            self.cfg,
+            runner=Mock(return_value=subprocess.CompletedProcess([], 1, "", "")),
+        )
+
+        self.assertTrue(record["timed_out"])
+        process.terminate.assert_called_once_with()
+        self.assertEqual(process.wait.call_count, 2)
+
+    def test_wait_polls_for_a_delayed_exit_record(self) -> None:
+        pid_record = self.container.runtime_dir / "pids" / "task-a.json"
+        pid_record.parent.mkdir()
+        pid_record.write_text('{"pid": 42, "pgid": 42}\n', encoding="utf-8")
+        exit_record = pid_record.with_suffix(".exit")
+        handle = self.mod.DockerAgentHandle(
+            Mock(wait=Mock(return_value=0), returncode=0),
+            "task-a",
+            self.container.container_id,
+            pid_record,
+            time.monotonic(),
+            exit_record,
+        )
+        runner = Mock(
+            side_effect=[
+                subprocess.CompletedProcess([], 1, "", ""),
+                subprocess.CompletedProcess([], 1, "", ""),
+            ]
+        )
+
+        with patch.object(self.mod.time, "sleep", side_effect=lambda _: exit_record.write_text("0\n")):
+            record, _ = self.mod.wait_agent(
+                self.container, handle, self.root, "task", self.cfg, runner=runner
+            )
+
+        self.assertEqual(record["exit_code"], 0)
+        self.assertIsNone(record["cleanup_error"])
+
 class DockerQualificationTests(unittest.TestCase):
     @classmethod
+
     def setUpClass(cls) -> None:
         cls.mod = load_script("statefulbench_docker.py")
 

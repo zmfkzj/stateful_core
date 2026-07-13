@@ -1855,7 +1855,7 @@ class RealWorldRunnerTests(unittest.TestCase):
             **kwargs,
         )
 
-    def test_runtime_arm_starts_prepares_and_removes_one_container_without_host_execution(self) -> None:
+    def test_runtime_arm_uses_container_exec_agents_then_post_agent_checks(self) -> None:
         runtime = self.mod._DOCKER.DockerRuntime(
             binary="/docker",
             image="statefulbench-realworld:local",
@@ -1863,19 +1863,41 @@ class RealWorldRunnerTests(unittest.TestCase):
             repo_digests=(),
             platform="linux/arm64",
         )
-        container = object()
-        start = mock.Mock(return_value=container)
-        prepare = mock.Mock(
-            return_value={
-                "HOME": "/home/stateful",
-                "PI_CODING_AGENT_DIR": "/home/stateful/.omp/profiles/stateful/agent",
-                "STATEFUL_OMP_SANDBOX": "off",
-            }
+        container = self.mod._DOCKER.ArmContainer(
+            runtime, "container-1", "arm", self.root / "workspace", self.root / "runtime"
         )
-        remove = mock.Mock()
-        launch = mock.Mock(side_effect=AssertionError("host agent must not launch"))
-        setup = mock.Mock(side_effect=AssertionError("host setup must not run"))
-        container_exec = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "", ""))
+        starts = []
+        waits = []
+
+        def launch(container, arm_dir, agent_id, prompt, cfg, env):
+            starts.append((agent_id, env["HOME"], prompt.name))
+            return object()
+
+        def wait(container, handle, arm_dir, kind, cfg):
+            waits.append(kind)
+            return (
+                {
+                    "agent_id": starts[len(waits) - 1][0],
+                    "kind": kind,
+                    "exit_code": 0,
+                    "timed_out": False,
+                    "cleanup_error": None,
+                    "wall_time_s": 0.0,
+                    "total_tokens": 0,
+                    "tool_calls": 0,
+                },
+                float(len(waits)),
+            )
+
+
+        def inject(*_args):
+            self.assertEqual(waits, ["task"] * 10)
+            self.assertEqual(len(starts), 10)
+
+        def post_checks(*_args, **_kwargs):
+            self.assertEqual(waits, ["task"] * 10 + ["final"])
+            self.assertEqual(len(starts), 11)
+            return True, True
 
         result = self.mod.run_repo_arm(
             self.repo,
@@ -1884,31 +1906,48 @@ class RealWorldRunnerTests(unittest.TestCase):
             self.root / "cache",
             self.root / "out",
             "parallel-off",
-            self.mod.RunConfig(tasks=10, stateful_binary="/tmp/stateful"),
+            self.mod.RunConfig(
+                tasks=10,
+                stateful_binary="/usr/local/bin/stateful",
+                omp_bin="/usr/local/bin/omp",
+            ),
             runtime=runtime,
-            launch=launch,
-            workspace_factory=self.workspace,
             archive_loader=lambda *_: self.root / "archive.tar.gz",
             workspace_materializer=lambda *_: self.root / "workspace",
-            container_exec=container_exec,
-            setup=setup,
-            evaluator=mock.Mock(side_effect=AssertionError("host evaluator must not run")),
-            suite=mock.Mock(side_effect=AssertionError("host suite must not run")),
-            arm_container_start=start,
-            arm_runtime_prepare=prepare,
-            arm_container_remove=remove,
+            arm_container_start=mock.Mock(return_value=container),
+            arm_runtime_prepare=mock.Mock(return_value={"HOME": "/home/stateful"}),
+            arm_container_remove=mock.Mock(),
+            container_exec=mock.Mock(return_value=subprocess.CompletedProcess([], 0, "", "")),
+            container_agent_launch=launch,
+            container_agent_wait=wait,
+            container_evaluator_inject=inject,
+            container_post_checks=post_checks,
         )
 
-        self.assertEqual(result["error"], "container agent execution is not implemented")
-        start.assert_called_once()
-        prepare.assert_called_once_with(container, "parallel-off", credential_db=None)
-        launch.assert_not_called()
-        setup.assert_not_called()
-        remove.assert_called_once_with(container)
+        self.assertTrue(result["cleared"], result)
         self.assertEqual(
-            [call.args[1] for call in container_exec.call_args_list],
-            ["git", "git", "git", "python3", "/workspace/.statefulbench-venv/bin/python"],
+            [agent_id for agent_id, _, _ in starts],
+            [f"task-{index}" for index in range(10)] + ["final"],
         )
+        self.assertEqual([home for _, home, _ in starts], ["/home/stateful"] * 11)
+        self.assertEqual(waits, ["task"] * 10 + ["final"])
+
+    def test_runner_requires_a_docker_runtime_for_live_execution(self) -> None:
+        archive_loader = mock.Mock(side_effect=AssertionError("host execution must not start"))
+
+        result = self.mod.run_repo_arm(
+            self.repo,
+            self.corpus,
+            self.dataset,
+            self.root / "cache",
+            self.root / "out",
+            "parallel-off",
+            self.mod.RunConfig(tasks=10),
+            archive_loader=archive_loader,
+        )
+
+        self.assertEqual(result["error"], "Docker runtime is required for agent execution")
+        archive_loader.assert_not_called()
 
     def test_runtime_arm_removes_container_when_initialization_fails(self) -> None:
         runtime = self.mod._DOCKER.DockerRuntime(
@@ -1946,78 +1985,6 @@ class RealWorldRunnerTests(unittest.TestCase):
         self.assertEqual(result["error"], "initialization failed")
         remove.assert_called_once_with(container)
 
-    def test_runtime_arm_fails_closed_when_credential_seed_cleanup_fails(self) -> None:
-        runtime = self.mod._DOCKER.DockerRuntime(
-            binary="/docker",
-            image="statefulbench-realworld:local",
-            image_id="sha256:fixture",
-            repo_digests=(),
-            platform="linux/arm64",
-        )
-        container = object()
-        credential = self.root / "seed" / "agent.db"
-        credential.parent.mkdir()
-        credential.write_text("seed", encoding="utf-8")
-        remove = mock.Mock()
-        cleanup = mock.Mock()
-        with mock.patch.object(self.mod.shutil, "rmtree", cleanup):
-            result = self.mod.run_repo_arm(
-                self.repo,
-                self.corpus,
-                self.dataset,
-                self.root / "cache",
-                self.root / "out",
-                "parallel-off",
-                self.mod.RunConfig(tasks=10, stateful_binary="/tmp/stateful"),
-                runtime=runtime,
-                workspace_factory=self.workspace,
-                archive_loader=lambda *_: self.root / "archive.tar.gz",
-                arm_container_start=mock.Mock(return_value=container),
-                workspace_materializer=lambda *_: self.root / "workspace",
-                container_exec=mock.Mock(return_value=subprocess.CompletedProcess([], 0, "", "")),
-                arm_runtime_prepare=mock.Mock(return_value={}),
-                arm_container_remove=remove,
-                credential_seed=mock.Mock(return_value=credential),
-            )
-
-        self.assertEqual(result["error"], "container agent execution is not implemented")
-        cleanup.assert_called_once_with(credential.parent)
-        remove.assert_called_once_with(container)
-
-    def test_runtime_arm_refuses_host_agent_execution_and_removes_container(self) -> None:
-        runtime = self.mod._DOCKER.DockerRuntime(
-            binary="/docker",
-            image="statefulbench-realworld:local",
-            image_id="sha256:fixture",
-            repo_digests=(),
-            platform="linux/arm64",
-        )
-        container = object()
-        remove = mock.Mock()
-
-        result = self.mod.run_repo_arm(
-            self.repo,
-            self.corpus,
-            self.dataset,
-            self.root / "cache",
-            self.root / "out",
-            "parallel-off",
-            self.mod.RunConfig(tasks=10, stateful_binary="/tmp/stateful"),
-            runtime=runtime,
-            workspace_factory=self.workspace,
-            workspace_materializer=lambda *_: self.root / "workspace",
-            container_exec=mock.Mock(return_value=subprocess.CompletedProcess([], 0, "", "")),
-            archive_loader=lambda *_: self.root / "archive.tar.gz",
-            setup=mock.Mock(side_effect=AssertionError("host setup must not run")),
-            evaluator=mock.Mock(side_effect=AssertionError("host evaluator must not run")),
-            suite=mock.Mock(side_effect=AssertionError("host suite must not run")),
-            arm_container_start=mock.Mock(return_value=container),
-            arm_runtime_prepare=mock.Mock(return_value={}),
-            arm_container_remove=remove,
-        )
-
-        self.assertEqual(result["error"], "container agent execution is not implemented")
-        remove.assert_called_once_with(container)
 
     def test_post_agent_evaluators_and_suite_use_container_exec_paths(self) -> None:
         runtime = self.mod._DOCKER.DockerRuntime(

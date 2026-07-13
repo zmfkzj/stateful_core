@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import secrets
+import shlex
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +31,18 @@ class ArmContainer:
     def home(self) -> str:
         return "/home/stateful"
 
+
+
+@dataclass
+class DockerAgentHandle:
+    popen: subprocess.Popen
+    agent_id: str
+    container_id: str
+    pid_record: Path
+    started_monotonic: float
+    exit_record: Path | None = None
+    cleanup_error: str | None = None
+    container_removed: bool = False
 
 def resolve_binary(binary: str) -> str:
     resolved = shutil.which(binary)
@@ -215,6 +229,261 @@ def copy_to_container(
         raise RuntimeError(f"arm container copy failed: {completed.stderr.strip()}")
 
 
+def _agent_runtime_paths(container: ArmContainer, agent_id: str) -> tuple[Path, Path, Path, Path]:
+    if not agent_id or Path(agent_id).name != agent_id:
+        raise ValueError("agent id must be a single path component")
+    pid = container.runtime_dir / "pids" / f"{agent_id}.json"
+    return (
+        pid,
+        pid.with_suffix(".exit"),
+        container.runtime_dir / "logs" / f"{agent_id}.stdout.log",
+        container.runtime_dir / "logs" / f"{agent_id}.stderr.log",
+    )
+
+
+def launch_agent(
+    container: ArmContainer,
+    arm_dir: Path,
+    agent_id: str,
+    prompt_path: Path,
+    cfg: object,
+    env: dict[str, str],
+    *,
+    popen=subprocess.Popen,
+    copy=copy_to_container,
+) -> DockerAgentHandle:
+    del arm_dir
+    pid_record, exit_record, stdout, stderr = _agent_runtime_paths(container, agent_id)
+    stdout.parent.mkdir(parents=True, exist_ok=True)
+    prompt_destination = f"/runtime/prompts/{agent_id}.prompt.txt"
+    copy(container, prompt_path, prompt_destination)
+    inner = [
+        "statefulbench-container-entry",
+        f"/runtime/pids/{agent_id}.json",
+        str(cfg.omp_bin),
+        "--cwd",
+        "/workspace",
+        "--mode",
+        "json",
+        "--model",
+        str(cfg.model),
+        "--thinking",
+        str(cfg.thinking),
+        "--approval-mode",
+        "yolo",
+        "--no-title",
+        f"@{prompt_destination}",
+    ]
+    shell = (
+        f"{shlex.join(inner)} >{shlex.quote('/runtime/logs/' + stdout.name)} "
+        f"2>{shlex.quote('/runtime/logs/' + stderr.name)}; status=$?; "
+        f"printf '%s\\n' \"$status\" >{shlex.quote('/runtime/pids/' + exit_record.name)}; exit \"$status\""
+    )
+    command = [container.runtime.binary, "exec", "-d", "-w", "/workspace"]
+    for name, value in sorted(env.items()):
+        command.extend(("--env", f"{name}={value}"))
+    process = popen(
+        [*command, container.container_id, "sh", "-c", shell],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return DockerAgentHandle(
+        popen=process,
+        agent_id=agent_id,
+        container_id=container.container_id,
+        pid_record=pid_record,
+        started_monotonic=time.monotonic(),
+        exit_record=exit_record,
+    )
+
+
+def _inner_identity(handle: DockerAgentHandle) -> tuple[int, int] | None:
+    try:
+        value = json.loads(handle.pid_record.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if type(value) is not dict:
+        return None
+    pid, pgid = value.get("pid"), value.get("pgid")
+    if type(pid) is not int or type(pgid) is not int or pid < 1 or pgid < 1:
+        return None
+    return pid, pgid
+
+
+def _inner_process_exists(
+    container: ArmContainer, pid: int, *, runner=subprocess.run
+) -> bool:
+    return (
+        exec_in_container(
+            container, "test", "-e", f"/proc/{pid}", runner=runner, check=False
+        ).returncode
+        == 0
+    )
+
+
+def _inner_group_exists(
+    container: ArmContainer, pgid: int, *, runner=subprocess.run
+) -> bool:
+    return (
+        exec_in_container(
+            container, "kill", "-0", f"-{pgid}", runner=runner, check=False
+        ).returncode
+        == 0
+    )
+
+
+def _wait_for_inner_exit(
+    container: ArmContainer, pid: int, pgid: int, wait_s: float, *, runner=subprocess.run
+) -> bool:
+    deadline = time.monotonic() + wait_s
+    while True:
+        if not _inner_process_exists(container, pid, runner=runner) and not _inner_group_exists(
+            container, pgid, runner=runner
+        ):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+
+
+def terminate_agent_group(
+    container: ArmContainer,
+    handle: DockerAgentHandle,
+    *,
+    runner=subprocess.run,
+    wait_s: float = 5,
+    remove=None,
+) -> str | None:
+    identity = _inner_identity(handle)
+    errors: list[str] = []
+    if identity is None:
+        errors.append(f"missing or invalid inner pid record for {handle.agent_id}")
+    else:
+        pid, pgid = identity
+        for signal_name in ("TERM", "KILL"):
+            completed = exec_in_container(
+                container,
+                "kill",
+                f"-{signal_name}",
+                f"-{pgid}",
+                runner=runner,
+                check=False,
+            )
+            if completed.returncode != 0 and _inner_process_exists(container, pid, runner=runner):
+                errors.append(f"inner process group {pgid} rejected {signal_name}")
+            if _wait_for_inner_exit(container, pid, pgid, wait_s, runner=runner):
+                return None
+        errors.append(f"inner process group {pgid} survived TERM/KILL escalation")
+    if remove is None:
+        remove = remove_arm_container
+    try:
+        remove(container, runner=runner)
+        handle.container_removed = True
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        errors.append(f"arm container removal failed: {error}")
+    handle.cleanup_error = "; ".join(errors)
+    return handle.cleanup_error
+
+
+def _exit_code(handle: DockerAgentHandle) -> int | None:
+    if handle.exit_record is None:
+        return None
+    try:
+        return int(handle.exit_record.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+def _reap_docker_client(popen: subprocess.Popen) -> str | None:
+    try:
+        popen.terminate()
+    except ProcessLookupError:
+        pass
+    try:
+        popen.wait(timeout=5)
+        return None
+    except subprocess.TimeoutExpired:
+        try:
+            popen.kill()
+        except ProcessLookupError:
+            pass
+        try:
+            popen.wait(timeout=5)
+            return None
+        except subprocess.TimeoutExpired:
+            return "detached docker exec client did not exit after TERM/KILL"
+
+
+def wait_agent(
+    container: ArmContainer,
+    handle: DockerAgentHandle,
+    arm_dir: Path,
+    kind: str,
+    cfg: object,
+    *,
+    runner=subprocess.run,
+) -> tuple[dict, float]:
+    timed_out = False
+    cleanup_error: str | None = None
+    launch_code: int | None = None
+    try:
+        launch_code = handle.popen.wait(timeout=min(5, float(cfg.timeout_s)))
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        client_cleanup_error = _reap_docker_client(handle.popen)
+        cleanup_error = terminate_agent_group(container, handle, runner=runner)
+        if client_cleanup_error is not None:
+            cleanup_error = "; ".join(
+                error for error in (cleanup_error, client_cleanup_error) if error
+            )
+    identity = _inner_identity(handle)
+    deadline = handle.started_monotonic + float(cfg.timeout_s)
+    exit_code = launch_code if launch_code not in (None, 0) else None
+    while not timed_out and exit_code is None and identity is None:
+        if time.monotonic() >= deadline:
+            timed_out = True
+            cleanup_error = terminate_agent_group(container, handle, runner=runner)
+            break
+        time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+        identity = _inner_identity(handle)
+    if not timed_out and exit_code is None and identity is not None:
+        pid, pgid = identity
+        while _inner_process_exists(container, pid, runner=runner) or _inner_group_exists(
+            container, pgid, runner=runner
+        ):
+            if time.monotonic() >= deadline:
+                timed_out = True
+                cleanup_error = terminate_agent_group(container, handle, runner=runner)
+                break
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+        if not timed_out:
+            while (exit_code := _exit_code(handle)) is None and time.monotonic() < deadline:
+                time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+            if exit_code is None:
+                cleanup_error = f"missing exit record for {handle.agent_id}"
+    if timed_out:
+        exit_code = -9
+    if handle.cleanup_error:
+        cleanup_error = handle.cleanup_error
+    ended = time.monotonic()
+    usage = (
+        cfg.usage_from_log(container.runtime_dir / "logs" / f"{handle.agent_id}.stdout.log")
+        if hasattr(cfg, "usage_from_log")
+        else {"total_tokens": 0, "tool_calls": 0}
+    )
+    return (
+        {
+            "agent_id": handle.agent_id,
+            "kind": kind,
+            "exit_code": -1 if exit_code is None else exit_code,
+            "timed_out": timed_out,
+            "cleanup_error": cleanup_error,
+            "wall_time_s": max(0.0, ended - handle.started_monotonic),
+            **usage,
+        },
+        ended,
+    )
+
+
 def remove_arm_container(
     container: ArmContainer, *, runner=subprocess.run, timeout_s: float = 60
 ) -> None:
@@ -234,7 +503,8 @@ def prepare_arm_runtime(
     arm: str,
     *,
     credential_db: Path | None = None,
-    stateful_binary: str = "stateful",
+    omp_binary: str = "/usr/local/bin/omp",
+    stateful_binary: str = "/usr/local/bin/stateful",
     runner=subprocess.run,
 ) -> dict[str, str]:
     if arm not in {"sequential", "parallel-off", "parallel-on"}:
@@ -263,10 +533,13 @@ def prepare_arm_runtime(
         env["TMPDIR"],
         "/runtime/logs",
         "/runtime/pids",
+        "/runtime/prompts",
         "/runtime/diagnostics",
         env=env,
         runner=runner,
     )
+    for binary in (omp_binary, stateful_binary):
+        exec_in_container(container, "test", "-x", binary, env=env, runner=runner)
     if arm == "parallel-on":
         exec_in_container(
             container, stateful_binary, "install", "--agent", "omp", "--yes", env=env, runner=runner

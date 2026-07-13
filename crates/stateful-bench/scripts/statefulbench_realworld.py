@@ -1493,20 +1493,17 @@ def _prepare_container_repository(
     return python, repository_env
 
 
-def _run_container_post_agent_checks(
-    repo: dict,
+def _inject_container_evaluators(
     corpus: dict,
     dataset_root: Path,
     container: _DOCKER.ArmContainer,
-    python: Path,
     env: dict[str, str],
     artifacts: dict[str, dict[str, str]],
     artifact_dir: Path,
     *,
     execute=_DOCKER.exec_in_container,
     copy=_DOCKER.copy_to_container,
-) -> tuple[bool, bool]:
-    evaluator_results = []
+) -> None:
     for task in corpus["tasks"]:
         source = _canonical_evaluator_path(task, dataset_root)
         relative = source.relative_to((dataset_root / "evaluators").resolve())
@@ -1530,6 +1527,31 @@ def _run_container_post_agent_checks(
             f"{task['key']}:evaluator-mode",
             execute=execute,
         )
+
+
+def _run_container_post_agent_checks(
+    repo: dict,
+    corpus: dict,
+    dataset_root: Path,
+    container: _DOCKER.ArmContainer,
+    python: Path,
+    env: dict[str, str],
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+    *,
+    execute=_DOCKER.exec_in_container,
+    copy=_DOCKER.copy_to_container,
+    inject: bool = True,
+) -> tuple[bool, bool]:
+    if inject:
+        _inject_container_evaluators(
+            corpus, dataset_root, container, env, artifacts, artifact_dir, execute=execute, copy=copy
+        )
+    evaluator_results = []
+    for task in corpus["tasks"]:
+        source = _canonical_evaluator_path(task, dataset_root)
+        relative = source.relative_to((dataset_root / "evaluators").resolve())
+        destination = f"/workspace/.statefulbench-evaluators/{relative}"
         evaluator_results.append(
             _run_container_logged(
                 container,
@@ -1557,6 +1579,196 @@ def _run_container_post_agent_checks(
     return all(evaluator_results), suite_ok
 
 
+def _run_container_repo_arm(
+    repo: dict,
+    corpus: dict,
+    dataset_root: Path,
+    cache_dir: Path,
+    out_dir: Path,
+    arm: str,
+    cfg: RunConfig,
+    *,
+    runtime: _DOCKER.DockerRuntime,
+    archive_loader,
+    arm_container_start,
+    arm_runtime_prepare,
+    arm_container_remove,
+    credential_seed,
+    workspace_materializer,
+    container_exec,
+    container_agent_launch,
+    container_agent_wait,
+    container_evaluator_inject,
+    container_post_checks,
+) -> dict:
+    trial = cfg.trial
+    arm_dir = out_dir / repo["key"] / arm / f"trial-{trial}"
+    artifact_dir = arm_dir / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifacts: dict[str, dict[str, str]] = {}
+    tasks, final_prompt = _runner_prompts(corpus, arm_dir)
+    agents: list[dict] = []
+    pending: list[tuple[object, str]] = []
+    task_started: float | None = None
+    task_ended: float | None = None
+    arm_started: float | None = None
+    final_started: float | None = None
+    final_ended: float | None = None
+    evaluators_ok = False
+    upstream_suite_ok = False
+    error: str | None = None
+    container: _DOCKER.ArmContainer | None = None
+    container_removed = False
+
+    def wait(handle: object, kind: str) -> tuple[dict, float]:
+        nonlocal container_removed
+        record, ended = container_agent_wait(container, handle, arm_dir, kind, cfg)
+        pending.remove((handle, kind))
+        container_removed = container_removed or bool(getattr(handle, "container_removed", False))
+        return record, ended
+
+    try:
+        archive = archive_loader(repo, cache_dir)
+        workspace = workspace_materializer(repo, archive, arm_dir / "workspace")
+        runtime_dir = arm_dir / "runtime"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        container = arm_container_start(
+            runtime, _arm_container_name(repo, arm, trial), workspace, runtime_dir
+        )
+        credential = credential_seed(arm_dir) if credential_seed is not None else None
+        try:
+            common_env = arm_runtime_prepare(
+                container,
+                arm,
+                credential_db=credential,
+                omp_binary=cfg.omp_bin,
+                stateful_binary=cfg.stateful_binary or "/usr/local/bin/stateful",
+            )
+        finally:
+            if credential is not None:
+                shutil.rmtree(credential.parent)
+        container_repo = _prepare_container_repository(
+            repo, container, common_env, artifacts, artifact_dir, execute=container_exec
+        )
+        if container_repo is None:
+            raise RuntimeError("container repository setup failed")
+        python, environment = container_repo
+        cfg.usage_from_log = _LITE.usage_from_log
+
+        def start(task: dict, prompt: Path) -> object:
+            nonlocal task_started, arm_started
+            handle = container_agent_launch(container, arm_dir, task["key"], prompt, cfg, environment)
+            pending.append((handle, "task"))
+            started = getattr(handle, "started_monotonic", time.monotonic())
+            task_started = started if task_started is None else min(task_started, started)
+            arm_started = started if arm_started is None else min(arm_started, started)
+            return handle
+
+        if arm == "sequential":
+            for task, prompt in tasks:
+                record, ended = wait(start(task, prompt), "task")
+                agents.append(record)
+                if record["cleanup_error"] is not None:
+                    raise RuntimeError(
+                        f"task agent {record['agent_id']} cleanup failed: {record['cleanup_error']}"
+                    )
+                task_ended = ended
+        else:
+            handles = [start(task, prompt) for task, prompt in tasks]
+            for handle in handles:
+                record, ended = wait(handle, "task")
+                agents.append(record)
+                if record["cleanup_error"] is not None:
+                    raise RuntimeError(
+                        f"task agent {record['agent_id']} cleanup failed: {record['cleanup_error']}"
+                    )
+                task_ended = ended if task_ended is None else max(task_ended, ended)
+
+        container_evaluator_inject(
+            corpus, dataset_root, container, environment, artifacts, artifact_dir
+        )
+        final_handle = container_agent_launch(
+            container, arm_dir, "final", final_prompt, cfg, environment
+        )
+        pending.append((final_handle, "final"))
+        final_started = getattr(final_handle, "started_monotonic", time.monotonic())
+        arm_started = final_started if arm_started is None else min(arm_started, final_started)
+        final_record, final_ended = wait(final_handle, "final")
+        agents.append(final_record)
+        if final_record["cleanup_error"] is not None:
+            raise RuntimeError(
+                f"final agent {final_record['agent_id']} cleanup failed: {final_record['cleanup_error']}"
+            )
+        evaluators_ok, upstream_suite_ok = container_post_checks(
+            repo,
+            corpus,
+            dataset_root,
+            container,
+            python,
+            environment,
+            artifacts,
+            artifact_dir,
+            inject=False,
+        )
+    except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
+        error = str(exc)
+    finally:
+        for handle, kind in pending[:]:
+            try:
+                record, ended = wait(handle, kind)
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                continue
+            agents.append(record)
+            if kind == "task":
+                task_ended = ended if task_ended is None else max(task_ended, ended)
+            else:
+                final_ended = ended
+        if container is not None and not container_removed:
+            try:
+                arm_container_remove(container)
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                error = str(exc) if error is None else f"{error}; {exc}"
+
+    post_suite_ok = evaluators_ok and upstream_suite_ok
+    tasks_wall_time_s = (
+        0.0 if task_started is None or task_ended is None else max(0.0, task_ended - task_started)
+    )
+    arm_end = final_ended if final_ended is not None else task_ended
+    arm_wall_time_s = (
+        0.0 if arm_started is None or arm_end is None else max(0.0, arm_end - arm_started)
+    )
+    final_wall_time_s = (
+        0.0
+        if final_started is None or final_ended is None
+        else max(0.0, final_ended - final_started)
+    )
+    result = {
+        "repository": repo["key"],
+        "arm": arm,
+        "trial": trial,
+        "cleared": (
+            error is None
+            and post_suite_ok
+            and len(agents) == len(tasks) + 1
+            and all(record["exit_code"] == 0 and not record["timed_out"] for record in agents)
+        ),
+        "error": error,
+        "arm_wall_time_s": arm_wall_time_s,
+        "tasks_wall_time_s": tasks_wall_time_s,
+        "final_wall_time_s": final_wall_time_s,
+        "total_tokens": sum(record["total_tokens"] for record in agents),
+        "total_tool_calls": sum(record["tool_calls"] for record in agents),
+        "post_suite_ok": post_suite_ok,
+        "evaluators_ok": evaluators_ok,
+        "upstream_suite_ok": upstream_suite_ok,
+        "evaluator_results": [],
+        "agents": agents,
+        "artifacts": artifacts,
+    }
+    _write_run_result(out_dir, result)
+    return result
+
+
 def run_repo_arm(
     repo: dict,
     corpus: dict,
@@ -1566,8 +1778,8 @@ def run_repo_arm(
     arm: str,
     cfg: RunConfig,
     *,
-    launch=_LITE.launch_agent,
-    server=_LITE.arm_stateful_server,
+    launch=None,
+    server=None,
     workspace_factory=_fresh_workspace,
     archive_loader=ensure_archive,
     setup=_run_setup,
@@ -1580,12 +1792,44 @@ def run_repo_arm(
     credential_seed=None,
     workspace_materializer=_extract_arm_workspace,
     container_exec=_DOCKER.exec_in_container,
+    container_agent_launch=_DOCKER.launch_agent,
+    container_agent_wait=_DOCKER.wait_agent,
+    container_evaluator_inject=_inject_container_evaluators,
+    container_post_checks=_run_container_post_agent_checks,
 ) -> dict:
     if arm not in {"sequential", "parallel-off", "parallel-on"}:
         raise ValueError(f"unknown arm: {arm}")
     trial = cfg.trial
     manifest_dir = manifest_dir.resolve()
     cfg = replace(cfg, denied_read_paths=(manifest_dir,))
+    if runtime is not None:
+        return _run_container_repo_arm(
+            repo,
+            corpus,
+            manifest_dir,
+            cache_dir,
+            out_dir,
+            arm,
+            cfg,
+            runtime=runtime,
+            archive_loader=archive_loader,
+            arm_container_start=arm_container_start,
+            arm_runtime_prepare=arm_runtime_prepare,
+            arm_container_remove=arm_container_remove,
+            credential_seed=credential_seed,
+            workspace_materializer=workspace_materializer,
+            container_exec=container_exec,
+            container_agent_launch=container_agent_launch,
+            container_agent_wait=container_agent_wait,
+            container_evaluator_inject=container_evaluator_inject,
+            container_post_checks=container_post_checks,
+        )
+    if launch is None:
+        result = _empty_run_result(repo, arm, trial, "Docker runtime is required for agent execution")
+        _write_run_result(out_dir, result)
+        return result
+    if server is None:
+        server = _LITE.arm_stateful_server
     if arm == "parallel-on" and not cfg.stateful_binary:
         result = _empty_run_result(
             repo, arm, trial, "parallel-on requires a resolvable stateful binary"
@@ -2021,8 +2265,8 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--trials", type=int, default=1)
     run.add_argument("--model", default="openai-codex/gpt-5.6-terra")
     run.add_argument("--thinking", default="high")
-    run.add_argument("--omp-bin", default="omp")
-    run.add_argument("--stateful-binary", default=shutil.which("stateful"))
+    run.add_argument("--omp-bin", default="/usr/local/bin/omp")
+    run.add_argument("--stateful-binary", default="/usr/local/bin/stateful")
     run.add_argument("--timeout-s", type=int, default=900)
     for command in (qualify, run):
         command.add_argument("--docker-bin", default="docker")
@@ -2032,7 +2276,6 @@ def main(argv: list[str] | None = None) -> int:
         arguments.command == "qualify"
         and os.environ.get("STATEFULBENCH_DOCKER_INNER") == "qualification"
     )
-
     if arguments.command == "qualify" and not inner_qualification:
         try:
             repo_root = Path(__file__).resolve().parents[3]
@@ -2069,10 +2312,7 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--trials must be at least 1")
         if arguments.timeout_s < 1:
             parser.error("--timeout-s must be at least 1")
-        if "parallel-on" in arguments.arms and not arguments.stateful_binary:
-            parser.error("parallel-on requires a resolvable stateful binary; pass --stateful-binary")
         try:
-            omp_binary = _LITE.resolve_omp_binary(arguments.omp_bin)
             runtime = _DOCKER.inspect_runtime(arguments.docker_bin, arguments.docker_image)
         except (RuntimeError, ValueError) as error:
             parser.error(str(error))
@@ -2120,7 +2360,7 @@ def main(argv: list[str] | None = None) -> int:
             timeout_s=arguments.timeout_s,
             model=arguments.model,
             thinking=arguments.thinking,
-            omp_bin=omp_binary,
+            omp_bin=arguments.omp_bin,
             stateful_binary=arguments.stateful_binary,
             denied_read_paths=(dataset_root,),
         )
