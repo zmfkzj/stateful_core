@@ -562,6 +562,17 @@ class DockerDiagnosticTests(unittest.TestCase):
         self.assertEqual(snapshot["databases"]["broken.db"]["integrity"], "malformed")
         self.assertEqual(snapshot["lock_files"], ["agent.db-wal"])
 
+    def test_snapshot_opens_percent_encoded_database_by_uri(self) -> None:
+        import sqlite3
+
+        database = self.home / "agent%2Fstate.db"
+        with sqlite3.connect(database) as connection:
+            connection.execute("create table safe_items (id integer)")
+
+        snapshot = self.diagnostics.snapshot_home(self.home)
+
+        self.assertEqual(snapshot["databases"]["agent%2Fstate.db"]["integrity"], "ok")
+
     def test_diff_and_runtime_classification_fail_closed(self) -> None:
         (self.home / "before.txt").write_text("one", encoding="utf-8")
         before = self.diagnostics.snapshot_home(self.home)
@@ -588,6 +599,29 @@ class DockerDiagnosticTests(unittest.TestCase):
         self.assertEqual(
             self.diagnostics.classify_runtime_failure("unexpected failure"),
             "unclassified_runtime_failure",
+        )
+        self.assertEqual(
+            self.diagnostics.classify_runtime_failure("sqlite_unavailable"),
+            "sqlite_unavailable",
+        )
+
+    def test_snapshot_changes_include_nonregular_and_type_replacements(self) -> None:
+        (self.home / "entry").mkdir()
+        (self.home / "removed").mkdir()
+        before = self.diagnostics.snapshot_home(self.home)
+        (self.home / "entry").rmdir()
+        (self.home / "entry").write_text("now regular", encoding="utf-8")
+        (self.home / "removed").rmdir()
+        os.mkfifo(self.home / "stream")
+        after = self.diagnostics.snapshot_home(self.home)
+
+        self.assertEqual(
+            self.diagnostics.snapshot_changes(before, after),
+            [
+                {"path": "entry", "change": "changed"},
+                {"path": "removed", "change": "deleted"},
+                {"path": "stream", "change": "created"},
+            ],
         )
 
     def test_snapshot_never_dereferences_symlinks_or_hashes_fifos(self) -> None:
@@ -616,7 +650,7 @@ class DockerDiagnosticTests(unittest.TestCase):
             "sqlite_unavailable",
         )
 
-    def test_capture_rejects_host_workspace_path_leaks(self) -> None:
+    def test_capture_rejects_escaped_host_workspace_path_leaks(self) -> None:
         runtime = self.mod.DockerRuntime(
             binary="/docker",
             image="fixture",
@@ -646,12 +680,64 @@ class DockerDiagnosticTests(unittest.TestCase):
         }
 
         def emit(*_args, **_kwargs):
-            output.write_text(json.dumps(snapshot), encoding="utf-8")
+            output.write_text(
+                json.dumps(snapshot).replace("/", "\\u002f"),
+                encoding="utf-8",
+            )
             return subprocess.CompletedProcess([], 0, "", "")
-
         with patch.object(self.mod, "exec_in_container", side_effect=emit):
             with self.assertRaisesRegex(RuntimeError, "leaked host path"):
                 self.mod.capture_home_snapshot(container, "initialized")
+
+
+    def test_inspect_summary_redacts_container_state(self) -> None:
+        runtime = self.mod.DockerRuntime(
+            binary="/docker",
+            image="fixture",
+            image_id="sha256:fixture",
+            repo_digests=(),
+            platform="linux/arm64",
+        )
+        container = self.mod.ArmContainer(
+            runtime,
+            "container-1",
+            "arm",
+            self.home / "workspace",
+            self.home / "runtime",
+        )
+        completed = subprocess.CompletedProcess(
+            [],
+            0,
+            json.dumps(
+                {
+                    "Status": "running",
+                    "Pid": 42,
+                    "StartedAt": "2026-07-13T00:00:00Z",
+                    "FinishedAt": "",
+                    "Error": "secret-token-value",
+                }
+            ),
+            "",
+        )
+
+        summary = self.mod.inspect_arm_container(
+            container,
+            runner=Mock(return_value=completed),
+        )
+
+        self.assertEqual(
+            summary,
+            {
+                "id": "container-1",
+                "image_id": "sha256:fixture",
+                "state": {
+                    "status": "running",
+                    "pid": 42,
+                    "started_at": "2026-07-13T00:00:00Z",
+                    "finished_at": "",
+                },
+            },
+        )
 
 if __name__ == "__main__":
     unittest.main()

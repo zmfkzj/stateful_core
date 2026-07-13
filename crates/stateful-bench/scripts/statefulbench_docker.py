@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import time
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 DIAGNOSTIC_PHASES = (
     "initialized",
@@ -247,6 +247,58 @@ def diagnostic_artifact_path(phase: str) -> str:
     return f"runtime/diagnostics/{phase}.json"
 
 
+def _relative_diagnostic_path(value: object) -> bool:
+    if type(value) is not str:
+        return False
+    path = PurePosixPath(value)
+    return not path.is_absolute() and value not in {"", "."} and ".." not in path.parts
+
+
+def _sanitized_home_snapshot(
+    snapshot: object, phase: str, container: ArmContainer
+) -> bool:
+    if (
+        type(snapshot) is not dict
+        or snapshot.get("phase") != phase
+        or snapshot.get("schema_version") != 1
+        or snapshot.get("home") != container.home
+        or snapshot.get("per_agent_home_tree") is not False
+        or not isinstance(snapshot.get("files"), list)
+        or not isinstance(snapshot.get("databases"), dict)
+        or not isinstance(snapshot.get("lock_files"), list)
+        or not isinstance(snapshot.get("processes"), list)
+    ):
+        return False
+    if not all(
+        type(record) is dict
+        and _relative_diagnostic_path(record.get("path"))
+        and type(record.get("type")) is str
+        and type(record.get("size")) is int
+        and type(record.get("mtime_ns")) is int
+        for record in snapshot["files"]
+    ):
+        return False
+    if not all(_relative_diagnostic_path(path) for path in snapshot["databases"]):
+        return False
+    if not all(_relative_diagnostic_path(path) for path in snapshot["lock_files"]):
+        return False
+
+    def no_absolute_value(value: object) -> bool:
+        if type(value) is str:
+            return not value.startswith("/")
+        if isinstance(value, list):
+            return all(no_absolute_value(item) for item in value)
+        if isinstance(value, dict):
+            return all(no_absolute_value(item) for item in value.values())
+        return True
+
+    return all(
+        no_absolute_value(value)
+        for key, value in snapshot.items()
+        if key != "home"
+    )
+
+
 def capture_home_snapshot(
     container: ArmContainer,
     phase: str,
@@ -273,20 +325,56 @@ def capture_home_snapshot(
         snapshot = json.loads(encoded)
     except (OSError, json.JSONDecodeError, ValueError) as error:
         raise RuntimeError(f"diagnostic capture failed for {phase}") from error
-    if (
-        type(snapshot) is not dict
-        or snapshot.get("phase") != phase
-        or snapshot.get("schema_version") != 1
-        or not isinstance(snapshot.get("files"), list)
-        or not isinstance(snapshot.get("databases"), dict)
-    ):
-        raise RuntimeError(f"diagnostic capture malformed for {phase}")
+    decoded = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
     if any(
-        str(path.resolve()) in encoded
+        str(path.resolve()) in decoded
         for path in (container.runtime_dir, container.workspace)
     ):
         raise RuntimeError(f"diagnostic capture leaked host path for {phase}")
+    if not _sanitized_home_snapshot(snapshot, phase, container):
+        raise RuntimeError(f"diagnostic capture malformed for {phase}")
     return snapshot
+
+def inspect_arm_container(
+    container: ArmContainer, *, runner=subprocess.run, timeout_s: float = 60
+) -> dict:
+    completed = runner(
+        [
+            container.runtime.binary,
+            "inspect",
+            "--format",
+            "{{json .State}}",
+            container.container_id,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=timeout_s,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"arm container inspection failed: {completed.stderr.strip()}")
+    try:
+        state = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("arm container inspection returned malformed state") from error
+    if (
+        type(state) is not dict
+        or type(state.get("Status")) is not str
+        or type(state.get("Pid")) is not int
+        or type(state.get("StartedAt")) is not str
+        or type(state.get("FinishedAt")) is not str
+    ):
+        raise RuntimeError("arm container inspection returned unsafe state")
+    return {
+        "id": container.container_id,
+        "image_id": container.runtime.image_id,
+        "state": {
+            "status": state["Status"],
+            "pid": state["Pid"],
+            "started_at": state["StartedAt"],
+            "finished_at": state["FinishedAt"],
+        },
+    }
 
 
 def _agent_runtime_paths(container: ArmContainer, agent_id: str) -> tuple[Path, Path, Path, Path]:

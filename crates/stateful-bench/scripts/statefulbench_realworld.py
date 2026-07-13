@@ -1677,6 +1677,7 @@ def _run_container_repo_arm(
     container_evaluator_inject,
     container_post_checks,
     container_diagnostics=_DOCKER.capture_home_snapshot,
+    container_inspect=_DOCKER.inspect_arm_container,
 ) -> dict:
     trial = cfg.trial
     arm_dir = out_dir / repo["key"] / arm / f"trial-{trial}"
@@ -1705,11 +1706,15 @@ def _run_container_repo_arm(
     agent_identities: dict[str, dict[str, str]] = {}
     versions: dict[str, str] = {}
     inter_agent_diagnostic_time_s = 0.0
+    phase_timestamps: dict[str, float] = {}
+    inspect_summary: dict | None = None
 
     def snapshot(phase: str) -> float:
         started = time.monotonic()
         snapshots[phase] = container_diagnostics(container, phase)
-        return max(0.0, time.monotonic() - started)
+        elapsed = max(0.0, time.monotonic() - started)
+        phase_timestamps[phase] = max(0.0, time.monotonic() - row_started)
+        return elapsed
 
     def agent_identity(agent_id: str, env: dict[str, str]) -> None:
         agent_identities[agent_id] = {
@@ -1746,6 +1751,7 @@ def _run_container_repo_arm(
         finally:
             if credential is not None:
                 shutil.rmtree(credential.parent)
+        inspect_summary = container_inspect(container)
         snapshot("initialized")
         container_repo = _prepare_container_repository(
             repo, container, common_env, artifacts, artifact_dir, execute=container_exec
@@ -1892,8 +1898,10 @@ def _run_container_repo_arm(
             diagnostic_error = diagnostic_error or classification
     if diagnostic_error is not None:
         error = diagnostic_error if error is None else f"{error}; diagnostics: {diagnostic_error}"
-    error_classification = _DIAGNOSTICS.classify_runtime_failure(
-        error, snapshots.get("after-final")
+    error_classification = (
+        diagnostic_error
+        if diagnostic_error in {"sqlite_locked", "sqlite_malformed", "sqlite_unavailable"}
+        else _DIAGNOSTICS.classify_runtime_failure(error, snapshots.get("after-final"))
     )
     result = {
         "repository": repo["key"],
@@ -1939,6 +1947,7 @@ def _run_container_repo_arm(
                 else max(0.0, teardown_ended - teardown_started)
             ),
             "removed": container_removed,
+            "inspect": inspect_summary,
         },
         "diagnostics": {
             "snapshots": {
@@ -1949,6 +1958,7 @@ def _run_container_repo_arm(
             "home_changes": home_changes,
             "agent_identities": agent_identities,
             "error_classification": error_classification,
+            "phase_timestamps": phase_timestamps,
         },
     }
     _write_run_result(out_dir, result)
@@ -1983,6 +1993,7 @@ def run_repo_arm(
     container_evaluator_inject=_inject_container_evaluators,
     container_post_checks=_run_container_post_agent_checks,
     container_diagnostics=_DOCKER.capture_home_snapshot,
+    container_inspect=_DOCKER.inspect_arm_container,
 ) -> dict:
     if arm not in {"sequential", "parallel-off", "parallel-on"}:
         raise ValueError(f"unknown arm: {arm}")
@@ -2011,6 +2022,7 @@ def run_repo_arm(
             container_evaluator_inject=container_evaluator_inject,
             container_post_checks=container_post_checks,
             container_diagnostics=container_diagnostics,
+            container_inspect=container_inspect,
         )
     if launch is None:
         result = _empty_run_result(repo, arm, trial, "Docker runtime is required for agent execution")
@@ -2339,6 +2351,24 @@ def build_run_summary(
                 for result in results
                 if result["repository"] == key and result["arm"] == arm
             ]
+            provenances = {
+                (
+                    result.get("runtime", {}).get("image_id"),
+                    result.get("runtime", {}).get("platform"),
+                )
+                for result in original_rows
+            }
+            if len(provenances) > 1:
+                aggregates.append(
+                    {
+                        "repo": key,
+                        "arm": arm,
+                        "row_count": len(matching),
+                        "failures": failures,
+                        "comparison_error": "mixed Docker runtime provenance",
+                    }
+                )
+                continue
             aggregates.append(
                 {
                     "repo": key,

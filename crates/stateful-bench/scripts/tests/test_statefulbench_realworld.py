@@ -1882,6 +1882,18 @@ class RealWorldRunnerTests(unittest.TestCase):
         starts = []
         waits = []
         snapshots = []
+        inspect = mock.Mock(
+            return_value={
+                "id": "container-1",
+                "image_id": "sha256:fixture",
+                "state": {
+                    "status": "running",
+                    "pid": 42,
+                    "started_at": "2026-07-13T00:00:00Z",
+                    "finished_at": "",
+                },
+            }
+        )
 
         def diagnostics(container, phase):
             snapshots.append(phase)
@@ -1943,6 +1955,7 @@ class RealWorldRunnerTests(unittest.TestCase):
             container_evaluator_inject=inject,
             container_post_checks=post_checks,
             container_diagnostics=diagnostics,
+            container_inspect=inspect,
         )
 
         self.assertTrue(result["cleared"], result)
@@ -1953,6 +1966,11 @@ class RealWorldRunnerTests(unittest.TestCase):
         self.assertEqual([home for _, home, _ in starts], ["/home/stateful"] * 11)
         self.assertEqual(waits, ["task"] * 10 + ["final"])
         self.assertEqual(snapshots, list(self.mod._DOCKER.DIAGNOSTIC_PHASES))
+        self.assertEqual(result["container"]["inspect"]["state"]["pid"], 42)
+        self.assertEqual(
+            set(result["diagnostics"]["phase_timestamps"]),
+            set(self.mod._DOCKER.DIAGNOSTIC_PHASES),
+        )
 
     def test_runner_requires_a_docker_runtime_for_live_execution(self) -> None:
         archive_loader = mock.Mock(side_effect=AssertionError("host execution must not start"))
@@ -2725,6 +2743,38 @@ class RealWorldDiagnosticsReportingTests(unittest.TestCase):
             "2026-07-13T00:00:00Z",
         )
         self.assertEqual(summary["results"][0]["diagnostics"]["snapshots"]["after-final"], "runtime/diagnostics/after-final.json")
+
+    def test_mixed_runtime_provenance_excludes_aggregate_but_retains_rows(self) -> None:
+        first = {
+            "repository": "requests",
+            "arm": "parallel-on",
+            "trial": 1,
+            "cleared": True,
+            "error": None,
+            "arm_wall_time_s": 1.0,
+            "tasks_wall_time_s": 0.5,
+            "final_wall_time_s": 0.25,
+            "total_tokens": 1,
+            "total_tool_calls": 1,
+            "runtime": {"image_id": "sha256:first", "platform": "linux/arm64"},
+        }
+        second = {**first, "trial": 2, "runtime": {"image_id": "sha256:second", "platform": "linux/arm64"}}
+
+        summary = self.mod.build_run_summary(
+            [{"key": "requests", "commit": "a" * 40, "archive_sha256": "b" * 64}],
+            ["parallel-on"],
+            2,
+            "model",
+            "high",
+            [first, second],
+            "2026-07-13T00:00:00Z",
+        )
+
+        self.assertEqual(summary["results"], [first, second])
+        self.assertEqual(
+            summary["aggregates"][0]["comparison_error"],
+            "mixed Docker runtime provenance",
+        )
 
     def test_invalid_shared_home_evidence_is_not_gradeable(self) -> None:
         evidence = {

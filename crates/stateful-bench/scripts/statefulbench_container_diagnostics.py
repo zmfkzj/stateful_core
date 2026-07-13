@@ -18,12 +18,32 @@ def _sensitive(name: str) -> bool:
     return any(pattern in name.casefold() for pattern in _SENSITIVE)
 
 
-def _digest(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for block in iter(lambda: source.read(1024 * 1024), b""):
+def _digest(path: Path, expected: os.stat_result) -> str:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise OSError("O_NOFOLLOW is unavailable")
+    descriptor = os.open(path, os.O_RDONLY | nofollow)
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino)
+            or (opened.st_size, opened.st_mtime_ns)
+            != (expected.st_size, expected.st_mtime_ns)
+        ):
+            raise OSError("diagnostic file changed after lstat")
+        digest = hashlib.sha256()
+        while block := os.read(descriptor, 1024 * 1024):
             digest.update(block)
-    return digest.hexdigest()
+        current = os.fstat(descriptor)
+        if (
+            (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
+            != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+        ):
+            raise OSError("diagnostic file changed while hashing")
+        return digest.hexdigest()
+    finally:
+        os.close(descriptor)
 
 
 def _file_record(home: Path, path: Path) -> dict:
@@ -35,7 +55,7 @@ def _file_record(home: Path, path: Path) -> dict:
     if stat.S_ISDIR(metadata.st_mode):
         return {**record, "type": "directory"}
     if stat.S_ISREG(metadata.st_mode):
-        return {**record, "type": "file", "sha256": _digest(path)}
+        return {**record, "type": "file", "sha256": _digest(path, metadata)}
     if stat.S_ISFIFO(metadata.st_mode):
         return {**record, "type": "fifo"}
     if stat.S_ISSOCK(metadata.st_mode):
@@ -51,7 +71,7 @@ def _sqlite_record(path: Path) -> dict:
     record: dict = {"integrity": "unknown", "schemas": [], "table_counts": {}}
     connection: sqlite3.Connection | None = None
     try:
-        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
         integrity = connection.execute("pragma integrity_check").fetchone()
         if integrity != ("ok",):
             record["integrity"] = "malformed"
@@ -137,7 +157,11 @@ def snapshot_home(home: Path) -> dict:
 
 def snapshot_changes(before: dict, after: dict) -> list[dict]:
     def index(snapshot: dict) -> dict[str, dict]:
-        return {item["path"]: item for item in snapshot.get("files", []) if item.get("type") == "file"}
+        return {
+            item["path"]: item
+            for item in snapshot.get("files", [])
+            if type(item) is dict and type(item.get("path")) is str
+        }
 
     first, second = index(before), index(after)
     changes = []
@@ -146,13 +170,15 @@ def snapshot_changes(before: dict, after: dict) -> list[dict]:
             changes.append({"path": path, "change": "created"})
         elif path not in second:
             changes.append({"path": path, "change": "deleted"})
-        elif any(first[path].get(key) != second[path].get(key) for key in ("size", "mtime_ns", "sha256")):
+        elif first[path] != second[path]:
             changes.append({"path": path, "change": "changed"})
     return changes
 
 
 def classify_runtime_failure(error: str | None, snapshot: dict | None = None) -> str | None:
     text = (error or "").casefold()
+    if "sqlite_unavailable" in text:
+        return "sqlite_unavailable"
     if "locked" in text or "busy" in text:
         return "sqlite_locked"
     if "malformed" in text or "not a database" in text:
