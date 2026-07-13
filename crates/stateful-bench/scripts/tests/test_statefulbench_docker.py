@@ -506,6 +506,7 @@ class DockerAgentLifecycleTests(unittest.TestCase):
         process = Mock(returncode=None)
         process.wait.side_effect = [subprocess.TimeoutExpired("docker", 1), 0]
         process.terminate.side_effect = OSError("client termination failed")
+        process.communicate.side_effect = [subprocess.TimeoutExpired("docker", 1), (b"", b"")]
         handle = self.mod.DockerAgentHandle(
             process, "task-a", self.container.container_id, pid_record, 0.0
         )
@@ -541,7 +542,7 @@ class DockerAgentLifecycleTests(unittest.TestCase):
             pid_record,
             0.0,
         )
-        handle.popen.stdout.read.return_value = b'{"pid":42,"pgid":42,"exit_code":0}\n'
+        handle.popen.communicate.return_value = (b'{"pid":42,"pgid":42,"exit_code":0}\n', b"")
         runner = Mock()
 
         record, _ = self.mod.wait_agent(
@@ -552,6 +553,8 @@ class DockerAgentLifecycleTests(unittest.TestCase):
         self.assertIsNone(record["cleanup_error"])
         self.assertEqual((record["pid"], record["pgid"]), (42, 42))
         runner.assert_not_called()
+        handle.popen.stdout.close.assert_called_once_with()
+        handle.popen.stderr.close.assert_called_once_with()
     def test_wait_removes_arm_when_docker_exec_exits_nonzero(self) -> None:
         pid_record = self.container.runtime_dir / "pids" / "task-a.json"
         pid_record.parent.mkdir()
@@ -563,6 +566,7 @@ class DockerAgentLifecycleTests(unittest.TestCase):
             pid_record,
             0.0,
         )
+        handle.popen.communicate.return_value = (b"", b"")
 
         with patch.object(self.mod, "remove_arm_container") as remove:
             record, _ = self.mod.wait_agent(
@@ -590,7 +594,7 @@ class DockerAgentLifecycleTests(unittest.TestCase):
             pid_record,
             0.0,
         )
-        handle.popen.stdout.read.return_value = b"\xff"
+        handle.popen.communicate.return_value = (b"\xff", b"")
 
         with patch.object(self.mod, "remove_arm_container") as remove:
             record, _ = self.mod.wait_agent(
@@ -620,7 +624,7 @@ class DockerAgentLifecycleTests(unittest.TestCase):
             pid_record,
             0.0,
         )
-        handle.popen.stdout.read.return_value = b'{"pid":42,"pgid":42,"exit_code":3}\n'
+        handle.popen.communicate.return_value = (b'{"pid":42,"pgid":42,"exit_code":3}\n', b"")
         runner = Mock()
 
         record, _ = self.mod.wait_agent(
@@ -637,6 +641,7 @@ class DockerAgentLifecycleTests(unittest.TestCase):
         pid_record.write_text('{"pid": 42, "pgid": 42}\n', encoding="utf-8")
         process = Mock(returncode=None)
         process.wait.side_effect = [subprocess.TimeoutExpired("docker", 1), 0]
+        process.communicate.side_effect = [subprocess.TimeoutExpired("docker", 1), (b"", b"")]
         handle = self.mod.DockerAgentHandle(
             process,
             "task-a",
@@ -675,6 +680,7 @@ class DockerAgentLifecycleTests(unittest.TestCase):
         pid_record.write_text('{"pid": 42, "pgid": 42}\n', encoding="utf-8")
         process = Mock(returncode=None)
         process.wait.side_effect = [subprocess.TimeoutExpired("docker", 5), 0]
+        process.communicate.side_effect = [subprocess.TimeoutExpired("docker", 5), (b"", b"")]
         handle = self.mod.DockerAgentHandle(
             process, "task-a", self.container.container_id, pid_record, time.monotonic()
         )
@@ -710,7 +716,7 @@ class DockerAgentLifecycleTests(unittest.TestCase):
             pid_record,
             time.monotonic(),
         )
-        handle.popen.stdout.read.return_value = b'{"pid":42,"pgid":42,"exit_code":0}\n'
+        handle.popen.communicate.return_value = (b'{"pid":42,"pgid":42,"exit_code":0}\n', b"")
 
         record, _ = self.mod.wait_agent(
             self.container,

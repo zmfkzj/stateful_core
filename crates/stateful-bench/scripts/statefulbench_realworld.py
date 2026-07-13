@@ -1278,6 +1278,33 @@ def _inject_evaluators(corpus: dict, dataset_root: Path, workspace: Path) -> lis
         paths.append(source)
     return paths
 
+def _agent_only_timing(
+    arm: str,
+    agents: list[dict],
+    task_started: float | None,
+    task_ended: float | None,
+) -> tuple[float, float, float]:
+    task_records = [record for record in agents if record["kind"] == "task"]
+    if arm == "sequential":
+        tasks_wall_time_s = sum(max(0.0, record["wall_time_s"]) for record in task_records)
+    else:
+        tasks_wall_time_s = (
+            0.0
+            if task_started is None or task_ended is None
+            else max(0.0, task_ended - task_started)
+        )
+    final_wall_time_s = next(
+        (
+            max(0.0, record["wall_time_s"])
+            for record in agents
+            if record["kind"] == "final"
+        ),
+        0.0,
+    )
+    return tasks_wall_time_s + final_wall_time_s, tasks_wall_time_s, final_wall_time_s
+
+
+
 
 def _empty_run_result(repo: dict, arm: str, trial: int, error: str | None = None) -> dict:
     return {
@@ -1796,7 +1823,7 @@ def _run_container_post_agent_checks(
     execute=_DOCKER.exec_in_container,
     copy=_DOCKER.copy_to_container,
     inject: bool = True,
-) -> tuple[bool, bool]:
+) -> tuple[bool, bool, list[dict[str, bool | str]]]:
     if inject:
         _inject_container_evaluators(
             corpus, dataset_root, container, env, artifacts, artifact_dir, execute=execute, copy=copy
@@ -1807,16 +1834,21 @@ def _run_container_post_agent_checks(
         relative = source.relative_to((dataset_root / "evaluators").resolve())
         destination = f"/workspace/.statefulbench-evaluators/{relative}"
         evaluator_results.append(
-            _run_container_logged(
-                container,
-                [str(python), destination, "/workspace"],
-                env,
-                artifacts,
-                artifact_dir,
-                f"{task['key']}:evaluator",
-                execute=execute,
-            ).returncode
-            == 0
+            {
+                "key": task["key"],
+                "ok": (
+                    _run_container_logged(
+                        container,
+                        [str(python), destination, "/workspace"],
+                        env,
+                        artifacts,
+                        artifact_dir,
+                        f"{task['key']}:evaluator",
+                        execute=execute,
+                    ).returncode
+                    == 0
+                ),
+            }
         )
     suite_ok = (
         _run_container_logged(
@@ -1830,7 +1862,7 @@ def _run_container_post_agent_checks(
         ).returncode
         == 0
     )
-    return all(evaluator_results), suite_ok
+    return all(result["ok"] for result in evaluator_results), suite_ok, evaluator_results
 
 
 def _run_container_repo_arm(
@@ -1872,6 +1904,7 @@ def _run_container_repo_arm(
     final_started: float | None = None
     final_ended: float | None = None
     evaluators_ok = False
+    evaluator_results: list[dict[str, bool | str]] = []
     upstream_suite_ok = False
     error: str | None = None
     container: _DOCKER.ArmContainer | None = None
@@ -2035,7 +2068,7 @@ def _run_container_repo_arm(
         )
         if evidence_error is not None:
             raise RuntimeError(evidence_error)
-        evaluators_ok, upstream_suite_ok = container_post_checks(
+        evaluators_ok, upstream_suite_ok, evaluator_results = container_post_checks(
             repo,
             corpus,
             dataset_root,
@@ -2044,7 +2077,7 @@ def _run_container_repo_arm(
             environment,
             artifacts,
             artifact_dir,
-            inject=False,
+            inject=True,
         )
         snapshot("after-grading")
     except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
@@ -2076,17 +2109,8 @@ def _run_container_repo_arm(
             teardown_ended = time.monotonic()
 
     post_suite_ok = evaluators_ok and upstream_suite_ok
-    tasks_wall_time_s = (
-        0.0 if task_started is None or task_ended is None else max(0.0, task_ended - task_started)
-    )
-    arm_end = final_ended if final_ended is not None else task_ended
-    arm_wall_time_s = (
-        0.0 if arm_started is None or arm_end is None else max(0.0, arm_end - arm_started - inter_agent_diagnostic_time_s)
-    )
-    final_wall_time_s = (
-        0.0
-        if final_started is None or final_ended is None
-        else max(0.0, final_ended - final_started)
+    arm_wall_time_s, tasks_wall_time_s, final_wall_time_s = _agent_only_timing(
+        arm, agents, task_started, task_ended
     )
     home_changes = [
         {
@@ -2136,7 +2160,7 @@ def _run_container_repo_arm(
         "post_suite_ok": post_suite_ok,
         "evaluators_ok": evaluators_ok,
         "upstream_suite_ok": upstream_suite_ok,
-        "evaluator_results": [],
+        "evaluator_results": evaluator_results,
         "agents": agents,
         "artifacts": artifacts,
         "end_to_end_wall_time_s": max(0.0, time.monotonic() - row_started),
@@ -2441,21 +2465,8 @@ def run_repo_arm(
                 error = cleanup_error if error is None else f"{error}; {cleanup_error}"
 
     post_suite_ok = evaluators_ok and upstream_suite_ok
-    tasks_wall_time_s = (
-        0.0
-        if task_started is None or task_ended is None
-        else max(0.0, task_ended - task_started)
-    )
-    arm_end = final_ended if final_ended is not None else task_ended
-    arm_wall_time_s = (
-        0.0
-        if arm_started is None or arm_end is None
-        else max(0.0, arm_end - arm_started)
-    )
-    final_wall_time_s = (
-        0.0
-        if final_started is None or final_ended is None
-        else max(0.0, final_ended - final_started)
+    arm_wall_time_s, tasks_wall_time_s, final_wall_time_s = _agent_only_timing(
+        arm, agents, task_started, task_ended
     )
     result = {
         "repository": repo["key"],

@@ -639,6 +639,21 @@ def _reap_docker_client(handle: DockerAgentHandle) -> str | None:
     except (OSError, subprocess.SubprocessError) as error:
         return f"docker exec client wait after TERM failed: {error}"
 
+def _communicate_client(popen: subprocess.Popen, timeout: float) -> tuple[bytes, bytes]:
+    stdout, stderr = popen.communicate(timeout=timeout)
+    if not isinstance(stdout, bytes) or not isinstance(stderr, bytes):
+        raise OSError("docker exec client did not return byte streams")
+    return stdout, stderr
+
+
+def _close_client_pipes(popen: subprocess.Popen) -> None:
+    for stream in (popen.stdout, popen.stderr):
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
 
 def wait_agent(
     container: ArmContainer,
@@ -653,26 +668,38 @@ def wait_agent(
     timed_out = False
     cleanup_error: str | None = None
     client_cleanup_error: str | None = None
+    stdout = b""
     try:
-        client_exit_code = handle.popen.wait(timeout=float(cfg.timeout_s))
+        stdout, _ = _communicate_client(handle.popen, float(cfg.timeout_s))
+        client_exit_code = handle.popen.returncode
     except subprocess.TimeoutExpired:
         timed_out = True
         client_exit_code = -9
         handle.client_timed_out = True
         client_cleanup_error = _reap_docker_client(handle)
+        try:
+            _communicate_client(handle.popen, 5)
+        except (OSError, subprocess.SubprocessError) as error:
+            client_cleanup_error = "; ".join(
+                detail for detail in (client_cleanup_error, str(error)) if detail
+            )
+        finally:
+            _close_client_pipes(handle.popen)
         cleanup_error = terminate_agent_group(
             container, handle, runner=runner, force_container_removal=True
         )
         exit_code = -9
+    except (OSError, subprocess.SubprocessError) as error:
+        client_exit_code = -1
+        client_cleanup_error = str(error)
+        _close_client_pipes(handle.popen)
+        cleanup_error = terminate_agent_group(
+            container, handle, runner=runner, force_container_removal=True
+        )
+        exit_code = -1
     else:
-        try:
-            completion = (
-                _completion_from_channel(handle.popen.stdout.read())
-                if client_exit_code == 0
-                else None
-            )
-        except (OSError, subprocess.SubprocessError):
-            completion = None
+        _close_client_pipes(handle.popen)
+        completion = _completion_from_channel(stdout) if client_exit_code == 0 else None
         if completion is None:
             reason = (
                 f"docker exec exited {client_exit_code} without trusted completion"

@@ -2165,11 +2165,12 @@ class RealWorldRunnerTests(unittest.TestCase):
             self.assertEqual(waits, ["task"] * 10)
             self.assertEqual(len(starts), 10)
 
-        def post_checks(*_args, **_kwargs):
+        def post_checks(*_args, **kwargs):
             self.assertEqual(waits, ["task"] * 10 + ["final"])
             self.assertEqual(len(starts), 11)
             self.assertEqual(snapshots[-1], "after-final")
-            return True, True
+            self.assertTrue(kwargs["inject"])
+            return True, True, [{"key": f"task-{index}", "ok": True} for index in range(10)]
         def execute(_container, *argv, **_kwargs):
             if argv == ("/usr/local/bin/stateful", "--version"):
                 return subprocess.CompletedProcess([], 2, "", "unexpected argument --version")
@@ -2220,6 +2221,10 @@ class RealWorldRunnerTests(unittest.TestCase):
         )
         self.assertEqual([home for _, home, _ in starts], ["/home/stateful"] * 11)
         self.assertEqual(waits, ["task"] * 10 + ["final"])
+        self.assertEqual(
+            result["evaluator_results"],
+            [{"key": f"task-{index}", "ok": True} for index in range(10)],
+        )
         self.assertEqual(snapshots, list(self.mod._DOCKER.DIAGNOSTIC_PHASES))
         self.assertEqual(result["container"]["inspect"]["state"]["pid"], 42)
         self.assertEqual(
@@ -2414,7 +2419,9 @@ class RealWorldRunnerTests(unittest.TestCase):
             container_agent_launch=launch,
             container_agent_wait=wait,
             container_evaluator_inject=mock.Mock(),
-            container_post_checks=mock.Mock(return_value=(True, True)),
+            container_post_checks=mock.Mock(
+                return_value=(True, True, [{"key": f"task-{index}", "ok": True} for index in range(10)])
+            ),
             container_diagnostics=self.container_diagnostics,
             container_inspect=mock.Mock(
                 return_value={
@@ -2508,7 +2515,7 @@ class RealWorldRunnerTests(unittest.TestCase):
         copy = mock.Mock()
         python = Path("/workspace/.statefulbench-venv/bin/python")
 
-        evaluators_ok, suite_ok = self.mod._run_container_post_agent_checks(
+        evaluators_ok, suite_ok, evaluator_results = self.mod._run_container_post_agent_checks(
             self.repo,
             self.corpus,
             self.dataset,
@@ -2523,6 +2530,10 @@ class RealWorldRunnerTests(unittest.TestCase):
 
         self.assertTrue(evaluators_ok)
         self.assertTrue(suite_ok)
+        self.assertEqual(
+            evaluator_results,
+            [{"key": f"task-{index}", "ok": True} for index in range(10)],
+        )
         commands = [call.args[1:] for call in execute.call_args_list]
         self.assertIn(
             (str(python), "/workspace/.statefulbench-evaluators/task-0.py", "/workspace"),
@@ -2841,6 +2852,67 @@ class RealWorldRunnerTests(unittest.TestCase):
 
         self.assertTrue(result["cleared"], result)
         self.assertEqual(seen, [(self.dataset / f"evaluators/task-{index}.py").resolve() for index in range(10)])
+
+    def test_agent_only_timing_excludes_delayed_evaluator_reinjection(self) -> None:
+        for arm in ("sequential", "parallel-off"):
+            with self.subTest(arm=arm):
+                clock = [0.0]
+
+                class Handle:
+                    def __init__(self, agent_id):
+                        self.agent_id = agent_id
+                        self.started_monotonic = clock[0]
+
+                def launch(*args):
+                    return Handle(args[2])
+
+                def wait(handle, _arm_dir, kind, _cfg):
+                    duration = 7.0 if kind == "final" else 1.0
+                    clock[0] += duration
+                    return (
+                        {
+                            "agent_id": handle.agent_id,
+                            "kind": kind,
+                            "exit_code": 0,
+                            "timed_out": False,
+                            "cleanup_error": None,
+                            "wall_time_s": duration,
+                            "total_tokens": 0,
+                            "tool_calls": 0,
+                        },
+                        clock[0],
+                    )
+
+                original_inject = self.mod._inject_evaluators
+
+                def delayed_inject(*args):
+                    result = original_inject(*args)
+                    clock[0] += 100.0
+                    return result
+
+                with (
+                    mock.patch.object(self.mod._LITE, "_wait_agent", side_effect=wait),
+                    mock.patch.object(self.mod, "_inject_evaluators", side_effect=delayed_inject),
+                ):
+                    result = self.mod.run_repo_arm(
+                        self.repo,
+                        self.corpus,
+                        self.dataset,
+                        self.root / "cache",
+                        self.root / "out",
+                        arm,
+                        self.mod.RunConfig(tasks=10, stateful_binary="/tmp/stateful"),
+                        launch=launch,
+                        workspace_factory=self.workspace,
+                        archive_loader=lambda *_: self.root / "archive.tar.gz",
+                        setup=lambda *_: True,
+                        evaluator=lambda *_: True,
+                        suite=lambda *_: True,
+                    )
+
+                self.assertEqual(result["tasks_wall_time_s"], 10.0)
+                self.assertEqual(result["final_wall_time_s"], 7.0)
+                self.assertEqual(result["arm_wall_time_s"], 17.0)
 
     def test_all_evaluators_and_suite_run_after_an_evaluator_failure(self) -> None:
         events = []
