@@ -22,7 +22,9 @@ COPY --from=stateful-builder /usr/local/cargo /usr/local/cargo
 COPY --from=stateful-builder /usr/local/rustup /usr/local/rustup
 COPY --from=stateful-builder /src/target/release/stateful /usr/local/bin/stateful
 COPY crates/stateful-bench/scripts/statefulbench_container_entry.py /usr/local/bin/statefulbench-container-entry
-RUN chmod 0755 /usr/local/bin/statefulbench-container-entry \
+COPY crates/stateful-bench/scripts/statefulbench_container_diagnostics.py /usr/local/bin/statefulbench-container-diagnostics
+
+RUN chmod 0755 /usr/local/bin/statefulbench-container-entry /usr/local/bin/statefulbench-container-diagnostics \
     && python3 --version \
     && omp --version \
     && stateful --help >/dev/null \

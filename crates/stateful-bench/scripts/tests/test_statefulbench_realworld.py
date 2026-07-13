@@ -1799,6 +1799,18 @@ class RealWorldRunnerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
+    @staticmethod
+    def container_diagnostics(_container, _phase):
+        return {
+            "schema_version": 1,
+            "home": "/home/stateful",
+            "files": [],
+            "databases": {},
+            "lock_files": [],
+            "per_agent_home_tree": False,
+            "processes": [],
+        }
+
     @contextlib.contextmanager
     def workspace(self, *_args):
         workspace = self.root / "workspace"
@@ -1915,13 +1927,14 @@ class RealWorldRunnerTests(unittest.TestCase):
             archive_loader=lambda *_: self.root / "archive.tar.gz",
             workspace_materializer=lambda *_: self.root / "workspace",
             arm_container_start=mock.Mock(return_value=container),
-            arm_runtime_prepare=mock.Mock(return_value={"HOME": "/home/stateful"}),
+            arm_runtime_prepare=mock.Mock(return_value={"HOME": "/home/stateful", "PI_CODING_AGENT_DIR": "/home/stateful/.omp/profiles/stateful/agent"}),
             arm_container_remove=mock.Mock(),
             container_exec=mock.Mock(return_value=subprocess.CompletedProcess([], 0, "", "")),
             container_agent_launch=launch,
             container_agent_wait=wait,
             container_evaluator_inject=inject,
             container_post_checks=post_checks,
+            container_diagnostics=self.container_diagnostics,
         )
 
         self.assertTrue(result["cleared"], result)
@@ -1980,9 +1993,10 @@ class RealWorldRunnerTests(unittest.TestCase):
             arm_container_start=start,
             arm_runtime_prepare=mock.Mock(side_effect=RuntimeError("initialization failed")),
             arm_container_remove=remove,
+            container_diagnostics=self.container_diagnostics,
         )
 
-        self.assertEqual(result["error"], "initialization failed")
+        self.assertEqual(result["error"], "initialization failed; diagnostics: missing shared HOME evidence")
         remove.assert_called_once_with(container)
 
 
@@ -2543,8 +2557,10 @@ class RealWorldReportingTests(unittest.TestCase):
                 side_effect=lambda path: {"repository": path.stem},
             ),
             mock.patch.object(self.mod, "_corpus_matches_repository", return_value=True),
-            mock.patch.object(self.mod, "run_repo_arm", side_effect=lambda *_args: next(results)),
+            mock.patch.object(self.mod, "run_repo_arm", side_effect=lambda *_args, **_kwargs: next(results)),
             mock.patch.object(self.mod.time, "strftime", return_value="2026-07-12T00:00:00Z"),
+            mock.patch.object(self.mod._DOCKER, "inspect_runtime", return_value=mock.Mock()),
+            mock.patch.object(self.mod, "load_qualification_receipt", return_value={}),
             contextlib.redirect_stdout(stdout),
         ):
             status = self.mod.main(
@@ -2564,6 +2580,8 @@ class RealWorldReportingTests(unittest.TestCase):
                     "model",
                     "--thinking",
                     "thinking",
+                    "--docker-image",
+                    "statefulbench-realworld:local",
                 ]
             )
 
@@ -2619,6 +2637,64 @@ class RealWorldReportingTests(unittest.TestCase):
         self.assertEqual(
             table.splitlines()[-1],
             "| alpha | sequential | 1 | False | 0.000 | 0 | 0 | first\\nsecond\\|third |",
+        )
+
+
+class RealWorldDiagnosticsReportingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.mod = load_script("statefulbench_realworld.py")
+
+    def test_diagnostic_paths_are_row_local_and_summary_retains_raw_evidence(self) -> None:
+        result = {
+            "repository": "requests",
+            "arm": "parallel-on",
+            "trial": 1,
+            "cleared": True,
+            "error": None,
+            "arm_wall_time_s": 1.0,
+            "tasks_wall_time_s": 0.5,
+            "final_wall_time_s": 0.25,
+            "total_tokens": 1,
+            "total_tool_calls": 1,
+            "runtime": {"image_id": "sha256:fixture", "platform": "linux/arm64", "repo_digests": [], "versions": {}},
+            "container": {"id": "container-1", "setup_wall_time_s": 0.1, "teardown_wall_time_s": 0.2, "removed": True},
+            "diagnostics": {
+                "snapshots": {"after-final": "runtime/diagnostics/after-final.json"},
+                "home_changes": [],
+                "error_classification": None,
+            },
+        }
+
+        self.assertEqual(
+            self.mod._diagnostic_artifact_paths(result),
+            {"after-final": "runtime/diagnostics/after-final.json"},
+        )
+        summary = self.mod.build_run_summary(
+            [{"key": "requests", "commit": "a" * 40, "archive_sha256": "b" * 64}],
+            ["parallel-on"],
+            1,
+            "model",
+            "high",
+            [result],
+            "2026-07-13T00:00:00Z",
+        )
+        self.assertEqual(summary["results"][0]["diagnostics"]["snapshots"]["after-final"], "runtime/diagnostics/after-final.json")
+
+    def test_invalid_shared_home_evidence_is_not_gradeable(self) -> None:
+        evidence = {
+            "snapshots": {
+                phase: {"schema_version": 1, "home": "/home/stateful", "files": [], "databases": {}, "lock_files": [], "per_agent_home_tree": False, "processes": []}
+                for phase in ("initialized", "before-tasks", "after-tasks", "after-final")
+            },
+            "agent_identities": {
+                "task-a": {"container_id": "container-1", "home": "/home/stateful", "profile": "/home/stateful/.omp/profiles/stateful/agent"},
+                "final": {"container_id": "other-container", "home": "/home/stateful", "profile": "/home/stateful/.omp/profiles/stateful/agent"},
+            },
+        }
+
+        self.assertEqual(
+            self.mod.validate_shared_home_evidence(evidence, "container-1", {"task-a", "final"}),
+            "contradictory shared HOME evidence",
         )
 if __name__ == "__main__":
     unittest.main()

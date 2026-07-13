@@ -42,6 +42,16 @@ _DOCKER = importlib.util.module_from_spec(_DOCKER_SPEC)
 sys.modules[_DOCKER_SPEC.name] = _DOCKER
 _DOCKER_SPEC.loader.exec_module(_DOCKER)
 
+_DIAGNOSTICS_PATH = Path(__file__).with_name("statefulbench_container_diagnostics.py")
+_DIAGNOSTICS_SPEC = importlib.util.spec_from_file_location(
+    "statefulbench_container_diagnostics_for_realworld", _DIAGNOSTICS_PATH
+)
+if _DIAGNOSTICS_SPEC is None or _DIAGNOSTICS_SPEC.loader is None:
+    raise RuntimeError(f"cannot import diagnostics helper from {_DIAGNOSTICS_PATH}")
+_DIAGNOSTICS = importlib.util.module_from_spec(_DIAGNOSTICS_SPEC)
+sys.modules[_DIAGNOSTICS_SPEC.name] = _DIAGNOSTICS
+_DIAGNOSTICS_SPEC.loader.exec_module(_DIAGNOSTICS)
+
 
 _REPOSITORY_FIELDS = frozenset(
     {
@@ -1287,6 +1297,18 @@ def _empty_run_result(repo: dict, arm: str, trial: int, error: str | None = None
         "evaluator_results": [],
         "agents": [],
         "artifacts": {},
+        "runtime": {"image_id": None, "repo_digests": [], "platform": None, "versions": {}},
+        "container": {
+            "id": None,
+            "setup_wall_time_s": 0.0,
+            "teardown_wall_time_s": 0.0,
+            "removed": False,
+        },
+        "diagnostics": {
+            "snapshots": {},
+            "home_changes": [],
+            "error_classification": _DIAGNOSTICS.classify_runtime_failure(error),
+        },
     }
 
 
@@ -1328,6 +1350,51 @@ def _runtime_provenance(runtime: _DOCKER.DockerRuntime) -> dict:
         "repo_digests": list(runtime.repo_digests),
         "platform": runtime.platform,
     }
+
+
+def _diagnostic_artifact_paths(result: dict) -> dict[str, str]:
+    snapshots = result.get("diagnostics", {}).get("snapshots", {})
+    if type(snapshots) is not dict or not all(
+        phase in _DOCKER.DIAGNOSTIC_PHASES and type(path) is str
+        and path == _DOCKER.diagnostic_artifact_path(phase)
+        for phase, path in snapshots.items()
+    ):
+        raise ValueError("diagnostic artifact paths are malformed")
+    return dict(sorted(snapshots.items()))
+
+
+def validate_shared_home_evidence(
+    evidence: dict, container_id: str, expected_agents: set[str]
+) -> str | None:
+    snapshots = evidence.get("snapshots")
+    identities = evidence.get("agent_identities")
+    required = {"initialized", "before-tasks", "after-tasks", "after-final"}
+    if type(snapshots) is not dict or not required.issubset(snapshots):
+        return "missing shared HOME evidence"
+    if type(identities) is not dict or set(identities) != expected_agents:
+        return "missing shared HOME evidence"
+    expected_profile = "/home/stateful/.omp/profiles/stateful/agent"
+    for phase in required:
+        snapshot = snapshots[phase]
+        if (
+            type(snapshot) is not dict
+            or snapshot.get("schema_version") != 1
+            or snapshot.get("home") != "/home/stateful"
+            or snapshot.get("per_agent_home_tree") is not False
+            or not isinstance(snapshot.get("files"), list)
+            or not isinstance(snapshot.get("databases"), dict)
+            or not isinstance(snapshot.get("lock_files"), list)
+        ):
+            return "contradictory shared HOME evidence"
+    for identity in identities.values():
+        if (
+            type(identity) is not dict
+            or identity.get("container_id") != container_id
+            or identity.get("home") != "/home/stateful"
+            or identity.get("profile") != expected_profile
+        ):
+            return "contradictory shared HOME evidence"
+    return None
 
 
 def _qualification_identity(
@@ -1432,7 +1499,7 @@ def _run_container_logged(
     stderr = artifact_dir / f"{number:03d}.stderr.log"
     stdout.write_text(completed.stdout, encoding="utf-8")
     stderr.write_text(completed.stderr, encoding="utf-8")
-    artifacts[label] = {"stdout": str(stdout), "stderr": str(stderr)}
+    artifacts[label] = {"stdout": f"artifacts/{stdout.name}", "stderr": f"artifacts/{stderr.name}"}
     return completed
 
 
@@ -1600,6 +1667,7 @@ def _run_container_repo_arm(
     container_agent_wait,
     container_evaluator_inject,
     container_post_checks,
+    container_diagnostics=_DOCKER.capture_home_snapshot,
 ) -> dict:
     trial = cfg.trial
     arm_dir = out_dir / repo["key"] / arm / f"trial-{trial}"
@@ -1619,6 +1687,27 @@ def _run_container_repo_arm(
     error: str | None = None
     container: _DOCKER.ArmContainer | None = None
     container_removed = False
+    row_started = time.monotonic()
+    setup_started: float | None = None
+    setup_ended: float | None = None
+    teardown_started: float | None = None
+    teardown_ended: float | None = None
+    snapshots: dict[str, dict] = {}
+    agent_identities: dict[str, dict[str, str]] = {}
+    versions: dict[str, str] = {}
+    inter_agent_diagnostic_time_s = 0.0
+
+    def snapshot(phase: str) -> float:
+        started = time.monotonic()
+        snapshots[phase] = container_diagnostics(container, phase)
+        return max(0.0, time.monotonic() - started)
+
+    def agent_identity(agent_id: str, env: dict[str, str]) -> None:
+        agent_identities[agent_id] = {
+            "container_id": container.container_id,
+            "home": env.get("HOME", ""),
+            "profile": env.get("PI_CODING_AGENT_DIR", ""),
+        }
 
     def wait(handle: object, kind: str) -> tuple[dict, float]:
         nonlocal container_removed
@@ -1632,6 +1721,7 @@ def _run_container_repo_arm(
         workspace = workspace_materializer(repo, archive, arm_dir / "workspace")
         runtime_dir = arm_dir / "runtime"
         runtime_dir.mkdir(parents=True, exist_ok=True)
+        setup_started = time.monotonic()
         container = arm_container_start(
             runtime, _arm_container_name(repo, arm, trial), workspace, runtime_dir
         )
@@ -1647,6 +1737,7 @@ def _run_container_repo_arm(
         finally:
             if credential is not None:
                 shutil.rmtree(credential.parent)
+        snapshot("initialized")
         container_repo = _prepare_container_repository(
             repo, container, common_env, artifacts, artifact_dir, execute=container_exec
         )
@@ -1654,10 +1745,18 @@ def _run_container_repo_arm(
             raise RuntimeError("container repository setup failed")
         python, environment = container_repo
         cfg.usage_from_log = _LITE.usage_from_log
+        for name, binary in (("omp", cfg.omp_bin), ("stateful", cfg.stateful_binary or "/usr/local/bin/stateful")):
+            version = container_exec(container, binary, "--version", env=common_env, check=False)
+            if version.returncode != 0:
+                raise RuntimeError(f"{name} version capture failed")
+            versions[name] = version.stdout.strip().splitlines()[0] if version.stdout.strip() else ""
+        snapshot("before-tasks")
+        setup_ended = time.monotonic()
 
         def start(task: dict, prompt: Path) -> object:
             nonlocal task_started, arm_started
             handle = container_agent_launch(container, arm_dir, task["key"], prompt, cfg, environment)
+            agent_identity(task["key"], environment)
             pending.append((handle, "task"))
             started = getattr(handle, "started_monotonic", time.monotonic())
             task_started = started if task_started is None else min(task_started, started)
@@ -1683,6 +1782,7 @@ def _run_container_repo_arm(
                         f"task agent {record['agent_id']} cleanup failed: {record['cleanup_error']}"
                     )
                 task_ended = ended if task_ended is None else max(task_ended, ended)
+        inter_agent_diagnostic_time_s = snapshot("after-tasks")
 
         container_evaluator_inject(
             corpus, dataset_root, container, environment, artifacts, artifact_dir
@@ -1690,6 +1790,7 @@ def _run_container_repo_arm(
         final_handle = container_agent_launch(
             container, arm_dir, "final", final_prompt, cfg, environment
         )
+        agent_identity("final", environment)
         pending.append((final_handle, "final"))
         final_started = getattr(final_handle, "started_monotonic", time.monotonic())
         arm_started = final_started if arm_started is None else min(arm_started, final_started)
@@ -1699,6 +1800,14 @@ def _run_container_repo_arm(
             raise RuntimeError(
                 f"final agent {final_record['agent_id']} cleanup failed: {final_record['cleanup_error']}"
             )
+        snapshot("after-final")
+        evidence_error = validate_shared_home_evidence(
+            {"snapshots": snapshots, "agent_identities": agent_identities},
+            container.container_id,
+            {task["key"] for task, _ in tasks} | {"final"},
+        )
+        if evidence_error is not None:
+            raise RuntimeError(evidence_error)
         evaluators_ok, upstream_suite_ok = container_post_checks(
             repo,
             corpus,
@@ -1710,6 +1819,7 @@ def _run_container_repo_arm(
             artifact_dir,
             inject=False,
         )
+        snapshot("after-grading")
     except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
         error = str(exc)
     finally:
@@ -1724,10 +1834,19 @@ def _run_container_repo_arm(
             else:
                 final_ended = ended
         if container is not None and not container_removed:
+            teardown_started = time.monotonic()
+            try:
+                snapshot("before-remove")
+            except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
+                error = str(exc) if error is None else f"{error}; {exc}"
+        if container is not None and not container_removed:
             try:
                 arm_container_remove(container)
+                container_removed = True
             except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
                 error = str(exc) if error is None else f"{error}; {exc}"
+        if teardown_started is not None:
+            teardown_ended = time.monotonic()
 
     post_suite_ok = evaluators_ok and upstream_suite_ok
     tasks_wall_time_s = (
@@ -1735,12 +1854,37 @@ def _run_container_repo_arm(
     )
     arm_end = final_ended if final_ended is not None else task_ended
     arm_wall_time_s = (
-        0.0 if arm_started is None or arm_end is None else max(0.0, arm_end - arm_started)
+        0.0 if arm_started is None or arm_end is None else max(0.0, arm_end - arm_started - inter_agent_diagnostic_time_s)
     )
     final_wall_time_s = (
         0.0
         if final_started is None or final_ended is None
         else max(0.0, final_ended - final_started)
+    )
+    home_changes = [
+        {
+            "from": before,
+            "to": after,
+            "changes": _DIAGNOSTICS.snapshot_changes(snapshots[before], snapshots[after]),
+        }
+        for before, after in zip(_DOCKER.DIAGNOSTIC_PHASES, _DOCKER.DIAGNOSTIC_PHASES[1:])
+        if before in snapshots and after in snapshots
+    ]
+    diagnostic_error = validate_shared_home_evidence(
+        {"snapshots": snapshots, "agent_identities": agent_identities},
+        getattr(container, "container_id", "") if container is not None else "",
+        {task["key"] for task, _ in tasks} | {"final"},
+    )
+    if set(snapshots) != set(_DOCKER.DIAGNOSTIC_PHASES):
+        diagnostic_error = diagnostic_error or "missing shared HOME evidence"
+    for snapshot_value in snapshots.values():
+        classification = _DIAGNOSTICS.classify_runtime_failure(None, snapshot_value)
+        if classification is not None:
+            diagnostic_error = diagnostic_error or classification
+    if diagnostic_error is not None:
+        error = diagnostic_error if error is None else f"{error}; diagnostics: {diagnostic_error}"
+    error_classification = _DIAGNOSTICS.classify_runtime_failure(
+        error, snapshots.get("after-final")
     )
     result = {
         "repository": repo["key"],
@@ -1749,6 +1893,8 @@ def _run_container_repo_arm(
         "cleared": (
             error is None
             and post_suite_ok
+            and container_removed
+            and diagnostic_error is None
             and len(agents) == len(tasks) + 1
             and all(record["exit_code"] == 0 and not record["timed_out"] for record in agents)
         ),
@@ -1764,6 +1910,37 @@ def _run_container_repo_arm(
         "evaluator_results": [],
         "agents": agents,
         "artifacts": artifacts,
+        "end_to_end_wall_time_s": max(0.0, time.monotonic() - row_started),
+        "runtime": {
+            "image_id": runtime.image_id,
+            "repo_digests": list(runtime.repo_digests),
+            "platform": runtime.platform,
+            "versions": versions,
+        },
+        "container": {
+            "id": getattr(container, "container_id", None),
+            "setup_wall_time_s": (
+                0.0
+                if setup_started is None or setup_ended is None
+                else max(0.0, setup_ended - setup_started)
+            ),
+            "teardown_wall_time_s": (
+                0.0
+                if teardown_started is None or teardown_ended is None
+                else max(0.0, teardown_ended - teardown_started)
+            ),
+            "removed": container_removed,
+        },
+        "diagnostics": {
+            "snapshots": {
+                phase: _DOCKER.diagnostic_artifact_path(phase)
+                for phase in _DOCKER.DIAGNOSTIC_PHASES
+                if phase in snapshots
+            },
+            "home_changes": home_changes,
+            "agent_identities": agent_identities,
+            "error_classification": error_classification,
+        },
     }
     _write_run_result(out_dir, result)
     return result
@@ -1796,6 +1973,7 @@ def run_repo_arm(
     container_agent_wait=_DOCKER.wait_agent,
     container_evaluator_inject=_inject_container_evaluators,
     container_post_checks=_run_container_post_agent_checks,
+    container_diagnostics=_DOCKER.capture_home_snapshot,
 ) -> dict:
     if arm not in {"sequential", "parallel-off", "parallel-on"}:
         raise ValueError(f"unknown arm: {arm}")
@@ -1823,6 +2001,7 @@ def run_repo_arm(
             container_agent_wait=container_agent_wait,
             container_evaluator_inject=container_evaluator_inject,
             container_post_checks=container_post_checks,
+            container_diagnostics=container_diagnostics,
         )
     if launch is None:
         result = _empty_run_result(repo, arm, trial, "Docker runtime is required for agent execution")
@@ -2069,7 +2248,6 @@ def run_repo_arm(
     return result
 
 
-
 def _failure_reason(result: dict) -> str | None:
     if result["error"] is not None:
         return result["error"]
@@ -2184,6 +2362,7 @@ def build_run_summary(
         ],
         "generated_at": generated_at,
         "arms": rows,
+        "results": results,
         "aggregates": aggregates,
     }
 

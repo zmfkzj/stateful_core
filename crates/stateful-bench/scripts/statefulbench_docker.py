@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import importlib.util
+
 import secrets
 import shlex
 import shutil
@@ -8,6 +10,16 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+DIAGNOSTIC_PHASES = (
+    "initialized",
+    "before-tasks",
+    "after-tasks",
+    "after-final",
+    "after-grading",
+    "before-remove",
+)
+
 
 
 @dataclass(frozen=True)
@@ -227,6 +239,51 @@ def copy_to_container(
     )
     if completed.returncode != 0:
         raise RuntimeError(f"arm container copy failed: {completed.stderr.strip()}")
+
+
+def diagnostic_artifact_path(phase: str) -> str:
+    if phase not in DIAGNOSTIC_PHASES:
+        raise ValueError(f"unknown diagnostic phase: {phase}")
+    return f"runtime/diagnostics/{phase}.json"
+
+
+def capture_home_snapshot(
+    container: ArmContainer,
+    phase: str,
+    *,
+    runner=subprocess.run,
+) -> dict:
+    relative = diagnostic_artifact_path(phase)
+    output = container.runtime_dir.parent / relative
+    exec_in_container(
+        container,
+        "/usr/local/bin/statefulbench-container-diagnostics",
+        "--home",
+        container.home,
+        "--phase",
+        phase,
+        "--output",
+        f"/{relative}",
+        runner=runner,
+    )
+    try:
+        if output.is_symlink():
+            raise ValueError("diagnostic artifact must not be a symlink")
+        encoded = output.read_text(encoding="utf-8")
+        snapshot = json.loads(encoded)
+    except (OSError, json.JSONDecodeError, ValueError) as error:
+        raise RuntimeError(f"diagnostic capture failed for {phase}") from error
+    if (
+        type(snapshot) is not dict
+        or snapshot.get("phase") != phase
+        or snapshot.get("schema_version") != 1
+        or not isinstance(snapshot.get("files"), list)
+        or not isinstance(snapshot.get("databases"), dict)
+    ):
+        raise RuntimeError(f"diagnostic capture malformed for {phase}")
+    if str(container.runtime_dir.resolve()) in encoded:
+        raise RuntimeError(f"diagnostic capture leaked host path for {phase}")
+    return snapshot
 
 
 def _agent_runtime_paths(container: ArmContainer, agent_id: str) -> tuple[Path, Path, Path, Path]:

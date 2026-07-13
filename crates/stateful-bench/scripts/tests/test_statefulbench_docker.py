@@ -525,5 +525,84 @@ class DockerQualificationTests(unittest.TestCase):
 
         self.assertEqual(status, 23)
 
+
+class DockerDiagnosticTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.diagnostics = load_script("statefulbench_container_diagnostics.py")
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.home = Path(self.tempdir.name) / "home"
+        self.home.mkdir()
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    def test_snapshot_redacts_contents_and_reports_safe_sqlite_metadata(self) -> None:
+        database = self.home / "agent.db"
+        import sqlite3
+
+        with sqlite3.connect(database) as connection:
+            connection.execute("create table safe_items (id integer)")
+            connection.execute("insert into safe_items values (1)")
+        connection.close()
+        (self.home / "agent.db-wal").write_text("secret-token-value", encoding="utf-8")
+        (self.home / "broken.db").write_text("not sqlite", encoding="utf-8")
+        (self.home / "token.txt").write_text("secret-token-value", encoding="utf-8")
+
+        snapshot = self.diagnostics.snapshot_home(self.home)
+        encoded = json.dumps(snapshot)
+
+        self.assertNotIn("secret-token-value", encoded)
+        self.assertIn("agent.db", encoded)
+        self.assertEqual(snapshot["databases"]["agent.db"]["integrity"], "ok")
+        self.assertNotIn("rows", snapshot["databases"]["agent.db"])
+        self.assertEqual(snapshot["databases"]["broken.db"]["integrity"], "malformed")
+        self.assertEqual(snapshot["lock_files"], ["agent.db-wal"])
+
+    def test_diff_and_runtime_classification_fail_closed(self) -> None:
+        (self.home / "before.txt").write_text("one", encoding="utf-8")
+        before = self.diagnostics.snapshot_home(self.home)
+        (self.home / "before.txt").write_text("two", encoding="utf-8")
+        (self.home / "created.txt").write_text("three", encoding="utf-8")
+        after = self.diagnostics.snapshot_home(self.home)
+
+        self.assertEqual(
+            self.diagnostics.snapshot_changes(before, after),
+            [{"path": "before.txt", "change": "changed"}, {"path": "created.txt", "change": "created"}],
+        )
+        self.assertEqual(
+            self.diagnostics.classify_runtime_failure("database is locked"),
+            "sqlite_locked",
+        )
+        self.assertEqual(
+            self.diagnostics.classify_runtime_failure("not a database"),
+            "sqlite_malformed",
+        )
+        self.assertEqual(
+            self.diagnostics.classify_runtime_failure("unexpected failure"),
+            "unclassified_runtime_failure",
+        )
+
+    def test_snapshot_skips_symlinked_databases_and_fails_closed_on_unavailable_sqlite(self) -> None:
+        import sqlite3
+
+        outside = Path(self.tempdir.name) / "outside.db"
+        with sqlite3.connect(outside) as connection:
+            connection.execute("create table external_data (id integer)")
+        connection.close()
+        (self.home / "outside.db").symlink_to(outside)
+
+        snapshot = self.diagnostics.snapshot_home(self.home)
+
+        self.assertNotIn("outside.db", snapshot["databases"])
+        self.assertEqual(
+            self.diagnostics.classify_runtime_failure(
+                None, {"databases": {"agent.db": {"integrity": "unavailable"}}}
+            ),
+            "sqlite_unavailable",
+        )
+
 if __name__ == "__main__":
     unittest.main()
