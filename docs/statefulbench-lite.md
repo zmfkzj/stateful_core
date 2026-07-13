@@ -35,10 +35,9 @@ digests, and native platform, and uses that platform for Docker containers.
 Rebuild and requalify when any of those identity inputs, the manifest, corpus,
 or archive pin changes.
 
-`linux/arm64` is the currently tested image target, not a claim that every host
-has a native supported runtime. The runner uses the inspected image platform;
-use the image and platform you actually qualified, rather than assuming the
-host architecture.
+The Docker **server**, not the host, decides the accepted platform. The published
+`linux/arm64` image requires a Docker server that reports `linux/arm64`; the
+runner rejects any image/server platform mismatch, so emulation is not accepted.
 
 ## Qualify before any live run
 
@@ -58,10 +57,12 @@ python3 crates/stateful-bench/scripts/statefulbench_realworld.py qualify \
 Use `--repo <repository-key>` repeatedly to qualify selected repositories.
 Successful qualification writes
 `<cache>/qualification/receipts/<repository>.json`. Each receipt binds the
-manifest and corpus hashes, archive SHA-256 and commit, plus the Docker image,
-image ID, repository digests, and platform. `run` rejects a missing or
-mismatched receipt.
-
+manifest and corpus hashes, archive SHA-256 and commit, Docker image identity
+(including image ID, repository digests, platform, and server platform), the
+privately staged graded inputs (issue snapshot, task evaluators, task reference
+patches, and integrated reference patch), and the exact six-tool map: Python,
+OMP, Stateful SHA-256, Git, rustc, and Cargo. `run` rejects a missing or
+mismatched receipt; changing any of these inputs requires requalification.
 The reusable cache contains content-addressed archives, `pip-cache/`,
 qualification artifacts, and receipts:
 
@@ -100,16 +101,15 @@ python3 crates/stateful-bench/scripts/statefulbench_realworld.py run \
 ```
 
 Supported run options are `--repos` (a comma-separated repository list),
-`--arms`, `--trials`, `--model`, `--thinking`, `--omp-bin`,
-`--stateful-binary`, `--timeout-s`, and `--docker-bin`. `--arms` defaults to
-`sequential,parallel-off,parallel-on`; `--trials` defaults to 1. The
-qualification command accepts `--repo` repeatedly and both commands accept
-`--docker-bin` (default `docker`).
+`--arms`, `--trials`, `--model`, `--thinking`, `--timeout-s`, and
+`--docker-bin`. `--arms` defaults to `sequential,parallel-off,parallel-on`;
+`--trials` defaults to 1. The qualification command accepts `--repo` repeatedly
+and both commands accept `--docker-bin` (default `docker`).
 
 For reproducible defaults, `run` uses
 `openai-codex/gpt-5.6-terra`, `high` thinking, and a 900-second agent timeout.
-Its container paths default to `/usr/local/bin/omp` and
-`/usr/local/bin/stateful`; record any override of these flags with the output.
+Live execution requires the image-qualified `/usr/local/bin/omp` and
+`/usr/local/bin/stateful` paths; do not substitute host or alternate binaries.
 
 For each repository, arm, and trial, the harness starts one persistent arm
 container. Every task agent and the final reviewer runs through `docker exec`
@@ -142,6 +142,13 @@ upstream suite pass, and the arm container is removed successfully.
 
 ## Results, cleanup, and diagnostics
 
+
+Agent completion comes only through the trusted wrapper's Docker-client stdout
+channel: exactly one JSON record with the agent PID, process-group ID, and exit
+code. A missing, malformed, or nonzero Docker-client attestation forces arm
+container cleanup and records agent exit code `-1`; the harness does not trust
+agent-writable files for completion.
+
 The runner removes each arm container with `docker rm -f`; a failed removal is
 recorded and prevents clearance. It retains the host-mounted workspace and
 runtime evidence:
@@ -160,9 +167,13 @@ runtime evidence:
       diagnostics/{initialized,before-tasks,after-tasks,after-final,after-grading,before-remove}.json
 ```
 
-`results.json` records agent exit/timeout/cleanup state, evaluator and suite
-outcomes, timing, tokens, tool calls, container teardown, Docker runtime
-identity, and diagnostic classification. `summary.json` records all rows and
+`results.json` records agent exit/timeout/cleanup state, keyed
+`evaluator_results` (`key` and `ok` for each task), evaluator and suite
+outcomes, Docker runtime identity, and diagnostic classification.
+`tasks_wall_time_s`, `final_wall_time_s`, and `arm_wall_time_s` measure only
+task/final agent execution (excluding setup, diagnostics, grading, and
+teardown). `end_to_end_wall_time_s` covers the full row; separate container
+setup and teardown timings are retained. `summary.json` records all rows and
 aggregates; both JSON files are atomically replaced.
 
 Diagnostics are captured at the listed lifecycle phases. They prove the shared
