@@ -3749,9 +3749,21 @@ class RealWorldReportingTests(unittest.TestCase):
             self.assertEqual(rewritten[1]["artifacts"], original["artifacts"])
             self.assertEqual(rewritten[1]["total_tokens"], original["total_tokens"])
             self.assertEqual(rewritten[1]["qualification"], identity)
+            summary_row = next(
+                result
+                for result in summary["results"]
+                if (result["repository"], result["arm"], result["trial"]) == key
+            )
+            self.assertEqual(summary_row, rewritten[1])
         self.assertTrue(
             all(
                 aggregate["comparison_error"] == "dataset stage cleanup failed"
+                for aggregate in summary["aggregates"]
+            )
+        )
+        self.assertTrue(
+            all(
+                "tokens" not in aggregate and "wall_time_s" not in aggregate
                 for aggregate in summary["aggregates"]
             )
         )
