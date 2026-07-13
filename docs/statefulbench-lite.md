@@ -46,12 +46,15 @@ repository mounted read-only at `/benchmark` and the cache mounted at `/cache`;
 it downloads and checksum-verifies archives, then checks the base suite,
 reference patches, integrated reference, evaluators, and upstream suite.
 
-Before either `qualify` or `run` parses its manifest, it copies every regular
-file under the entire dataset root into a private `0700` snapshot. Selected
-corpus and graded inputs are then staged privately with `0600` permissions.
-Qualification, agent execution, and grading use those snapshots and never
-reread the mutable source dataset tree. Allocate temporary disk space for a
-full dataset copy; the private snapshots are removed when the command exits.
+The outer `qualify` command reads the original manifest only to select requested
+repositories and invalidate their receipts. Its Docker inner qualification then
+copies every regular file under the entire dataset root into a private `0700`
+snapshot before qualification parsing and consumption. Live `run` similarly
+snapshots the dataset before manifest and grading consumption. Selected corpus
+and graded inputs are staged privately with `0600` permissions; qualification,
+agent execution, and grading never reread the mutable source dataset tree.
+Allocate temporary disk space for a full dataset copy; the private snapshots are
+removed when the command exits.
 
 ```sh
 CACHE="$HOME/.cache/statefulbench-realworld"

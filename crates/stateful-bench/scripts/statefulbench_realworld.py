@@ -100,6 +100,7 @@ _TASK_FIELDS = frozenset(
     }
 )
 _ANCHOR_FIELDS = frozenset({"path", "symbol"})
+_STAGED_DATASET_ACTIVE = False
 
 
 def _sha256(path: Path) -> str:
@@ -1324,6 +1325,7 @@ def _empty_run_result(repo: dict, arm: str, trial: int, error: str | None = None
         "evaluator_results": [],
         "agents": [],
         "artifacts": {},
+        "qualification": None,
         "runtime": {
             "image_id": None,
             "repo_digests": [],
@@ -1522,6 +1524,24 @@ def _require_tool_provenance(value: object) -> dict[str, str]:
     ):
         raise ValueError("tool_provenance must contain exact non-empty tool identities")
     return dict(value)
+
+
+def _qualification_row_identity(receipt: dict | None) -> dict | None:
+    if receipt is None:
+        return None
+    fields = (
+        "manifest_sha256",
+        "corpus_sha256",
+        "archive_sha256",
+        "commit",
+        "image_id",
+        "platform",
+        "graded_inputs",
+        "tool_provenance",
+    )
+    if any(field not in receipt for field in fields):
+        raise ValueError("qualification receipt identity is incomplete")
+    return {field: receipt[field] for field in fields}
 
 
 def _qualification_tool_provenance() -> dict[str, str]:
@@ -2163,6 +2183,7 @@ def _run_container_repo_arm(
         "evaluator_results": evaluator_results,
         "agents": agents,
         "artifacts": artifacts,
+        "qualification": _qualification_row_identity(qualification_receipt),
         "end_to_end_wall_time_s": max(0.0, time.monotonic() - row_started),
         "runtime": {
             "image_id": runtime.image_id,
@@ -2729,12 +2750,13 @@ def main(argv: list[str] | None = None) -> int:
         arguments.command == "qualify"
         and os.environ.get("STATEFULBENCH_DOCKER_INNER") == "qualification"
     )
+    global _STAGED_DATASET_ACTIVE
     if (
         (
             arguments.command == "run"
             or (inner_qualification and Path("/.dockerenv").is_file())
         )
-        and os.environ.get("STATEFULBENCH_STAGED_DATASET") != "1"
+        and not _STAGED_DATASET_ACTIVE
     ):
         staged_argv = list(sys.argv[1:] if argv is None else argv)
         try:
@@ -2743,15 +2765,11 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("--manifest is required") from error
         with _staged_dataset_tree(arguments.manifest) as staged_manifest:
             staged_argv[manifest_index + 1] = str(staged_manifest)
-            previous = os.environ.get("STATEFULBENCH_STAGED_DATASET")
-            os.environ["STATEFULBENCH_STAGED_DATASET"] = "1"
+            _STAGED_DATASET_ACTIVE = True
             try:
                 return main(staged_argv)
             finally:
-                if previous is None:
-                    os.environ.pop("STATEFULBENCH_STAGED_DATASET", None)
-                else:
-                    os.environ["STATEFULBENCH_STAGED_DATASET"] = previous
+                _STAGED_DATASET_ACTIVE = False
     if arguments.command == "qualify" and not inner_qualification:
         try:
             repo_root = Path(__file__).resolve().parents[3]
@@ -2851,6 +2869,7 @@ def main(argv: list[str] | None = None) -> int:
         results = []
         for repo in selected:
             corpus = corpora[repo["key"]]
+            repo_results: list[dict] = []
             try:
                 with _staged_graded_inputs(
                     dataset_root / repo["corpus"],
@@ -2875,13 +2894,24 @@ def main(argv: list[str] | None = None) -> int:
                             except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
                                 result = _empty_run_result(repo, arm, trial, str(error))
                             _write_run_result(arguments.out, result)
+                            repo_results.append(result)
                             results.append(result)
             except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
-                for trial in range(1, arguments.trials + 1):
-                    for arm in arguments.arms:
-                        result = _empty_run_result(repo, arm, trial, str(error))
+                if repo_results:
+                    for result in repo_results:
+                        result["cleared"] = False
+                        result["error"] = (
+                            str(error)
+                            if result["error"] is None
+                            else f"{result['error']}; {error}"
+                        )
                         _write_run_result(arguments.out, result)
-                        results.append(result)
+                else:
+                    for trial in range(1, arguments.trials + 1):
+                        for arm in arguments.arms:
+                            result = _empty_run_result(repo, arm, trial, str(error))
+                            _write_run_result(arguments.out, result)
+                            results.append(result)
         summary = build_run_summary(
             selected,
             arguments.arms,
