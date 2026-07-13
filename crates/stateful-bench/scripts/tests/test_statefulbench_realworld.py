@@ -2770,6 +2770,40 @@ class RealWorldRunnerTests(unittest.TestCase):
         self.assertIn((str(python), "-c", "pass"), commands)
         self.assertEqual(copy.call_count, 10)
 
+    def test_reinjecting_canonical_evaluators_removes_prior_read_only_copy(self) -> None:
+        runtime = self.mod._DOCKER.DockerRuntime(
+            binary="/docker",
+            image="statefulbench-realworld:local",
+            image_id="sha256:fixture",
+            repo_digests=(),
+            platform="linux/arm64",
+        )
+        container = self.mod._DOCKER.ArmContainer(
+            runtime, "container-id", "arm", self.root / "workspace", self.root / "runtime"
+        )
+        artifacts = {}
+        artifact_dir = self.root / "artifacts-reinject"
+        artifact_dir.mkdir()
+        commands = []
+
+        def execute(_container, *argv, **_kwargs):
+            commands.append(argv)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        def copy(_container, _source, destination):
+            self.assertIn(("rm", "-f", destination), commands)
+
+        self.mod._inject_container_evaluators(
+            self.corpus,
+            self.dataset,
+            container,
+            {"HOME": "/home/stateful"},
+            artifacts,
+            artifact_dir,
+            execute=execute,
+            copy=copy,
+        )
+
     def test_sequential_waits_then_injects_evaluators_before_final_with_eleven_records(self) -> None:
         events = []
 

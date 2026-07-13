@@ -1928,6 +1928,15 @@ def _inject_container_evaluators(
             f"{task['key']}:evaluator-dir",
             execute=execute,
         )
+        _run_container_logged(
+            container,
+            ["rm", "-f", destination],
+            env,
+            artifacts,
+            artifact_dir,
+            f"{task['key']}:evaluator-remove",
+            execute=execute,
+        )
         copy(container, source, destination)
         _run_container_logged(
             container,
