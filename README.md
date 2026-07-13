@@ -418,49 +418,17 @@ differentiated safety outcome, and the ProgramBench note records completed
 inference trials plus the official-eval blocker. Do not infer quality wins from
 either artifact.
 
-The full task-graph StatefulBench protocol is cancelled. The maintained
-[statefulbench-lite](docs/statefulbench-lite.md) is a small launcher smoke, not
-real-world evidence: its `generate` command creates an intentionally RED
-workspace without launching agents or consuming model credits:
+The maintained StatefulBench workflow is the
+[Docker runtime guide](docs/statefulbench-lite.md) for the real-world corpus:
+100 issue-derived tasks across ten pinned repositories. It requires a rebuilt
+Linux Docker image, Docker qualification, and matching qualification receipts
+before any model-backed run. Agents and grading commands execute with Docker;
+there is no host-executed live runner.
 
-```sh
-python3 crates/stateful-bench/scripts/statefulbench_lite.py generate --dest tmp/statefulbench-lite-smoke
-```
-
-`statefulbench_lite.py run` does launch live agents and consumes credits; its
-results do not establish behavioral quality, safety, or statistical superiority.
-
-For the real-world corpus, use the
-[detailed StatefulBench workflow](docs/statefulbench-realworld-design.md).
-It contains 100 coding tasks across ten pinned repositories. Qualification is
-required before any live run: it verifies the base suite, base-RED/reference-
-GREEN task evaluators, integrated reference, upstream suite, and a non-isolated
-overlap graph.
-The manifest binds each downloaded archive to its canonical GitHub repository,
-exact commit, and SHA-256; qualification also ignores host Git configuration
-and hooks when checking reference patches.
-
-
-```sh
-python3 crates/stateful-bench/scripts/statefulbench_realworld.py qualify --manifest datasets/statefulbench-realworld/manifest.json --cache tmp/statefulbench-realworld-cache
-```
-
-Evaluators and reference patches are withheld from task agents; after those
-agents finish, the final reviewer and then the harness run the evaluators and
-upstream suite. A full one-trial result runs all three arms over all ten
-repositories (330 live agents, so budget model credits accordingly):
-
-```sh
-python3 crates/stateful-bench/scripts/statefulbench_realworld.py run --manifest datasets/statefulbench-realworld/manifest.json --cache tmp/statefulbench-realworld-cache --out tmp/statefulbench-realworld/$(date -u +%Y%m%d-%H%M%S)
-```
-
-It is a full result only when every arm clears: all task and final agents exit
-successfully without timing out, no arm error occurs, and the post-final
-evaluators and upstream suite pass. Preserve `summary.json`, each trial's
-`results.json`, command/log artifacts, and the provenance manifest.
-`results.json` and `summary.json` are published atomically, so automation
-never consumes partial JSON records. Interpret only tokens, tool calls, and
-wall time as descriptive efficiency metrics.
+The opt-in, credit-free Docker end-to-end gate has passed all three arms on the
+rebuilt `linux/arm64` image. It uses fake agents and establishes runtime
+mechanics only. A full model-backed $10 \times 3 \times 3$ run has not been
+performed, so no corpus or arm-comparison result is claimed.
 
 For DeNovoSWE and ProgramBench setup, interpretation rules, and reusable command
 lines, read [DeNovoSWE Benchmark Guide](docs/denovo-benchmark-guide.md),

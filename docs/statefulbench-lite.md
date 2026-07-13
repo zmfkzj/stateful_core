@@ -1,245 +1,157 @@
-# StatefulBench benchmarks
+# StatefulBench Docker runtime
 
-StatefulBench has two separate shared-checkout efficiency workloads:
+StatefulBench runs the real-world shared-checkout corpus: ten issue-derived
+tasks in each of ten pinned repositories. Every qualification and live run uses
+the mandatory Docker image; there is no host-executed live runner.
 
-- **Synthetic smoke (`statefulbench_lite.py`)** is the inexpensive five-task
-  `taskset` workload. Use it to prove that OMP, credentials, a Stateful binary,
-  and the three-arm launcher work together before spending credits on the
-  corpus.
-- **Real-world (`statefulbench_realworld.py`)** runs 100 issue-derived coding
-  tasks: ten tasks in each of ten pinned Python repositories. It is the
-  benchmark for reporting.
+The three arms are `sequential` (task agents in order), `parallel-off`
+(concurrent task agents without Stateful), and `parallel-on` (concurrent task
+agents with Stateful enforcement). The final reviewer starts after all task
+agents finish. Do not compare runs with different images, models, thinking
+settings, corpus revisions, task selections, or trial counts.
 
-Both compare the same arms:
+> **Current evidence:** the opt-in, credit-free Docker end-to-end gate has
+> passed all three arms against a rebuilt `linux/arm64` image. Its fake agents
+> prove Docker lifecycle, shared-checkout, and shared-HOME mechanics only. No
+> model-backed full $10 \times 3 \times 3$ run has been performed, and no
+> corpus-quality or arm-comparison result is claimed.
 
-- `sequential` runs task agents one at a time in specification order;
-- `parallel-off` runs task agents concurrently without Stateful coordination;
-- `parallel-on` runs task agents concurrently with an arm-local Stateful
-  enforcement server.
+## Build and identify the Docker runtime
 
-Each arm, repository, and trial receives a fresh checkout. The final reviewer
-starts only after every task agent in its arm has been reaped. Do not compare
-arms that use different models, thinking settings, task selections, trial
-counts, or corpus revisions.
-An `--arms` selection must be a nonempty comma-separated list of distinct arm
-names.
-
-
-## Synthetic smoke
-
-The generated `taskset` repository has two to five deliberately incomplete
-tasks (`slug`, `stats`, `rle`, `roman`, and `intervals`) plus one final
-integration reviewer. Generation itself consumes no model credits:
+From the repository root, rebuild the required Linux image:
 
 ```sh
-python3 crates/stateful-bench/scripts/statefulbench_lite.py generate \
-  --dest tmp/lite-seed --tasks 5
+IMAGE=statefulbench-realworld:linux-arm64
+docker build --platform linux/arm64 \
+  --file crates/stateful-bench/docker/statefulbench-realworld.Dockerfile \
+  --tag "$IMAGE" .
+docker image inspect --format '{{.Os}}/{{.Architecture}} {{.Id}} {{json .RepoDigests}}' "$IMAGE"
 ```
 
-The generated test suite is intentionally RED until agents implement the
-tasks. A cheap live launcher smoke uses one non-Stateful arm, two task agents,
-and one final agent:
+The runner requires `--docker-image` for both commands. Before qualification or
+run it inspects exactly one Linux image, records its image ID, repository
+digests, and native platform, and uses that platform for Docker containers.
+Rebuild and requalify when any of those identity inputs, the manifest, corpus,
+or archive pin changes.
+
+## Qualify before any live run
+
+Use a cache outside the repository root. Qualification runs in Docker with the
+repository mounted read-only at `/benchmark` and the cache mounted at `/cache`;
+it downloads and checksum-verifies archives, then checks the base suite,
+reference patches, integrated reference, evaluators, and upstream suite.
 
 ```sh
-python3 crates/stateful-bench/scripts/statefulbench_lite.py run \
-  --arms parallel-off --tasks 2 --timeout-s 600 \
-  --out tmp/statefulbench-lite/smoke
-```
-
-Run the synthetic three-arm comparison only when intended; the default command
-selects all three arms, five tasks, and one trial:
-
-```sh
-python3 crates/stateful-bench/scripts/statefulbench_lite.py run
-```
-
-The supported synthetic command shapes are:
-
-```text
-statefulbench_lite.py generate --dest DEST [--tasks TASKS]
-statefulbench_lite.py run [--arms ARMS] [--tasks TASKS] [--trials TRIALS]
-  [--model MODEL] [--thinking THINKING] [--omp-bin OMP_BIN]
-  [--stateful-binary STATEFUL_BINARY] [--timeout-s TIMEOUT_S] [--out OUT]
-```
-
-`--tasks` must be from 2 through 5. `parallel-on` requires a resolvable
-Stateful binary. Synthetic output is rooted at the requested `--out` path:
-
-```text
-<out>/
-  summary.json
-  <arm>/trial-<n>/
-    results.json
-    workspace/
-    prompts/
-    logs/<agent>.stdout.log
-    logs/<agent>.stderr.log
-```
-`results.json` and `summary.json` are published by atomic replacement, so a
-reader never receives a partially serialized JSON record.
-
-
-`parallel-on` also writes its arm-local server logs under
-`logs/stateful-server.{stdout,stderr}.log`.
-
-### Synthetic clearance
-
-The implemented synthetic `cleared` predicate requires all selected task
-agents and the final agent to exit with code 0 without timing out, no harness
-error, **and** `post_suite_ok: true`. The latter is the generated `unittest`
-suite rerun by the harness after the final agent exits. It is a workload smoke,
-not a behavioral-quality score.
-
-Each synthetic `results.json` includes the arm/trial identity, clearance and
-error state, arm/task/final wall times, aggregate tokens and tool calls,
-`post_suite_ok`, and per-agent exit, timeout, wall-time, token, and tool-call
-records. `<out>/summary.json` records model, thinking, task count, trial
-count, generation time, and all arm records. The command prints one table row
-per arm/trial.
-
-## Real-world corpus: freeze, qualify, then run
-
-The checked-in corpus is an issue-derived, pinned dataset at
-`datasets/statefulbench-realworld/manifest.json`. Its ten repositories each
-have five bug tasks and five feature tasks: 100 coding tasks total. The
-manifest records requested and canonical URLs, commit and archive hashes,
-Python version, setup and upstream-suite commands, and the per-repository
-corpus path. `metadata.exclusions`, when present, maps an exact suite
-`--deselect` or `--ignore` argument to its audited reason; validation rejects
-notes that do not match the suite. Task records retain their issue-source URLs
-and frozen-source hashes.
-
-For django-storages, four exact `tests/test_s3.py::S3StorageTests` nodes are
-deselected because their upstream expectations are superseded by the corpus
-contracts for legacy credential alias removal, the cache/pickle model, token
-alias removal, and unsigned URL endpoint behavior. This is an auditable
-node-level list, not a broad test filter.
-
-### Freeze
-
-Freeze is a reviewed dataset-authoring boundary, not a runner subcommand:
-commit the manifest, issue snapshots, task prompts, evaluators, and reference
-patches together before qualification or inference.
-`statefulbench_realworld.py --help` exposes only `qualify` and `run`; do not
-invent a `freeze` invocation or mutate a manifest after it has been qualified.
-The manifest binds the canonical GitHub owner/repository and exact
-40-character commit to the archive URL; the requested URL remains provenance
-metadata. The runner accepts only archive bytes matching the manifest's
-SHA-256.
-
-
-### Qualify all ten pinned repositories
-
-Qualification has no OMP agents. It downloads missing archives into the cache,
-creates fresh workspaces, and verifies each base, reference task patch,
-integrated reference patch, overlap graph, evaluator, and upstream suite:
-
-```sh
+CACHE="$HOME/.cache/statefulbench-realworld"
 python3 crates/stateful-bench/scripts/statefulbench_realworld.py qualify \
   --manifest datasets/statefulbench-realworld/manifest.json \
-  --cache tmp/statefulbench-realworld/cache
+  --cache "$CACHE" \
+  --docker-image "$IMAGE"
 ```
 
-To qualify one named repository while preparing or repairing the corpus, add
-`--repo <repository-key>`; the option may be repeated. The CLI does not
-automatically gate `run` on qualification, so complete qualification
-successfully before a live run. Qualification isolates its Git patch operations
-from host system and global configuration and hooks, with fixed line-ending and
-whitespace checks, so host Git setup cannot change the qualification result.
-Qualification artifacts live at:
+Use `--repo <repository-key>` repeatedly to qualify selected repositories.
+Successful qualification writes
+`<cache>/qualification/receipts/<repository>.json`. Each receipt binds the
+manifest and corpus hashes, archive SHA-256 and commit, plus the Docker image,
+image ID, repository digests, and platform. `run` rejects a missing or
+mismatched receipt.
 
+The reusable cache contains content-addressed archives, `pip-cache/`,
+qualification artifacts, and receipts:
 
 ```text
 <cache>/
   <archive-sha256>.tar.gz
   pip-cache/
-  qualification/<repository>/artifacts/
-    <number>.stdout.log
-    <number>.stderr.log
+  qualification/
+    <repository>/artifacts/
+    receipts/<repository>.json
 ```
 
-The content-addressed archive cache is reusable across qualification and runs.
-Delete it only to deliberately redownload and re-verify archives.
-`<cache>/pip-cache` is retained and shared by qualification and all run
-workspaces only as `PIP_CACHE_DIR`; each workspace keeps `HOME`, `TMPDIR`, and
-`CARGO_HOME` in its own runtime directory outside the checkout.
+Keep the cache to reuse verified archives and dependencies. Delete it only to
+force archive redownload and requalification.
 
-### Run the full benchmark
+## Run the model-backed benchmark
 
-Run every repository and every arm by omitting `--repos` and `--arms`:
+The reporting run below selects all ten repositories, all three arms, and three
+trials ($10 \times 3 \times 3$). It launches 990 model-backed OMP agents and
+consumes substantial model credits; run it only on an explicit request. This
+full run has **not** been performed.
 
 ```sh
+OUT=".stateful_bench/statefulbench-realworld/$(date -u +%Y%m%d-%H%M%S)"
 python3 crates/stateful-bench/scripts/statefulbench_realworld.py run \
   --manifest datasets/statefulbench-realworld/manifest.json \
-  --cache tmp/statefulbench-realworld/cache \
-  --out tmp/statefulbench-realworld/run-$(date -u +%Y%m%d-%H%M%S)
+  --cache "$CACHE" \
+  --out "$OUT" \
+  --trials 3 \
+  --docker-image "$IMAGE"
 ```
 
-The real-world `run` command requires `--manifest`, `--cache`, and `--out`.
-Its other supported options are:
+Supported run options are `--repos` (a comma-separated repository list),
+`--arms`, `--trials`, `--model`, `--thinking`, `--omp-bin`,
+`--stateful-binary`, `--timeout-s`, and `--docker-bin`. `--arms` defaults to
+`sequential,parallel-off,parallel-on`; `--trials` defaults to 1. The
+qualification command accepts `--repo` repeatedly and both commands accept
+`--docker-bin` (default `docker`).
 
-```text
-[--repos REPOS] [--arms ARMS] [--trials TRIALS] [--model MODEL]
-[--thinking THINKING] [--omp-bin OMP_BIN]
-[--stateful-binary STATEFUL_BINARY] [--timeout-s TIMEOUT_S]
-```
+For each repository, arm, and trial, the harness starts one persistent arm
+container. Every task agent and the final reviewer runs through `docker exec`
+in that container, sharing `/workspace` and `HOME=/home/stateful`; no
+per-agent HOME exists. `parallel-on` installs and enables Stateful in that
+container and starts its enforcement server. The other arms do not enable
+Stateful.
 
-`--repos` is a comma-separated set of manifest repository keys. The default
-arms are `sequential,parallel-off,parallel-on`; `--trials` defaults to 1.
-`parallel-on` requires a resolvable Stateful binary.
+After the final reviewer, canonical evaluators and the pinned upstream suite
+run in the same container. An arm clears only when there is no harness or
+diagnostic error, every agent exits zero without timing out, evaluators and the
+upstream suite pass, and the arm container is removed successfully.
 
-> **Cost warning:** one complete real-world trial launches
-> $10 \times 3 \times (10 + 1) = 330$ OMP agent processes: ten repositories,
-> three arms, ten task agents, and one final agent per arm. It consumes
-> substantial model credits and time. Run the full command only on an explicit
-> request after the synthetic smoke and full qualification succeed.
+## Results, cleanup, and diagnostics
 
-Real-world run output is:
+The runner removes each arm container with `docker rm -f`; a failed removal is
+recorded and prevents clearance. It retains the host-mounted workspace and
+runtime evidence:
 
 ```text
 <out>/
   summary.json
   <repository>/<arm>/trial-<n>/
     results.json
+    workspace/
     prompts/
-    logs/<agent>.stdout.log
-    logs/<agent>.stderr.log
-    logs/stateful-server.{stdout,stderr}.log   # parallel-on only
-    artifacts/<number>.stdout.log
-    artifacts/<number>.stderr.log
+    artifacts/
+    runtime/
+      logs/<agent>.stdout.log
+      logs/<agent>.stderr.log
+      diagnostics/{initialized,before-tasks,after-tasks,after-final,after-grading,before-remove}.json
 ```
 
-The `artifacts/` logs cover setup, evaluator, and upstream-suite commands.
-Agent and server logs are separate under `logs/`. The run workspace is a
-temporary directory and is removed after the arm; use these retained logs and
-the result record for diagnosis. `<out>/summary.json` preserves the model,
-thinking setting, selected pinned repositories, trial count, generation time,
-per-arm rows, and per-repository/arm aggregates. The command also prints a
-row for every repository, arm, and trial.
+`results.json` records agent exit/timeout/cleanup state, evaluator and suite
+outcomes, timing, tokens, tool calls, container teardown, Docker runtime
+identity, and diagnostic classification. `summary.json` records all rows and
+aggregates; both JSON files are atomically replaced.
 
-### Evaluator isolation and real-world clearance
+Diagnostics are captured at the listed lifecycle phases. They prove the shared
+container and HOME identities and summarize relative HOME files, databases,
+locks, and process state. Snapshots reject absolute host paths and do not retain
+secret contents. For a failed arm, read `results.json`, then the agent logs,
+command artifacts, and diagnostics; preserve them with the matching receipt.
 
-Task agents receive only their own prompt and the pinned shared checkout.
-Reference patches and evaluators are absent during task execution. After all
-ten task agents finish, the harness copies the canonical evaluator files into
-`.statefulbench-evaluators`, makes the copies read-only, gives the final agent
-all task specifications, and then independently runs every canonical
-evaluator and the pinned upstream suite. It verifies the canonical evaluator
-source hashes before and after final-agent execution; a changed source is a
-harness error.
+## Opt-in credit-free Docker gate
 
-Real-world `cleared` is stricter than the synthetic predicate: no arm-level
-error; all ten task agents and the final agent exit 0 without timing out; all
-canonical evaluators pass; and the pinned upstream suite passes. The result
-records `evaluators_ok`, `upstream_suite_ok`, and each evaluator result in
-addition to the shared timing, token, tool-call, and agent fields.
+The Docker end-to-end test is skipped unless
+`STATEFULBENCH_DOCKER_TEST_IMAGE` names an image. It uses a fake OMP executable,
+does not require model credentials, and exercises all three arms, shared
+`/workspace`, shared `/home/stateful`, grading, diagnostics, and cleanup:
 
-## Interpretation boundary
+```sh
+STATEFULBENCH_DOCKER_TEST_IMAGE="$IMAGE" \
+python3 -m unittest discover -s crates/stateful-bench/scripts/tests \
+  -t crates/stateful-bench/scripts -p 'test_statefulbench_docker.py' -v
+```
 
-`cleared`, evaluator results, upstream-suite results, tokens, tool calls, and
-wall time are run records and efficiency measurements. Report arm/repository
-rows and aggregates descriptively. A smoke, a single trial, or an aggregate
-must not be presented as evidence of behavioral quality, causal effect,
-safety, or statistical superiority. The frozen full task-graph StatefulBench
-protocol is cancelled; these synthetic and real-world workflows are the
-maintained benchmarks.
+This is a runtime gate, not a model-backed benchmark result. Report live
+results descriptively as run records and efficiency measurements; do not infer
+behavioral quality, safety, causality, or statistical superiority from a gate,
+single trial, or aggregate.
