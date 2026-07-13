@@ -155,6 +155,129 @@ class DockerRuntimeTests(unittest.TestCase):
 
 
 
+
+class DockerArmContainerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.mod = load_script("statefulbench_docker.py")
+
+    def setUp(self) -> None:
+        self.runtime = self.mod.DockerRuntime(
+            binary="/usr/local/bin/docker",
+            image="statefulbench-realworld:local",
+            image_id="sha256:abc",
+            repo_digests=("statefulbench@sha256:def",),
+            platform="linux/arm64",
+        )
+
+    def test_arm_container_has_one_shared_workspace_and_home_without_hidden_mounts(self) -> None:
+        command = self.mod.arm_container_command(
+            self.runtime,
+            name="statefulbench-requests-parallel-on-1",
+            workspace=Path("/runs/requests/parallel-on/trial-1/workspace"),
+            runtime_dir=Path("/runs/requests/parallel-on/trial-1/runtime"),
+        )
+
+        text = " ".join(command)
+        self.assertIn("target=/workspace", text)
+        self.assertIn("target=/runtime", text)
+        self.assertNotIn("datasets/statefulbench-realworld", text)
+        self.assertNotIn("docker.sock", text)
+        self.assertNotIn("/home/agents", text)
+        self.assertIn(self.runtime.image_id, command)
+        self.assertEqual(command[-2:], ["sleep", "infinity"])
+
+    def test_prepare_arm_runtime_initializes_one_shared_home_and_stateful_once(self) -> None:
+        container = self.mod.ArmContainer(
+            self.runtime,
+            "container-id",
+            "statefulbench-requests-parallel-on-1",
+            Path("/runs/workspace"),
+            Path("/runs/runtime"),
+        )
+        runner = Mock(return_value=subprocess.CompletedProcess([], 0, "", ""))
+        credential = Path("/runs/seed/agent.db")
+
+        with patch.object(self.mod, "copy_to_container") as copy:
+            env = self.mod.prepare_arm_runtime(
+                container,
+                "parallel-on",
+                credential_db=credential,
+                runner=runner,
+            )
+
+        self.assertEqual(env["HOME"], "/home/stateful")
+        self.assertEqual(
+            env["PI_CODING_AGENT_DIR"], "/home/stateful/.omp/profiles/stateful/agent"
+        )
+        self.assertEqual(env["STATEFUL_OMP_SANDBOX"], "off")
+        copy.assert_called_once_with(
+            container,
+            credential,
+            "/home/stateful/.omp/profiles/stateful/agent/agent.db",
+            runner=runner,
+        )
+        commands = [call.args[0] for call in runner.call_args_list]
+        self.assertEqual(sum(command[-4:] == ["install", "--agent", "omp", "--yes"] for command in commands), 1)
+        self.assertEqual(sum(command[-3:] == ["enable", "--repo", "/workspace"] for command in commands), 1)
+        self.assertEqual(
+            sum(command[-3:] == ["server", "start", "--coordination-mode"] or command[-4:] == ["server", "start", "--coordination-mode", "enforcement"] for command in commands),
+            1,
+        )
+
+    def test_start_rejects_empty_container_id_and_remove_fails_closed(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "container id"):
+            self.mod.start_arm_container(
+                self.runtime,
+                "statefulbench-requests-parallel-off-1",
+                Path("/runs/workspace"),
+                Path("/runs/runtime"),
+                runner=Mock(return_value=subprocess.CompletedProcess([], 0, "\n", "")),
+            )
+
+        container = self.mod.ArmContainer(
+            self.runtime,
+            "container-id",
+            "statefulbench-requests-parallel-off-1",
+            Path("/runs/workspace"),
+            Path("/runs/runtime"),
+        )
+        with self.assertRaisesRegex(RuntimeError, "removal failed"):
+            self.mod.remove_arm_container(
+                container,
+                runner=Mock(return_value=subprocess.CompletedProcess([], 1, "", "still running")),
+            )
+
+    def test_start_failure_removes_only_a_token_owned_indeterminate_container(self) -> None:
+        runner = Mock(
+            side_effect=[
+                subprocess.CompletedProcess([], 1, "", "daemon disconnected"),
+                subprocess.CompletedProcess([], 0, "orphan-container-id owned-token\n", ""),
+                subprocess.CompletedProcess([], 0, "", ""),
+            ]
+        )
+
+        with (
+            patch.object(self.mod.secrets, "token_hex", return_value="owned-token"),
+            self.assertRaisesRegex(RuntimeError, "daemon disconnected"),
+        ):
+            self.mod.start_arm_container(
+                self.runtime,
+                "statefulbench-requests-parallel-off-1",
+                Path("/runs/workspace"),
+                Path("/runs/runtime"),
+                runner=runner,
+            )
+
+        self.assertEqual(
+            runner.call_args_list[2].args[0],
+            [
+                "/usr/local/bin/docker",
+                "rm",
+                "-f",
+                "orphan-container-id",
+            ],
+        )
 class DockerQualificationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:

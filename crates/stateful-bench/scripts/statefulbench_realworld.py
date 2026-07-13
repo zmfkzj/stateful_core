@@ -1399,6 +1399,164 @@ def _write_run_result(out_dir: Path, result: dict) -> None:
     _write_json_atomically(result_dir / "results.json", result)
 
 
+def _arm_container_name(repo: dict, arm: str, trial: int) -> str:
+    return f"statefulbench-{repo['key']}-{arm}-{trial}"
+
+
+def _seed_shared_credential(arm_dir: Path) -> Path | None:
+    target = arm_dir / ".credential-seed"
+    _LITE.copy_stateful_omp_agent_db(Path.home(), target)
+    credential = target / "agent.db"
+    return credential if credential.is_file() else None
+
+
+def _extract_arm_workspace(repo: dict, archive: Path, workspace: Path) -> Path:
+    shutil.rmtree(workspace, ignore_errors=True)
+    extract_workspace(archive, repo["archive_sha256"], workspace)
+    return workspace
+
+
+def _run_container_logged(
+    container: _DOCKER.ArmContainer,
+    argv: list[str],
+    env: dict[str, str],
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+    label: str,
+    *,
+    execute=_DOCKER.exec_in_container,
+) -> subprocess.CompletedProcess[str]:
+    completed = execute(container, *argv, env=env, check=False)
+    number = len(artifacts)
+    stdout = artifact_dir / f"{number:03d}.stdout.log"
+    stderr = artifact_dir / f"{number:03d}.stderr.log"
+    stdout.write_text(completed.stdout, encoding="utf-8")
+    stderr.write_text(completed.stderr, encoding="utf-8")
+    artifacts[label] = {"stdout": str(stdout), "stderr": str(stderr)}
+    return completed
+
+
+def _prepare_container_repository(
+    repo: dict,
+    container: _DOCKER.ArmContainer,
+    env: dict[str, str],
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+    *,
+    execute=_DOCKER.exec_in_container,
+) -> tuple[Path, dict[str, str]] | None:
+    git = [
+        ["git", "init"],
+        ["git", "add", "-A"],
+        [
+            "git",
+            "-c",
+            "user.email=statefulbench@local",
+            "-c",
+            "user.name=StatefulBench",
+            "commit",
+            "-m",
+            "seed workspace",
+        ],
+    ]
+    for index, argv in enumerate(git):
+        if _run_container_logged(
+            container, argv, env, artifacts, artifact_dir, f"run:git-{index}", execute=execute
+        ).returncode != 0:
+            return None
+    python = Path("/workspace/.statefulbench-venv/bin/python")
+    if _run_container_logged(
+        container,
+        ["python3", "-m", "venv", str(python.parent.parent)],
+        env,
+        artifacts,
+        artifact_dir,
+        "run:venv",
+        execute=execute,
+    ).returncode != 0:
+        return None
+    repository_env = {
+        **_repository_environment(repo, env),
+        "VIRTUAL_ENV": str(python.parent.parent),
+        "PATH": f"{python.parent}:/opt/bun/bin:/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin",
+    }
+    if _run_container_logged(
+        container,
+        _venv_argv(repo["setup"], python),
+        repository_env,
+        artifacts,
+        artifact_dir,
+        "run:setup",
+        execute=execute,
+    ).returncode != 0:
+        return None
+    return python, repository_env
+
+
+def _run_container_post_agent_checks(
+    repo: dict,
+    corpus: dict,
+    dataset_root: Path,
+    container: _DOCKER.ArmContainer,
+    python: Path,
+    env: dict[str, str],
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+    *,
+    execute=_DOCKER.exec_in_container,
+    copy=_DOCKER.copy_to_container,
+) -> tuple[bool, bool]:
+    evaluator_results = []
+    for task in corpus["tasks"]:
+        source = _canonical_evaluator_path(task, dataset_root)
+        relative = source.relative_to((dataset_root / "evaluators").resolve())
+        destination = f"/workspace/.statefulbench-evaluators/{relative}"
+        _run_container_logged(
+            container,
+            ["mkdir", "-p", str(Path(destination).parent)],
+            env,
+            artifacts,
+            artifact_dir,
+            f"{task['key']}:evaluator-dir",
+            execute=execute,
+        )
+        copy(container, source, destination)
+        _run_container_logged(
+            container,
+            ["chmod", "0444", destination],
+            env,
+            artifacts,
+            artifact_dir,
+            f"{task['key']}:evaluator-mode",
+            execute=execute,
+        )
+        evaluator_results.append(
+            _run_container_logged(
+                container,
+                [str(python), destination, "/workspace"],
+                env,
+                artifacts,
+                artifact_dir,
+                f"{task['key']}:evaluator",
+                execute=execute,
+            ).returncode
+            == 0
+        )
+    suite_ok = (
+        _run_container_logged(
+            container,
+            _venv_argv(repo["suite"], python),
+            env,
+            artifacts,
+            artifact_dir,
+            "post-final:upstream-suite",
+            execute=execute,
+        ).returncode
+        == 0
+    )
+    return all(evaluator_results), suite_ok
+
+
 def run_repo_arm(
     repo: dict,
     corpus: dict,
@@ -1415,6 +1573,13 @@ def run_repo_arm(
     setup=_run_setup,
     evaluator=_run_evaluator,
     suite=_run_suite,
+    runtime: _DOCKER.DockerRuntime | None = None,
+    arm_container_start=_DOCKER.start_arm_container,
+    arm_runtime_prepare=_DOCKER.prepare_arm_runtime,
+    arm_container_remove=_DOCKER.remove_arm_container,
+    credential_seed=None,
+    workspace_materializer=_extract_arm_workspace,
+    container_exec=_DOCKER.exec_in_container,
 ) -> dict:
     if arm not in {"sequential", "parallel-off", "parallel-on"}:
         raise ValueError(f"unknown arm: {arm}")
@@ -1444,6 +1609,7 @@ def run_repo_arm(
     upstream_suite_ok = False
     evaluator_results: list[dict[str, bool | str]] = []
     pending: list[tuple[AgentHandle, str]] = []
+    arm_container: _DOCKER.ArmContainer | None = None
 
 
     def wait(handle: AgentHandle, kind: str) -> tuple[dict, float]:
@@ -1453,6 +1619,33 @@ def run_repo_arm(
 
     try:
         archive = archive_loader(repo, cache_dir)
+        if runtime is not None:
+            workspace = workspace_materializer(repo, archive, arm_dir / "workspace")
+            runtime_dir = arm_dir / "runtime"
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            arm_container = arm_container_start(
+                runtime,
+                _arm_container_name(repo, arm, trial),
+                workspace,
+                runtime_dir,
+            )
+            credential = credential_seed(arm_dir) if credential_seed is not None else None
+            try:
+                common_env = arm_runtime_prepare(arm_container, arm, credential_db=credential)
+            finally:
+                if credential is not None:
+                    shutil.rmtree(credential.parent)
+            container_repo = _prepare_container_repository(
+                repo,
+                arm_container,
+                common_env,
+                artifacts,
+                artifact_dir,
+                execute=container_exec,
+            )
+            if container_repo is None:
+                raise RuntimeError("container repository setup failed")
+            raise RuntimeError("container agent execution is not implemented")
         pip_cache_dir = cache_dir / "pip-cache"
         pip_cache_dir.mkdir(parents=True, exist_ok=True)
         with workspace_factory(
@@ -1467,16 +1660,40 @@ def run_repo_arm(
             if materialized is None:
                 raise RuntimeError("unable to create benchmark workspace")
             workspace, python, env = materialized
-            env = _repository_environment(repo, env)
+            common_env: dict[str, str] = {}
+            if runtime is not None:
+                runtime_dir = arm_dir / "runtime"
+                runtime_dir.mkdir(parents=True, exist_ok=True)
+                arm_container = arm_container_start(
+                    runtime,
+                    _arm_container_name(repo, arm, trial),
+                    workspace,
+                    runtime_dir,
+                )
+                credential = credential_seed(arm_dir) if credential_seed is not None else None
+                try:
+                    common_env = arm_runtime_prepare(arm_container, arm, credential_db=credential)
+                finally:
+                    if credential is not None:
+                        shutil.rmtree(credential.parent)
+            if runtime is not None:
+                raise RuntimeError("container agent execution is not implemented")
+            env = {**_repository_environment(repo, env), **common_env}
             if not setup(repo, workspace, python, env, artifacts, artifact_dir, "run"):
                 raise RuntimeError("repository setup failed")
             mode = "stateful" if arm == "parallel-on" else "no-state"
-            server_context = server(arm_dir, cfg) if arm == "parallel-on" else nullcontext({})
+            server_context = (
+                nullcontext({})
+                if runtime is not None
+                else server(arm_dir, cfg) if arm == "parallel-on" else nullcontext({})
+            )
             with server_context as runtime_env:
                 runtime_cfg = replace(
                     cfg,
                     launch_env={
-                        name: value for name, value in env.items() if name not in {"HOME", "RUSTUP_HOME"}
+                        name: value
+                        for name, value in env.items()
+                        if runtime is not None or name not in {"HOME", "RUSTUP_HOME"}
                     },
                     stateful_runtime_env=runtime_env or None,
                 )
@@ -1557,6 +1774,12 @@ def run_repo_arm(
                 task_ended = ended if task_ended is None else max(task_ended, ended)
             else:
                 final_ended = ended
+        if arm_container is not None:
+            try:
+                arm_container_remove(arm_container)
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                cleanup_error = str(exc)
+                error = cleanup_error if error is None else f"{error}; {cleanup_error}"
 
     post_suite_ok = evaluators_ok and upstream_suite_ok
     tasks_wall_time_s = (
@@ -1915,6 +2138,8 @@ def main(argv: list[str] | None = None) -> int:
                             arguments.out,
                             arm,
                             replace(cfg, trial=trial),
+                            runtime=runtime,
+                            credential_seed=_seed_shared_credential,
                         )
                     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
                         result = _empty_run_result(repo, arm, trial, str(error))
