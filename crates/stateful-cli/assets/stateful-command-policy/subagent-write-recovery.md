@@ -11,9 +11,8 @@ When a subagent hits `apply_patch writes require ... same-reservation file claim
 3. Use active Stateful native tools in the same subagent tool context. Codex
    contexts may call `state_session_register` when the denial asks for session
    registration. OMP contexts do not supply or repair identity: OMP derives the
-   active Stateful `agent_id` from `ctx.sessionManager.getSessionId()` and
-   `ctx.sessionManager.getLeafId()` when present, producing
-   `omp-${sessionId}-${leafId}` or `omp-${sessionId}`. If `getSessionId()` is
+   active Stateful `agent_id` from `ctx.sessionManager.getSessionId()`,
+   producing the session-stable `omp-${sessionId}`. If `getSessionId()` is
    unavailable or invalid, OMP Stateful actions fail closed and the subagent
    should report the denial.
 4. For simple OMP native `edit`/`write` with no explicit `reservation_id`, let the extension predeclare and claim the exact tool-visible file scope before first authorization.

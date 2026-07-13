@@ -88,14 +88,6 @@ function firstString(...values) {
   return undefined;
 }
 
-function agentIdFragmentFromString(value) {
-  if (typeof value !== "string") return undefined;
-  const id = value.trim();
-  if (!id) return undefined;
-  if (!/^[A-Za-z0-9_-]+$/.test(id)) return undefined;
-  return id;
-}
-
 function sessionIdFromString(value) {
   if (typeof value !== "string") return undefined;
   const id = value.trim();
@@ -123,8 +115,9 @@ function sessionManagerString(ctx, method, parse) {
 function detectAgentId(_event, ctx) {
   const sessionId = sessionManagerString(ctx, "getSessionId", sessionIdFromString);
   if (!sessionId) return undefined;
-  const leafId = sessionManagerString(ctx, "getLeafId", agentIdFragmentFromString);
-  return leafId ? `omp-${sessionId}-${leafId}` : `omp-${sessionId}`;
+  // The session leaf advances on every appended entry, so a leaf-derived id
+  // churns per tool call and notifications never reach the session's stream.
+  return `omp-${sessionId}`;
 }
 
 function detectWorkspaceId(event, ctx) {

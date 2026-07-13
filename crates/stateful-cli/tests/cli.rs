@@ -1005,14 +1005,12 @@ fn omp_extension_uses_strict_agent_id_identity() {
     let extension = fs::read_to_string(agent_dir.join("extensions/stateful-omp-extension.js"))
         .expect("generated OMP extension should be readable");
 
-    assert!(extension.contains("function agentIdFragmentFromString"));
+    assert!(!extension.contains("function agentIdFragmentFromString"));
     assert!(extension.contains("function sessionManagerString"));
     assert!(extension.contains("function detectAgentId(_event, ctx)"));
     assert!(extension.contains("sessionManagerString(ctx, \"getSessionId\", sessionIdFromString)"));
-    assert!(
-        extension.contains("sessionManagerString(ctx, \"getLeafId\", agentIdFragmentFromString)")
-    );
-    assert!(extension.contains("`omp-${sessionId}-${leafId}`"));
+    assert!(!extension.contains("getLeafId"));
+    assert!(extension.contains("`omp-${sessionId}`"));
     assert!(extension.contains("agent_id"));
     assert!(!extension.contains("event?.agentId"));
     assert!(!extension.contains("event?.agent_id"));

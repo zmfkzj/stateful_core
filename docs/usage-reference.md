@@ -326,10 +326,11 @@ Write/execute paths still require the normal stateful authorization flow.
 
 `SessionStart` registers the active `agent_id` and `workspace_id` for hook and
 state operations. In OMP, the extension/native tool bridge derives the Stateful
-`agent_id` from `ctx.sessionManager.getSessionId()` plus
-`ctx.sessionManager.getLeafId()` when present. The generated id is
-`omp-${sessionId}-${leafId}` with a leaf id and `omp-${sessionId}` without one;
-if `getSessionId()` is unavailable or invalid, OMP Stateful actions fail closed.
+`agent_id` from `ctx.sessionManager.getSessionId()` only. The generated id is
+the session-stable `omp-${sessionId}`; session leaf/branch ids never enter the
+identity, so the notification stream subscribed at session start matches every
+later reservation, claim, and notification for that session.
+If `getSessionId()` is unavailable or invalid, OMP Stateful actions fail closed.
 Agents do not maintain current-session files, select coordination identity
 through environment variables, or provide event/ctx agent and session fields. In
 Codex, hooks receive Codex's `session_id` parameter and map it to Stateful

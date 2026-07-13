@@ -67,9 +67,10 @@ For v1, agent-facing coordination identity is the active `agent_id` scoped by
 `workspace_id`. Codex hooks and native tools inject that identity into hook and
 state operations. OMP derives its Stateful `agent_id` only from
 `ctx.sessionManager`: `getSessionId()` supplies the required session UUID and
-`getLeafId()`, when present, supplies the active branch. The generated id is
-`omp-${sessionId}-${leafId}` with a leaf id and `omp-${sessionId}` without one;
-if `getSessionId()` is unavailable or invalid, OMP Stateful actions fail closed.
+the generated id is the session-stable `omp-${sessionId}`. Session leaf/branch
+ids never enter the identity: the leaf advances on every appended entry, so a
+leaf-derived id would churn per tool call and break notification targeting.
+If `getSessionId()` is unavailable or invalid, OMP Stateful actions fail closed.
 Agents do not repair current-session files, choose session environment
 variables, read event/ctx agent or session fields, use process ids, or fall back
 to runtime session aliases. Reservation declaration may omit low-level storage
@@ -519,10 +520,10 @@ parent_actor_id
 ```
 
 Subagent-specific `actor_type`, `parent_agent_id`, and `parent_actor_id` fields
-are protocol vocabulary for native subagent-aware adapters. For OMP,
-branch-specific work uses the Stateful `agent_id` derived from
-`ctx.sessionManager.getSessionId()` plus `ctx.sessionManager.getLeafId()` when
-present. The Codex integration records each native subagent under its own
+are protocol vocabulary for native subagent-aware adapters. For OMP, each
+session (including each in-process subagent session) uses the Stateful
+`agent_id` derived from its own `ctx.sessionManager.getSessionId()`.
+The Codex integration records each native subagent under its own
 effective agent identity when Codex exposes one. Parent and child agents coordinate
 through the same workspace state, but a child does not inherit the parent's
 same-reservation claim authority. Same-owner agents do not receive automatic

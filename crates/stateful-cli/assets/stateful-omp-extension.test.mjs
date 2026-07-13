@@ -237,6 +237,40 @@ test('scope_overlap SSE block filters target agents by explicit target fields', 
   }
 });
 
+test('agent identity stays stable across session leaf movement', async (t) => {
+  const dir = tempDir();
+  const workspace = path.join(dir, 'workspace');
+  fs.mkdirSync(path.join(workspace, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(workspace, 'src/app.txt'), 'old\n');
+  const logPath = path.join(dir, 'stateful-calls.jsonl');
+  const fakeStateful = writeFakeStateful(dir);
+  const { handlers } = await loadExtension(t, fakeStateful, logPath);
+  let leaf = 'leaf-1';
+  const ctx = {
+    cwd: workspace,
+    sessionManager: {
+      getSessionId: () => '12345678-1234-1234-1234-123456789abc',
+      getLeafId: () => leaf,
+    },
+  };
+
+  await emitToolCall(handlers, { toolName: 'write', input: { path: 'src/app.txt', content: 'a\n' } }, ctx);
+  leaf = 'leaf-2';
+  await emitToolCall(handlers, { toolName: 'write', input: { path: 'src/app.txt', content: 'b\n' } }, ctx);
+
+  const agentIds = readLog(logPath)
+    .filter((call) => call.args[2] === 'pre-tool-use')
+    .map((call) => call.stdin.agent_id);
+  assert.deepEqual(
+    agentIds,
+    [
+      'omp-12345678-1234-1234-1234-123456789abc',
+      'omp-12345678-1234-1234-1234-123456789abc',
+    ],
+    'agent_id must not change when the session leaf advances; notifications target this id',
+  );
+});
+
 test('lazy_write_resume waits for queued wait_id before claiming and applying saved write', async (t) => {
   const dir = tempDir();
   const workspace = path.join(dir, 'workspace');
