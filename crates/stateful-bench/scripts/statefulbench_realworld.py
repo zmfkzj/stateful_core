@@ -1297,7 +1297,13 @@ def _empty_run_result(repo: dict, arm: str, trial: int, error: str | None = None
         "evaluator_results": [],
         "agents": [],
         "artifacts": {},
-        "runtime": {"image_id": None, "repo_digests": [], "platform": None, "versions": {}},
+        "runtime": {
+            "image_id": None,
+            "repo_digests": [],
+            "platform": None,
+            "server_platform": None,
+            "versions": {},
+        },
         "container": {
             "id": None,
             "setup_wall_time_s": 0.0,
@@ -1349,7 +1355,154 @@ def _runtime_provenance(runtime: _DOCKER.DockerRuntime) -> dict:
         "image_id": runtime.image_id,
         "repo_digests": list(runtime.repo_digests),
         "platform": runtime.platform,
+        "server_platform": runtime.server_platform,
     }
+
+
+def _graded_input_hashes(corpus_path: Path, corpus: dict) -> dict[str, object]:
+    dataset_root = corpus_path.parent.parent.resolve()
+
+    def hashes(paths: list[str]) -> dict[str, str]:
+        return {
+            path: _sha256(dataset_root / path)
+            for path in sorted(paths)
+        }
+
+    return {
+        "issue_snapshot": hashes([corpus["issue_snapshot"]]),
+        "evaluators": hashes([task["evaluator"] for task in corpus["tasks"]]),
+        "reference_patches": hashes([task["reference_patch"] for task in corpus["tasks"]]),
+        "integrated_reference_patch": hashes([corpus["integrated_reference_patch"]]),
+    }
+
+
+def _require_graded_inputs(
+    corpus_path: Path, corpus: dict, expected: dict[str, object], phase: str
+) -> None:
+    if _graded_input_hashes(corpus_path, corpus) != expected:
+        raise RuntimeError(f"graded inputs changed {phase}")
+
+
+def _graded_input_paths(corpus_path: Path, corpus: dict) -> tuple[Path, ...]:
+    corpus_path = corpus_path.resolve()
+    dataset_root = corpus_path.parent.parent
+    values = [
+        corpus["issue_snapshot"],
+        *(task["evaluator"] for task in corpus["tasks"]),
+        *(task["reference_patch"] for task in corpus["tasks"]),
+        corpus["integrated_reference_patch"],
+        str(corpus_path.relative_to(dataset_root)),
+    ]
+    paths: list[Path] = []
+    for value in values:
+        relative = Path(value)
+        source = (dataset_root / relative).resolve()
+        if relative.is_absolute() or ".." in relative.parts or not source.is_relative_to(dataset_root):
+            raise ValueError("graded input path escapes dataset root")
+        if not source.is_file() or source.is_symlink():
+            raise ValueError("graded input must be a regular file")
+        paths.append(relative)
+    return tuple(dict.fromkeys(paths))
+
+
+@contextlib.contextmanager
+def _staged_graded_inputs(
+    corpus_path: Path, corpus: dict, expected: dict[str, object]
+):
+    corpus_path = corpus_path.resolve()
+    dataset_root = corpus_path.parent.parent
+    staged_root = Path(tempfile.mkdtemp(prefix="statefulbench-graded-inputs-"))
+    staged_root.chmod(0o700)
+    try:
+        for relative in _graded_input_paths(corpus_path, corpus):
+            source = (dataset_root / relative).resolve()
+            destination = staged_root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+            destination.chmod(0o600)
+        staged_corpus = staged_root / corpus_path.relative_to(dataset_root)
+        _require_graded_inputs(staged_corpus, corpus, expected, "while staging")
+        yield staged_root
+    finally:
+        shutil.rmtree(staged_root)
+
+
+@contextlib.contextmanager
+def _staged_dataset_tree(manifest_path: Path):
+    manifest_path = manifest_path.resolve()
+    source_root = manifest_path.parent
+    if not source_root.is_dir() or source_root.is_symlink():
+        raise ValueError("dataset root must be a real directory")
+    staged_root = Path(tempfile.mkdtemp(prefix="statefulbench-dataset-"))
+    staged_root.chmod(0o700)
+    try:
+        for base, directories, files in os.walk(source_root):
+            source_base = Path(base)
+            relative_base = source_base.relative_to(source_root)
+            destination_base = staged_root / relative_base
+            destination_base.mkdir(parents=True, exist_ok=True)
+            destination_base.chmod(0o700)
+            for directory in directories:
+                if (source_base / directory).is_symlink():
+                    raise ValueError("dataset contains a symlinked directory")
+            for filename in files:
+                source = source_base / filename
+                if not source.is_file() or source.is_symlink():
+                    raise ValueError("dataset contains a non-regular file")
+                destination = destination_base / filename
+                shutil.copyfile(source, destination)
+                destination.chmod(0o600)
+        staged_manifest = staged_root / manifest_path.name
+        if not staged_manifest.is_file():
+            raise ValueError("dataset manifest is unavailable after staging")
+        yield staged_manifest
+    finally:
+        shutil.rmtree(staged_root)
+
+
+def _capture_tool_provenance(probe, omp_binary: str, stateful_binary: str) -> dict[str, str]:
+    versions: dict[str, str] = {}
+    for name, command in (
+        ("python", ("python3", "--version")),
+        ("omp", (omp_binary, "--version")),
+        ("git", ("git", "--version")),
+        ("rustc", ("rustc", "--version")),
+        ("cargo", ("cargo", "--version")),
+    ):
+        completed = probe(*command)
+        value = completed.stdout.strip().splitlines()
+        if completed.returncode != 0 or not value:
+            raise RuntimeError(f"{name} version capture failed")
+        versions[name] = value[0]
+    stateful = probe("sha256sum", stateful_binary)
+    match = re.fullmatch(r"([0-9a-f]{64})\s+\S+\s*", stateful.stdout)
+    if stateful.returncode != 0 or match is None:
+        raise RuntimeError("stateful identity capture failed")
+    versions["stateful"] = f"sha256:{match.group(1)}"
+    return _require_tool_provenance(versions)
+
+
+_TOOL_PROVENANCE_KEYS = frozenset({"python", "omp", "stateful", "git", "rustc", "cargo"})
+
+
+def _require_tool_provenance(value: object) -> dict[str, str]:
+    if (
+        type(value) is not dict
+        or set(value) != _TOOL_PROVENANCE_KEYS
+        or any(type(item) is not str or not item for item in value.values())
+        or not _HEX_64.fullmatch(value["stateful"].removeprefix("sha256:"))
+        or not value["stateful"].startswith("sha256:")
+    ):
+        raise ValueError("tool_provenance must contain exact non-empty tool identities")
+    return dict(value)
+
+
+def _qualification_tool_provenance() -> dict[str, str]:
+    return _capture_tool_provenance(
+        lambda *command: subprocess.run(command, capture_output=True, text=True, check=False),
+        "/usr/local/bin/omp",
+        "/usr/local/bin/stateful",
+    )
 
 
 def _diagnostic_artifact_paths(result: dict) -> dict[str, str]:
@@ -1411,15 +1564,25 @@ def _qualification_identity(
     manifest: Path,
     corpus: Path,
     runtime: _DOCKER.DockerRuntime,
+    tool_provenance: dict[str, str] | None = None,
+    graded_inputs: dict[str, object] | None = None,
 ) -> dict:
-    return {
+    identity = {
         "key": repo["key"],
         "manifest_sha256": _sha256(manifest),
         "corpus_sha256": _sha256(corpus),
+        "graded_inputs": (
+            _graded_input_hashes(corpus, load_corpus(corpus))
+            if graded_inputs is None
+            else graded_inputs
+        ),
         "archive_sha256": repo["archive_sha256"],
         "commit": repo["commit"],
         **_runtime_provenance(runtime),
     }
+    if tool_provenance is not None:
+        identity["tool_provenance"] = _require_tool_provenance(tool_provenance)
+    return identity
 
 
 def write_qualification_receipt(
@@ -1428,11 +1591,16 @@ def write_qualification_receipt(
     manifest: Path,
     corpus: Path,
     runtime: _DOCKER.DockerRuntime,
+    *,
+    tool_provenance: dict[str, str],
+    graded_inputs: dict[str, object] | None = None,
 ) -> dict:
     path = _receipt_path(cache_dir, repo["key"])
     path.parent.mkdir(parents=True, exist_ok=True)
     receipt = {
-        **_qualification_identity(repo, manifest, corpus, runtime),
+        **_qualification_identity(
+            repo, manifest, corpus, runtime, tool_provenance, graded_inputs
+        ),
         "qualified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "qualified": True,
     }
@@ -1461,6 +1629,7 @@ def load_qualification_receipt(
     for field, expected in _qualification_identity(repo, manifest, corpus, runtime).items():
         if receipt.get(field) != expected:
             raise ValueError(f"qualification receipt {field} does not match current identity")
+    _require_tool_provenance(receipt.get("tool_provenance"))
     return receipt
 
 
@@ -1479,11 +1648,20 @@ def _arm_container_name(repo: dict, arm: str, trial: int) -> str:
     return f"statefulbench-{repo['key']}-{arm}-{trial}"
 
 
-def _seed_shared_credential(arm_dir: Path) -> Path | None:
-    target = arm_dir / ".credential-seed"
-    _LITE.copy_stateful_omp_agent_db(Path.home(), target)
-    credential = target / "agent.db"
-    return credential if credential.is_file() else None
+def _seed_shared_credential(_arm_dir: Path) -> Path | None:
+    target = Path(tempfile.mkdtemp(prefix="statefulbench-credential-"))
+    target.chmod(0o700)
+    try:
+        _LITE.copy_stateful_omp_agent_db(Path.home(), target)
+        credential = target / "agent.db"
+        if not credential.is_file():
+            shutil.rmtree(target)
+            return None
+        credential.chmod(0o600)
+        return credential
+    except BaseException:
+        shutil.rmtree(target, ignore_errors=True)
+        raise
 
 
 def _extract_arm_workspace(repo: dict, archive: Path, workspace: Path) -> Path:
@@ -1665,6 +1843,7 @@ def _run_container_repo_arm(
     cfg: RunConfig,
     *,
     runtime: _DOCKER.DockerRuntime,
+    qualification_receipt: dict | None = None,
     archive_loader,
     arm_container_start,
     arm_runtime_prepare,
@@ -1708,6 +1887,13 @@ def _run_container_repo_arm(
     inter_agent_diagnostic_time_s = 0.0
     phase_timestamps: dict[str, float] = {}
     inspect_summary: dict | None = None
+    expected_tools = None
+    expected_inputs = None
+    if qualification_receipt is not None:
+        expected_tools = _require_tool_provenance(qualification_receipt.get("tool_provenance"))
+        expected_inputs = qualification_receipt.get("graded_inputs")
+        if type(expected_inputs) is not dict:
+            raise ValueError("qualification receipt graded_inputs is invalid")
 
     def snapshot(phase: str) -> float:
         started = time.monotonic()
@@ -1768,20 +1954,15 @@ def _run_container_repo_arm(
                 stateful_binary=cfg.stateful_binary or "/usr/local/bin/stateful",
             )
         cfg.usage_from_log = _LITE.usage_from_log
-        for name, binary in (("omp", cfg.omp_bin), ("stateful", cfg.stateful_binary or "/usr/local/bin/stateful")):
-            if name == "stateful":
-                identity = container_exec(
-                    container, "sha256sum", binary, env=common_env, check=False
-                )
-                match = re.fullmatch(r"([0-9a-f]{64})\s+\S+\s*", identity.stdout)
-                if identity.returncode != 0 or match is None:
-                    raise RuntimeError("stateful identity capture failed")
-                versions[name] = f"sha256:{match.group(1)}"
-                continue
-            version = container_exec(container, binary, "--version", env=common_env, check=False)
-            if version.returncode != 0:
-                raise RuntimeError(f"{name} version capture failed")
-            versions[name] = version.stdout.strip().splitlines()[0] if version.stdout.strip() else ""
+        versions = _capture_tool_provenance(
+            lambda *command: container_exec(
+                container, *command, env=common_env, check=False
+            ),
+            cfg.omp_bin,
+            cfg.stateful_binary or "/usr/local/bin/stateful",
+        )
+        if expected_tools is not None and versions != expected_tools:
+            raise RuntimeError("live tool provenance does not match qualification receipt")
         snapshot("before-tasks")
         setup_ended = time.monotonic()
 
@@ -1816,9 +1997,23 @@ def _run_container_repo_arm(
                 task_ended = ended if task_ended is None else max(task_ended, ended)
         inter_agent_diagnostic_time_s = snapshot("after-tasks")
 
+        if expected_inputs is not None:
+            _require_graded_inputs(
+                dataset_root / repo["corpus"],
+                corpus,
+                expected_inputs,
+                "before evaluator injection",
+            )
         container_evaluator_inject(
             corpus, dataset_root, container, environment, artifacts, artifact_dir
         )
+        if expected_inputs is not None:
+            _require_graded_inputs(
+                dataset_root / repo["corpus"],
+                corpus,
+                expected_inputs,
+                "during evaluator injection",
+            )
         final_handle = container_agent_launch(
             container, arm_dir, "final", final_prompt, cfg, environment
         )
@@ -1949,6 +2144,7 @@ def _run_container_repo_arm(
             "image_id": runtime.image_id,
             "repo_digests": list(runtime.repo_digests),
             "platform": runtime.platform,
+            "server_platform": runtime.server_platform,
             "versions": versions,
         },
         "container": {
@@ -1999,6 +2195,7 @@ def run_repo_arm(
     evaluator=_run_evaluator,
     suite=_run_suite,
     runtime: _DOCKER.DockerRuntime | None = None,
+    qualification_receipt: dict | None = None,
     arm_container_start=_DOCKER.start_arm_container,
     arm_runtime_prepare=_DOCKER.prepare_arm_runtime,
     arm_container_remove=_DOCKER.remove_arm_container,
@@ -2026,6 +2223,7 @@ def run_repo_arm(
             out_dir,
             arm,
             cfg,
+            qualification_receipt=qualification_receipt,
             runtime=runtime,
             archive_loader=archive_loader,
             arm_container_start=arm_container_start,
@@ -2372,6 +2570,8 @@ def build_run_summary(
                 (
                     result.get("runtime", {}).get("image_id"),
                     result.get("runtime", {}).get("platform"),
+                    result.get("runtime", {}).get("server_platform"),
+                    json.dumps(result.get("runtime", {}).get("versions", {}), sort_keys=True),
                 )
                 for result in original_rows
             }
@@ -2457,16 +2657,22 @@ def _inner_qualification_runtime(
 ) -> _DOCKER.DockerRuntime:
     if not Path("/.dockerenv").is_file():
         raise ValueError("inner qualification requires a Docker container marker")
-    if not manifest.resolve().is_relative_to(Path("/benchmark")):
+    if (
+        not manifest.resolve().is_relative_to(Path("/benchmark"))
+        and os.environ.get("STATEFULBENCH_STAGED_DATASET") != "1"
+    ):
         raise ValueError("inner qualification manifest must be under /benchmark")
     if cache.resolve() != Path("/cache"):
         raise ValueError("inner qualification cache must be /cache")
     image_id = os.environ.get("STATEFULBENCH_IMAGE_ID")
     platform = os.environ.get("STATEFULBENCH_IMAGE_PLATFORM")
+    server_platform = os.environ.get("STATEFULBENCH_SERVER_PLATFORM")
     if not image_id or not image_id.startswith("sha256:"):
         raise ValueError("inner qualification requires inspected image ID provenance")
     if not platform or not platform.startswith("linux/"):
         raise ValueError("inner qualification requires inspected Linux platform provenance")
+    if server_platform != platform:
+        raise ValueError("inner qualification requires matching Docker server platform provenance")
     try:
         repo_digests = json.loads(os.environ.get("STATEFULBENCH_IMAGE_REPO_DIGESTS", "[]"))
     except json.JSONDecodeError as error:
@@ -2479,6 +2685,7 @@ def _inner_qualification_runtime(
         image_id=image_id,
         repo_digests=tuple(repo_digests),
         platform=platform,
+        server_platform=server_platform,
     )
 
 
@@ -2511,6 +2718,29 @@ def main(argv: list[str] | None = None) -> int:
         arguments.command == "qualify"
         and os.environ.get("STATEFULBENCH_DOCKER_INNER") == "qualification"
     )
+    if (
+        (
+            arguments.command == "run"
+            or (inner_qualification and Path("/.dockerenv").is_file())
+        )
+        and os.environ.get("STATEFULBENCH_STAGED_DATASET") != "1"
+    ):
+        staged_argv = list(sys.argv[1:] if argv is None else argv)
+        try:
+            manifest_index = staged_argv.index("--manifest")
+        except ValueError as error:
+            raise ValueError("--manifest is required") from error
+        with _staged_dataset_tree(arguments.manifest) as staged_manifest:
+            staged_argv[manifest_index + 1] = str(staged_manifest)
+            previous = os.environ.get("STATEFULBENCH_STAGED_DATASET")
+            os.environ["STATEFULBENCH_STAGED_DATASET"] = "1"
+            try:
+                return main(staged_argv)
+            finally:
+                if previous is None:
+                    os.environ.pop("STATEFULBENCH_STAGED_DATASET", None)
+                else:
+                    os.environ["STATEFULBENCH_STAGED_DATASET"] = previous
     if arguments.command == "qualify" and not inner_qualification:
         try:
             repo_root = Path(__file__).resolve().parents[3]
@@ -2576,14 +2806,22 @@ def main(argv: list[str] | None = None) -> int:
         selected = repositories
 
     if arguments.command == "run":
+        if (
+            arguments.omp_bin != "/usr/local/bin/omp"
+            or arguments.stateful_binary != "/usr/local/bin/stateful"
+        ):
+            parser.error(
+                "run requires image-qualified --omp-bin and --stateful-binary paths"
+            )
         corpora: dict[str, dict] = {}
+        receipts: dict[str, dict] = {}
         try:
             for repo in selected:
                 corpus_path = dataset_root / repo["corpus"]
                 corpus = load_corpus(corpus_path)
                 if not _corpus_matches_repository(repo, corpus):
                     raise ValueError("corpus repository does not match manifest key")
-                load_qualification_receipt(
+                receipts[repo["key"]] = load_qualification_receipt(
                     arguments.cache, repo, arguments.manifest, corpus_path, runtime
                 )
                 corpora[repo["key"]] = corpus
@@ -2602,24 +2840,37 @@ def main(argv: list[str] | None = None) -> int:
         results = []
         for repo in selected:
             corpus = corpora[repo["key"]]
-            for trial in range(1, arguments.trials + 1):
-                for arm in arguments.arms:
-                    try:
-                        result = run_repo_arm(
-                            repo,
-                            corpus,
-                            dataset_root,
-                            arguments.cache,
-                            arguments.out,
-                            arm,
-                            replace(cfg, trial=trial),
-                            runtime=runtime,
-                            credential_seed=_seed_shared_credential,
-                        )
-                    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            try:
+                with _staged_graded_inputs(
+                    dataset_root / repo["corpus"],
+                    corpus,
+                    receipts[repo["key"]]["graded_inputs"],
+                ) as staged_dataset_root:
+                    for trial in range(1, arguments.trials + 1):
+                        for arm in arguments.arms:
+                            try:
+                                result = run_repo_arm(
+                                    repo,
+                                    corpus,
+                                    staged_dataset_root,
+                                    arguments.cache,
+                                    arguments.out,
+                                    arm,
+                                    replace(cfg, trial=trial),
+                                    runtime=runtime,
+                                    qualification_receipt=receipts[repo["key"]],
+                                    credential_seed=_seed_shared_credential,
+                                )
+                            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                                result = _empty_run_result(repo, arm, trial, str(error))
+                            _write_run_result(arguments.out, result)
+                            results.append(result)
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                for trial in range(1, arguments.trials + 1):
+                    for arm in arguments.arms:
                         result = _empty_run_result(repo, arm, trial, str(error))
-                    _write_run_result(arguments.out, result)
-                    results.append(result)
+                        _write_run_result(arguments.out, result)
+                        results.append(result)
         summary = build_run_summary(
             selected,
             arguments.arms,
@@ -2634,6 +2885,12 @@ def main(argv: list[str] | None = None) -> int:
         print(_table(results))
         return 0 if results and all(result["cleared"] for result in results) else 1
 
+    try:
+        tool_provenance = _qualification_tool_provenance()
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        print(f"Docker qualification failed: {error}", file=sys.stderr)
+        return 1
+
     results = []
     for repo in selected:
         remove_qualification_receipt(arguments.cache, repo["key"])
@@ -2642,10 +2899,22 @@ def main(argv: list[str] | None = None) -> int:
             corpus = load_corpus(corpus_path)
             if not _corpus_matches_repository(repo, corpus):
                 raise ValueError("corpus repository does not match manifest key")
-            result = qualify_repository(repo, corpus, dataset_root, arguments.cache)
+            admitted_inputs = _graded_input_hashes(corpus_path, corpus)
+            with _staged_graded_inputs(
+                corpus_path, corpus, admitted_inputs
+            ) as staged_dataset_root:
+                result = qualify_repository(
+                    repo, corpus, staged_dataset_root, arguments.cache
+                )
             if _qualified(result):
                 write_qualification_receipt(
-                    arguments.cache, repo, arguments.manifest, corpus_path, runtime
+                    arguments.cache,
+                    repo,
+                    arguments.manifest,
+                    corpus_path,
+                    runtime,
+                    tool_provenance=tool_provenance,
+                    graded_inputs=admitted_inputs,
                 )
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             result = {
@@ -2659,7 +2928,16 @@ def main(argv: list[str] | None = None) -> int:
                 "artifacts": {},
             }
         results.append(result)
-    print(json.dumps({"runtime": _runtime_provenance(runtime), "repositories": results}, sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "runtime": _runtime_provenance(runtime),
+                "tool_provenance": tool_provenance,
+                "repositories": results,
+            },
+            sort_keys=True,
+        )
+    )
     return 0 if all(_qualified(result) for result in results) else 1
 
 

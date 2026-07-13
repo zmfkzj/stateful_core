@@ -7,6 +7,7 @@ import io
 import json
 import sys
 import subprocess
+import shutil
 import tarfile
 import tempfile
 import unittest
@@ -1122,6 +1123,17 @@ class QualificationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
+    @staticmethod
+    def _tools() -> dict[str, str]:
+        return {
+            "python": "Python 3.14.6",
+            "omp": "omp 16.4.2",
+            "stateful": "sha256:" + "a" * 64,
+            "git": "git version 2.50.0",
+            "rustc": "rustc 1.90.0",
+            "cargo": "cargo 1.90.0",
+        }
+
     def _patch(self, before: str, after: str, path: str = "target.py") -> str:
         if path.endswith(".py"):
             before = f"value = {before!r}"
@@ -1287,6 +1299,18 @@ class QualificationTests(unittest.TestCase):
             mock.patch.object(
                 self.mod, "_inner_qualification_runtime", return_value=runtime
             ),
+            mock.patch.object(
+                self.mod,
+                "_qualification_tool_provenance",
+                return_value={
+                    "python": "Python 3.14.6",
+                    "omp": "omp 16.4.2",
+                    "stateful": "sha256:" + "a" * 64,
+                    "git": "git version 2.50.0",
+                    "rustc": "rustc 1.90.0",
+                    "cargo": "cargo 1.90.0",
+                },
+            ),
             contextlib.redirect_stdout(stdout),
         ):
             status = self.mod.main(
@@ -1318,7 +1342,12 @@ class QualificationTests(unittest.TestCase):
         )
 
         receipt = self.mod.write_qualification_receipt(
-            self.cache, repository, self.manifest, corpus, runtime
+            self.cache,
+            repository,
+            self.manifest,
+            corpus,
+            runtime,
+            tool_provenance=self._tools(),
         )
         self.assertEqual(
             self.mod.load_qualification_receipt(
@@ -1371,6 +1400,210 @@ class QualificationTests(unittest.TestCase):
                 self.cache, repository, self.manifest, corpus, stale_platform
             )
 
+    def test_qualification_receipt_binds_every_frozen_graded_input(self) -> None:
+        repository = self.mod.load_manifest(self.manifest)["repositories"][0]
+        corpus_path = self.dataset / repository["corpus"]
+        corpus = self.mod.load_corpus(corpus_path)
+        runtime = self.mod._DOCKER.DockerRuntime(
+            binary="/docker",
+            image="statefulbench-realworld:local",
+            image_id="sha256:abc",
+            repo_digests=(),
+            platform="linux/arm64",
+        )
+        self.mod.write_qualification_receipt(
+            self.cache,
+            repository,
+            self.manifest,
+            corpus_path,
+            runtime,
+            tool_provenance=self._tools(),
+        )
+        inputs = [
+            self.dataset / corpus["issue_snapshot"],
+            self.dataset / corpus["tasks"][0]["evaluator"],
+            self.dataset / corpus["tasks"][0]["reference_patch"],
+            self.dataset / corpus["integrated_reference_patch"],
+        ]
+        for path in inputs:
+            original = path.read_bytes()
+            path.write_bytes(original + (b"\n" if path == inputs[0] else b"\n# stale input\n"))
+            with self.assertRaisesRegex(ValueError, "graded_inputs"):
+                self.mod.load_qualification_receipt(
+                    self.cache, repository, self.manifest, corpus_path, runtime
+                )
+            path.write_bytes(original)
+
+    def test_live_input_guard_rejects_mutation_between_evaluator_copy_checks(self) -> None:
+        repository = self.mod.load_manifest(self.manifest)["repositories"][0]
+        corpus_path = self.dataset / repository["corpus"]
+        corpus = self.mod.load_corpus(corpus_path)
+        admitted = self.mod._graded_input_hashes(corpus_path, corpus)
+        self.mod._require_graded_inputs(
+            corpus_path, corpus, admitted, "before evaluator injection"
+        )
+        (self.dataset / corpus["tasks"][0]["evaluator"]).write_text(
+            "raise AssertionError('mutated')\n", encoding="utf-8"
+        )
+        with self.assertRaisesRegex(RuntimeError, "during evaluator injection"):
+            self.mod._require_graded_inputs(
+                corpus_path, corpus, admitted, "during evaluator injection"
+            )
+
+    def test_private_staging_consumes_admitted_bytes_after_source_restore(self) -> None:
+        repository = self.mod.load_manifest(self.manifest)["repositories"][0]
+        corpus_path = self.dataset / repository["corpus"]
+        corpus = self.mod.load_corpus(corpus_path)
+        admitted = self.mod._graded_input_hashes(corpus_path, corpus)
+        evaluator = self.dataset / corpus["tasks"][0]["evaluator"]
+        original = evaluator.read_bytes()
+
+        with self.mod._staged_graded_inputs(corpus_path, corpus, admitted) as staged_root:
+            evaluator.write_bytes(b"raise AssertionError('swapped')\n")
+            evaluator.write_bytes(original)
+            self.assertEqual(
+                (staged_root / corpus["tasks"][0]["evaluator"]).read_bytes(),
+                original,
+            )
+            self.assertEqual(
+                self.mod._graded_input_hashes(
+                    staged_root / corpus_path.relative_to(self.dataset), corpus
+                ),
+                admitted,
+            )
+
+    def test_dataset_stage_preserves_manifest_and_corpus_after_source_mutation(self) -> None:
+        manifest_before = self.manifest.read_bytes()
+        corpus_path = self.dataset / "repos" / "fixture.json"
+        corpus_before = corpus_path.read_bytes()
+
+        with self.mod._staged_dataset_tree(self.manifest) as staged_manifest:
+            self.manifest.write_text("{}\n", encoding="utf-8")
+            corpus_path.write_text(
+                json.dumps({"final_prompt": "mutated"}), encoding="utf-8"
+            )
+            self.assertEqual(staged_manifest.read_bytes(), manifest_before)
+            staged_corpus = self.mod.load_corpus(
+                staged_manifest.parent / "repos" / "fixture.json"
+            )
+            self.assertEqual(staged_corpus["final_prompt"], "fix")
+            self.assertEqual(
+                (staged_manifest.parent / "repos" / "fixture.json").read_bytes(),
+                corpus_before,
+            )
+
+
+    def test_qualification_consumes_private_staged_inputs(self) -> None:
+        original = self.mod.qualify_repository
+
+        def qualify_then_mutate(*args, **kwargs):
+            result = original(*args, **kwargs)
+            (self.dataset / "evaluators" / "task-0.py").write_text(
+                "raise AssertionError('mutated')\n", encoding="utf-8"
+            )
+            return result
+
+        with mock.patch.object(self.mod, "qualify_repository", side_effect=qualify_then_mutate):
+            status, result = self._qualify()
+
+        self.assertEqual(status, 0, result)
+        receipt = json.loads(
+            (self.cache / "qualification" / "receipts" / "fixture.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertNotEqual(
+            receipt["graded_inputs"]["evaluators"]["evaluators/task-0.py"],
+            self.mod._sha256(self.dataset / "evaluators" / "task-0.py"),
+        )
+    def test_qualification_receipt_records_complete_tool_provenance(self) -> None:
+        repository = self.mod.load_manifest(self.manifest)["repositories"][0]
+        corpus_path = self.dataset / repository["corpus"]
+        runtime = self.mod._DOCKER.DockerRuntime(
+            binary="/docker",
+            image="statefulbench-realworld:local",
+            image_id="sha256:abc",
+            repo_digests=(),
+            platform="linux/arm64",
+        )
+        tools = {
+            "python": "Python 3.14.6",
+            "omp": "omp 16.4.2",
+            "stateful": "sha256:" + "a" * 64,
+            "git": "git version 2.50.0",
+            "rustc": "rustc 1.90.0",
+            "cargo": "cargo 1.90.0",
+        }
+        receipt = self.mod.write_qualification_receipt(
+            self.cache,
+            repository,
+            self.manifest,
+            corpus_path,
+            runtime,
+            tool_provenance=tools,
+        )
+        self.assertEqual(receipt["tool_provenance"], tools)
+
+    def test_qualification_receipt_rejects_incomplete_tool_provenance(self) -> None:
+        repository = self.mod.load_manifest(self.manifest)["repositories"][0]
+        runtime = self.mod._DOCKER.DockerRuntime(
+            binary="/docker",
+            image="statefulbench-realworld:local",
+            image_id="sha256:abc",
+            repo_digests=(),
+            platform="linux/arm64",
+        )
+        with self.assertRaisesRegex(ValueError, "tool_provenance"):
+            self.mod.write_qualification_receipt(
+                self.cache,
+                repository,
+                self.manifest,
+                self.dataset / repository["corpus"],
+                runtime,
+                tool_provenance={"python": "Python 3.14.6"},
+            )
+
+    def test_credential_seed_is_private_and_cleans_up_after_copy_error(self) -> None:
+        arm_dir = self.root / "retained-arm"
+        seed_dir = self.root / "system-temp-seed"
+        seed_dir.mkdir(mode=0o700)
+
+        def copy_then_fail(_source: Path, target: Path) -> None:
+            target.mkdir(parents=True, exist_ok=True)
+            (target / "agent.db").write_bytes(b"credential")
+            raise RuntimeError("copy failed")
+
+        with (
+            mock.patch.object(self.mod.tempfile, "mkdtemp", return_value=str(seed_dir)),
+            mock.patch.object(self.mod._LITE, "copy_stateful_omp_agent_db", side_effect=copy_then_fail),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "copy failed"):
+                self.mod._seed_shared_credential(arm_dir)
+
+        self.assertFalse(seed_dir.exists())
+        self.assertFalse((arm_dir / ".credential-seed").exists())
+
+    def test_credential_seed_is_private_system_temporary_file(self) -> None:
+        arm_dir = self.root / "retained-arm"
+        seed_dir = self.root / "system-temp-seed"
+        seed_dir.mkdir(mode=0o700)
+
+        def copy(_source: Path, target: Path) -> None:
+            target.mkdir(parents=True, exist_ok=True)
+            (target / "agent.db").write_bytes(b"credential")
+
+        with (
+            mock.patch.object(self.mod.tempfile, "mkdtemp", return_value=str(seed_dir)),
+            mock.patch.object(self.mod._LITE, "copy_stateful_omp_agent_db", side_effect=copy),
+        ):
+            credential = self.mod._seed_shared_credential(arm_dir)
+
+        self.assertEqual(credential, seed_dir / "agent.db")
+        self.assertEqual(seed_dir.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(credential.stat().st_mode & 0o777, 0o600)
+        self.assertFalse((arm_dir / ".credential-seed").exists())
+        shutil.rmtree(seed_dir)
+
     def test_failed_qualification_removes_existing_receipt(self) -> None:
         repository = self.mod.load_manifest(self.manifest)["repositories"][0]
         runtime = self.mod._DOCKER.DockerRuntime(
@@ -1386,6 +1619,7 @@ class QualificationTests(unittest.TestCase):
             self.manifest,
             self.dataset / repository["corpus"],
             runtime,
+            tool_provenance=self._tools(),
         )
         (self.dataset / "evaluators" / "task-0.py").write_text(
             "pass\n", encoding="utf-8"
@@ -1437,6 +1671,7 @@ class QualificationTests(unittest.TestCase):
             "STATEFULBENCH_DOCKER_INNER": "qualification",
             "STATEFULBENCH_IMAGE_ID": "sha256:fixture",
             "STATEFULBENCH_IMAGE_PLATFORM": "linux/arm64",
+            "STATEFULBENCH_SERVER_PLATFORM": "linux/arm64",
             "STATEFULBENCH_IMAGE_REPO_DIGESTS": "[]",
         }
         with (
@@ -1465,6 +1700,7 @@ class QualificationTests(unittest.TestCase):
         environment = {
             "STATEFULBENCH_IMAGE_ID": "sha256:fixture",
             "STATEFULBENCH_IMAGE_PLATFORM": "linux/arm64",
+            "STATEFULBENCH_SERVER_PLATFORM": "linux/arm64",
             "STATEFULBENCH_IMAGE_REPO_DIGESTS": "[]",
         }
         with (
@@ -1634,6 +1870,10 @@ class QualificationTests(unittest.TestCase):
         self.assertTrue(repository["integrated_green"], result)
         self.assertFalse(repository["isolated_tasks"], result)
         self.assertEqual(status, 0, result)
+        self.assertEqual(
+            set(result["tool_provenance"]),
+            {"python", "omp", "stateful", "git", "rustc", "cargo"},
+        )
         self.assertTrue((self.cache / "pip-cache").is_dir())
 
     def test_changed_anchors_require_hunks_to_touch_the_symbol(self) -> None:
@@ -1930,7 +2170,6 @@ class RealWorldRunnerTests(unittest.TestCase):
             self.assertEqual(len(starts), 11)
             self.assertEqual(snapshots[-1], "after-final")
             return True, True
-
         def execute(_container, *argv, **_kwargs):
             if argv == ("/usr/local/bin/stateful", "--version"):
                 return subprocess.CompletedProcess([], 2, "", "unexpected argument --version")
@@ -1938,7 +2177,14 @@ class RealWorldRunnerTests(unittest.TestCase):
                 return subprocess.CompletedProcess(
                     [], 0, "a" * 64 + "  /usr/local/bin/stateful\n", ""
                 )
-            return subprocess.CompletedProcess([], 0, "omp 1\n", "")
+            versions = {
+                ("python3", "--version"): "Python 3.14.6\n",
+                ("/usr/local/bin/omp", "--version"): "omp 1\n",
+                ("git", "--version"): "git version 2.50.0\n",
+                ("rustc", "--version"): "rustc 1.90.0\n",
+                ("cargo", "--version"): "cargo 1.90.0\n",
+            }
+            return subprocess.CompletedProcess([], 0, versions.get(argv, ""), "")
 
         result = self.mod.run_repo_arm(
             self.repo,
@@ -1981,7 +2227,15 @@ class RealWorldRunnerTests(unittest.TestCase):
             set(self.mod._DOCKER.DIAGNOSTIC_PHASES),
         )
         self.assertEqual(
-            result["runtime"]["versions"]["stateful"], "sha256:" + "a" * 64
+            result["runtime"]["versions"],
+            {
+                "python": "Python 3.14.6",
+                "omp": "omp 1",
+                "stateful": "sha256:" + "a" * 64,
+                "git": "git version 2.50.0",
+                "rustc": "rustc 1.90.0",
+                "cargo": "cargo 1.90.0",
+            },
         )
 
     def test_parallel_on_activates_stateful_after_container_git_init(self) -> None:
@@ -2687,7 +2941,19 @@ class RealWorldReportingTests(unittest.TestCase):
             mock.patch.object(self.mod, "run_repo_arm", side_effect=lambda *_args, **_kwargs: next(results)),
             mock.patch.object(self.mod.time, "strftime", return_value="2026-07-12T00:00:00Z"),
             mock.patch.object(self.mod._DOCKER, "inspect_runtime", return_value=mock.Mock()),
-            mock.patch.object(self.mod, "load_qualification_receipt", return_value={}),
+            mock.patch.object(
+                self.mod, "load_qualification_receipt", return_value={"graded_inputs": {}}
+            ),
+            mock.patch.object(
+                self.mod,
+                "_staged_graded_inputs",
+                side_effect=lambda *_args: contextlib.nullcontext(self.root / "staged"),
+            ),
+            mock.patch.object(
+                self.mod,
+                "_staged_dataset_tree",
+                side_effect=lambda path: contextlib.nullcontext(path),
+            ),
             contextlib.redirect_stdout(stdout),
         ):
             status = self.mod.main(
@@ -2871,6 +3137,48 @@ class RealWorldDiagnosticsReportingTests(unittest.TestCase):
         )
 
         self.assertEqual(summary["results"], [first, second])
+        self.assertEqual(
+            summary["aggregates"][0]["comparison_error"],
+            "mixed Docker runtime provenance",
+        )
+
+    def test_mixed_tool_provenance_excludes_aggregate(self) -> None:
+        first = {
+            "repository": "requests",
+            "arm": "parallel-on",
+            "trial": 1,
+            "cleared": True,
+            "error": None,
+            "arm_wall_time_s": 1.0,
+            "tasks_wall_time_s": 0.5,
+            "final_wall_time_s": 0.25,
+            "total_tokens": 1,
+            "total_tool_calls": 1,
+            "runtime": {
+                "image_id": "sha256:fixture",
+                "platform": "linux/arm64",
+                "versions": {"stateful": "sha256:" + "a" * 64},
+            },
+        }
+        second = {
+            **first,
+            "trial": 2,
+            "runtime": {
+                **first["runtime"],
+                "versions": {"stateful": "sha256:" + "b" * 64},
+            },
+        }
+
+        summary = self.mod.build_run_summary(
+            [{"key": "requests", "commit": "a" * 40, "archive_sha256": "b" * 64}],
+            ["parallel-on"],
+            2,
+            "model",
+            "high",
+            [first, second],
+            "2026-07-13T00:00:00Z",
+        )
+
         self.assertEqual(
             summary["aggregates"][0]["comparison_error"],
             "mixed Docker runtime provenance",

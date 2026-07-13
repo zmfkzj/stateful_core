@@ -29,6 +29,7 @@ class DockerRuntime:
     image_id: str
     repo_digests: tuple[str, ...]
     platform: str
+    server_platform: str = ""
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,15 @@ def inspect_runtime(
     docker_bin: str, image: str, *, runner=subprocess.run
 ) -> DockerRuntime:
     binary = resolve_binary(docker_bin)
+    server = runner(
+        [binary, "version", "--format", "{{.Server.Os}}/{{.Server.Arch}}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    server_platform = server.stdout.strip().lower()
+    if server.returncode != 0 or server_platform.count("/") != 1:
+        raise RuntimeError(f"Docker server platform inspection failed: {server.stderr.strip()}")
     completed = runner(
         [binary, "image", "inspect", image],
         capture_output=True,
@@ -79,12 +89,18 @@ def inspect_runtime(
     if len(rows) != 1 or rows[0].get("Os") != "linux":
         raise RuntimeError("Docker image must resolve to exactly one Linux image")
     row = rows[0]
+    platform = f"{row['Os']}/{row['Architecture']}"
+    if platform != server_platform:
+        raise RuntimeError(
+            f"Docker image platform {platform} does not match Docker server platform {server_platform}"
+        )
     return DockerRuntime(
         binary=binary,
         image=image,
         image_id=row["Id"],
         repo_digests=tuple(sorted(row.get("RepoDigests") or ())),
-        platform=f"{row['Os']}/{row['Architecture']}",
+        platform=platform,
+        server_platform=server_platform,
     )
 
 
@@ -746,6 +762,8 @@ def qualification_command(
         f"STATEFULBENCH_IMAGE_ID={runtime.image_id}",
         "--env",
         f"STATEFULBENCH_IMAGE_PLATFORM={runtime.platform}",
+        "--env",
+        f"STATEFULBENCH_SERVER_PLATFORM={runtime.server_platform}",
         "--env",
         f"STATEFULBENCH_IMAGE_REPO_DIGESTS={json.dumps(runtime.repo_digests)}",
         "--env",

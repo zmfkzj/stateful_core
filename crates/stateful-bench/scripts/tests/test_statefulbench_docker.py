@@ -39,16 +39,47 @@ class DockerRuntimeTests(unittest.TestCase):
             ),
             stderr="",
         )
+        def runner(command, **_kwargs):
+            if command[1:3] == ["version", "--format"]:
+                return subprocess.CompletedProcess(command, 0, "linux/arm64\n", "")
+            return completed
+
         runtime = self.mod.inspect_runtime(
-            "docker", "statefulbench-realworld:local", runner=Mock(return_value=completed)
+            "docker", "statefulbench-realworld:local", runner=runner
         )
         self.assertEqual(runtime.image_id, "sha256:abc")
         self.assertEqual(runtime.repo_digests, ("statefulbench@sha256:def",))
         self.assertEqual(runtime.platform, "linux/arm64")
         self.assertTrue(Path(runtime.binary).is_absolute())
 
+    def test_inspect_runtime_rejects_image_platform_that_differs_from_server(self) -> None:
+        image = subprocess.CompletedProcess(
+            ["docker"],
+            0,
+            stdout=json.dumps(
+                [
+                    {
+                        "Id": "sha256:abc",
+                        "RepoDigests": [],
+                        "Os": "linux",
+                        "Architecture": "arm64",
+                    }
+                ]
+            ),
+            stderr="",
+        )
+
+        def runner(command, **_kwargs):
+            if command[1:3] == ["version", "--format"]:
+                return subprocess.CompletedProcess(command, 0, "linux/amd64\n", "")
+            self.assertEqual(command[1:3], ["image", "inspect"])
+            return image
+
+        with self.assertRaisesRegex(RuntimeError, "platform"):
+            self.mod.inspect_runtime("docker", "statefulbench-realworld:local", runner=runner)
+
     def test_inspect_runtime_fails_closed_on_missing_daemon_or_non_linux_image(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "Docker image inspection failed"):
+        with self.assertRaisesRegex(RuntimeError, r"Docker .*inspection failed"):
             self.mod.inspect_runtime(
                 "docker",
                 "missing",
