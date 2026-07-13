@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import tempfile
 import stat
 from pathlib import Path
 
@@ -18,20 +19,37 @@ def _sensitive(name: str) -> bool:
     return any(pattern in name.casefold() for pattern in _SENSITIVE)
 
 
-def _digest(path: Path, expected: os.stat_result) -> str:
+def _regular_descriptor(
+    path: Path, expected: os.stat_result | None = None
+) -> tuple[int, os.stat_result]:
     nofollow = getattr(os, "O_NOFOLLOW", None)
     if nofollow is None:
         raise OSError("O_NOFOLLOW is unavailable")
-    descriptor = os.open(path, os.O_RDONLY | nofollow)
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | nofollow)
     try:
         opened = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino)
-            or (opened.st_size, opened.st_mtime_ns)
-            != (expected.st_size, expected.st_mtime_ns)
+        if not stat.S_ISREG(opened.st_mode) or (
+            expected is not None
+            and (
+                (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+                != (
+                    expected.st_dev,
+                    expected.st_ino,
+                    expected.st_size,
+                    expected.st_mtime_ns,
+                )
+            )
         ):
             raise OSError("diagnostic file changed after lstat")
+        return descriptor, opened
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _digest(path: Path, expected: os.stat_result) -> str:
+    descriptor, opened = _regular_descriptor(path, expected)
+    try:
         digest = hashlib.sha256()
         while block := os.read(descriptor, 1024 * 1024):
             digest.update(block)
@@ -67,11 +85,25 @@ def _quote_identifier(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
-def _sqlite_record(path: Path) -> dict:
+def _sqlite_record(path: Path, expected: os.stat_result) -> dict:
     record: dict = {"integrity": "unknown", "schemas": [], "table_counts": {}}
     connection: sqlite3.Connection | None = None
+    descriptor: int | None = None
+    temporary: Path | None = None
     try:
-        connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        descriptor, _ = _regular_descriptor(path, expected)
+        temporary_descriptor, temporary_name = tempfile.mkstemp(suffix=".sqlite")
+        temporary = Path(temporary_name)
+        try:
+            while block := os.read(descriptor, 1024 * 1024):
+                remaining = memoryview(block)
+                while remaining:
+                    remaining = remaining[os.write(temporary_descriptor, remaining) :]
+        finally:
+            os.close(temporary_descriptor)
+            os.close(descriptor)
+            descriptor = None
+        connection = sqlite3.connect(f"{temporary.as_uri()}?mode=ro", uri=True)
         integrity = connection.execute("pragma integrity_check").fetchone()
         if integrity != ("ok",):
             record["integrity"] = "malformed"
@@ -95,11 +127,17 @@ def _sqlite_record(path: Path) -> dict:
             if "locked" in str(error).casefold() or "busy" in str(error).casefold()
             else "unavailable"
         )
-    except (sqlite3.DatabaseError, OSError):
+    except sqlite3.DatabaseError:
         record["integrity"] = "malformed"
+    except OSError:
+        record["integrity"] = "unavailable"
     finally:
+        if descriptor is not None:
+            os.close(descriptor)
         if connection is not None:
             connection.close()
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return record
 
 
@@ -138,10 +176,11 @@ def snapshot_home(home: Path) -> dict:
         relative = path.relative_to(home).as_posix()
         if _sensitive(relative):
             continue
-        is_regular = stat.S_ISREG(path.lstat().st_mode)
+        metadata = path.lstat()
+        is_regular = stat.S_ISREG(metadata.st_mode)
         files.append(_file_record(home, path))
         if is_regular and path.suffix in {".db", ".sqlite", ".sqlite3"}:
-            databases[relative] = _sqlite_record(path)
+            databases[relative] = _sqlite_record(path, metadata)
         if is_regular and path.name.casefold().endswith(_LOCK_SUFFIXES):
             locks.append(relative)
     return {

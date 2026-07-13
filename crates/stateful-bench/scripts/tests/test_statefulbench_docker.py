@@ -568,10 +568,64 @@ class DockerDiagnosticTests(unittest.TestCase):
         database = self.home / "agent%2Fstate.db"
         with sqlite3.connect(database) as connection:
             connection.execute("create table safe_items (id integer)")
+        connection.close()
 
         snapshot = self.diagnostics.snapshot_home(self.home)
 
         self.assertEqual(snapshot["databases"]["agent%2Fstate.db"]["integrity"], "ok")
+
+    def test_snapshot_does_not_reopen_database_after_symlink_swap(self) -> None:
+        import sqlite3
+
+        database = self.home / "agent.db"
+        outside = Path(self.tempdir.name) / "outside.db"
+        with sqlite3.connect(database) as connection:
+            connection.execute("create table local_data (id integer)")
+        connection.close()
+        with sqlite3.connect(outside) as connection:
+            connection.execute("create table external_data (id integer)")
+        connection.close()
+        original = self.diagnostics._file_record
+
+        def swap(home, path):
+            record = original(home, path)
+            if path.name == "agent.db":
+                path.unlink()
+                path.symlink_to(outside)
+            return record
+
+        with patch.object(self.diagnostics, "_file_record", side_effect=swap):
+            snapshot = self.diagnostics.snapshot_home(self.home)
+
+        self.assertEqual(snapshot["databases"]["agent.db"]["integrity"], "unavailable")
+
+    def test_snapshot_does_not_open_database_fifo_after_swap(self) -> None:
+        import sqlite3
+
+        database = self.home / "agent.db"
+        with sqlite3.connect(database) as connection:
+            connection.execute("create table local_data (id integer)")
+        connection.close()
+        original = self.diagnostics._file_record
+
+        def swap(home, path):
+            record = original(home, path)
+            if path.name == "agent.db":
+                path.unlink()
+                os.mkfifo(path)
+            return record
+
+        with (
+            patch.object(self.diagnostics, "_file_record", side_effect=swap),
+            patch.object(
+                self.diagnostics.sqlite3,
+                "connect",
+                side_effect=AssertionError("must not open swapped FIFO"),
+            ),
+        ):
+            snapshot = self.diagnostics.snapshot_home(self.home)
+
+        self.assertEqual(snapshot["databases"]["agent.db"]["integrity"], "unavailable")
 
     def test_diff_and_runtime_classification_fail_closed(self) -> None:
         (self.home / "before.txt").write_text("one", encoding="utf-8")
