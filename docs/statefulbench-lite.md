@@ -180,6 +180,12 @@ runtime evidence:
 `results.json` records agent exit/timeout/cleanup state, keyed
 `evaluator_results` (`key` and `ok` for each task), evaluator and suite
 outcomes, Docker runtime identity, and diagnostic classification.
+
+Each raw arm row retains the `qualification` identity used for admission, both
+in its `results.json` and in `summary.json`'s raw results: manifest, corpus,
+and archive hashes; commit; image ID and platform; the graded-input hash map;
+and six-tool provenance. Rows that fail after admission retain this identity
+too, so failure interpretation remains tied to the qualified inputs.
 `tasks_wall_time_s`, `final_wall_time_s`, and `arm_wall_time_s` measure only
 task/final agent execution (excluding setup, diagnostics, grading, and
 teardown). `end_to_end_wall_time_s` covers the full row; separate container
