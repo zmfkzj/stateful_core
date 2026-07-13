@@ -1931,6 +1931,15 @@ class RealWorldRunnerTests(unittest.TestCase):
             self.assertEqual(snapshots[-1], "after-final")
             return True, True
 
+        def execute(_container, *argv, **_kwargs):
+            if argv == ("/usr/local/bin/stateful", "--version"):
+                return subprocess.CompletedProcess([], 2, "", "unexpected argument --version")
+            if argv == ("sha256sum", "/usr/local/bin/stateful"):
+                return subprocess.CompletedProcess(
+                    [], 0, "a" * 64 + "  /usr/local/bin/stateful\n", ""
+                )
+            return subprocess.CompletedProcess([], 0, "omp 1\n", "")
+
         result = self.mod.run_repo_arm(
             self.repo,
             self.corpus,
@@ -1949,7 +1958,7 @@ class RealWorldRunnerTests(unittest.TestCase):
             arm_container_start=mock.Mock(return_value=container),
             arm_runtime_prepare=mock.Mock(return_value={"HOME": "/home/stateful", "PI_CODING_AGENT_DIR": "/home/stateful/.omp/profiles/stateful/agent"}),
             arm_container_remove=mock.Mock(),
-            container_exec=mock.Mock(return_value=subprocess.CompletedProcess([], 0, "", "")),
+            container_exec=execute,
             container_agent_launch=launch,
             container_agent_wait=wait,
             container_evaluator_inject=inject,
@@ -1971,6 +1980,97 @@ class RealWorldRunnerTests(unittest.TestCase):
             set(result["diagnostics"]["phase_timestamps"]),
             set(self.mod._DOCKER.DIAGNOSTIC_PHASES),
         )
+        self.assertEqual(
+            result["runtime"]["versions"]["stateful"], "sha256:" + "a" * 64
+        )
+
+    def test_parallel_on_activates_stateful_after_container_git_init(self) -> None:
+        runtime = self.mod._DOCKER.DockerRuntime(
+            binary="/docker",
+            image="statefulbench-realworld:local",
+            image_id="sha256:fixture",
+            repo_digests=(),
+            platform="linux/arm64",
+        )
+        workspace = self.root / "workspace"
+        workspace.mkdir()
+        container = self.mod._DOCKER.ArmContainer(
+            runtime, "container-1", "arm", workspace, self.root / "runtime"
+        )
+        events = []
+
+        def prepare(_container, _arm, *, activate_stateful=True, **_kwargs):
+            events.append(("prepare", activate_stateful))
+            return {
+                "HOME": "/home/stateful",
+                "PI_CODING_AGENT_DIR": "/home/stateful/.omp/profiles/stateful/agent",
+            }
+
+        def execute(_container, *argv, **_kwargs):
+            if argv == ("git", "init"):
+                events.append(("git", "init"))
+            if argv == ("sha256sum", "/usr/local/bin/stateful"):
+                return subprocess.CompletedProcess(
+                    [], 0, "b" * 64 + "  /usr/local/bin/stateful\n", ""
+                )
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        def launch(_container, _arm_dir, agent_id, _prompt, _cfg, _env):
+            return type("Handle", (), {"agent_id": agent_id, "started_monotonic": 0.0})()
+
+        def wait(_container, handle, _arm_dir, kind, _cfg):
+            return (
+                {
+                    "agent_id": handle.agent_id,
+                    "kind": kind,
+                    "exit_code": 0,
+                    "timed_out": False,
+                    "cleanup_error": None,
+                    "wall_time_s": 0.0,
+                    "total_tokens": 0,
+                    "tool_calls": 0,
+                },
+                0.0,
+            )
+
+        result = self.mod.run_repo_arm(
+            self.repo,
+            self.corpus,
+            self.dataset,
+            self.root / "cache",
+            self.root / "out",
+            "parallel-on",
+            self.mod.RunConfig(tasks=10, stateful_binary="/usr/local/bin/stateful"),
+            runtime=runtime,
+            archive_loader=lambda *_: self.root / "archive.tar.gz",
+            workspace_materializer=lambda *_: workspace,
+            arm_container_start=mock.Mock(return_value=container),
+            arm_runtime_prepare=prepare,
+            arm_container_remove=mock.Mock(),
+            container_exec=execute,
+            container_agent_launch=launch,
+            container_agent_wait=wait,
+            container_evaluator_inject=mock.Mock(),
+            container_post_checks=mock.Mock(return_value=(True, True)),
+            container_diagnostics=self.container_diagnostics,
+            container_inspect=mock.Mock(
+                return_value={
+                    "id": "container-1",
+                    "image_id": "sha256:fixture",
+                    "state": {
+                        "status": "running",
+                        "pid": 42,
+                        "started_at": "2026-07-13T00:00:00Z",
+                        "finished_at": "",
+                    },
+                }
+            ),
+        )
+
+        self.assertTrue(result["cleared"], result)
+        self.assertEqual(events.count(("prepare", False)), 1)
+        self.assertEqual(events.count(("prepare", True)), 1)
+        self.assertLess(events.index(("git", "init")), events.index(("prepare", True)))
 
     def test_runner_requires_a_docker_runtime_for_live_execution(self) -> None:
         archive_loader = mock.Mock(side_effect=AssertionError("host execution must not start"))

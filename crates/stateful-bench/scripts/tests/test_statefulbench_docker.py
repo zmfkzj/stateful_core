@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import runpy
 import subprocess
 import tempfile
 import unittest
 import time
+import tarfile
+import textwrap
 import sys
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -846,6 +849,252 @@ class DockerDiagnosticTests(unittest.TestCase):
                 },
             },
         )
+
+
+
+@unittest.skipUnless(
+    os.environ.get("STATEFULBENCH_DOCKER_TEST_IMAGE"),
+    "set STATEFULBENCH_DOCKER_TEST_IMAGE to run Docker end-to-end tests",
+)
+class DockerEndToEndTests(unittest.TestCase):
+    """Credit-free proof that the live Docker arm path shares one HOME/workspace."""
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tempdir.name)
+        self.docker = load_script("statefulbench_docker.py")
+        self.realworld = load_script("statefulbench_realworld.py")
+        self.image = os.environ["STATEFULBENCH_DOCKER_TEST_IMAGE"]
+        self.dataset = self.root / "dataset"
+        self.archive = self._write_fixture()
+        self.runtime = self.docker.inspect_runtime("docker", self.image)
+        self.repo = {
+            "key": "docker-e2e",
+            "archive_sha256": hashlib.sha256(self.archive.read_bytes()).hexdigest(),
+            "setup": ["python", "-c", "pass"],
+            "suite": ["python", "suite.py"],
+            "environment": {"STATEFULBENCH_FAKE_EXIT": "0"},
+        }
+        self.corpus = {
+            "repository": "docker-e2e",
+            "final_prompt": "verify the two fixture edits",
+            "tasks": [
+                {
+                    "key": key,
+                    "prompt": f"write {key}.txt",
+                    "evaluator": f"evaluators/{key}.py",
+                }
+                for key in ("alpha", "beta")
+            ],
+        }
+        for key in ("alpha", "beta"):
+            evaluator = self.dataset / "evaluators" / f"{key}.py"
+            evaluator.parent.mkdir(parents=True, exist_ok=True)
+            evaluator.write_text(
+                "from pathlib import Path\n"
+                "import sys\n"
+                f"assert (Path(sys.argv[1]) / '{key}.txt').read_text() == '{key}\\n'\n",
+                encoding="utf-8",
+            )
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    def _write_fixture(self) -> Path:
+        source = self.root / "source"
+        source.mkdir()
+        (source / "fake-omp").write_text(
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env python3
+                import json
+                import os
+                import sys
+                import time
+                from pathlib import Path
+
+                if "--version" in sys.argv:
+                    print("fake-omp 1")
+                    raise SystemExit(0)
+                prompt = next(argument[1:] for argument in sys.argv if argument.startswith("@"))
+                agent_id = Path(prompt).name.removesuffix(".prompt.txt")
+                home = Path(os.environ["HOME"])
+                workspace = Path.cwd()
+
+                def append(path, value):
+                    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+                    try:
+                        os.write(descriptor, (value + "\\n").encode())
+                    finally:
+                        os.close(descriptor)
+
+                home.mkdir(parents=True, exist_ok=True)
+                shared = home / "shared-agent-log.txt"
+                (home / "secret-token-value.txt").write_text("secret-token-value")
+                append(shared, agent_id)
+                append(
+                    workspace / "agent-observations.jsonl",
+                    json.dumps({"agent_id": agent_id, "home": str(home), "pwd": str(workspace)}),
+                )
+                started = time.monotonic_ns()
+                if agent_id != "final":
+                    append(home / "ready-agents.txt", agent_id)
+                    if os.environ.get("STATEFULBENCH_FAKE_PARALLEL") == "1":
+                        while len(shared.read_text().splitlines()) < 2:
+                            time.sleep(0.01)
+                    (workspace / f"{agent_id}.txt").write_text(f"{agent_id}\\n")
+                else:
+                    (workspace / "final.txt").write_text("final\\n")
+                time.sleep(0.15)
+                append(
+                    workspace / "agent-events.jsonl",
+                    json.dumps(
+                        {
+                            "agent_id": agent_id,
+                            "start": started,
+                            "end": time.monotonic_ns(),
+                            "shared_ids": shared.read_text().splitlines(),
+                        }
+                    ),
+                )
+                print(json.dumps({"message": {"usage": {"totalTokens": 7, "toolCalls": 1}}}))
+                raise SystemExit(int(os.environ.get("STATEFULBENCH_FAKE_EXIT", "0")))
+                """
+            ),
+            encoding="utf-8",
+        )
+        (source / "fake-stateful").write_text(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> /workspace/stateful-invocations.log\n"
+            "exec /usr/local/bin/stateful \"$@\"\n",
+            encoding="utf-8",
+        )
+        (source / "suite.py").write_text(
+            "from pathlib import Path\n"
+            "assert Path('alpha.txt').read_text() == 'alpha\\n'\n"
+            "assert Path('beta.txt').read_text() == 'beta\\n'\n",
+            encoding="utf-8",
+        )
+        for executable in ("fake-omp", "fake-stateful"):
+            (source / executable).chmod(0o755)
+        archive = self.root / "fixture.tar.gz"
+        with tarfile.open(archive, "w:gz") as output:
+            output.add(source, arcname="fixture")
+        return archive
+
+    def _run_arm(self, arm: str) -> dict:
+        repo = {
+            **self.repo,
+            "environment": {
+                **self.repo["environment"],
+                "STATEFULBENCH_FAKE_PARALLEL": "0" if arm == "sequential" else "1",
+            },
+        }
+        return self.realworld.run_repo_arm(
+            repo,
+            self.corpus,
+            self.dataset,
+            self.root / "cache",
+            self.root / "out",
+            arm,
+            self.realworld.RunConfig(
+                tasks=2,
+                timeout_s=30,
+                omp_bin="/workspace/fake-omp",
+                stateful_binary="/workspace/fake-stateful",
+            ),
+            runtime=self.runtime,
+            archive_loader=lambda *_: self.archive,
+        )
+
+    def test_all_arms_share_home_grade_and_cleanup(self) -> None:
+        results = {arm: self._run_arm(arm) for arm in ("sequential", "parallel-off", "parallel-on")}
+
+        self.assertTrue(all(result["cleared"] for result in results.values()), results)
+        for arm, result in results.items():
+            with self.subTest(arm=arm):
+                self.assertTrue(result["cleared"], result)
+                self.assertTrue(result["post_suite_ok"], result)
+                self.assertTrue(result["evaluators_ok"], result)
+                self.assertTrue(result["upstream_suite_ok"], result)
+                self.assertEqual(result["total_tokens"], 21)
+                self.assertEqual(result["total_tool_calls"], 3)
+                self.assertTrue(result["container"]["removed"])
+                self.assertTrue(all(record["exit_code"] == 0 for record in result["agents"]))
+                workspace = self.root / "out" / "docker-e2e" / arm / "trial-1" / "workspace"
+                observations = [
+                    json.loads(line)
+                    for line in (workspace / "agent-observations.jsonl").read_text().splitlines()
+                ]
+                self.assertEqual({record["agent_id"] for record in observations}, {"alpha", "beta", "final"})
+                self.assertEqual({record["home"] for record in observations}, {"/home/stateful"})
+                self.assertEqual({record["pwd"] for record in observations}, {"/workspace"})
+                self.assertEqual((workspace / "alpha.txt").read_text(), "alpha\n")
+                self.assertEqual((workspace / "beta.txt").read_text(), "beta\n")
+                snapshot_path = self.root / "out" / "docker-e2e" / arm / "trial-1" / "runtime" / "diagnostics" / "after-tasks.json"
+                snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+                self.assertIn("shared-agent-log.txt", {record["path"] for record in snapshot["files"]})
+                encoded = json.dumps(snapshot)
+                self.assertNotIn("secret-token-value", encoded)
+                self.assertNotIn(str(self.root), encoded)
+                self.assertTrue(all(not record["path"].startswith("/") for record in snapshot["files"]))
+
+        intervals = {
+            arm: {
+                item["agent_id"]: item
+                for item in (
+                    json.loads(line)
+                    for line in (
+                        self.root / "out" / "docker-e2e" / arm / "trial-1" / "workspace" / "agent-events.jsonl"
+                    ).read_text().splitlines()
+                )
+                if item["agent_id"] != "final"
+            }
+            for arm in results
+        }
+        sequential = intervals["sequential"]
+        self.assertTrue(
+            sequential["alpha"]["end"] <= sequential["beta"]["start"]
+            or sequential["beta"]["end"] <= sequential["alpha"]["start"]
+        )
+        parallel = intervals["parallel-off"]
+        self.assertLess(parallel["alpha"]["start"], parallel["beta"]["end"])
+        self.assertLess(parallel["beta"]["start"], parallel["alpha"]["end"])
+        parallel_on = intervals["parallel-on"]
+        self.assertLess(parallel_on["alpha"]["start"], parallel_on["beta"]["end"])
+        self.assertLess(parallel_on["beta"]["start"], parallel_on["alpha"]["end"])
+        events = {
+            arm: {
+                item["agent_id"]: item
+                for item in (
+                    json.loads(line)
+                    for line in (
+                        self.root / "out" / "docker-e2e" / arm / "trial-1" / "workspace" / "agent-events.jsonl"
+                    ).read_text().splitlines()
+                )
+            }
+            for arm in results
+        }
+        self.assertEqual(events["sequential"]["alpha"]["shared_ids"], ["alpha"])
+        self.assertEqual(events["sequential"]["beta"]["shared_ids"], ["alpha", "beta"])
+        self.assertEqual(events["sequential"]["final"]["shared_ids"], ["alpha", "beta", "final"])
+        for arm in ("parallel-off", "parallel-on"):
+            self.assertEqual(set(events[arm]["alpha"]["shared_ids"]), {"alpha", "beta"})
+            self.assertEqual(set(events[arm]["beta"]["shared_ids"]), {"alpha", "beta"})
+            self.assertEqual(
+                set(events[arm]["final"]["shared_ids"]), {"alpha", "beta", "final"}
+            )
+        invocations = (
+            self.root / "out" / "docker-e2e" / "parallel-on" / "trial-1" / "workspace" / "stateful-invocations.log"
+        ).read_text().splitlines()
+        self.assertEqual(invocations.count("server start --coordination-mode enforcement"), 1)
+        names = ",".join(f"statefulbench-docker-e2e-{arm}-1" for arm in results)
+        completed = subprocess.run(
+            ["docker", "ps", "-a", "--format", "{{.Names}}"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertFalse(set(completed.stdout.splitlines()) & set(names.split(",")))
 
 if __name__ == "__main__":
     unittest.main()

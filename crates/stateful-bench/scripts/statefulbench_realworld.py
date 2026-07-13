@@ -1747,6 +1747,7 @@ def _run_container_repo_arm(
                 credential_db=credential,
                 omp_binary=cfg.omp_bin,
                 stateful_binary=cfg.stateful_binary or "/usr/local/bin/stateful",
+                activate_stateful=arm != "parallel-on",
             )
         finally:
             if credential is not None:
@@ -1759,8 +1760,24 @@ def _run_container_repo_arm(
         if container_repo is None:
             raise RuntimeError("container repository setup failed")
         python, environment = container_repo
+        if arm == "parallel-on":
+            common_env = arm_runtime_prepare(
+                container,
+                arm,
+                omp_binary=cfg.omp_bin,
+                stateful_binary=cfg.stateful_binary or "/usr/local/bin/stateful",
+            )
         cfg.usage_from_log = _LITE.usage_from_log
         for name, binary in (("omp", cfg.omp_bin), ("stateful", cfg.stateful_binary or "/usr/local/bin/stateful")):
+            if name == "stateful":
+                identity = container_exec(
+                    container, "sha256sum", binary, env=common_env, check=False
+                )
+                match = re.fullmatch(r"([0-9a-f]{64})\s+\S+\s*", identity.stdout)
+                if identity.returncode != 0 or match is None:
+                    raise RuntimeError("stateful identity capture failed")
+                versions[name] = f"sha256:{match.group(1)}"
+                continue
             version = container_exec(container, binary, "--version", env=common_env, check=False)
             if version.returncode != 0:
                 raise RuntimeError(f"{name} version capture failed")

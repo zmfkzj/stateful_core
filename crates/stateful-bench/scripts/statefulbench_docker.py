@@ -653,6 +653,7 @@ def prepare_arm_runtime(
     credential_db: Path | None = None,
     omp_binary: str = "/usr/local/bin/omp",
     stateful_binary: str = "/usr/local/bin/stateful",
+    activate_stateful: bool = True,
     runner=subprocess.run,
 ) -> dict[str, str]:
     if arm not in {"sequential", "parallel-off", "parallel-on"}:
@@ -688,7 +689,7 @@ def prepare_arm_runtime(
     )
     for binary in (omp_binary, stateful_binary):
         exec_in_container(container, "test", "-x", binary, env=env, runner=runner)
-    if arm == "parallel-on":
+    if arm == "parallel-on" and activate_stateful:
         exec_in_container(
             container, stateful_binary, "install", "--agent", "omp", "--yes", env=env, runner=runner
         )
@@ -699,7 +700,7 @@ def prepare_arm_runtime(
             f"{env['PI_CODING_AGENT_DIR']}/agent.db",
             runner=runner,
         )
-    if arm == "parallel-on":
+    if arm == "parallel-on" and activate_stateful:
         exec_in_container(
             container, stateful_binary, "enable", "--repo", "/workspace", env=env, runner=runner
         )
