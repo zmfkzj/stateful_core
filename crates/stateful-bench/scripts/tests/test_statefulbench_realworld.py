@@ -1666,6 +1666,41 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(status, 17)
         self.assertEqual(run_container.call_args.args[4], ("requests",))
 
+    def test_public_run_stages_dataset_despite_inherited_staging_sentinel(self) -> None:
+        stage_calls = []
+
+        @contextlib.contextmanager
+        def stage(manifest: Path):
+            stage_calls.append(manifest)
+            yield manifest
+
+        with (
+            mock.patch.dict(
+                self.mod.os.environ, {"STATEFULBENCH_STAGED_DATASET": "1"}, clear=False
+            ),
+            mock.patch.object(self.mod, "_staged_dataset_tree", side_effect=stage),
+            mock.patch.object(self.mod._DOCKER, "inspect_runtime", return_value=mock.Mock()),
+            mock.patch.object(self.mod, "load_manifest", return_value={}),
+            mock.patch.object(self.mod, "repo_entries", return_value=()),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            status = self.mod.main(
+                [
+                    "run",
+                    "--manifest",
+                    str(self.root / "manifest.json"),
+                    "--cache",
+                    str(self.cache),
+                    "--out",
+                    str(self.root / "out"),
+                    "--docker-image",
+                    "statefulbench-realworld:local",
+                ]
+            )
+
+        self.assertEqual(status, 1)
+        self.assertEqual(stage_calls, [self.root / "manifest.json"])
+
     def test_inner_qualification_rejects_host_sentinel(self) -> None:
         environment = {
             "STATEFULBENCH_DOCKER_INNER": "qualification",
@@ -2108,7 +2143,7 @@ class RealWorldRunnerTests(unittest.TestCase):
             **kwargs,
         )
 
-    def test_runtime_arm_uses_container_exec_agents_then_post_agent_checks(self) -> None:
+    def test_runtime_arm_serializes_admitted_qualification_identity_in_summary(self) -> None:
         runtime = self.mod._DOCKER.DockerRuntime(
             binary="/docker",
             image="statefulbench-realworld:local",
@@ -2186,9 +2221,35 @@ class RealWorldRunnerTests(unittest.TestCase):
                 ("cargo", "--version"): "cargo 1.90.0\n",
             }
             return subprocess.CompletedProcess([], 0, versions.get(argv, ""), "")
+        admitted_identity = {
+            "manifest_sha256": "m" * 64,
+            "corpus_sha256": "c" * 64,
+            "archive_sha256": "a" * 64,
+            "commit": "f" * 40,
+            "image_id": "sha256:fixture",
+            "platform": "linux/arm64",
+            "graded_inputs": {"evaluators": {"evaluators/task-0.py": "e" * 64}},
+            "tool_provenance": {
+                "python": "Python 3.14.6",
+                "omp": "omp 1",
+                "stateful": "sha256:" + "a" * 64,
+                "git": "git version 2.50.0",
+                "rustc": "rustc 1.90.0",
+                "cargo": "cargo 1.90.0",
+            },
+        }
+        qualification_receipt = {
+            **admitted_identity,
+            "qualified": True,
+            "qualified_at": "2026-07-13T00:00:00Z",
+        }
+        input_guard = mock.patch.object(self.mod, "_require_graded_inputs")
+        input_guard.start()
+        self.addCleanup(input_guard.stop)
+
 
         result = self.mod.run_repo_arm(
-            self.repo,
+            {**self.repo, "corpus": "repos/fixture.json"},
             self.corpus,
             self.dataset,
             self.root / "cache",
@@ -2200,6 +2261,7 @@ class RealWorldRunnerTests(unittest.TestCase):
                 omp_bin="/usr/local/bin/omp",
             ),
             runtime=runtime,
+            qualification_receipt=qualification_receipt,
             archive_loader=lambda *_: self.root / "archive.tar.gz",
             workspace_materializer=lambda *_: self.root / "workspace",
             arm_container_start=mock.Mock(return_value=container),
@@ -2242,6 +2304,23 @@ class RealWorldRunnerTests(unittest.TestCase):
                 "cargo": "cargo 1.90.0",
             },
         )
+        self.assertEqual(result["qualification"], admitted_identity)
+        summary = self.mod.build_run_summary(
+            [
+                {
+                    "key": "fixture",
+                    "commit": "f" * 40,
+                    "archive_sha256": "a" * 64,
+                }
+            ],
+            ["parallel-off"],
+            1,
+            "model",
+            "high",
+            [result],
+            "2026-07-13T00:00:00Z",
+        )
+        self.assertEqual(summary["results"][0]["qualification"], admitted_identity)
 
     def test_container_cleanup_error_blocks_final_and_grading(self) -> None:
         runtime = self.mod._DOCKER.DockerRuntime(
@@ -3178,6 +3257,133 @@ class RealWorldReportingTests(unittest.TestCase):
         table = stdout.getvalue()
         self.assertIn("| repository | arm | trial | cleared |", table)
         self.assertIn("| bravo | parallel-off | 1 | False | 4.000 | 14 | 5 | repository setup failed |", table)
+
+    def test_staged_input_cleanup_failure_rewrites_completed_rows_without_duplicates(self) -> None:
+        for arms in (("sequential",), ("sequential", "parallel-off")):
+            with self.subTest(completed_rows=len(arms)):
+                out_dir = self.root / f"cleanup-{len(arms)}"
+                results = [
+                    {
+                        **self.result(
+                            "alpha",
+                            arm,
+                            1,
+                            wall=float(index),
+                            tokens=index,
+                            tools=index + 1,
+                        ),
+                        "agents": [{"agent_id": f"agent-{index}"}],
+                        "artifacts": {"run": {"stdout": f"artifacts/{arm}.log"}},
+                    }
+                    for index, arm in enumerate(arms, start=1)
+                ]
+                retained = json.loads(json.dumps(results))
+                writes = []
+                write_result = self.mod._write_run_result
+
+                @contextlib.contextmanager
+                def staged_inputs(*_args):
+                    yield self.root / "staged"
+                    raise OSError("staged cleanup failed")
+
+                def record_write(out: Path, result: dict) -> None:
+                    writes.append(json.loads(json.dumps(result)))
+                    write_result(out, result)
+
+                with (
+                    mock.patch.object(self.mod, "load_manifest", return_value={}),
+                    mock.patch.object(
+                        self.mod, "repo_entries", return_value=(self.repositories[0],)
+                    ),
+                    mock.patch.object(
+                        self.mod, "load_corpus", return_value={"repository": "alpha"}
+                    ),
+                    mock.patch.object(
+                        self.mod, "_corpus_matches_repository", return_value=True
+                    ),
+                    mock.patch.object(
+                        self.mod._DOCKER, "inspect_runtime", return_value=mock.Mock()
+                    ),
+                    mock.patch.object(
+                        self.mod,
+                        "load_qualification_receipt",
+                        return_value={"graded_inputs": {}},
+                    ),
+                    mock.patch.object(self.mod, "_staged_dataset_tree", side_effect=contextlib.nullcontext),
+                    mock.patch.object(
+                        self.mod, "_staged_graded_inputs", side_effect=staged_inputs
+                    ),
+                    mock.patch.object(self.mod, "run_repo_arm", side_effect=results),
+                    mock.patch.object(
+                        self.mod, "_empty_run_result", wraps=self.mod._empty_run_result
+                    ) as empty_run,
+                    mock.patch.object(self.mod, "_write_run_result", side_effect=record_write),
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    status = self.mod.main(
+                        [
+                            "run",
+                            "--manifest",
+                            str(self.root / "manifest.json"),
+                            "--cache",
+                            str(self.root / "cache"),
+                            "--out",
+                            str(out_dir),
+                            "--arms",
+                            ",".join(arms),
+                            "--docker-image",
+                            "statefulbench-realworld:local",
+                        ]
+                    )
+
+                self.assertEqual(status, 1)
+                self.assertEqual(empty_run.call_count, 0)
+                summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+                scheduled = [("alpha", arm, 1) for arm in arms]
+                self.assertEqual(
+                    [
+                        (result["repository"], result["arm"], result["trial"])
+                        for result in summary["results"]
+                    ],
+                    scheduled,
+                )
+                self.assertEqual(
+                    [
+                        (row["repo"], row["arm"], row["trial"])
+                        for row in summary["arms"]
+                    ],
+                    scheduled,
+                )
+                for original in retained:
+                    key = (
+                        original["repository"],
+                        original["arm"],
+                        original["trial"],
+                    )
+                    rewritten = [
+                        result
+                        for result in writes
+                        if (result["repository"], result["arm"], result["trial"]) == key
+                    ]
+                    self.assertEqual(len(rewritten), 2)
+                    self.assertTrue(rewritten[0]["cleared"])
+                    self.assertFalse(rewritten[1]["cleared"])
+                    self.assertEqual(rewritten[1]["error"], "staged cleanup failed")
+                    self.assertEqual(rewritten[1]["agents"], original["agents"])
+                    self.assertEqual(rewritten[1]["artifacts"], original["artifacts"])
+                    self.assertEqual(
+                        rewritten[1]["total_tokens"], original["total_tokens"]
+                    )
+                    persisted = json.loads(
+                        (
+                            out_dir
+                            / original["repository"]
+                            / original["arm"]
+                            / f"trial-{original['trial']}"
+                            / "results.json"
+                        ).read_text(encoding="utf-8")
+                    )
+                    self.assertEqual(persisted, rewritten[1])
 
     def test_result_write_is_atomic_and_preserves_prior_valid_json(self) -> None:
         result = self.result("alpha", "sequential", 1, tokens=1)
