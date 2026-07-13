@@ -1836,8 +1836,12 @@ def _run_container_logged(
     label: str,
     *,
     execute=_DOCKER.exec_in_container,
+    timeout_s: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    completed = execute(container, *argv, env=env, check=False)
+    kwargs = {"check": False}
+    if timeout_s is not None:
+        kwargs["timeout_s"] = timeout_s
+    completed = execute(container, *argv, env=env, **kwargs)
     number = len(artifacts)
     stdout = artifact_dir / f"{number:03d}.stdout.log"
     stderr = artifact_dir / f"{number:03d}.stderr.log"
@@ -1998,6 +2002,7 @@ def _run_container_post_agent_checks(
             artifact_dir,
             "post-final:upstream-suite",
             execute=execute,
+            timeout_s=900,
         ).returncode
         == 0
     )

@@ -2768,6 +2768,7 @@ class RealWorldRunnerTests(unittest.TestCase):
             commands,
         )
         self.assertIn((str(python), "-c", "pass"), commands)
+        self.assertEqual(execute.call_args_list[-1].kwargs["timeout_s"], 900)
         self.assertEqual(copy.call_count, 10)
 
     def test_reinjecting_canonical_evaluators_removes_prior_read_only_copy(self) -> None:
