@@ -420,10 +420,11 @@ either artifact.
 
 The maintained StatefulBench workflow is the
 [Docker runtime guide](docs/statefulbench-lite.md) for the real-world corpus:
-100 issue-derived tasks across ten pinned repositories. It requires a rebuilt
-Linux Docker image, Docker qualification, and matching qualification receipts
-before any model-backed run. Agents and grading commands execute with Docker;
-there is no host-executed live runner.
+100 issue-derived tasks across ten pinned repositories. Its currently tested
+image target is `linux/arm64`; it requires a rebuilt Docker image, Docker
+qualification, and matching qualification receipts before any model-backed run.
+Agents and grading commands execute with Docker; there is no host-executed live
+runner.
 
 The opt-in, credit-free Docker end-to-end gate has passed all three arms on the
 rebuilt `linux/arm64` image. It uses fake agents and establishes runtime

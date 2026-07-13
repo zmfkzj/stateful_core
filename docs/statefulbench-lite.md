@@ -18,7 +18,8 @@ settings, corpus revisions, task selections, or trial counts.
 
 ## Build and identify the Docker runtime
 
-From the repository root, rebuild the required Linux image:
+From the repository root, rebuild the currently tested and supported
+`linux/arm64` image target:
 
 ```sh
 IMAGE=statefulbench-realworld:linux-arm64
@@ -33,6 +34,11 @@ run it inspects exactly one Linux image, records its image ID, repository
 digests, and native platform, and uses that platform for Docker containers.
 Rebuild and requalify when any of those identity inputs, the manifest, corpus,
 or archive pin changes.
+
+`linux/arm64` is the currently tested image target, not a claim that every host
+has a native supported runtime. The runner uses the inspected image platform;
+use the image and platform you actually qualified, rather than assuming the
+host architecture.
 
 ## Qualify before any live run
 
@@ -71,6 +77,11 @@ qualification artifacts, and receipts:
 Keep the cache to reuse verified archives and dependencies. Delete it only to
 force archive redownload and requalification.
 
+Receipts in this writable cache are operator workflow evidence: they make the
+runner reject a locally missing or mismatched identity. They are not
+tamper-resistant authorization against a person who controls the cache or the
+checked-out code.
+
 ## Run the model-backed benchmark
 
 The reporting run below selects all ten repositories, all three arms, and three
@@ -95,12 +106,34 @@ Supported run options are `--repos` (a comma-separated repository list),
 qualification command accepts `--repo` repeatedly and both commands accept
 `--docker-bin` (default `docker`).
 
+For reproducible defaults, `run` uses
+`openai-codex/gpt-5.6-terra`, `high` thinking, and a 900-second agent timeout.
+Its container paths default to `/usr/local/bin/omp` and
+`/usr/local/bin/stateful`; record any override of these flags with the output.
+
 For each repository, arm, and trial, the harness starts one persistent arm
 container. Every task agent and the final reviewer runs through `docker exec`
 in that container, sharing `/workspace` and `HOME=/home/stateful`; no
 per-agent HOME exists. `parallel-on` installs and enables Stateful in that
 container and starts its enforcement server. The other arms do not enable
 Stateful.
+
+### Trusted-runtime boundary and credentials
+
+This live-agent runtime is intentionally unrestricted: each arm container uses
+`SYS_ADMIN`, unconfined seccomp/AppArmor and system-path policies, bridge
+networking, OMP `--approval-mode yolo`, and
+`STATEFUL_OMP_SANDBOX=off`. Run it only for a disposable, trusted corpus—not
+for untrusted repositories, data, or credentials.
+
+At arm setup, the harness selectively seeds only
+`$HOME/.omp/profiles/stateful/agent/agent.db` rows whose provider is
+`openai-codex` and whose credential type is `oauth`, when present. It creates a
+temporary reduced database, copies that database into the container's OMP
+profile, and deletes the host-side seed after setup. It does not mount or copy
+the rest of host `HOME` or other host credentials. Without usable selected
+OAuth credentials, model agents fail rather than receiving an alternate host
+credential.
 
 After the final reviewer, canonical evaluators and the pinned upstream suite
 run in the same container. An arm clears only when there is no harness or
