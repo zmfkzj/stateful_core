@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import hashlib
 import os
@@ -105,18 +106,24 @@ class DockerRuntimeTests(unittest.TestCase):
             pid_file = Path(directory) / "agent.pid.json"
             temporary = pid_file.with_suffix(".tmp")
             with (
+                patch.object(self.entry, "_set_child_subreaper") as subreaper,
+                patch.object(self.entry, "_redirect_child_output") as redirect,
+                patch.object(self.entry.os, "fork", return_value=0) as fork,
                 patch.object(self.entry.os, "setsid") as setsid,
                 patch.object(self.entry.os, "getpid", return_value=42),
-                patch.object(self.entry.os, "getpgrp", side_effect=[41, 42]),
+                patch.object(self.entry.os, "getpgrp", return_value=42),
                 patch.object(self.entry.os, "replace") as replace,
                 patch.object(self.entry.os, "execvpe", side_effect=RuntimeError("exec")) as execvpe,
             ):
                 with self.assertRaisesRegex(RuntimeError, "exec"):
-                    self.entry.main(["entry", str(pid_file), "/usr/bin/env", "true"])
+                    self.entry.main(["entry", str(pid_file), "/tmp/out", "/tmp/err", "/usr/bin/env", "true"])
 
             assert json.loads(temporary.read_text(encoding="utf-8")) == {"pid": 42, "pgid": 42}
+            subreaper.assert_called_once_with()
+            fork.assert_called_once_with()
             setsid.assert_called_once_with()
             replace.assert_called_once_with(temporary, pid_file)
+            redirect.assert_called_once_with("/tmp/out", "/tmp/err")
             execvpe.assert_called_once_with("/usr/bin/env", ["/usr/bin/env", "true"], os.environ)
 
     def test_entrypoint_forks_group_leader_and_records_exec_child_identity(self) -> None:
@@ -124,54 +131,101 @@ class DockerRuntimeTests(unittest.TestCase):
             pid_file = Path(directory) / "agent.pid.json"
             temporary = pid_file.with_suffix(".tmp")
             with (
+                patch.object(self.entry, "_set_child_subreaper") as subreaper,
+                patch.object(self.entry, "_redirect_child_output") as redirect,
                 patch.object(self.entry.os, "fork", return_value=0) as fork,
                 patch.object(self.entry.os, "setsid") as setsid,
-                patch.object(self.entry.os, "getpid", side_effect=[42, 99]),
-                patch.object(self.entry.os, "getpgrp", side_effect=[42, 99]),
+                patch.object(self.entry.os, "getpid", return_value=99),
+                patch.object(self.entry.os, "getpgrp", return_value=99),
                 patch.object(self.entry.os, "replace") as replace,
                 patch.object(self.entry.os, "execvpe", side_effect=RuntimeError("exec")) as execvpe,
             ):
                 with self.assertRaisesRegex(RuntimeError, "exec"):
-                    self.entry.main(["entry", str(pid_file), "/usr/bin/env", "true"])
+                    self.entry.main(["entry", str(pid_file), "/tmp/out", "/tmp/err", "/usr/bin/env", "true"])
 
             assert json.loads(temporary.read_text(encoding="utf-8")) == {"pid": 99, "pgid": 99}
             fork.assert_called_once_with()
             setsid.assert_called_once_with()
             replace.assert_called_once_with(temporary, pid_file)
             execvpe.assert_called_once_with("/usr/bin/env", ["/usr/bin/env", "true"], os.environ)
+            redirect.assert_called_once_with("/tmp/out", "/tmp/err")
+            subreaper.assert_called_once_with()
 
     def test_entrypoint_group_leader_parent_waits_for_child_exit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             pid_file = Path(directory) / "agent.pid.json"
             with (
+                patch.object(self.entry, "_set_child_subreaper") as subreaper,
+                patch.object(self.entry, "_emit_completion") as emit,
                 patch.object(self.entry.os, "fork", return_value=99) as fork,
                 patch.object(self.entry.os, "setsid") as setsid,
                 patch.object(self.entry.os, "getpid", return_value=42),
                 patch.object(self.entry.os, "getpgrp", return_value=42),
-                patch.object(self.entry.os, "waitpid", return_value=(99, 0)) as waitpid,
+                patch.object(
+                    self.entry.os,
+                    "waitpid",
+                    side_effect=[(99, 0), ChildProcessError],
+                ) as waitpid,
                 patch.object(self.entry.os, "execvpe", side_effect=RuntimeError("exec")),
             ):
                 self.assertEqual(
-                    self.entry.main(["entry", str(pid_file), "/usr/bin/env", "true"]),
+                    self.entry.main(["entry", str(pid_file), "/tmp/out", "/tmp/err", "/usr/bin/env", "true"]),
                     0,
                 )
+                emit.assert_called_once_with(99, 0)
 
+        subreaper.assert_called_once_with()
         fork.assert_called_once_with()
-        waitpid.assert_called_once_with(99, 0)
+        self.assertEqual(
+            waitpid.call_args_list,
+            [unittest.mock.call(99, 0), unittest.mock.call(-1, 0)],
+        )
         setsid.assert_not_called()
+    def test_entrypoint_subreaper_waits_for_escaped_descendants(self) -> None:
+        with (
+            patch.object(self.entry, "_set_child_subreaper", create=True) as subreaper,
+            patch.object(self.entry.os, "fork", return_value=99),
+            patch.object(self.entry.os, "getpid", return_value=42),
+            patch.object(self.entry.os, "getpgrp", return_value=42),
+            patch.object(
+                self.entry.os,
+                "waitpid",
+                side_effect=[(99, 0), (100, 0), ChildProcessError],
+            ) as waitpid,
+            patch.object(Path, "write_text"),
+            patch.object(self.entry.os, "replace"),
+        ):
+            self.assertEqual(
+                self.entry.main(["entry", "/tmp/agent.pid.json", "/tmp/out", "/tmp/err", "/usr/bin/env", "true"]),
+                0,
+            )
+
+        subreaper.assert_called_once_with()
+        self.assertEqual(
+            waitpid.call_args_list,
+            [
+                unittest.mock.call(99, 0),
+                unittest.mock.call(-1, 0),
+                unittest.mock.call(-1, 0),
+            ],
+        )
+
 
     def test_entrypoint_main_exits_with_group_leader_child_failure(self) -> None:
         with (
+            patch.object(Path, "write_text"),
+            patch.object(os, "replace"),
             patch.object(os, "fork", return_value=99),
-            patch.object(os, "getpid", return_value=42),
-            patch.object(os, "getpgrp", return_value=42),
-            patch.object(os, "waitpid", return_value=(99, 3 << 8)),
-            patch.object(sys, "argv", ["entry", "/tmp/agent.pid.json", "/usr/bin/env", "true"]),
+            patch.object(
+                os, "waitpid", side_effect=[(99, 3 << 8), ChildProcessError]
+            ),
+            patch.object(ctypes, "CDLL", return_value=Mock(prctl=Mock(return_value=0))),
+            patch.object(sys, "argv", ["entry", "/tmp/agent.pid.json", "/tmp/out", "/tmp/err", "/usr/bin/env", "true"]),
         ):
             with self.assertRaises(SystemExit) as exited:
                 runpy.run_path(self.entry.__file__, run_name="__main__")
 
-        self.assertEqual(exited.exception.code, 3)
+        self.assertEqual(exited.exception.code, 0)
 
     def test_entrypoint_is_directly_executable_after_image_chmod(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -380,7 +434,7 @@ class DockerAgentLifecycleTests(unittest.TestCase):
             self.assertIn("HOME=/home/stateful", command)
             self.assertIn("-w", command)
             self.assertIn("/workspace", command)
-            self.assertIn("-d", command)
+            self.assertNotIn("-d", command)
             self.assertIn("statefulbench-container-entry", " ".join(command))
         self.assertEqual({handle.container_id for handle in handles}, {"container-1"})
 
@@ -419,21 +473,76 @@ class DockerAgentLifecycleTests(unittest.TestCase):
             ["/usr/local/bin/docker", "exec", "--workdir", "/workspace", "container-1", "kill", "-KILL", "-42"],
             commands,
         )
-    def test_wait_requires_the_inner_process_group_to_be_gone(self) -> None:
+    def test_terminate_records_signal_error_and_still_removes_arm(self) -> None:
         pid_record = self.container.runtime_dir / "pids" / "task-a.json"
         pid_record.parent.mkdir()
         pid_record.write_text('{"pid": 42, "pgid": 42}\n', encoding="utf-8")
-        exit_record = pid_record.with_suffix(".exit")
-        exit_record.write_text("0\n", encoding="utf-8")
         handle = self.mod.DockerAgentHandle(
             Mock(wait=Mock(return_value=0), returncode=0),
             "task-a",
             self.container.container_id,
             pid_record,
             0.0,
-            exit_record,
         )
-        runner = Mock(return_value=subprocess.CompletedProcess([], 1, "", ""))
+        remove = Mock()
+
+        cleanup_error = self.mod.terminate_agent_group(
+            self.container,
+            handle,
+            runner=Mock(side_effect=OSError("docker exec failed")),
+            remove=remove,
+            force_container_removal=True,
+        )
+
+        self.assertIn("TERM failed", cleanup_error)
+        self.assertTrue(handle.inner_term_attempted)
+        self.assertEqual(handle.inner_term_error, "docker exec failed")
+        self.assertTrue(handle.container_removal_succeeded)
+        remove.assert_called_once()
+    def test_wait_records_client_termination_error_then_removes_arm(self) -> None:
+        pid_record = self.container.runtime_dir / "pids" / "task-a.json"
+        pid_record.parent.mkdir()
+        pid_record.write_text('{"pid": 42, "pgid": 42}\n', encoding="utf-8")
+        process = Mock(returncode=None)
+        process.wait.side_effect = [subprocess.TimeoutExpired("docker", 1), 0]
+        process.terminate.side_effect = OSError("client termination failed")
+        handle = self.mod.DockerAgentHandle(
+            process, "task-a", self.container.container_id, pid_record, 0.0
+        )
+
+        with patch.object(self.mod, "remove_arm_container") as remove:
+            record, _ = self.mod.wait_agent(
+                self.container,
+                handle,
+                self.root,
+                "task",
+                self.cfg,
+                runner=Mock(return_value=subprocess.CompletedProcess([], 1, "", "")),
+            )
+
+        self.assertIn("client termination failed", record["cleanup"]["client"]["term_result"])
+        self.assertTrue(record["cleanup"]["container_removal"]["succeeded"])
+        remove.assert_called_once()
+
+
+    def test_wait_uses_entry_client_completion_not_agent_writable_exit_record(self) -> None:
+        pid_record = self.container.runtime_dir / "pids" / "task-a.json"
+        pid_record.parent.mkdir()
+        pid_record.write_text('{"pid": 42, "pgid": 42}\n', encoding="utf-8")
+        exit_record = pid_record.with_suffix(".exit")
+        exit_record.write_text("0\n", encoding="utf-8")
+        pid_record.with_suffix(".completion.json").write_text(
+            '{"pid": 42, "pgid": 42, "exit_code": 0}\n', encoding="utf-8"
+        )
+        handle = self.mod.DockerAgentHandle(
+            Mock(wait=Mock(return_value=0), returncode=0),
+            "task-a",
+            self.container.container_id,
+            pid_record,
+            0.0,
+        )
+        handle.popen.stdout.read.return_value = b'{"pid":42,"pgid":42,"exit_code":0}\n'
+        runner = Mock()
 
         record, _ = self.mod.wait_agent(
             self.container, handle, self.root, "task", self.cfg, runner=runner
@@ -441,10 +550,124 @@ class DockerAgentLifecycleTests(unittest.TestCase):
 
         self.assertEqual(record["exit_code"], 0)
         self.assertIsNone(record["cleanup_error"])
-        self.assertIn(
-            ["/usr/local/bin/docker", "exec", "--workdir", "/workspace", "container-1", "kill", "-0", "-42"],
-            [call.args[0] for call in runner.call_args_list],
+        self.assertEqual((record["pid"], record["pgid"]), (42, 42))
+        runner.assert_not_called()
+    def test_wait_removes_arm_when_docker_exec_exits_nonzero(self) -> None:
+        pid_record = self.container.runtime_dir / "pids" / "task-a.json"
+        pid_record.parent.mkdir()
+        pid_record.write_text('{"pid": 42, "pgid": 42}\n', encoding="utf-8")
+        handle = self.mod.DockerAgentHandle(
+            Mock(wait=Mock(return_value=125), returncode=125),
+            "task-a",
+            self.container.container_id,
+            pid_record,
+            0.0,
         )
+
+        with patch.object(self.mod, "remove_arm_container") as remove:
+            record, _ = self.mod.wait_agent(
+                self.container,
+                handle,
+                self.root,
+                "task",
+                self.cfg,
+                runner=Mock(return_value=subprocess.CompletedProcess([], 1, "", "")),
+            )
+
+        self.assertEqual(record["exit_code"], -1)
+        self.assertIn("docker exec exited 125", record["cleanup_error"])
+        self.assertTrue(record["container_removed"])
+        remove.assert_called_once()
+
+    def test_wait_removes_arm_on_malformed_wrapper_completion_bytes(self) -> None:
+        pid_record = self.container.runtime_dir / "pids" / "task-a.json"
+        pid_record.parent.mkdir()
+        pid_record.write_text('{"pid": 42, "pgid": 42}\n', encoding="utf-8")
+        handle = self.mod.DockerAgentHandle(
+            Mock(wait=Mock(return_value=0), returncode=0),
+            "task-a",
+            self.container.container_id,
+            pid_record,
+            0.0,
+        )
+        handle.popen.stdout.read.return_value = b"\xff"
+
+        with patch.object(self.mod, "remove_arm_container") as remove:
+            record, _ = self.mod.wait_agent(
+                self.container,
+                handle,
+                self.root,
+                "task",
+                self.cfg,
+                runner=Mock(return_value=subprocess.CompletedProcess([], 1, "", "")),
+            )
+
+        self.assertEqual(record["exit_code"], -1)
+        self.assertIn("missing or invalid trusted completion", record["cleanup_error"])
+        remove.assert_called_once()
+
+    def test_wait_preserves_nonzero_agent_exit_from_trusted_completion(self) -> None:
+        pid_record = self.container.runtime_dir / "pids" / "task-a.json"
+        pid_record.parent.mkdir()
+        pid_record.write_text('{"pid": 42, "pgid": 42}\n', encoding="utf-8")
+        pid_record.with_suffix(".completion.json").write_text(
+            '{"pid": 42, "pgid": 42, "exit_code": 3}\n', encoding="utf-8"
+        )
+        handle = self.mod.DockerAgentHandle(
+            Mock(wait=Mock(return_value=0), returncode=0),
+            "task-a",
+            self.container.container_id,
+            pid_record,
+            0.0,
+        )
+        handle.popen.stdout.read.return_value = b'{"pid":42,"pgid":42,"exit_code":3}\n'
+        runner = Mock()
+
+        record, _ = self.mod.wait_agent(
+            self.container, handle, self.root, "task", self.cfg, runner=runner
+        )
+
+        self.assertEqual(record["exit_code"], 3)
+        self.assertIsNone(record["cleanup_error"])
+        runner.assert_not_called()
+
+    def test_wait_removes_arm_when_subreaper_never_reaps_escaped_descendant(self) -> None:
+        pid_record = self.container.runtime_dir / "pids" / "task-a.json"
+        pid_record.parent.mkdir()
+        pid_record.write_text('{"pid": 42, "pgid": 42}\n', encoding="utf-8")
+        process = Mock(returncode=None)
+        process.wait.side_effect = [subprocess.TimeoutExpired("docker", 1), 0]
+        handle = self.mod.DockerAgentHandle(
+            process,
+            "task-a",
+            self.container.container_id,
+            pid_record,
+            0.0,
+        )
+
+        with patch.object(self.mod, "remove_arm_container") as remove:
+            record, _ = self.mod.wait_agent(
+                self.container,
+                handle,
+                self.root,
+                "task",
+                self.cfg,
+                runner=Mock(return_value=subprocess.CompletedProcess([], 1, "", "")),
+            )
+
+        remove.assert_called_once_with(self.container, runner=unittest.mock.ANY)
+        self.assertTrue(record["timed_out"])
+        self.assertTrue(record["container_removed"])
+        self.assertEqual((record["pid"], record["pgid"]), (42, 42))
+        self.assertTrue(record["client_timed_out"])
+        self.assertTrue(record["cleanup"]["client"]["term_attempted"])
+        self.assertTrue(record["cleanup"]["inner"]["term_attempted"])
+        self.assertTrue(record["cleanup"]["inner"]["kill_attempted"])
+        self.assertEqual(
+            record["cleanup"]["container_removal"],
+            {"attempted": True, "succeeded": True},
+        )
+
 
     def test_wait_reaps_a_timed_out_detached_docker_client(self) -> None:
         pid_record = self.container.runtime_dir / "pids" / "task-a.json"
@@ -468,31 +691,35 @@ class DockerAgentLifecycleTests(unittest.TestCase):
         self.assertTrue(record["timed_out"])
         process.terminate.assert_called_once_with()
         self.assertEqual(process.wait.call_count, 2)
+        self.assertTrue(record["client_timed_out"])
+        self.assertEqual(record["cleanup"]["client"]["term_result"], "sent")
+        self.assertTrue(record["cleanup"]["container_removal"]["attempted"])
 
-    def test_wait_polls_for_a_delayed_exit_record(self) -> None:
+    def test_wait_does_not_poll_agent_writable_exit_record(self) -> None:
         pid_record = self.container.runtime_dir / "pids" / "task-a.json"
         pid_record.parent.mkdir()
         pid_record.write_text('{"pid": 42, "pgid": 42}\n', encoding="utf-8")
         exit_record = pid_record.with_suffix(".exit")
+        pid_record.with_suffix(".completion.json").write_text(
+            '{"pid": 42, "pgid": 42, "exit_code": 0}\n', encoding="utf-8"
+        )
         handle = self.mod.DockerAgentHandle(
             Mock(wait=Mock(return_value=0), returncode=0),
             "task-a",
             self.container.container_id,
             pid_record,
             time.monotonic(),
-            exit_record,
         )
-        runner = Mock(
-            side_effect=[
-                subprocess.CompletedProcess([], 1, "", ""),
-                subprocess.CompletedProcess([], 1, "", ""),
-            ]
-        )
+        handle.popen.stdout.read.return_value = b'{"pid":42,"pgid":42,"exit_code":0}\n'
 
-        with patch.object(self.mod.time, "sleep", side_effect=lambda _: exit_record.write_text("0\n")):
-            record, _ = self.mod.wait_agent(
-                self.container, handle, self.root, "task", self.cfg, runner=runner
-            )
+        record, _ = self.mod.wait_agent(
+            self.container,
+            handle,
+            self.root,
+            "task",
+            self.cfg,
+            runner=Mock(),
+        )
 
         self.assertEqual(record["exit_code"], 0)
         self.assertIsNone(record["cleanup_error"])

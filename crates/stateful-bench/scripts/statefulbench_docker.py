@@ -53,9 +53,23 @@ class DockerAgentHandle:
     container_id: str
     pid_record: Path
     started_monotonic: float
-    exit_record: Path | None = None
     cleanup_error: str | None = None
     container_removed: bool = False
+    pid: int | None = None
+    pgid: int | None = None
+    client_timed_out: bool = False
+    client_term_attempted: bool = False
+    client_term_result: str | None = None
+    client_kill_attempted: bool = False
+    client_kill_result: str | None = None
+    inner_term_attempted: bool = False
+    inner_term_returncode: int | None = None
+    inner_term_error: str | None = None
+    inner_kill_attempted: bool = False
+    inner_kill_returncode: int | None = None
+    inner_kill_error: str | None = None
+    container_removal_attempted: bool = False
+    container_removal_succeeded: bool = False
 
 def resolve_binary(binary: str) -> str:
     resolved = shutil.which(binary)
@@ -391,15 +405,11 @@ def inspect_arm_container(
             "finished_at": state["FinishedAt"],
         },
     }
-
-
-def _agent_runtime_paths(container: ArmContainer, agent_id: str) -> tuple[Path, Path, Path, Path]:
+def _agent_runtime_paths(container: ArmContainer, agent_id: str) -> tuple[Path, Path, Path]:
     if not agent_id or Path(agent_id).name != agent_id:
         raise ValueError("agent id must be a single path component")
-    pid = container.runtime_dir / "pids" / f"{agent_id}.json"
     return (
-        pid,
-        pid.with_suffix(".exit"),
+        container.runtime_dir / "pids" / f"{agent_id}.json",
         container.runtime_dir / "logs" / f"{agent_id}.stdout.log",
         container.runtime_dir / "logs" / f"{agent_id}.stderr.log",
     )
@@ -417,13 +427,15 @@ def launch_agent(
     copy=copy_to_container,
 ) -> DockerAgentHandle:
     del arm_dir
-    pid_record, exit_record, stdout, stderr = _agent_runtime_paths(container, agent_id)
+    pid_record, stdout, stderr = _agent_runtime_paths(container, agent_id)
     stdout.parent.mkdir(parents=True, exist_ok=True)
     prompt_destination = f"/runtime/prompts/{agent_id}.prompt.txt"
     copy(container, prompt_path, prompt_destination)
     inner = [
         "statefulbench-container-entry",
         f"/runtime/pids/{agent_id}.json",
+        f"/runtime/logs/{stdout.name}",
+        f"/runtime/logs/{stderr.name}",
         str(cfg.omp_bin),
         "--cwd",
         "/workspace",
@@ -438,18 +450,13 @@ def launch_agent(
         "--no-title",
         f"@{prompt_destination}",
     ]
-    shell = (
-        f"{shlex.join(inner)} >{shlex.quote('/runtime/logs/' + stdout.name)} "
-        f"2>{shlex.quote('/runtime/logs/' + stderr.name)}; status=$?; "
-        f"printf '%s\\n' \"$status\" >{shlex.quote('/runtime/pids/' + exit_record.name)}; exit \"$status\""
-    )
-    command = [container.runtime.binary, "exec", "-d", "-w", "/workspace"]
+    command = [container.runtime.binary, "exec", "-w", "/workspace"]
     for name, value in sorted(env.items()):
         command.extend(("--env", f"{name}={value}"))
     process = popen(
-        [*command, container.container_id, "sh", "-c", shell],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        [*command, container.container_id, *inner],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
     return DockerAgentHandle(
         popen=process,
@@ -457,7 +464,6 @@ def launch_agent(
         container_id=container.container_id,
         pid_record=pid_record,
         started_monotonic=time.monotonic(),
-        exit_record=exit_record,
     )
 
 
@@ -472,6 +478,34 @@ def _inner_identity(handle: DockerAgentHandle) -> tuple[int, int] | None:
     if type(pid) is not int or type(pgid) is not int or pid < 1 or pgid < 1:
         return None
     return pid, pgid
+
+def _completion_from_channel(value: object) -> tuple[int, int, int] | None:
+    if not isinstance(value, bytes):
+        return None
+    try:
+        lines = value.decode("ascii").splitlines()
+        completion = json.loads(lines[0]) if len(lines) == 1 else None
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if (
+        type(completion) is not dict
+        or set(completion) != {"pid", "pgid", "exit_code"}
+    ):
+        return None
+    pid, pgid, exit_code = (
+        completion["pid"],
+        completion["pgid"],
+        completion["exit_code"],
+    )
+    if (
+        type(pid) is not int
+        or type(pgid) is not int
+        or type(exit_code) is not int
+        or pid < 1
+        or pgid < 1
+    ):
+        return None
+    return pid, pgid, exit_code
 
 
 def _inner_process_exists(
@@ -517,6 +551,7 @@ def terminate_agent_group(
     runner=subprocess.run,
     wait_s: float = 5,
     remove=None,
+    force_container_removal: bool = False,
 ) -> str | None:
     identity = _inner_identity(handle)
     errors: list[str] = []
@@ -524,57 +559,85 @@ def terminate_agent_group(
         errors.append(f"missing or invalid inner pid record for {handle.agent_id}")
     else:
         pid, pgid = identity
+        handle.pid, handle.pgid = pid, pgid
         for signal_name in ("TERM", "KILL"):
-            completed = exec_in_container(
-                container,
-                "kill",
-                f"-{signal_name}",
-                f"-{pgid}",
-                runner=runner,
-                check=False,
-            )
-            if completed.returncode != 0 and _inner_process_exists(container, pid, runner=runner):
-                errors.append(f"inner process group {pgid} rejected {signal_name}")
-            if _wait_for_inner_exit(container, pid, pgid, wait_s, runner=runner):
-                return None
-        errors.append(f"inner process group {pgid} survived TERM/KILL escalation")
+            if signal_name == "TERM":
+                handle.inner_term_attempted = True
+            else:
+                handle.inner_kill_attempted = True
+            try:
+                completed = exec_in_container(
+                    container,
+                    "kill",
+                    f"-{signal_name}",
+                    f"-{pgid}",
+                    runner=runner,
+                    check=False,
+                )
+                if signal_name == "TERM":
+                    handle.inner_term_returncode = completed.returncode
+                else:
+                    handle.inner_kill_returncode = completed.returncode
+                if completed.returncode != 0 and _inner_process_exists(container, pid, runner=runner):
+                    errors.append(f"inner process group {pgid} rejected {signal_name}")
+                if _wait_for_inner_exit(container, pid, pgid, wait_s, runner=runner):
+                    if not force_container_removal:
+                        return None
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                if signal_name == "TERM":
+                    handle.inner_term_error = str(error)
+                else:
+                    handle.inner_kill_error = str(error)
+                errors.append(f"inner process group {pgid} {signal_name} failed: {error}")
+        if not force_container_removal:
+            errors.append(f"inner process group {pgid} survived TERM/KILL escalation")
+    if force_container_removal:
+        errors.append("entry subreaper did not reap all descendants before deadline")
     if remove is None:
         remove = remove_arm_container
+    handle.container_removal_attempted = True
     try:
         remove(container, runner=runner)
         handle.container_removed = True
+        handle.container_removal_succeeded = True
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         errors.append(f"arm container removal failed: {error}")
     handle.cleanup_error = "; ".join(errors)
     return handle.cleanup_error
 
 
-def _exit_code(handle: DockerAgentHandle) -> int | None:
-    if handle.exit_record is None:
-        return None
+def _reap_docker_client(handle: DockerAgentHandle) -> str | None:
+    handle.client_term_attempted = True
     try:
-        return int(handle.exit_record.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        return None
-
-def _reap_docker_client(popen: subprocess.Popen) -> str | None:
-    try:
-        popen.terminate()
+        handle.popen.terminate()
+        handle.client_term_result = "sent"
     except ProcessLookupError:
-        pass
+        handle.client_term_result = "not-running"
+    except (OSError, subprocess.SubprocessError) as error:
+        handle.client_term_result = f"error: {error}"
     try:
-        popen.wait(timeout=5)
+        handle.popen.wait(timeout=5)
         return None
     except subprocess.TimeoutExpired:
+        handle.client_kill_attempted = True
         try:
-            popen.kill()
+            handle.popen.kill()
+            handle.client_kill_result = "sent"
         except ProcessLookupError:
-            pass
+            handle.client_kill_result = "not-running"
+        except (OSError, subprocess.SubprocessError) as error:
+            handle.client_kill_result = f"error: {error}"
         try:
-            popen.wait(timeout=5)
+            handle.popen.wait(timeout=5)
             return None
         except subprocess.TimeoutExpired:
-            return "detached docker exec client did not exit after TERM/KILL"
+            handle.client_kill_result = "timed-out"
+            return "docker exec client did not exit after TERM/KILL"
+        except (OSError, subprocess.SubprocessError) as error:
+            handle.client_kill_result = f"error: {error}"
+            return f"docker exec client wait after KILL failed: {error}"
+    except (OSError, subprocess.SubprocessError) as error:
+        return f"docker exec client wait after TERM failed: {error}"
 
 
 def wait_agent(
@@ -586,48 +649,52 @@ def wait_agent(
     *,
     runner=subprocess.run,
 ) -> tuple[dict, float]:
+    del arm_dir
     timed_out = False
     cleanup_error: str | None = None
-    launch_code: int | None = None
+    client_cleanup_error: str | None = None
     try:
-        launch_code = handle.popen.wait(timeout=min(5, float(cfg.timeout_s)))
+        client_exit_code = handle.popen.wait(timeout=float(cfg.timeout_s))
     except subprocess.TimeoutExpired:
         timed_out = True
-        client_cleanup_error = _reap_docker_client(handle.popen)
-        cleanup_error = terminate_agent_group(container, handle, runner=runner)
-        if client_cleanup_error is not None:
-            cleanup_error = "; ".join(
-                error for error in (cleanup_error, client_cleanup_error) if error
-            )
-    identity = _inner_identity(handle)
-    deadline = handle.started_monotonic + float(cfg.timeout_s)
-    exit_code = launch_code if launch_code not in (None, 0) else None
-    while not timed_out and exit_code is None and identity is None:
-        if time.monotonic() >= deadline:
-            timed_out = True
-            cleanup_error = terminate_agent_group(container, handle, runner=runner)
-            break
-        time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
-        identity = _inner_identity(handle)
-    if not timed_out and exit_code is None and identity is not None:
-        pid, pgid = identity
-        while _inner_process_exists(container, pid, runner=runner) or _inner_group_exists(
-            container, pgid, runner=runner
-        ):
-            if time.monotonic() >= deadline:
-                timed_out = True
-                cleanup_error = terminate_agent_group(container, handle, runner=runner)
-                break
-            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
-        if not timed_out:
-            while (exit_code := _exit_code(handle)) is None and time.monotonic() < deadline:
-                time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
-            if exit_code is None:
-                cleanup_error = f"missing exit record for {handle.agent_id}"
-    if timed_out:
+        client_exit_code = -9
+        handle.client_timed_out = True
+        client_cleanup_error = _reap_docker_client(handle)
+        cleanup_error = terminate_agent_group(
+            container, handle, runner=runner, force_container_removal=True
+        )
         exit_code = -9
-    if handle.cleanup_error:
-        cleanup_error = handle.cleanup_error
+    else:
+        try:
+            completion = (
+                _completion_from_channel(handle.popen.stdout.read())
+                if client_exit_code == 0
+                else None
+            )
+        except (OSError, subprocess.SubprocessError):
+            completion = None
+        if completion is None:
+            reason = (
+                f"docker exec exited {client_exit_code} without trusted completion"
+                if client_exit_code != 0
+                else "missing or invalid trusted completion record"
+            )
+            cleanup_error = terminate_agent_group(
+                container, handle, runner=runner, force_container_removal=True
+            )
+            cleanup_error = "; ".join(
+                error for error in (reason, cleanup_error) if error
+            )
+            exit_code = -1
+        else:
+            handle.pid, handle.pgid, exit_code = completion
+    cleanup_error = "; ".join(
+        dict.fromkeys(
+            error
+            for error in (cleanup_error, client_cleanup_error, handle.cleanup_error)
+            if error
+        )
+    ) or None
     ended = time.monotonic()
     usage = (
         cfg.usage_from_log(container.runtime_dir / "logs" / f"{handle.agent_id}.stdout.log")
@@ -638,8 +705,32 @@ def wait_agent(
         {
             "agent_id": handle.agent_id,
             "kind": kind,
-            "exit_code": -1 if exit_code is None else exit_code,
+            "exit_code": exit_code,
             "timed_out": timed_out,
+            "pid": handle.pid,
+            "pgid": handle.pgid,
+            "client_timed_out": handle.client_timed_out,
+            "container_removed": handle.container_removed,
+            "cleanup": {
+                "client": {
+                    "term_attempted": handle.client_term_attempted,
+                    "term_result": handle.client_term_result,
+                    "kill_attempted": handle.client_kill_attempted,
+                    "kill_result": handle.client_kill_result,
+                },
+                "inner": {
+                    "term_attempted": handle.inner_term_attempted,
+                    "term_returncode": handle.inner_term_returncode,
+                    "term_error": handle.inner_term_error,
+                    "kill_attempted": handle.inner_kill_attempted,
+                    "kill_returncode": handle.inner_kill_returncode,
+                    "kill_error": handle.inner_kill_error,
+                },
+                "container_removal": {
+                    "attempted": handle.container_removal_attempted,
+                    "succeeded": handle.container_removal_succeeded,
+                },
+            },
             "cleanup_error": cleanup_error,
             "wall_time_s": max(0.0, ended - handle.started_monotonic),
             **usage,

@@ -2238,6 +2238,104 @@ class RealWorldRunnerTests(unittest.TestCase):
             },
         )
 
+    def test_container_cleanup_error_blocks_final_and_grading(self) -> None:
+        runtime = self.mod._DOCKER.DockerRuntime(
+            binary="/docker",
+            image="statefulbench-realworld:local",
+            image_id="sha256:fixture",
+            repo_digests=(),
+            platform="linux/arm64",
+        )
+        workspace = self.root / "workspace"
+        workspace.mkdir()
+        container = self.mod._DOCKER.ArmContainer(
+            runtime, "container-1", "arm", workspace, self.root / "runtime"
+        )
+        launched = []
+        post_checks = mock.Mock(return_value=(True, True))
+
+        def execute(_container, *argv, **_kwargs):
+            versions = {
+                ("python3", "--version"): "Python 3.14.6\n",
+                ("/usr/local/bin/omp", "--version"): "omp 1\n",
+                ("git", "--version"): "git version 2.50.0\n",
+                ("rustc", "--version"): "rustc 1.90.0\n",
+                ("cargo", "--version"): "cargo 1.90.0\n",
+            }
+            if argv == ("sha256sum", "/usr/local/bin/stateful"):
+                return subprocess.CompletedProcess(
+                    [], 0, "a" * 64 + "  /usr/local/bin/stateful\n", ""
+                )
+            return subprocess.CompletedProcess([], 0, versions.get(argv, ""), "")
+
+        def launch(_container, _arm_dir, agent_id, _prompt, _cfg, _env):
+            launched.append(agent_id)
+            return type("Handle", (), {"agent_id": agent_id, "started_monotonic": 0.0})()
+
+        def wait(_container, handle, _arm_dir, kind, _cfg):
+            return (
+                {
+                    "agent_id": handle.agent_id,
+                    "kind": kind,
+                    "exit_code": -9,
+                    "timed_out": True,
+                    "cleanup_error": "entry subreaper did not reap all descendants before deadline",
+                    "wall_time_s": 0.0,
+                    "total_tokens": 0,
+                    "tool_calls": 0,
+                },
+                0.0,
+            )
+
+        result = self.mod._run_container_repo_arm(
+            self.repo,
+            self.corpus,
+            self.dataset,
+            self.root / "cache",
+            self.root / "out",
+            "sequential",
+            self.mod.RunConfig(
+                tasks=10,
+                stateful_binary="/usr/local/bin/stateful",
+                omp_bin="/usr/local/bin/omp",
+            ),
+            runtime=runtime,
+            archive_loader=lambda *_: self.root / "archive.tar.gz",
+            arm_container_start=mock.Mock(return_value=container),
+            arm_runtime_prepare=mock.Mock(
+                return_value={
+                    "HOME": "/home/stateful",
+                    "PI_CODING_AGENT_DIR": "/home/stateful/.omp/profiles/stateful/agent",
+                }
+            ),
+            arm_container_remove=mock.Mock(),
+            credential_seed=None,
+            workspace_materializer=lambda *_: workspace,
+            container_exec=execute,
+            container_agent_launch=launch,
+            container_agent_wait=wait,
+            container_evaluator_inject=mock.Mock(),
+            container_post_checks=post_checks,
+            container_diagnostics=self.container_diagnostics,
+            container_inspect=mock.Mock(
+                return_value={
+                    "id": "container-1",
+                    "image_id": "sha256:fixture",
+                    "state": {
+                        "status": "running",
+                        "pid": 42,
+                        "started_at": "2026-07-13T00:00:00Z",
+                        "finished_at": "",
+                    },
+                }
+            ),
+        )
+
+        self.assertEqual(launched, ["task-0"])
+        post_checks.assert_not_called()
+        self.assertFalse(result["cleared"])
+        self.assertIn("entry subreaper did not reap", result["error"])
+
     def test_parallel_on_activates_stateful_after_container_git_init(self) -> None:
         runtime = self.mod._DOCKER.DockerRuntime(
             binary="/docker",
@@ -2267,7 +2365,14 @@ class RealWorldRunnerTests(unittest.TestCase):
                 return subprocess.CompletedProcess(
                     [], 0, "b" * 64 + "  /usr/local/bin/stateful\n", ""
                 )
-            return subprocess.CompletedProcess([], 0, "", "")
+            versions = {
+                ("python3", "--version"): "Python 3.14.6\n",
+                ("/usr/local/bin/omp", "--version"): "omp 1\n",
+                ("git", "--version"): "git version 2.50.0\n",
+                ("rustc", "--version"): "rustc 1.90.0\n",
+                ("cargo", "--version"): "cargo 1.90.0\n",
+            }
+            return subprocess.CompletedProcess([], 0, versions.get(argv, ""), "")
 
         def launch(_container, _arm_dir, agent_id, _prompt, _cfg, _env):
             return type("Handle", (), {"agent_id": agent_id, "started_monotonic": 0.0})()
@@ -2294,7 +2399,11 @@ class RealWorldRunnerTests(unittest.TestCase):
             self.root / "cache",
             self.root / "out",
             "parallel-on",
-            self.mod.RunConfig(tasks=10, stateful_binary="/usr/local/bin/stateful"),
+            self.mod.RunConfig(
+                tasks=10,
+                stateful_binary="/usr/local/bin/stateful",
+                omp_bin="/usr/local/bin/omp",
+            ),
             runtime=runtime,
             archive_loader=lambda *_: self.root / "archive.tar.gz",
             workspace_materializer=lambda *_: workspace,
