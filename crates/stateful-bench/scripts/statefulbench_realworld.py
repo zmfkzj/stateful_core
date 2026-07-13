@@ -1704,21 +1704,10 @@ def _append_stage_cleanup_error(result: dict, error: str) -> None:
     )
 
 
-def _invalidate_stage_cleanup_receipts(
-    cache_dir: Path, manifest_path: Path, wanted: tuple[str, ...]
-) -> None:
-    try:
-        repositories = repo_entries(load_manifest(manifest_path))
-        selected = [
-            repo for repo in repositories if not wanted or repo["key"] in set(wanted)
-        ]
-    except (OSError, ValueError):
-        root = cache_dir / "qualification" / "receipts"
-        for receipt in root.glob("*.json"):
-            receipt.unlink(missing_ok=True)
-        return
-    for repository in selected:
-        remove_qualification_receipt(cache_dir, repository["key"])
+def _invalidate_stage_cleanup_receipts(cache_dir: Path) -> None:
+    root = cache_dir / "qualification" / "receipts"
+    for receipt in root.glob("*.json"):
+        receipt.unlink(missing_ok=True)
 
 
 def _downgrade_stage_cleanup_run(arguments, error: str) -> None:
@@ -1752,38 +1741,63 @@ def _downgrade_stage_cleanup_run(arguments, error: str) -> None:
         results.append(result)
     if not results:
         return
-    try:
-        repositories = repo_entries(load_manifest(arguments.manifest))
-        wanted = arguments.repos
-        selected = tuple(
-            repo for repo in repositories if not wanted or repo["key"] in set(wanted)
+    scheduled = []
+    for aggregate in previous.get("aggregates", []):
+        if (
+            type(aggregate) is dict
+            and type(aggregate.get("repo")) is str
+            and type(aggregate.get("arm")) is str
+        ):
+            scheduled.append((aggregate["repo"], aggregate["arm"]))
+    if not scheduled:
+        scheduled = list(
+            dict.fromkeys((result["repository"], result["arm"]) for result in results)
         )
-        summary = build_run_summary(
-            selected,
-            arguments.arms,
-            arguments.trials,
-            arguments.model,
-            arguments.thinking,
-            results,
-            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    trials = previous.get("trials")
+    aggregates = []
+    for repository, arm in scheduled:
+        matching = [
+            result
+            for result in results
+            if result["repository"] == repository and result["arm"] == arm
+        ]
+        failures = [
+            {
+                "repo": row["repo"],
+                "arm": row["arm"],
+                "trial": row["trial"],
+                "error": row["error"],
+            }
+            for row in map(_report_row, matching)
+            if not row["cleared"]
+        ]
+        if type(trials) is int:
+            present = {result["trial"] for result in matching}
+            failures.extend(
+                {
+                    "repo": repository,
+                    "arm": arm,
+                    "trial": trial,
+                    "error": "missing result",
+                }
+                for trial in range(1, trials + 1)
+                if trial not in present
+            )
+        aggregates.append(
+            {
+                "repo": repository,
+                "arm": arm,
+                "row_count": len(matching),
+                "failures": failures,
+                "comparison_error": error,
+            }
         )
-    except (OSError, ValueError):
-        summary = {
-            **previous,
-            "arms": [_report_row(result) for result in results],
-            "results": results,
-            "aggregates": [],
-        }
-    summary["aggregates"] = [
-        {
-            "repo": aggregate["repo"],
-            "arm": aggregate["arm"],
-            "row_count": aggregate["row_count"],
-            "failures": aggregate["failures"],
-            "comparison_error": error,
-        }
-        for aggregate in summary["aggregates"]
-    ]
+    summary = {
+        **previous,
+        "arms": [_report_row(result) for result in results],
+        "results": results,
+        "aggregates": aggregates,
+    }
     _write_json_atomically(summary_path, summary)
 
 
@@ -2883,9 +2897,7 @@ def main(argv: list[str] | None = None) -> int:
             if not completed:
                 raise
             if arguments.command == "qualify":
-                _invalidate_stage_cleanup_receipts(
-                    arguments.cache, arguments.manifest, tuple(arguments.repo or ())
-                )
+                _invalidate_stage_cleanup_receipts(arguments.cache)
                 print(f"Docker qualification failed: {error}", file=sys.stderr)
             else:
                 _downgrade_stage_cleanup_run(arguments, str(error))

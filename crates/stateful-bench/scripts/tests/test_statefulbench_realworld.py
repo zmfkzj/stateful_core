@@ -1835,10 +1835,17 @@ class QualificationTests(unittest.TestCase):
             platform="linux/arm64",
         )
         tools = self._tools()
+        original_manifest = self.manifest.read_bytes()
+        swapped_manifest = json.loads(original_manifest)
+        swapped_manifest["repositories"] = swapped_manifest["repositories"][:1]
+        receipt_root = self.cache / "qualification" / "receipts"
+        receipt_root.mkdir(parents=True)
+        (receipt_root / "unrelated.json").write_text("{}\n", encoding="utf-8")
 
         @contextlib.contextmanager
         def stage(manifest: Path):
             yield manifest
+            self.manifest.write_text(json.dumps(swapped_manifest), encoding="utf-8")
             raise OSError("dataset stage cleanup failed")
 
         qualified = {
@@ -1887,12 +1894,11 @@ class QualificationTests(unittest.TestCase):
                     runtime.image,
                 ]
             )
+        self.manifest.write_bytes(original_manifest)
 
         self.assertEqual(status, 1)
-        for key in ("fixture", "fixture-1"):
-            self.assertFalse(
-                (self.cache / "qualification" / "receipts" / f"{key}.json").exists()
-            )
+        for key in ("fixture", "fixture-1", "unrelated"):
+            self.assertFalse((receipt_root / f"{key}.json").exists())
 
     def test_outer_qualification_invalidates_receipt_before_docker_failure(self) -> None:
         runtime = self.mod._DOCKER.DockerRuntime(
@@ -3673,18 +3679,31 @@ class RealWorldReportingTests(unittest.TestCase):
         retained = json.loads(json.dumps(results))
         writes = []
         write_result = self.mod._write_run_result
+        source_manifest = self.root / "manifest.json"
+        source_manifest.write_text('{"original": true}\n', encoding="utf-8")
+        original_manifest = source_manifest.read_bytes()
+        stage_state = {"swapped": False}
+
 
         @contextlib.contextmanager
         def stage(manifest: Path):
             yield manifest
+            source_manifest.write_text('{"swapped": true}\n', encoding="utf-8")
+            stage_state["swapped"] = True
             raise OSError("dataset stage cleanup failed")
+
 
         def record_write(out: Path, result: dict) -> None:
             writes.append(json.loads(json.dumps(result)))
             write_result(out, result)
 
+        def load_manifest(_path: Path):
+            if stage_state["swapped"]:
+                raise AssertionError("cleanup must not reread source manifest")
+            return {}
+
         with (
-            mock.patch.object(self.mod, "load_manifest", return_value={}),
+            mock.patch.object(self.mod, "load_manifest", side_effect=load_manifest),
             mock.patch.object(
                 self.mod, "repo_entries", return_value=(self.repositories[0],)
             ),
@@ -3726,6 +3745,7 @@ class RealWorldReportingTests(unittest.TestCase):
                     "statefulbench-realworld:local",
                 ]
             )
+        source_manifest.write_bytes(original_manifest)
 
         self.assertEqual(status, 1)
         summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
