@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import shutil
 import tempfile
 import stat
 from pathlib import Path
@@ -85,25 +86,69 @@ def _quote_identifier(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
+def _copy_descriptor(descriptor: int, destination: Path) -> None:
+    output = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        while block := os.read(descriptor, 1024 * 1024):
+            remaining = memoryview(block)
+            while remaining:
+                written = os.write(output, remaining)
+                if written <= 0:
+                    raise OSError("diagnostic copy write failed")
+                remaining = remaining[written:]
+    finally:
+        os.close(output)
+
+
+def _unchanged(current: os.stat_result, expected: os.stat_result) -> bool:
+    return (
+        current.st_dev,
+        current.st_ino,
+        current.st_size,
+        current.st_mtime_ns,
+    ) == (
+        expected.st_dev,
+        expected.st_ino,
+        expected.st_size,
+        expected.st_mtime_ns,
+    )
+
 def _sqlite_record(path: Path, expected: os.stat_result) -> dict:
     record: dict = {"integrity": "unknown", "schemas": [], "table_counts": {}}
     connection: sqlite3.Connection | None = None
-    descriptor: int | None = None
-    temporary: Path | None = None
+    temporary_dir: Path | None = None
+    descriptors: list[tuple[int, os.stat_result]] = []
+    sidecars = tuple(path.with_name(f"{path.name}{suffix}") for suffix in ("-wal", "-shm", "-journal"))
+    absent_sidecars: list[Path] = []
     try:
-        descriptor, _ = _regular_descriptor(path, expected)
-        temporary_descriptor, temporary_name = tempfile.mkstemp(suffix=".sqlite")
-        temporary = Path(temporary_name)
-        try:
-            while block := os.read(descriptor, 1024 * 1024):
-                remaining = memoryview(block)
-                while remaining:
-                    remaining = remaining[os.write(temporary_descriptor, remaining) :]
-        finally:
-            os.close(temporary_descriptor)
+        sources: list[tuple[Path, os.stat_result]] = [(path, expected)]
+        for sidecar in sidecars:
+            try:
+                sources.append((sidecar, sidecar.lstat()))
+            except FileNotFoundError:
+                absent_sidecars.append(sidecar)
+        for source, metadata in sources:
+            descriptors.append(_regular_descriptor(source, metadata))
+        temporary_dir = Path(tempfile.mkdtemp(prefix="statefulbench-sqlite-"))
+        temporary_dir.chmod(0o700)
+        for (source, _), (descriptor, _) in zip(sources, descriptors, strict=True):
+            _copy_descriptor(descriptor, temporary_dir / source.name)
+        for sidecar in absent_sidecars:
+            try:
+                sidecar.lstat()
+            except FileNotFoundError:
+                continue
+            raise OSError("SQLite sidecar appeared during diagnostic capture")
+        if any(
+            not _unchanged(os.fstat(descriptor), metadata)
+            for descriptor, metadata in descriptors
+        ):
+            raise OSError("SQLite source changed during diagnostic capture")
+        for descriptor, _ in descriptors:
             os.close(descriptor)
-            descriptor = None
-        connection = sqlite3.connect(f"{temporary.as_uri()}?mode=ro", uri=True)
+        descriptors.clear()
+        copied_database = temporary_dir / path.name
+        connection = sqlite3.connect(f"{copied_database.as_uri()}?mode=ro", uri=True)
         integrity = connection.execute("pragma integrity_check").fetchone()
         if integrity != ("ok",):
             record["integrity"] = "malformed"
@@ -132,12 +177,12 @@ def _sqlite_record(path: Path, expected: os.stat_result) -> dict:
     except OSError:
         record["integrity"] = "unavailable"
     finally:
-        if descriptor is not None:
+        for descriptor, _ in descriptors:
             os.close(descriptor)
         if connection is not None:
             connection.close()
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
+        if temporary_dir is not None:
+            shutil.rmtree(temporary_dir, ignore_errors=True)
     return record
 
 

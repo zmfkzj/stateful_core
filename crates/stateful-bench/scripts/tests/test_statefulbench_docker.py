@@ -574,6 +574,44 @@ class DockerDiagnosticTests(unittest.TestCase):
 
         self.assertEqual(snapshot["databases"]["agent%2Fstate.db"]["integrity"], "ok")
 
+    def test_snapshot_includes_committed_wal_database_contents(self) -> None:
+        import sqlite3
+
+        database = self.home / "agent.db"
+        connection = sqlite3.connect(database)
+        try:
+            self.assertEqual(
+                connection.execute("pragma journal_mode = wal").fetchone(),
+                ("wal",),
+            )
+            connection.execute("create table safe_items (id integer)")
+            connection.execute("insert into safe_items values (1)")
+            connection.commit()
+            self.assertTrue((self.home / "agent.db-wal").is_file())
+
+            snapshot = self.diagnostics.snapshot_home(self.home)
+        finally:
+            connection.close()
+
+        self.assertEqual(snapshot["databases"]["agent.db"]["integrity"], "ok")
+        self.assertEqual(snapshot["databases"]["agent.db"]["schemas"], ["safe_items"])
+        self.assertEqual(snapshot["databases"]["agent.db"]["table_counts"], {"safe_items": 1})
+
+    def test_snapshot_rejects_unsafe_sqlite_sidecar(self) -> None:
+        import sqlite3
+
+        database = self.home / "agent.db"
+        outside = Path(self.tempdir.name) / "outside"
+        with sqlite3.connect(database) as connection:
+            connection.execute("create table safe_items (id integer)")
+        connection.close()
+        outside.write_text("untrusted", encoding="utf-8")
+        (self.home / "agent.db-wal").symlink_to(outside)
+
+        snapshot = self.diagnostics.snapshot_home(self.home)
+
+        self.assertEqual(snapshot["databases"]["agent.db"]["integrity"], "unavailable")
+
     def test_snapshot_does_not_reopen_database_after_symlink_swap(self) -> None:
         import sqlite3
 
