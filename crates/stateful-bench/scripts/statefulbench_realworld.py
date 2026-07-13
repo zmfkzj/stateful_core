@@ -3,10 +3,12 @@ from __future__ import annotations
 import argparse
 import ast
 import contextlib
+import copy
 import functools
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import posixpath
 import re
@@ -1304,6 +1306,91 @@ def _agent_only_timing(
     )
     return tasks_wall_time_s + final_wall_time_s, tasks_wall_time_s, final_wall_time_s
 
+def _nonnegative_int(value: object, label: str) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{label} is invalid")
+    return value
+
+
+def _context_render_snapshot_count(snapshot: dict, phase: str) -> int:
+    if type(snapshot) is not dict:
+        raise ValueError(f"missing context render metrics at {phase}")
+    runtime_metrics = snapshot.get("runtime_metrics")
+    if type(runtime_metrics) is not dict:
+        raise ValueError(f"missing context render metrics at {phase}")
+    return _nonnegative_int(
+        runtime_metrics.get("context_render_success_count"),
+        f"context render count at {phase}",
+    )
+
+
+def _after_final_coordination_metrics(snapshot: dict) -> dict:
+    if type(snapshot) is not dict:
+        raise ValueError("after-final coordination diagnostics are invalid")
+    databases = snapshot.get("databases")
+    if type(databases) is not dict:
+        raise ValueError("after-final coordination diagnostics are invalid")
+    recognized = [
+        record["coordination_metrics"]
+        for record in databases.values()
+        if type(record) is dict and type(record.get("coordination_metrics")) is dict
+    ]
+    if len(recognized) != 1:
+        raise ValueError("exactly one coordination metrics database is required")
+    return copy.deepcopy(recognized[0])
+
+
+def _build_coordination_metrics(
+    arm: str, snapshots: dict[str, dict], agents: list[dict]
+) -> dict | None:
+    if arm != "parallel-on":
+        return None
+    if type(snapshots) is not dict:
+        raise ValueError("context render snapshots are invalid")
+    before_tasks = _context_render_snapshot_count(
+        snapshots.get("before-tasks"), "before-tasks"
+    )
+    after_tasks = _context_render_snapshot_count(
+        snapshots.get("after-tasks"), "after-tasks"
+    )
+    after_final = _context_render_snapshot_count(
+        snapshots.get("after-final"), "after-final"
+    )
+    if before_tasks > after_tasks or after_tasks > after_final:
+        raise ValueError("context render counts decreased across phases")
+    if type(agents) is not list:
+        raise ValueError("agent coordination metrics are invalid")
+    explicit_calls = {"task": 0, "final": 0}
+    for record in agents:
+        if type(record) is not dict:
+            raise ValueError("agent coordination metrics are invalid")
+        kind = record.get("kind")
+        if kind in explicit_calls:
+            explicit_calls[kind] += _nonnegative_int(
+                record.get("context_render_tool_calls"),
+                f"context render tool calls for {kind}",
+            )
+    metrics = _after_final_coordination_metrics(snapshots.get("after-final"))
+    task_server = after_tasks - before_tasks
+    final_server = after_final - after_tasks
+    context_renders = {
+        "server": {
+            "tasks": task_server,
+            "final": final_server,
+            "total": task_server + final_server,
+        },
+        "explicit_tool_calls": {
+            "tasks": explicit_calls["task"],
+            "final": explicit_calls["final"],
+            "total": explicit_calls["task"] + explicit_calls["final"],
+        },
+    }
+    _normalized_coordination_metrics(
+        {**metrics, "context_renders": context_renders}
+    )
+    metrics["context_renders"] = context_renders
+    return metrics
+
 
 
 
@@ -1325,6 +1412,7 @@ def _empty_run_result(
         "final_wall_time_s": 0.0,
         "total_tokens": 0,
         "total_tool_calls": 0,
+        "coordination_metrics": None,
         "post_suite_ok": False,
         "evaluators_ok": False,
         "upstream_suite_ok": False,
@@ -1736,6 +1824,7 @@ def _downgrade_stage_cleanup_run(arguments, error: str) -> None:
             continue
         if type(result) is not dict:
             continue
+        result.setdefault("coordination_metrics", None)
         _append_stage_cleanup_error(result, error)
         _write_run_result(arguments.out, result)
         results.append(result)
@@ -1790,6 +1879,7 @@ def _downgrade_stage_cleanup_run(arguments, error: str) -> None:
                 "row_count": len(matching),
                 "failures": failures,
                 "comparison_error": error,
+                "coordination_metrics": None,
             }
         )
     summary = {
@@ -2051,6 +2141,8 @@ def _run_container_repo_arm(
     evaluator_results: list[dict[str, bool | str]] = []
     upstream_suite_ok = False
     error: str | None = None
+    coordination_metrics: dict | None = None
+    coordination_metrics_failed = False
     container: _DOCKER.ArmContainer | None = None
     container_removed = False
     row_started = time.monotonic()
@@ -2212,6 +2304,11 @@ def _run_container_repo_arm(
         )
         if evidence_error is not None:
             raise RuntimeError(evidence_error)
+        try:
+            coordination_metrics = _build_coordination_metrics(arm, snapshots, agents)
+        except ValueError:
+            coordination_metrics_failed = True
+            raise
         evaluators_ok, upstream_suite_ok, evaluator_results = container_post_checks(
             repo,
             corpus,
@@ -2270,7 +2367,10 @@ def _run_container_repo_arm(
         getattr(container, "container_id", "") if container is not None else "",
         {task["key"] for task, _ in tasks} | {"final"},
     )
-    if set(snapshots) != set(_DOCKER.DIAGNOSTIC_PHASES):
+    if (
+        set(snapshots) != set(_DOCKER.DIAGNOSTIC_PHASES)
+        and not coordination_metrics_failed
+    ):
         diagnostic_error = diagnostic_error or "missing shared HOME evidence"
     for snapshot_value in snapshots.values():
         classification = _DIAGNOSTICS.classify_runtime_failure(None, snapshot_value)
@@ -2301,6 +2401,7 @@ def _run_container_repo_arm(
         "final_wall_time_s": final_wall_time_s,
         "total_tokens": sum(record["total_tokens"] for record in agents),
         "total_tool_calls": sum(record["tool_calls"] for record in agents),
+        "coordination_metrics": coordination_metrics,
         "post_suite_ok": post_suite_ok,
         "evaluators_ok": evaluators_ok,
         "upstream_suite_ok": upstream_suite_ok,
@@ -2639,6 +2740,7 @@ def run_repo_arm(
         "final_wall_time_s": final_wall_time_s,
         "total_tokens": sum(record["total_tokens"] for record in agents),
         "total_tool_calls": sum(record["tool_calls"] for record in agents),
+        "coordination_metrics": None,
         "post_suite_ok": post_suite_ok,
         "evaluators_ok": evaluators_ok,
         "upstream_suite_ok": upstream_suite_ok,
@@ -2686,6 +2788,235 @@ def _report_row(result: dict) -> dict:
         "tokens": result["total_tokens"],
         "tool_calls": result["total_tool_calls"],
         "error": _failure_reason(result),
+        "coordination_metrics": result.get("coordination_metrics"),
+    }
+
+_NOTIFICATION_STATUSES = frozenset({"created", "delivered", "pending", "expired"})
+_COORDINATION_RENDER_SOURCES = frozenset({"server", "explicit_tool_calls"})
+_COORDINATION_RENDER_PHASES = frozenset({"tasks", "final", "total"})
+_REQUIRED_NOTIFICATION_KINDS = frozenset({"reservation_granted", "scope_overlap"})
+
+
+def _nonnegative_number(value: object, label: str) -> float:
+    if type(value) not in {int, float} or not math.isfinite(value) or value < 0:
+        raise ValueError(f"{label} is invalid")
+    return float(value)
+
+
+def _integer_map(
+    value: object, label: str, required_keys: frozenset[str] | None = None
+) -> dict[str, int]:
+    if type(value) is not dict:
+        raise ValueError(f"{label} is invalid")
+    if required_keys is not None and set(value) != required_keys:
+        raise ValueError(f"{label} is invalid")
+    result: dict[str, int] = {}
+    for key, count in value.items():
+        if type(key) is not str or not key:
+            raise ValueError(f"{label} is invalid")
+        result[key] = _nonnegative_int(count, f"{label}.{key}")
+    return result
+
+
+def _sum_integer_maps(values: list[dict[str, int]]) -> dict[str, int]:
+    summed: dict[str, int] = {}
+    for value in values:
+        for key, count in value.items():
+            summed[key] = summed.get(key, 0) + count
+    return dict(sorted(summed.items()))
+
+
+def _normalized_coordination_metrics(value: object) -> dict:
+    required = {"notifications", "waits", "authorization", "context_renders"}
+    if type(value) is not dict or set(value) != required:
+        raise ValueError("coordination metrics are invalid")
+
+    notifications = value["notifications"]
+    if type(notifications) is not dict or set(notifications) != {"by_kind"}:
+        raise ValueError("coordination notifications are invalid")
+    notification_by_kind = notifications["by_kind"]
+    if type(notification_by_kind) is not dict:
+        raise ValueError("coordination notifications are invalid")
+    if not _REQUIRED_NOTIFICATION_KINDS.issubset(notification_by_kind):
+        raise ValueError("coordination notifications are invalid")
+    normalized_notifications: dict[str, dict[str, int]] = {}
+    for kind, counts in notification_by_kind.items():
+        if type(kind) is not str or not kind:
+            raise ValueError("coordination notifications are invalid")
+        normalized_counts = _integer_map(
+            counts, f"coordination notifications.{kind}", _NOTIFICATION_STATUSES
+        )
+        if normalized_counts["created"] != sum(
+            normalized_counts[status]
+            for status in _NOTIFICATION_STATUSES
+            if status != "created"
+        ):
+            raise ValueError("coordination notifications are invalid")
+        normalized_notifications[kind] = normalized_counts
+
+    waits = value["waits"]
+    if type(waits) is not dict or set(waits) != {
+        "by_final_status",
+        "grant_wait_time_s",
+        "unmeasured_grants",
+    }:
+        raise ValueError("coordination waits are invalid")
+    wait_statuses = _integer_map(
+        waits["by_final_status"], "coordination wait statuses"
+    )
+    wait_time = waits["grant_wait_time_s"]
+    if type(wait_time) is not dict or set(wait_time) != {
+        "count",
+        "total",
+        "mean",
+        "max",
+    }:
+        raise ValueError("coordination grant wait time is invalid")
+    grant_count = _nonnegative_int(wait_time["count"], "coordination grant count")
+    grant_total = _nonnegative_number(
+        wait_time["total"], "coordination grant total"
+    )
+    grant_mean = wait_time["mean"]
+    grant_maximum = wait_time["max"]
+    if grant_count == 0:
+        if grant_total != 0.0 or grant_mean is not None or grant_maximum is not None:
+            raise ValueError("coordination grant wait time is invalid")
+    else:
+        grant_mean = _nonnegative_number(grant_mean, "coordination grant mean")
+        grant_maximum = _nonnegative_number(
+            grant_maximum, "coordination grant maximum"
+        )
+        if grant_mean != round(grant_total / grant_count, 6):
+            raise ValueError("coordination grant wait time is invalid")
+    normalized_wait_time = {
+        "count": grant_count,
+        "total": grant_total,
+        "mean": grant_mean,
+        "max": grant_maximum,
+    }
+    unmeasured_grants = _nonnegative_int(
+        waits["unmeasured_grants"], "coordination unmeasured grants"
+    )
+
+    authorization = value["authorization"]
+    if type(authorization) is not dict or set(authorization) != {
+        "denied_by_reason",
+        "warned_by_reason",
+    }:
+        raise ValueError("coordination authorization is invalid")
+    denied = _integer_map(
+        authorization["denied_by_reason"], "coordination denied reasons"
+    )
+    warned = _integer_map(
+        authorization["warned_by_reason"], "coordination warned reasons"
+    )
+
+    context_renders = value["context_renders"]
+    if type(context_renders) is not dict or set(context_renders) != _COORDINATION_RENDER_SOURCES:
+        raise ValueError("coordination context renders are invalid")
+    normalized_renders: dict[str, dict[str, int]] = {}
+    for source, counts in context_renders.items():
+        normalized = _integer_map(
+            counts, f"coordination context renders.{source}", _COORDINATION_RENDER_PHASES
+        )
+        if normalized["total"] != normalized["tasks"] + normalized["final"]:
+            raise ValueError("coordination context renders are invalid")
+        normalized_renders[source] = normalized
+
+    return {
+        "notifications": {"by_kind": normalized_notifications},
+        "waits": {
+            "by_final_status": wait_statuses,
+            "grant_wait_time_s": normalized_wait_time,
+            "unmeasured_grants": unmeasured_grants,
+        },
+        "authorization": {
+            "denied_by_reason": denied,
+            "warned_by_reason": warned,
+        },
+        "context_renders": normalized_renders,
+    }
+
+
+def _aggregate_coordination_metrics(
+    arm: str, rows: list[dict], trials: int
+) -> dict | None:
+    if (
+        arm != "parallel-on"
+        or type(rows) is not list
+        or type(trials) is not int
+        or trials < 1
+        or len(rows) != trials
+        or any(type(row) is not dict for row in rows)
+        or any(type(row.get("trial")) is not int for row in rows)
+        or {row["trial"] for row in rows} != set(range(1, trials + 1))
+    ):
+        return None
+    try:
+        metrics = [
+            _normalized_coordination_metrics(row.get("coordination_metrics"))
+            for row in rows
+            if type(row) is dict
+        ]
+        if len(metrics) != len(rows):
+            return None
+    except ValueError:
+        return None
+
+    notification_by_kind: dict[str, dict[str, int]] = {}
+    for metric in metrics:
+        for kind, counts in metric["notifications"]["by_kind"].items():
+            existing = notification_by_kind.setdefault(
+                kind, {status: 0 for status in _NOTIFICATION_STATUSES}
+            )
+            for status, count in counts.items():
+                existing[status] += count
+    notification_by_kind = {
+        kind: dict(sorted(counts.items()))
+        for kind, counts in sorted(notification_by_kind.items())
+    }
+    wait_time_rows = [metric["waits"]["grant_wait_time_s"] for metric in metrics]
+    grant_count = sum(value["count"] for value in wait_time_rows)
+    grant_total = round(sum(value["total"] for value in wait_time_rows), 6)
+    maxima = [value["max"] for value in wait_time_rows if value["max"] is not None]
+    grant_wait_time_s = {
+        "count": grant_count,
+        "total": grant_total,
+        "mean": None if grant_count == 0 else round(grant_total / grant_count, 6),
+        "max": None if grant_count == 0 else max(maxima),
+    }
+
+    return {
+        "notifications": {"by_kind": notification_by_kind},
+        "waits": {
+            "by_final_status": _sum_integer_maps(
+                [metric["waits"]["by_final_status"] for metric in metrics]
+            ),
+            "grant_wait_time_s": grant_wait_time_s,
+            "unmeasured_grants": sum(
+                metric["waits"]["unmeasured_grants"] for metric in metrics
+            ),
+        },
+        "authorization": {
+            "denied_by_reason": _sum_integer_maps(
+                [
+                    metric["authorization"]["denied_by_reason"]
+                    for metric in metrics
+                ]
+            ),
+            "warned_by_reason": _sum_integer_maps(
+                [
+                    metric["authorization"]["warned_by_reason"]
+                    for metric in metrics
+                ]
+            ),
+        },
+        "context_renders": {
+            source: _sum_integer_maps(
+                [metric["context_renders"][source] for metric in metrics]
+            )
+            for source in sorted(_COORDINATION_RENDER_SOURCES)
+        },
     }
 
 
@@ -2749,6 +3080,7 @@ def build_run_summary(
                         "row_count": len(matching),
                         "failures": failures,
                         "comparison_error": "mixed Docker runtime provenance",
+                        "coordination_metrics": None,
                     }
                 )
                 continue
@@ -2767,6 +3099,9 @@ def build_run_summary(
                     ),
                     "tokens": sum(row["tokens"] for row in matching),
                     "tool_calls": sum(row["tool_calls"] for row in matching),
+                    "coordination_metrics": _aggregate_coordination_metrics(
+                        arm, original_rows, trials
+                    ),
                     "failures": failures,
                 }
             )

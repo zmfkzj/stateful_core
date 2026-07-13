@@ -111,6 +111,22 @@ The harness records:
 - timeout, exit, setup, and server failure reasons; and
 - per-repository and ten-repository aggregate results.
 
+### Coordination metrics
+
+Each detailed result row also contains `coordination_metrics`. It supplements the efficiency fields and does not redefine `cleared`.
+
+- `sequential` and `parallel-off` rows set `coordination_metrics` to `null`.
+- A `parallel-on` row contains an object only when all coordination diagnostics are complete. If the private coordination SQLite snapshot is unavailable, locked, malformed, or lacks the expected schema; server-log markers cannot be captured consistently; marker phase counts decrease; or the result assembler cannot construct the object, the field is `null` and the existing diagnostic failure path leaves the row uncleared.
+- Each populated object contains:
+  - `notifications.by_kind`, a status-count map for protocol notification kinds. It always includes `scope_overlap` and `reservation_granted`, each with `created`, `delivered`, `pending`, and `expired` counts; other protocol kinds may appear as sorted keys. `created` is the sum of retained status counts. A `scope_overlap` count is a deduplicated advisory-notification count, not a raw edit-collision count, and `delivered` records poll/SSE delivery.
+  - `waits.by_final_status`; `waits.grant_wait_time_s` with `count`, `total`, `mean`, and `max`; and `waits.unmeasured_grants`. A measurable grant duration runs from the matched reservation wait request to grant availability. Missing links or timestamps, malformed timestamps, and negative durations increment `unmeasured_grants` rather than becoming zero; `mean` and `max` are `null` when `count` is zero.
+  - `authorization.denied_by_reason` and `authorization.warned_by_reason`, which count protocol reason codes without decision messages.
+  - `context_renders.server` and `context_renders.explicit_tool_calls`, each with `tasks`, `final`, and `total`. Server `tasks` is the `after-tasks - before-tasks` successful-marker delta, `final` is `after-final - after-tasks`, and `total` is their sum. Explicit `tasks` sums task-agent OMP-log executions and `final` comes from the final-agent log. The benchmark does not derive an automatic-render count.
+
+`results.json` and `summary.json.results` retain complete row objects. A repository/arm aggregate has coordination metrics only when every scheduled `parallel-on` row is present and complete; otherwise its field is `null`, never a partial total. Aggregate notification, wait-status, authorization, render, measured-grant, and unmeasured-grant counts and wait totals are summed. The aggregate wait `mean` is the weighted `total / count`, rather than an average of row means; `max` is the maximum row value, or `null` for zero measured grants.
+
+The published object is value-free: it contains aggregate protocol categories, counts, and derived aggregate wait durations only. It must not expose notification payloads, wait/reservation/agent IDs, paths, resources, timestamps, free-form messages, raw database rows, or raw server-log lines. These diagnostics are observational evidence, not proof that Stateful caused an outcome. A fresh authorized smoke must emit the new fields before they are used for an on/off conclusion.
+
 The reporting contract remains efficiency-only. A single trial is descriptive. Results must not be presented as behavioral-quality, causal, safety, or statistical-superiority evidence.
 
 ## Qualification and launch gates

@@ -135,31 +135,83 @@ class StatefulBenchLiteTests(unittest.TestCase):
             log.write_text(
                 "\n".join(
                     [
-                        json.dumps({"message": {"usage": {"totalTokens": 11, "toolCalls": 3}}}),
+                        json.dumps(
+                            {
+                                "message": {
+                                    "content": "Use state_context_render before editing.",
+                                    "usage": {"totalTokens": 11, "toolCalls": 3},
+                                }
+                            }
+                        ),
                         "not json",
                         json.dumps({"usage": {"total_tokens": 7, "tool_calls": 2}}),
-                        json.dumps({"type": "tool_execution_start"}),
+                        json.dumps({"type": "tool_execution_start", "toolName": "state_context_render"}),
+                        json.dumps({"type": "tool_execution_start", "toolName": "state.context.render"}),
+                        json.dumps(
+                            {
+                                "type": "tool_execution_start",
+                                "toolName": "mcp__stateful__state_context_render",
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "tool_execution_start",
+                                "toolName": "mcp__stateful_state_context_render",
+                            }
+                        ),
+                        json.dumps({"type": "tool_execution_start", "toolName": "read_file"}),
+                        json.dumps(
+                            {
+                                "type": "tool_execution_end",
+                                "toolName": "state_context_render",
+                                "result": "state_context_render completed",
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "tool_result",
+                                "content": "state_context_render is available",
+                            }
+                        ),
                     ]
                 )
                 + "\n",
                 encoding="utf-8",
             )
-            self.assertEqual(self.mod.usage_from_log(log), {"total_tokens": 18, "tool_calls": 5})
+            self.assertEqual(
+                self.mod.usage_from_log(log),
+                {"total_tokens": 18, "tool_calls": 5, "context_render_tool_calls": 4},
+            )
 
             event_log = Path(temp_dir) / "event-agent.stdout.log"
             event_log.write_text(
                 "\n".join(
                     [
-                        json.dumps({"type": "toolcall_start"}),
-                        json.dumps({"type": "tool_execution_start"}),
-                        json.dumps({"type": "tool_execution_end"}),
-                        json.dumps({"type": "tool_execution_start"}),
+                        json.dumps({"type": "toolcall_start", "toolName": "state_context_render"}),
+                        json.dumps({"type": "tool_execution_start", "toolName": "read_file"}),
+                        json.dumps({"type": "tool_execution_end", "toolName": "state_context_render"}),
+                        json.dumps({"type": "tool_execution_start", "toolName": None}),
                     ]
                 )
                 + "\n",
                 encoding="utf-8",
             )
-            self.assertEqual(self.mod.usage_from_log(event_log), {"total_tokens": 0, "tool_calls": 2})
+            self.assertEqual(
+                self.mod.usage_from_log(event_log),
+                {"total_tokens": 0, "tool_calls": 2, "context_render_tool_calls": 0},
+            )
+
+            malformed_log = Path(temp_dir) / "malformed-agent.stdout.log"
+            malformed_log.write_text("not json\n", encoding="utf-8")
+            self.assertEqual(
+                self.mod.usage_from_log(malformed_log),
+                {"total_tokens": 0, "tool_calls": 0, "context_render_tool_calls": 0},
+            )
+
+            self.assertEqual(
+                self.mod.usage_from_log(Path(temp_dir) / "missing-agent.stdout.log"),
+                {"total_tokens": 0, "tool_calls": 0, "context_render_tool_calls": 0},
+            )
     def test_copy_stateful_omp_agent_db_seeds_only_codex_oauth_credentials(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

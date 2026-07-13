@@ -35,7 +35,10 @@ use std::{
     convert::Infallible,
     net::SocketAddr,
     str::FromStr,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 use tokio_stream::{Stream, StreamExt, wrappers::IntervalStream};
@@ -43,6 +46,7 @@ use tokio_stream::{Stream, StreamExt, wrappers::IntervalStream};
 pub const CRATE_NAME: &str = "stateful-server";
 const RUNTIME_CAPABILITIES: &[&str] = &["authorize.write_directory"];
 const DEFAULT_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
+const CONTEXT_RENDER_SUCCESS_MARKER: &str = "[stateful-metric] context_render_success";
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -50,6 +54,7 @@ pub struct ServerConfig {
     store: SharedStore,
     maintenance_interval: Duration,
     coordination_mode: CoordinationMode,
+    context_render_success_count: Arc<AtomicU64>,
 }
 
 impl ServerConfig {
@@ -66,7 +71,19 @@ impl ServerConfig {
             store: Arc::new(Mutex::new(store)),
             maintenance_interval: DEFAULT_MAINTENANCE_INTERVAL,
             coordination_mode: CoordinationMode::Enforcement,
+            context_render_success_count: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    fn record_context_render_success(&self) {
+        self.context_render_success_count
+            .fetch_add(1, Ordering::Relaxed);
+        eprintln!("{CONTEXT_RENDER_SUCCESS_MARKER}");
+    }
+
+    #[cfg(test)]
+    fn context_render_success_count(&self) -> u64 {
+        self.context_render_success_count.load(Ordering::Relaxed)
     }
 
     pub fn with_maintenance_interval(mut self, interval: Duration) -> Self {
@@ -1259,6 +1276,7 @@ async fn context_render(
     };
     let package = ContextPackage::from_items(live.items.clone());
     let prompt_text = render_prompt_text(&package, mode);
+    config.record_context_render_success();
 
     (
         StatusCode::OK,
@@ -2146,4 +2164,62 @@ struct OutboxSyncRequest {
     sequence: u64,
     event_type: String,
     payload: Value,
+}
+
+#[cfg(test)]
+mod context_render_metric_tests {
+    use super::*;
+    use axum::extract::State;
+
+    fn request(workspace_id: Option<&str>) -> ContextRenderRequest {
+        ContextRenderRequest {
+            mode: Some("brief".to_string()),
+            resource: None,
+            workspace_id: workspace_id.map(str::to_string),
+            agent_id: Some("agent-a".to_string()),
+            repo_id: None,
+            worktree_id: None,
+            root: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn context_render_metric_counts_only_successful_renders() {
+        let config = ServerConfig::new("token");
+        let (ok_status, _) = context_render(
+            State(config.clone()),
+            Json(request(Some("workspace-a"))),
+        )
+        .await;
+        let (bad_status, _) =
+            context_render(State(config.clone()), Json(request(None))).await;
+
+        assert_eq!(ok_status, StatusCode::OK);
+        assert_eq!(bad_status, StatusCode::BAD_REQUEST);
+        assert_eq!(config.context_render_success_count(), 1);
+        assert_eq!(
+            CONTEXT_RENDER_SUCCESS_MARKER,
+            "[stateful-metric] context_render_success"
+        );
+    }
+
+    #[tokio::test]
+    async fn context_render_metric_does_not_count_store_failure() {
+        let config = ServerConfig::new("token");
+        let store = config.store.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = store.lock().expect("store should initially lock");
+            panic!("poison test store");
+        })
+        .join();
+
+        let (status, _) = context_render(
+            State(config.clone()),
+            Json(request(Some("workspace-a"))),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(config.context_render_success_count(), 0);
+    }
 }

@@ -3,17 +3,41 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
 import sqlite3
 import shutil
 import tempfile
+from math import isfinite
 import stat
 from pathlib import Path
 
 _SENSITIVE = ("auth", "credential", "token", "secret", "cookie", "header")
 _LOCK_SUFFIXES = ("-wal", "-shm", "-journal", ".lock", ".tmp", ".temp")
+_CONTEXT_RENDER_SUCCESS_MARKER = b"[stateful-metric] context_render_success"
+_COORDINATION_TABLES = {"events", "notifications", "wait_queue"}
+_REQUIRED_NOTIFICATION_KINDS = ("reservation_granted", "scope_overlap")
+_NOTIFICATION_STATUSES = ("delivered", "expired", "pending")
+
+
+def _group_counts(rows) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value, count in rows:
+        if isinstance(value, str) and isinstance(count, int) and count >= 0:
+            counts[value] = count
+    return dict(sorted(counts.items()))
+
+
+def _parse_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
 def _sensitive(name: str) -> bool:
@@ -47,6 +71,40 @@ def _regular_descriptor(
         os.close(descriptor)
         raise
 
+def _rooted_regular_descriptor(
+    root: Path, path: Path, expected: os.stat_result
+) -> tuple[int, os.stat_result]:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    if nofollow is None or directory_flag is None:
+        raise OSError("safe directory descriptor flags are unavailable")
+    relative = path.relative_to(root)
+    if not relative.parts:
+        raise OSError("diagnostic log must be a file below its HOME")
+    directory = os.open(root, os.O_RDONLY | directory_flag | nofollow)
+    try:
+        for component in relative.parts[:-1]:
+            child = os.open(
+                component, os.O_RDONLY | directory_flag | nofollow, dir_fd=directory
+            )
+            os.close(directory)
+            directory = child
+        descriptor = os.open(
+            relative.parts[-1], os.O_RDONLY | os.O_NONBLOCK | nofollow, dir_fd=directory
+        )
+    finally:
+        os.close(directory)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or not _unchanged(opened, expected):
+            raise OSError("diagnostic file changed after lstat")
+        return descriptor, opened
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+
 
 def _digest(path: Path, expected: os.stat_result) -> str:
     descriptor, opened = _regular_descriptor(path, expected)
@@ -63,6 +121,33 @@ def _digest(path: Path, expected: os.stat_result) -> str:
         return digest.hexdigest()
     finally:
         os.close(descriptor)
+
+def _count_context_render_markers(
+    path: Path, expected: os.stat_result, root: Path | None = None
+) -> int:
+    descriptor, opened = (
+        _regular_descriptor(path, expected)
+        if root is None
+        else _rooted_regular_descriptor(root, path, expected)
+    )
+    try:
+        count = 0
+        partial = b""
+        while block := os.read(descriptor, 1024 * 1024):
+            lines = (partial + block).split(b"\n")
+            partial = lines.pop()
+            count += sum(
+                line == _CONTEXT_RENDER_SUCCESS_MARKER for line in lines
+            )
+        if partial == _CONTEXT_RENDER_SUCCESS_MARKER:
+            count += 1
+        if not _unchanged(os.fstat(descriptor), opened):
+            raise OSError("diagnostic file changed while counting markers")
+        return count
+    finally:
+        os.close(descriptor)
+
+
 
 
 def _file_record(home: Path, path: Path) -> dict:
@@ -112,6 +197,120 @@ def _unchanged(current: os.stat_result, expected: os.stat_result) -> bool:
         expected.st_size,
         expected.st_mtime_ns,
     )
+
+def _coordination_metrics(
+    connection: sqlite3.Connection, table_names: set[str]
+) -> dict | None:
+    if not _COORDINATION_TABLES.issubset(table_names):
+        return None
+
+    notification_counts: dict[str, dict[str, int]] = {
+        kind: {status: 0 for status in _NOTIFICATION_STATUSES}
+        for kind in _REQUIRED_NOTIFICATION_KINDS
+    }
+    for kind, status, count in connection.execute(
+        """
+        SELECT kind, status, COUNT(*)
+        FROM notifications
+        GROUP BY kind, status
+        """
+    ):
+        if (
+            isinstance(kind, str)
+            and isinstance(status, str)
+            and status in _NOTIFICATION_STATUSES
+            and isinstance(count, int)
+            and count >= 0
+        ):
+            notification_counts.setdefault(
+                kind, {known_status: 0 for known_status in _NOTIFICATION_STATUSES}
+            )[status] = count
+    notification_by_kind = {
+        kind: {
+            "created": sum(status_counts.values()),
+            **{
+                status: status_counts[status]
+                for status in _NOTIFICATION_STATUSES
+            },
+        }
+        for kind, status_counts in sorted(notification_counts.items())
+    }
+
+    wait_statuses = _group_counts(
+        connection.execute(
+            "SELECT status, COUNT(*) FROM wait_queue GROUP BY status"
+        )
+    )
+    requested_at = {
+        wait_id: _parse_timestamp(timestamp)
+        for wait_id, timestamp in connection.execute(
+            "SELECT wait_id, requested_at FROM wait_queue"
+        )
+        if isinstance(wait_id, str)
+    }
+    durations: list[float] = []
+    unmeasured_grants = 0
+    for payload_json, created_at in connection.execute(
+        """
+        SELECT payload_json, created_at
+        FROM notifications
+        WHERE kind = 'reservation_granted'
+        """
+    ):
+        try:
+            payload = json.loads(payload_json)
+        except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
+            unmeasured_grants += 1
+            continue
+        wait_id = payload.get("wait_id") if isinstance(payload, dict) else None
+        requested = requested_at.get(wait_id) if isinstance(wait_id, str) else None
+        created = _parse_timestamp(created_at)
+        if requested is None or created is None:
+            unmeasured_grants += 1
+            continue
+        seconds = (created - requested).total_seconds()
+        if not isfinite(seconds) or seconds < 0:
+            unmeasured_grants += 1
+            continue
+        durations.append(round(seconds, 6))
+    wait_total = round(sum(durations), 6) if durations else 0.0
+    wait_count = len(durations)
+    wait_stats = {
+        "count": wait_count,
+        "total": wait_total,
+        "mean": None if wait_count == 0 else round(wait_total / wait_count, 6),
+        "max": None if wait_count == 0 else max(durations),
+    }
+
+    def authorization_counts(event_type: str) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for (payload_json,) in connection.execute(
+            "SELECT payload_json FROM events WHERE event_type = ?", (event_type,)
+        ):
+            try:
+                payload = json.loads(payload_json)
+            except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            reason_code = (
+                payload.get("reason_code") if isinstance(payload, dict) else None
+            )
+            if isinstance(reason_code, str) and reason_code:
+                counts[reason_code] = counts.get(reason_code, 0) + 1
+        return dict(sorted(counts.items()))
+
+    return {
+        "notifications": {"by_kind": notification_by_kind},
+        "waits": {
+            "by_final_status": wait_statuses,
+            "grant_wait_time_s": wait_stats,
+            "unmeasured_grants": unmeasured_grants,
+        },
+        "authorization": {
+            "denied_by_reason": authorization_counts("AuthorizationDenied"),
+            "warned_by_reason": authorization_counts("AuthorizationWarned"),
+        },
+    }
+
 
 def _sqlite_record(path: Path, expected: os.stat_result) -> dict:
     record: dict = {"integrity": "unknown", "schemas": [], "table_counts": {}}
@@ -166,6 +365,9 @@ def _sqlite_record(path: Path, expected: os.stat_result) -> dict:
             name: connection.execute(f"select count(*) from {_quote_identifier(name)}").fetchone()[0]
             for name in names
         }
+        coordination_metrics = _coordination_metrics(connection, set(names))
+        if coordination_metrics is not None:
+            record["coordination_metrics"] = coordination_metrics
     except sqlite3.OperationalError as error:
         record["integrity"] = (
             "locked"
@@ -228,6 +430,15 @@ def snapshot_home(home: Path) -> dict:
             databases[relative] = _sqlite_record(path, metadata)
         if is_regular and path.name.casefold().endswith(_LOCK_SUFFIXES):
             locks.append(relative)
+    server_log = home / ".stateful" / "runtime" / "server.log"
+    try:
+        server_log_metadata = server_log.lstat()
+    except FileNotFoundError:
+        context_render_count = None
+    else:
+        context_render_count = _count_context_render_markers(
+            server_log, server_log_metadata, root=home
+        )
     return {
         "schema_version": 1,
         "home": home.as_posix() if home.as_posix().startswith("/home/") else "<home>",
@@ -236,6 +447,9 @@ def snapshot_home(home: Path) -> dict:
         "lock_files": locks,
         "per_agent_home_tree": (home.parent / "agents").exists(),
         "processes": _process_snapshot(),
+        "runtime_metrics": {
+            "context_render_success_count": context_render_count,
+        },
     }
 
 

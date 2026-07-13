@@ -418,6 +418,17 @@ differentiated safety outcome, and the ProgramBench note records completed
 inference trials plus the official-eval blocker. Do not infer quality wins from
 either artifact.
 
+Detailed StatefulBench `results.json` rows and `summary.json.results` expose
+value-free `coordination_metrics`: notification-status maps, final wait statuses
+and grant-wait summaries, authorization reason-code counts, and phase-separated
+context-render counts. Metrics are populated only for complete `parallel-on`
+evidence; sequential, parallel-off, mixed, or incomplete aggregates use `null`.
+Server render requests and agent-initiated render tool calls are reported
+separately. See the [StatefulBench coordination metrics
+reference](docs/statefulbench-realworld-design.md#coordination-metrics) for the
+detailed JSON schema and interpretation.
+
+
 The maintained StatefulBench workflow is the
 [Docker runtime guide](docs/statefulbench-lite.md) for the real-world corpus:
 100 issue-derived tasks across ten pinned repositories. Its currently tested

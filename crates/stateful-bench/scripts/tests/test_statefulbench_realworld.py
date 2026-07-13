@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import contextlib
 import importlib.util
@@ -2224,16 +2225,70 @@ class RealWorldRunnerTests(unittest.TestCase):
         self.tempdir.cleanup()
 
     @staticmethod
-    def container_diagnostics(_container, phase):
+    def coordination_aggregate() -> dict:
+        return {
+            "notifications": {
+                "by_kind": {
+                    "reservation_granted": {
+                        "created": 2,
+                        "delivered": 1,
+                        "pending": 1,
+                        "expired": 0,
+                    },
+                    "scope_overlap": {
+                        "created": 2,
+                        "delivered": 1,
+                        "pending": 1,
+                        "expired": 0,
+                    },
+                }
+            },
+            "waits": {
+                "by_final_status": {"claimed": 1, "queued": 1},
+                "grant_wait_time_s": {
+                    "count": 1,
+                    "total": 2.5,
+                    "mean": 2.5,
+                    "max": 2.5,
+                },
+                "unmeasured_grants": 1,
+            },
+            "authorization": {
+                "denied_by_reason": {"active_claim_conflict": 1},
+                "warned_by_reason": {"missing_claim": 1},
+            },
+        }
+
+    @classmethod
+    def container_diagnostics(cls, _container, phase):
+        context_render_counts = {
+            "initialized": 0,
+            "before-tasks": 2,
+            "after-tasks": 11,
+            "after-final": 16,
+            "after-grading": 16,
+            "before-remove": 16,
+        }
+        databases = {}
+        if phase == "after-final":
+            databases = {
+                ".stateful/state.db": {
+                    "integrity": "ok",
+                    "coordination_metrics": cls.coordination_aggregate(),
+                }
+            }
         return {
             "schema_version": 1,
             "phase": phase,
             "home": "/home/stateful",
             "files": [],
-            "databases": {},
+            "databases": databases,
             "lock_files": [],
             "per_agent_home_tree": False,
             "processes": [],
+            "runtime_metrics": {
+                "context_render_success_count": context_render_counts[phase],
+            },
         }
 
     @contextlib.contextmanager
@@ -2290,6 +2345,111 @@ class RealWorldRunnerTests(unittest.TestCase):
             evaluator=evaluator,
             suite=suite,
             **kwargs,
+        )
+
+    def run_container_with_diagnostics(self, arm, diagnostics):
+        runtime = self.mod._DOCKER.DockerRuntime(
+            binary="/docker",
+            image="statefulbench-realworld:local",
+            image_id="sha256:fixture",
+            repo_digests=(),
+            platform="linux/arm64",
+        )
+        workspace = self.root / f"workspace-{arm}"
+        workspace.mkdir(exist_ok=True)
+        container = self.mod._DOCKER.ArmContainer(
+            runtime, "container-1", arm, workspace, self.root / "runtime"
+        )
+        starts = []
+        waits = []
+
+        def execute(_container, *argv, **_kwargs):
+            if argv == ("sha256sum", "/usr/local/bin/stateful"):
+                return subprocess.CompletedProcess(
+                    [], 0, "a" * 64 + "  /usr/local/bin/stateful\n", ""
+                )
+            versions = {
+                ("python3", "--version"): "Python 3.14.6\n",
+                ("/usr/local/bin/omp", "--version"): "omp 1\n",
+                ("git", "--version"): "git version 2.50.0\n",
+                ("rustc", "--version"): "rustc 1.90.0\n",
+                ("cargo", "--version"): "cargo 1.90.0\n",
+            }
+            return subprocess.CompletedProcess([], 0, versions.get(argv, ""), "")
+
+        def launch(_container, _arm_dir, agent_id, _prompt, _cfg, _env):
+            starts.append(agent_id)
+            return object()
+
+        def wait(_container, _handle, _arm_dir, kind, _cfg):
+            agent_id = starts[len(waits)]
+            waits.append(kind)
+            return (
+                {
+                    "agent_id": agent_id,
+                    "kind": kind,
+                    "exit_code": 0,
+                    "timed_out": False,
+                    "cleanup_error": None,
+                    "wall_time_s": 0.0,
+                    "total_tokens": 0,
+                    "tool_calls": 0,
+                    "context_render_tool_calls": (
+                        2
+                        if kind == "final"
+                        else int(agent_id in {"task-0", "task-1", "task-2"})
+                    ),
+                },
+                float(len(waits)),
+            )
+
+        return self.mod.run_repo_arm(
+            self.repo,
+            self.corpus,
+            self.dataset,
+            self.root / "cache",
+            self.root / "out",
+            arm,
+            self.mod.RunConfig(
+                tasks=10,
+                stateful_binary="/usr/local/bin/stateful",
+                omp_bin="/usr/local/bin/omp",
+            ),
+            runtime=runtime,
+            archive_loader=lambda *_: self.root / "archive.tar.gz",
+            workspace_materializer=lambda *_: workspace,
+            arm_container_start=mock.Mock(return_value=container),
+            arm_runtime_prepare=mock.Mock(
+                return_value={
+                    "HOME": "/home/stateful",
+                    "PI_CODING_AGENT_DIR": "/home/stateful/.omp/profiles/stateful/agent",
+                }
+            ),
+            arm_container_remove=mock.Mock(),
+            container_exec=execute,
+            container_agent_launch=launch,
+            container_agent_wait=wait,
+            container_evaluator_inject=mock.Mock(),
+            container_post_checks=mock.Mock(
+                return_value=(
+                    True,
+                    True,
+                    [{"key": f"task-{index}", "ok": True} for index in range(10)],
+                )
+            ),
+            container_diagnostics=diagnostics,
+            container_inspect=mock.Mock(
+                return_value={
+                    "id": "container-1",
+                    "image_id": "sha256:fixture",
+                    "state": {
+                        "status": "running",
+                        "pid": 42,
+                        "started_at": "2026-07-13T00:00:00Z",
+                        "finished_at": "",
+                    },
+                }
+            ),
         )
 
     def test_runtime_arm_serializes_admitted_qualification_identity_in_summary(self) -> None:
@@ -2471,6 +2631,136 @@ class RealWorldRunnerTests(unittest.TestCase):
         )
         self.assertEqual(summary["results"][0]["qualification"], admitted_identity)
 
+    def test_coordination_metrics_assemble_parallel_on_phase_deltas_without_mutating_diagnostics(self) -> None:
+        captured = {}
+
+        def diagnostics(container, phase):
+            snapshot = self.container_diagnostics(container, phase)
+            captured[phase] = snapshot
+            return snapshot
+
+        result = self.run_container_with_diagnostics("parallel-on", diagnostics)
+        aggregate = captured["after-final"]["databases"][".stateful/state.db"][
+            "coordination_metrics"
+        ]
+
+        self.assertTrue(result["cleared"], result)
+        self.assertEqual(
+            result["coordination_metrics"]["context_renders"],
+            {
+                "server": {"tasks": 9, "final": 5, "total": 14},
+                "explicit_tool_calls": {"tasks": 3, "final": 2, "total": 5},
+            },
+        )
+        self.assertEqual(
+            result["coordination_metrics"]["notifications"],
+            aggregate["notifications"],
+        )
+        self.assertEqual(result["coordination_metrics"]["waits"], aggregate["waits"])
+        self.assertEqual(
+            result["coordination_metrics"]["authorization"],
+            aggregate["authorization"],
+        )
+        result["coordination_metrics"]["waits"]["unmeasured_grants"] = 99
+        self.assertEqual(aggregate["waits"]["unmeasured_grants"], 1)
+
+    def test_coordination_metrics_are_null_for_off_arms(self) -> None:
+        result = self.run_container_with_diagnostics(
+            "parallel-off", self.container_diagnostics
+        )
+
+        self.assertTrue(result["cleared"], result)
+        self.assertIsNone(result["coordination_metrics"])
+
+    def test_coordination_metrics_decreasing_server_counts_unclear_row(self) -> None:
+        def diagnostics(container, phase):
+            snapshot = self.container_diagnostics(container, phase)
+            if phase == "after-tasks":
+                snapshot["runtime_metrics"]["context_render_success_count"] = 1
+            return snapshot
+
+        result = self.run_container_with_diagnostics("parallel-on", diagnostics)
+
+        self.assertFalse(result["cleared"])
+        self.assertIsNone(result["coordination_metrics"])
+        self.assertEqual(result["error"], "context render counts decreased across phases")
+
+    def test_coordination_metrics_malformed_database_evidence_unclears_row(self) -> None:
+        def diagnostics(container, phase):
+            snapshot = self.container_diagnostics(container, phase)
+            if phase == "after-final":
+                snapshot["databases"][".stateful/state.db"][
+                    "coordination_metrics"
+                ]["waits"]["unmeasured_grants"] = True
+            return snapshot
+
+        result = self.run_container_with_diagnostics("parallel-on", diagnostics)
+
+        self.assertFalse(result["cleared"])
+        self.assertIsNone(result["coordination_metrics"])
+        self.assertEqual(result["error"], "coordination unmeasured grants is invalid")
+
+    def test_coordination_metrics_missing_required_notification_kinds_unclear_row(self) -> None:
+        for missing_kind in ("reservation_granted", "scope_overlap"):
+            with self.subTest(missing_kind=missing_kind):
+                def diagnostics(container, phase):
+                    snapshot = self.container_diagnostics(container, phase)
+                    if phase == "after-final":
+                        snapshot["databases"][".stateful/state.db"][
+                            "coordination_metrics"
+                        ]["notifications"]["by_kind"].pop(missing_kind)
+                    return snapshot
+
+                result = self.run_container_with_diagnostics("parallel-on", diagnostics)
+
+                self.assertFalse(result["cleared"])
+                self.assertIsNone(result["coordination_metrics"])
+
+    def test_coordination_metrics_inconsistent_notification_created_unclears_row(self) -> None:
+        def diagnostics(container, phase):
+            snapshot = self.container_diagnostics(container, phase)
+            if phase == "after-final":
+                snapshot["databases"][".stateful/state.db"][
+                    "coordination_metrics"
+                ]["notifications"]["by_kind"]["scope_overlap"]["created"] = 3
+            return snapshot
+
+        result = self.run_container_with_diagnostics("parallel-on", diagnostics)
+
+        self.assertFalse(result["cleared"])
+        self.assertIsNone(result["coordination_metrics"])
+
+    def test_coordination_metrics_reject_invalid_and_ambiguous_evidence(self) -> None:
+        snapshots = {
+            phase: self.container_diagnostics(None, phase)
+            for phase in ("before-tasks", "after-tasks", "after-final")
+        }
+        agents = [
+            {"kind": "task", "context_render_tool_calls": 1},
+            {"kind": "final", "context_render_tool_calls": 2},
+        ]
+        snapshots["before-tasks"]["runtime_metrics"][
+            "context_render_success_count"
+        ] = True
+        with self.assertRaisesRegex(
+            ValueError, "context render count at before-tasks is invalid"
+        ):
+            self.mod._build_coordination_metrics("parallel-on", snapshots, agents)
+
+        snapshots["before-tasks"]["runtime_metrics"][
+            "context_render_success_count"
+        ] = 2
+        snapshots["after-final"]["databases"]["another.db"] = {
+            "integrity": "ok",
+            "coordination_metrics": copy.deepcopy(
+                snapshots["after-final"]["databases"][".stateful/state.db"][
+                    "coordination_metrics"
+                ]
+            ),
+        }
+        with self.assertRaisesRegex(ValueError, "exactly one coordination metrics"):
+            self.mod._build_coordination_metrics("parallel-on", snapshots, agents)
+
     def test_container_cleanup_error_blocks_final_and_grading(self) -> None:
         runtime = self.mod._DOCKER.DockerRuntime(
             binary="/docker",
@@ -2621,6 +2911,7 @@ class RealWorldRunnerTests(unittest.TestCase):
                     "wall_time_s": 0.0,
                     "total_tokens": 0,
                     "tool_calls": 0,
+                    "context_render_tool_calls": 0,
                 },
                 0.0,
             )
@@ -3242,6 +3533,7 @@ class RealWorldReportingTests(unittest.TestCase):
         wall: float = 0.0,
         tokens: int = 0,
         tools: int = 0,
+        coordination_metrics: dict | None = None,
     ) -> dict:
         return {
             "repository": repository,
@@ -3254,6 +3546,7 @@ class RealWorldReportingTests(unittest.TestCase):
             "final_wall_time_s": wall / 4,
             "total_tokens": tokens,
             "total_tool_calls": tools,
+            "coordination_metrics": coordination_metrics,
         }
 
     @staticmethod
@@ -3323,6 +3616,7 @@ class RealWorldReportingTests(unittest.TestCase):
                 "tokens": 40,
                 "tool_calls": 5,
                 "error": "final agent exited 1",
+                "coordination_metrics": None,
             },
         )
         alpha_sequential = summary["aggregates"][0]
@@ -3343,6 +3637,273 @@ class RealWorldReportingTests(unittest.TestCase):
         self.assertEqual(summary["thinking"], "thinking")
         self.assertEqual(summary["trials"], 2)
         self.assertEqual(summary["generated_at"], "2026-07-12T00:00:00Z")
+
+    def test_coordination_metrics_aggregate_complete_parallel_on_trials(self) -> None:
+        first = {
+            "notifications": {
+                "by_kind": {
+                    "scope_overlap": {
+                        "created": 2,
+                        "delivered": 1,
+                        "pending": 1,
+                        "expired": 0,
+                    },
+                    "reservation_granted": {
+                        "created": 0,
+                        "delivered": 0,
+                        "pending": 0,
+                        "expired": 0,
+                    },
+                    "first_only": {
+                        "created": 1,
+                        "delivered": 1,
+                        "pending": 0,
+                        "expired": 0,
+                    },
+                }
+            },
+            "waits": {
+                "by_final_status": {"claimed": 2},
+                "grant_wait_time_s": {
+                    "count": 2,
+                    "total": 3.0,
+                    "mean": 1.5,
+                    "max": 2.5,
+                },
+                "unmeasured_grants": 1,
+            },
+            "authorization": {
+                "denied_by_reason": {"active_claim_conflict": 1},
+                "warned_by_reason": {},
+            },
+            "context_renders": {
+                "server": {"tasks": 9, "final": 5, "total": 14},
+                "explicit_tool_calls": {"tasks": 3, "final": 2, "total": 5},
+            },
+        }
+        second = {
+            "notifications": {
+                "by_kind": {
+                    "reservation_granted": {
+                        "created": 3,
+                        "delivered": 2,
+                        "pending": 0,
+                        "expired": 1,
+                    },
+                    "scope_overlap": {
+                        "created": 0,
+                        "delivered": 0,
+                        "pending": 0,
+                        "expired": 0,
+                    },
+                    "second_only": {
+                        "created": 2,
+                        "delivered": 0,
+                        "pending": 1,
+                        "expired": 1,
+                    },
+                }
+            },
+            "waits": {
+                "by_final_status": {"queued": 1, "claimed": 3},
+                "grant_wait_time_s": {
+                    "count": 3,
+                    "total": 12.0,
+                    "mean": 4.0,
+                    "max": 7.0,
+                },
+                "unmeasured_grants": 2,
+            },
+            "authorization": {
+                "denied_by_reason": {"missing_claim": 2},
+                "warned_by_reason": {"scope_overlap": 1},
+            },
+            "context_renders": {
+                "server": {"tasks": 4, "final": 6, "total": 10},
+                "explicit_tool_calls": {"tasks": 1, "final": 3, "total": 4},
+            },
+        }
+        summary = self.mod.build_run_summary(
+            [self.repositories[0]],
+            ["parallel-on"],
+            2,
+            "model",
+            "thinking",
+            [
+                self.result(
+                    "alpha",
+                    "parallel-on",
+                    1,
+                    coordination_metrics=first,
+                ),
+                self.result(
+                    "alpha",
+                    "parallel-on",
+                    2,
+                    coordination_metrics=second,
+                ),
+            ],
+            "2026-07-12T00:00:00Z",
+        )
+        metrics = summary["aggregates"][0]["coordination_metrics"]
+
+        self.assertEqual(
+            metrics["notifications"]["by_kind"],
+            {
+                "first_only": {
+                    "created": 1,
+                    "delivered": 1,
+                    "pending": 0,
+                    "expired": 0,
+                },
+                "reservation_granted": {
+                    "created": 3,
+                    "delivered": 2,
+                    "pending": 0,
+                    "expired": 1,
+                },
+                "scope_overlap": {
+                    "created": 2,
+                    "delivered": 1,
+                    "pending": 1,
+                    "expired": 0,
+                },
+                "second_only": {
+                    "created": 2,
+                    "delivered": 0,
+                    "pending": 1,
+                    "expired": 1,
+                },
+            },
+        )
+        self.assertEqual(
+            metrics["waits"]["by_final_status"], {"claimed": 5, "queued": 1}
+        )
+        self.assertEqual(
+            metrics["authorization"]["denied_by_reason"],
+            {"active_claim_conflict": 1, "missing_claim": 2},
+        )
+        self.assertEqual(
+            metrics["authorization"]["warned_by_reason"], {"scope_overlap": 1}
+        )
+        self.assertEqual(
+            metrics["context_renders"],
+            {
+                "server": {"tasks": 13, "final": 11, "total": 24},
+                "explicit_tool_calls": {"tasks": 4, "final": 5, "total": 9},
+            },
+        )
+        self.assertEqual(
+            metrics["waits"]["grant_wait_time_s"],
+            {"count": 5, "total": 15.0, "mean": 3.0, "max": 7.0},
+        )
+        self.assertEqual(metrics["waits"]["unmeasured_grants"], 3)
+
+        malformed = copy.deepcopy(first)
+        malformed["context_renders"]["server"]["tasks"] = True
+        self.assertIsNone(
+            self.mod._aggregate_coordination_metrics(
+                "parallel-on", [malformed, second], 2
+            )
+        )
+
+    def test_coordination_metrics_are_null_for_incomplete_and_off_aggregates(self) -> None:
+        complete = {
+            "notifications": {
+                "by_kind": {
+                    "reservation_granted": {
+                        "created": 0,
+                        "delivered": 0,
+                        "pending": 0,
+                        "expired": 0,
+                    },
+                    "scope_overlap": {
+                        "created": 0,
+                        "delivered": 0,
+                        "pending": 0,
+                        "expired": 0,
+                    },
+                }
+            },
+            "waits": {
+                "by_final_status": {},
+                "grant_wait_time_s": {
+                    "count": 0,
+                    "total": 0.0,
+                    "mean": None,
+                    "max": None,
+                },
+                "unmeasured_grants": 0,
+            },
+            "authorization": {
+                "denied_by_reason": {},
+                "warned_by_reason": {},
+            },
+            "context_renders": {
+                "server": {"tasks": 0, "final": 0, "total": 0},
+                "explicit_tool_calls": {"tasks": 0, "final": 0, "total": 0},
+            },
+        }
+        incomplete = self.mod.build_run_summary(
+            [self.repositories[0]],
+            ["parallel-on"],
+            2,
+            "model",
+            "thinking",
+            [
+                self.result(
+                    "alpha",
+                    "parallel-on",
+                    1,
+                    coordination_metrics=complete,
+                )
+            ],
+            "2026-07-12T00:00:00Z",
+        )
+        duplicate_trials = self.mod.build_run_summary(
+            [self.repositories[0]],
+            ["parallel-on"],
+            2,
+            "model",
+            "thinking",
+            [
+                self.result(
+                    "alpha",
+                    "parallel-on",
+                    1,
+                    coordination_metrics=complete,
+                ),
+                self.result(
+                    "alpha",
+                    "parallel-on",
+                    1,
+                    coordination_metrics=complete,
+                ),
+            ],
+            "2026-07-12T00:00:00Z",
+        )
+        sequential = self.result("alpha", "sequential", 1)
+        parallel_off = self.result("alpha", "parallel-off", 1)
+        sequential.pop("coordination_metrics")
+        parallel_off.pop("coordination_metrics")
+        off_arms = self.mod.build_run_summary(
+            [self.repositories[0]],
+            ["sequential", "parallel-off"],
+            1,
+            "model",
+            "thinking",
+            [sequential, parallel_off],
+            "2026-07-12T00:00:00Z",
+        )
+
+        self.assertIsNone(incomplete["aggregates"][0]["coordination_metrics"])
+        self.assertIsNone(
+            duplicate_trials["aggregates"][0]["coordination_metrics"]
+        )
+        self.assertEqual(
+            [aggregate["coordination_metrics"] for aggregate in off_arms["aggregates"]],
+            [None, None],
+        )
 
     def test_summary_marks_missing_scheduled_rows_without_inventing_metrics(self) -> None:
         rows = [
@@ -3711,6 +4272,8 @@ class RealWorldReportingTests(unittest.TestCase):
             }
             for index, arm in enumerate(arms, start=1)
         ]
+        for result in results:
+            result.pop("coordination_metrics")
         retained = json.loads(json.dumps(results))
         writes = []
         write_result = self.mod._write_run_result
@@ -3804,6 +4367,7 @@ class RealWorldReportingTests(unittest.TestCase):
             self.assertEqual(rewritten[1]["artifacts"], original["artifacts"])
             self.assertEqual(rewritten[1]["total_tokens"], original["total_tokens"])
             self.assertEqual(rewritten[1]["qualification"], identity)
+            self.assertIsNone(rewritten[1]["coordination_metrics"])
             summary_row = next(
                 result
                 for result in summary["results"]

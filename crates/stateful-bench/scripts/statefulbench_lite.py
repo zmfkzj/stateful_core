@@ -285,13 +285,29 @@ def generate_workspace(dest: Path, task_count: int) -> None:
     )
 
 
+def _is_context_render_tool(name: object) -> bool:
+    if not isinstance(name, str):
+        return False
+    return name in {
+        "state_context_render",
+        "state.context.render",
+        "mcp__stateful__state_context_render",
+        "mcp__stateful_state_context_render",
+    }
+
+
 def usage_from_log(path: Path) -> dict[str, int]:
     total_tokens = 0
     usage_tool_calls = 0
     execution_tool_calls = 0
+    context_render_tool_calls = 0
     has_usage_tool_calls = False
     if not path.exists():
-        return {"total_tokens": total_tokens, "tool_calls": usage_tool_calls}
+        return {
+            "total_tokens": total_tokens,
+            "tool_calls": usage_tool_calls,
+            "context_render_tool_calls": context_render_tool_calls,
+        }
     for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
         try:
             value = json.loads(line)
@@ -301,6 +317,8 @@ def usage_from_log(path: Path) -> dict[str, int]:
             continue
         if value.get("type") == "tool_execution_start":
             execution_tool_calls += 1
+            if _is_context_render_tool(value.get("toolName")):
+                context_render_tool_calls += 1
         message = value.get("message")
         usage = message.get("usage") if isinstance(message, dict) else None
         if not isinstance(usage, dict):
@@ -314,6 +332,7 @@ def usage_from_log(path: Path) -> dict[str, int]:
     return {
         "total_tokens": total_tokens,
         "tool_calls": usage_tool_calls if has_usage_tool_calls else execution_tool_calls,
+        "context_render_tool_calls": context_render_tool_calls,
     }
 
 
