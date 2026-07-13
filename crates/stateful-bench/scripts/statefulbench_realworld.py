@@ -1379,13 +1379,22 @@ def validate_shared_home_evidence(
         if (
             type(snapshot) is not dict
             or snapshot.get("schema_version") != 1
+            or snapshot.get("phase") != phase
             or snapshot.get("home") != "/home/stateful"
             or snapshot.get("per_agent_home_tree") is not False
             or not isinstance(snapshot.get("files"), list)
             or not isinstance(snapshot.get("databases"), dict)
             or not isinstance(snapshot.get("lock_files"), list)
+            or not isinstance(snapshot.get("processes"), list)
+            or not all(
+                type(database) is dict and type(database.get("integrity")) is str
+                for database in snapshot["databases"].values()
+            )
         ):
             return "contradictory shared HOME evidence"
+        classification = _DIAGNOSTICS.classify_runtime_failure(None, snapshot)
+        if classification is not None:
+            return classification
     for identity in identities.values():
         if (
             type(identity) is not dict

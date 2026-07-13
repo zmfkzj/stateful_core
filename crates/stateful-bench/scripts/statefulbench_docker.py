@@ -281,7 +281,10 @@ def capture_home_snapshot(
         or not isinstance(snapshot.get("databases"), dict)
     ):
         raise RuntimeError(f"diagnostic capture malformed for {phase}")
-    if str(container.runtime_dir.resolve()) in encoded:
+    if any(
+        str(path.resolve()) in encoded
+        for path in (container.runtime_dir, container.workspace)
+    ):
         raise RuntimeError(f"diagnostic capture leaked host path for {phase}")
     return snapshot
 

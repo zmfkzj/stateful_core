@@ -1800,9 +1800,10 @@ class RealWorldRunnerTests(unittest.TestCase):
         self.tempdir.cleanup()
 
     @staticmethod
-    def container_diagnostics(_container, _phase):
+    def container_diagnostics(_container, phase):
         return {
             "schema_version": 1,
+            "phase": phase,
             "home": "/home/stateful",
             "files": [],
             "databases": {},
@@ -1880,6 +1881,12 @@ class RealWorldRunnerTests(unittest.TestCase):
         )
         starts = []
         waits = []
+        snapshots = []
+
+        def diagnostics(container, phase):
+            snapshots.append(phase)
+            return self.container_diagnostics(container, phase)
+
 
         def launch(container, arm_dir, agent_id, prompt, cfg, env):
             starts.append((agent_id, env["HOME"], prompt.name))
@@ -1909,6 +1916,7 @@ class RealWorldRunnerTests(unittest.TestCase):
         def post_checks(*_args, **_kwargs):
             self.assertEqual(waits, ["task"] * 10 + ["final"])
             self.assertEqual(len(starts), 11)
+            self.assertEqual(snapshots[-1], "after-final")
             return True, True
 
         result = self.mod.run_repo_arm(
@@ -1934,7 +1942,7 @@ class RealWorldRunnerTests(unittest.TestCase):
             container_agent_wait=wait,
             container_evaluator_inject=inject,
             container_post_checks=post_checks,
-            container_diagnostics=self.container_diagnostics,
+            container_diagnostics=diagnostics,
         )
 
         self.assertTrue(result["cleared"], result)
@@ -1944,6 +1952,7 @@ class RealWorldRunnerTests(unittest.TestCase):
         )
         self.assertEqual([home for _, home, _ in starts], ["/home/stateful"] * 11)
         self.assertEqual(waits, ["task"] * 10 + ["final"])
+        self.assertEqual(snapshots, list(self.mod._DOCKER.DIAGNOSTIC_PHASES))
 
     def test_runner_requires_a_docker_runtime_for_live_execution(self) -> None:
         archive_loader = mock.Mock(side_effect=AssertionError("host execution must not start"))
@@ -2644,6 +2653,43 @@ class RealWorldDiagnosticsReportingTests(unittest.TestCase):
     def setUp(self) -> None:
         self.mod = load_script("statefulbench_realworld.py")
 
+    @staticmethod
+    def shared_evidence() -> dict:
+        phases = ("initialized", "before-tasks", "after-tasks", "after-final")
+        return {
+            "snapshots": {
+                phase: {
+                    "schema_version": 1,
+                    "phase": phase,
+                    "home": "/home/stateful",
+                    "files": [],
+                    "databases": {
+                        "agent.db": {
+                            "integrity": "ok",
+                            "schemas": [],
+                            "table_counts": {},
+                        }
+                    },
+                    "lock_files": [],
+                    "per_agent_home_tree": False,
+                    "processes": [],
+                }
+                for phase in phases
+            },
+            "agent_identities": {
+                "task-a": {
+                    "container_id": "container-1",
+                    "home": "/home/stateful",
+                    "profile": "/home/stateful/.omp/profiles/stateful/agent",
+                },
+                "final": {
+                    "container_id": "container-1",
+                    "home": "/home/stateful",
+                    "profile": "/home/stateful/.omp/profiles/stateful/agent",
+                },
+            },
+        }
+
     def test_diagnostic_paths_are_row_local_and_summary_retains_raw_evidence(self) -> None:
         result = {
             "repository": "requests",
@@ -2691,6 +2737,33 @@ class RealWorldDiagnosticsReportingTests(unittest.TestCase):
                 "final": {"container_id": "other-container", "home": "/home/stateful", "profile": "/home/stateful/.omp/profiles/stateful/agent"},
             },
         }
+
+        self.assertEqual(
+            self.mod.validate_shared_home_evidence(evidence, "container-1", {"task-a", "final"}),
+            "contradictory shared HOME evidence",
+        )
+
+    def test_unavailable_database_evidence_blocks_grading(self) -> None:
+        evidence = self.shared_evidence()
+        evidence["snapshots"]["after-final"]["databases"]["agent.db"]["integrity"] = "unavailable"
+
+        self.assertEqual(
+            self.mod.validate_shared_home_evidence(evidence, "container-1", {"task-a", "final"}),
+            "sqlite_unavailable",
+        )
+
+    def test_malformed_database_evidence_blocks_grading(self) -> None:
+        evidence = self.shared_evidence()
+        evidence["snapshots"]["after-final"]["databases"]["agent.db"]["integrity"] = "malformed"
+
+        self.assertEqual(
+            self.mod.validate_shared_home_evidence(evidence, "container-1", {"task-a", "final"}),
+            "sqlite_malformed",
+        )
+
+    def test_missing_process_evidence_is_contradictory(self) -> None:
+        evidence = self.shared_evidence()
+        del evidence["snapshots"]["after-final"]["processes"]
 
         self.assertEqual(
             self.mod.validate_shared_home_evidence(evidence, "container-1", {"task-a", "final"}),

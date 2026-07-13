@@ -70,7 +70,11 @@ def _sqlite_record(path: Path) -> dict:
             for name in names
         }
     except sqlite3.OperationalError as error:
-        record["integrity"] = "locked" if "locked" in str(error).casefold() else "unavailable"
+        record["integrity"] = (
+            "locked"
+            if "locked" in str(error).casefold() or "busy" in str(error).casefold()
+            else "unavailable"
+        )
     except (sqlite3.DatabaseError, OSError):
         record["integrity"] = "malformed"
     finally:
@@ -149,7 +153,7 @@ def snapshot_changes(before: dict, after: dict) -> list[dict]:
 
 def classify_runtime_failure(error: str | None, snapshot: dict | None = None) -> str | None:
     text = (error or "").casefold()
-    if "locked" in text:
+    if "locked" in text or "busy" in text:
         return "sqlite_locked"
     if "malformed" in text or "not a database" in text:
         return "sqlite_malformed"

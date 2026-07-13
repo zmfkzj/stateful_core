@@ -530,6 +530,7 @@ class DockerDiagnosticTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.diagnostics = load_script("statefulbench_container_diagnostics.py")
+        cls.mod = load_script("statefulbench_docker.py")
 
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -577,6 +578,10 @@ class DockerDiagnosticTests(unittest.TestCase):
             "sqlite_locked",
         )
         self.assertEqual(
+            self.diagnostics.classify_runtime_failure("database is busy"),
+            "sqlite_locked",
+        )
+        self.assertEqual(
             self.diagnostics.classify_runtime_failure("not a database"),
             "sqlite_malformed",
         )
@@ -585,7 +590,7 @@ class DockerDiagnosticTests(unittest.TestCase):
             "unclassified_runtime_failure",
         )
 
-    def test_snapshot_skips_symlinked_databases_and_fails_closed_on_unavailable_sqlite(self) -> None:
+    def test_snapshot_never_dereferences_symlinks_or_hashes_fifos(self) -> None:
         import sqlite3
 
         outside = Path(self.tempdir.name) / "outside.db"
@@ -593,16 +598,60 @@ class DockerDiagnosticTests(unittest.TestCase):
             connection.execute("create table external_data (id integer)")
         connection.close()
         (self.home / "outside.db").symlink_to(outside)
+        os.mkfifo(self.home / "stream.db")
 
         snapshot = self.diagnostics.snapshot_home(self.home)
+        files = {item["path"]: item for item in snapshot["files"]}
 
         self.assertNotIn("outside.db", snapshot["databases"])
+        self.assertNotIn("stream.db", snapshot["databases"])
+        self.assertEqual(files["outside.db"]["type"], "symlink")
+        self.assertNotIn("sha256", files["outside.db"])
+        self.assertEqual(files["stream.db"]["type"], "fifo")
+        self.assertNotIn("sha256", files["stream.db"])
         self.assertEqual(
             self.diagnostics.classify_runtime_failure(
                 None, {"databases": {"agent.db": {"integrity": "unavailable"}}}
             ),
             "sqlite_unavailable",
         )
+
+    def test_capture_rejects_host_workspace_path_leaks(self) -> None:
+        runtime = self.mod.DockerRuntime(
+            binary="/docker",
+            image="fixture",
+            image_id="sha256:fixture",
+            repo_digests=(),
+            platform="linux/arm64",
+        )
+        container = self.mod.ArmContainer(
+            runtime,
+            "container-1",
+            "arm",
+            self.home / "workspace",
+            self.home / "runtime",
+        )
+        output = self.home / "runtime" / "diagnostics" / "initialized.json"
+        output.parent.mkdir(parents=True)
+        snapshot = {
+            "schema_version": 1,
+            "phase": "initialized",
+            "home": "/home/stateful",
+            "files": [],
+            "databases": {},
+            "lock_files": [],
+            "processes": [],
+            "per_agent_home_tree": False,
+            "workspace_hint": str(container.workspace.resolve()),
+        }
+
+        def emit(*_args, **_kwargs):
+            output.write_text(json.dumps(snapshot), encoding="utf-8")
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        with patch.object(self.mod, "exec_in_container", side_effect=emit):
+            with self.assertRaisesRegex(RuntimeError, "leaked host path"):
+                self.mod.capture_home_snapshot(container, "initialized")
 
 if __name__ == "__main__":
     unittest.main()
