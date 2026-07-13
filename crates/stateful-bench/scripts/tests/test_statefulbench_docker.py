@@ -183,6 +183,7 @@ class DockerQualificationTests(unittest.TestCase):
         self.assertNotIn("/Users/arthur", " ".join(command))
         self.assertIn("STATEFULBENCH_DOCKER_INNER=qualification", command)
         self.assertEqual(command.count("--repo"), 1)
+        self.assertEqual(command[command.index("python3") - 1], self.runtime.image_id)
 
     def test_qualification_command_rejects_unsafe_mount_boundaries(self) -> None:
         with self.assertRaisesRegex(ValueError, "manifest"):

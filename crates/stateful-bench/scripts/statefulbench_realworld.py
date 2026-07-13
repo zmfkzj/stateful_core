@@ -1751,8 +1751,14 @@ def _parse_repositories(value: str) -> list[str]:
 
 
 def _inner_qualification_runtime(
-    image: str, docker_bin: str
+    image: str, docker_bin: str, manifest: Path, cache: Path
 ) -> _DOCKER.DockerRuntime:
+    if not Path("/.dockerenv").is_file():
+        raise ValueError("inner qualification requires a Docker container marker")
+    if not manifest.resolve().is_relative_to(Path("/benchmark")):
+        raise ValueError("inner qualification manifest must be under /benchmark")
+    if cache.resolve() != Path("/cache"):
+        raise ValueError("inner qualification cache must be /cache")
     image_id = os.environ.get("STATEFULBENCH_IMAGE_ID")
     platform = os.environ.get("STATEFULBENCH_IMAGE_PLATFORM")
     if not image_id or not image_id.startswith("sha256:"):
@@ -1807,8 +1813,21 @@ def main(argv: list[str] | None = None) -> int:
     if arguments.command == "qualify" and not inner_qualification:
         try:
             repo_root = Path(__file__).resolve().parents[3]
+            manifest_path = arguments.manifest.resolve()
+            if not manifest_path.is_relative_to(repo_root):
+                raise ValueError("manifest must be inside the repository root")
             if arguments.cache.resolve().is_relative_to(repo_root):
                 raise ValueError("cache must be outside the read-only repository root")
+            repositories = repo_entries(load_manifest(arguments.manifest))
+            wanted = tuple(arguments.repo or ())
+            selected = tuple(
+                repo for repo in repositories if not wanted or repo["key"] in set(wanted)
+            )
+            missing = sorted(set(wanted) - {repo["key"] for repo in selected})
+            if missing:
+                raise ValueError(f"unknown repository key: {', '.join(missing)}")
+            for repo in selected:
+                remove_qualification_receipt(arguments.cache, repo["key"])
             runtime = _DOCKER.inspect_runtime(arguments.docker_bin, arguments.docker_image)
             arguments.cache.mkdir(parents=True, exist_ok=True)
             return _DOCKER.run_qualification_container(
@@ -1816,7 +1835,7 @@ def main(argv: list[str] | None = None) -> int:
                 repo_root,
                 arguments.manifest,
                 arguments.cache,
-                tuple(arguments.repo or ()),
+                tuple(repo["key"] for repo in selected),
             )
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
             print(f"Docker qualification failed: {error}", file=sys.stderr)
@@ -1837,7 +1856,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         try:
             runtime = _inner_qualification_runtime(
-                arguments.docker_image, arguments.docker_bin
+                arguments.docker_image,
+                arguments.docker_bin,
+                arguments.manifest,
+                arguments.cache,
             )
         except ValueError as error:
             print(f"Docker qualification failed: {error}", file=sys.stderr)

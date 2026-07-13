@@ -88,7 +88,7 @@ def qualification_command(
         f"STATEFULBENCH_IMAGE_REPO_DIGESTS={json.dumps(runtime.repo_digests)}",
         "--env",
         "PYTHONDONTWRITEBYTECODE=1",
-        runtime.image,
+        runtime.image_id,
         "python3",
         "/benchmark/crates/stateful-bench/scripts/statefulbench_realworld.py",
         "qualify",

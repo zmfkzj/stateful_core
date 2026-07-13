@@ -1274,9 +1274,19 @@ class QualificationTests(unittest.TestCase):
             "STATEFULBENCH_IMAGE_PLATFORM": "linux/arm64",
             "STATEFULBENCH_IMAGE_REPO_DIGESTS": "[]",
         }
+        runtime = self.mod._DOCKER.DockerRuntime(
+            binary="docker",
+            image="statefulbench-realworld:local",
+            image_id="sha256:fixture",
+            repo_digests=(),
+            platform="linux/arm64",
+        )
         stdout = io.StringIO()
         with (
             mock.patch.dict(self.mod.os.environ, runtime_env, clear=False),
+            mock.patch.object(
+                self.mod, "_inner_qualification_runtime", return_value=runtime
+            ),
             contextlib.redirect_stdout(stdout),
         ):
             status = self.mod.main(
@@ -1421,6 +1431,88 @@ class QualificationTests(unittest.TestCase):
 
         self.assertEqual(status, 17)
         self.assertEqual(run_container.call_args.args[4], ("requests",))
+
+    def test_inner_qualification_rejects_host_sentinel(self) -> None:
+        environment = {
+            "STATEFULBENCH_DOCKER_INNER": "qualification",
+            "STATEFULBENCH_IMAGE_ID": "sha256:fixture",
+            "STATEFULBENCH_IMAGE_PLATFORM": "linux/arm64",
+            "STATEFULBENCH_IMAGE_REPO_DIGESTS": "[]",
+        }
+        with (
+            mock.patch.dict(self.mod.os.environ, environment, clear=False),
+            mock.patch.object(Path, "is_file", return_value=False),
+            mock.patch.object(
+                self.mod, "load_manifest", side_effect=AssertionError("host bypass")
+            ),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            status = self.mod.main(
+                [
+                    "qualify",
+                    "--manifest",
+                    "/benchmark/datasets/statefulbench-realworld/manifest.json",
+                    "--cache",
+                    "/cache",
+                    "--docker-image",
+                    "statefulbench-realworld:local",
+                ]
+            )
+
+        self.assertEqual(status, 1)
+
+    def test_inner_qualification_accepts_container_marker_and_paths(self) -> None:
+        environment = {
+            "STATEFULBENCH_IMAGE_ID": "sha256:fixture",
+            "STATEFULBENCH_IMAGE_PLATFORM": "linux/arm64",
+            "STATEFULBENCH_IMAGE_REPO_DIGESTS": "[]",
+        }
+        with (
+            mock.patch.dict(self.mod.os.environ, environment, clear=False),
+            mock.patch.object(Path, "is_file", return_value=True),
+        ):
+            runtime = self.mod._inner_qualification_runtime(
+                "statefulbench-realworld:local",
+                "docker",
+                Path("/benchmark/datasets/statefulbench-realworld/manifest.json"),
+                Path("/cache"),
+            )
+
+        self.assertEqual(runtime.image_id, "sha256:fixture")
+
+    def test_outer_qualification_invalidates_receipt_before_docker_failure(self) -> None:
+        runtime = self.mod._DOCKER.DockerRuntime(
+            binary="/docker",
+            image="statefulbench-realworld:local",
+            image_id="sha256:abc",
+            repo_digests=(),
+            platform="linux/arm64",
+        )
+        receipt = self.cache / "qualification" / "receipts" / "requests.json"
+        receipt.parent.mkdir(parents=True)
+        receipt.write_text("{}\n", encoding="utf-8")
+        with (
+            mock.patch.object(self.mod._DOCKER, "inspect_runtime", return_value=runtime),
+            mock.patch.object(
+                self.mod._DOCKER, "run_qualification_container", return_value=19
+            ),
+        ):
+            status = self.mod.main(
+                [
+                    "qualify",
+                    "--manifest",
+                    str(MANIFEST),
+                    "--cache",
+                    str(self.cache),
+                    "--repo",
+                    "requests",
+                    "--docker-image",
+                    runtime.image,
+                ]
+            )
+
+        self.assertEqual(status, 19)
+        self.assertFalse(receipt.exists())
 
     def test_run_rejects_missing_receipt_before_creating_rows(self) -> None:
         runtime = self.mod._DOCKER.DockerRuntime(
