@@ -2691,7 +2691,7 @@ def _inner_qualification_runtime(
         raise ValueError("inner qualification requires a Docker container marker")
     if (
         not manifest.resolve().is_relative_to(Path("/benchmark"))
-        and os.environ.get("STATEFULBENCH_STAGED_DATASET") != "1"
+        and not _STAGED_DATASET_ACTIVE
     ):
         raise ValueError("inner qualification manifest must be under /benchmark")
     if cache.resolve() != Path("/cache"):

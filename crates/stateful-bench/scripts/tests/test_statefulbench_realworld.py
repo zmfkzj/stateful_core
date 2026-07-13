@@ -1751,6 +1751,81 @@ class QualificationTests(unittest.TestCase):
 
         self.assertEqual(runtime.image_id, "sha256:fixture")
 
+    def test_inner_qualification_rejects_environment_staging_sentinel(self) -> None:
+        environment = {
+            "STATEFULBENCH_STAGED_DATASET": "1",
+            "STATEFULBENCH_IMAGE_ID": "sha256:fixture",
+            "STATEFULBENCH_IMAGE_PLATFORM": "linux/arm64",
+            "STATEFULBENCH_SERVER_PLATFORM": "linux/arm64",
+            "STATEFULBENCH_IMAGE_REPO_DIGESTS": "[]",
+        }
+        with (
+            mock.patch.dict(self.mod.os.environ, environment, clear=True),
+            mock.patch.object(Path, "is_file", return_value=True),
+            self.assertRaisesRegex(ValueError, "manifest must be under /benchmark"),
+        ):
+            self.mod._inner_qualification_runtime(
+                "statefulbench-realworld:local",
+                "docker",
+                Path("/private/staged/manifest.json"),
+                Path("/cache"),
+            )
+
+    def test_inner_qualification_recursion_accepts_module_private_staging(self) -> None:
+        environment = {
+            "STATEFULBENCH_DOCKER_INNER": "qualification",
+            "STATEFULBENCH_IMAGE_ID": "sha256:fixture",
+            "STATEFULBENCH_IMAGE_PLATFORM": "linux/arm64",
+            "STATEFULBENCH_SERVER_PLATFORM": "linux/arm64",
+            "STATEFULBENCH_IMAGE_REPO_DIGESTS": "[]",
+        }
+        staged_manifest = Path("/private/staged/manifest.json")
+        stage_calls = []
+
+        @contextlib.contextmanager
+        def stage(manifest: Path):
+            stage_calls.append(manifest)
+            yield staged_manifest
+
+        with (
+            mock.patch.dict(self.mod.os.environ, environment, clear=True),
+            mock.patch.object(Path, "is_file", return_value=True),
+            mock.patch.object(self.mod, "_staged_dataset_tree", side_effect=stage),
+            mock.patch.object(self.mod, "load_manifest", return_value={}),
+            mock.patch.object(self.mod, "repo_entries", return_value=()),
+            mock.patch.object(
+                self.mod,
+                "_qualification_tool_provenance",
+                return_value={
+                    "python": "Python 3.14.6",
+                    "omp": "omp 16.4.2",
+                    "stateful": "sha256:" + "a" * 64,
+                    "git": "git version 2.50.0",
+                    "rustc": "rustc 1.90.0",
+                    "cargo": "cargo 1.90.0",
+                },
+            ),
+            contextlib.redirect_stderr(io.StringIO()),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            status = self.mod.main(
+                [
+                    "qualify",
+                    "--manifest",
+                    "/benchmark/datasets/statefulbench-realworld/manifest.json",
+                    "--cache",
+                    "/cache",
+                    "--docker-image",
+                    "statefulbench-realworld:local",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(
+            stage_calls,
+            [Path("/benchmark/datasets/statefulbench-realworld/manifest.json")],
+        )
+
     def test_outer_qualification_invalidates_receipt_before_docker_failure(self) -> None:
         runtime = self.mod._DOCKER.DockerRuntime(
             binary="/docker",
