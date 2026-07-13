@@ -3147,6 +3147,27 @@ class RealWorldReportingTests(unittest.TestCase):
             "total_tool_calls": tools,
         }
 
+    @staticmethod
+    def admitted_receipt() -> tuple[dict, dict]:
+        identity = {
+            "manifest_sha256": "m" * 64,
+            "corpus_sha256": "c" * 64,
+            "archive_sha256": "b" * 64,
+            "commit": "a" * 40,
+            "image_id": "sha256:fixture",
+            "platform": "linux/arm64",
+            "graded_inputs": {"evaluators": {"evaluators/task-0.py": "e" * 64}},
+            "tool_provenance": {
+                "python": "Python 3.14.6",
+                "omp": "omp 16.4.2",
+                "stateful": "sha256:" + "a" * 64,
+                "git": "git version 2.50.0",
+                "rustc": "rustc 1.90.0",
+                "cargo": "cargo 1.90.0",
+            },
+        }
+        return {**identity, "qualified": True}, identity
+
     def test_summary_directly_sums_two_repository_rows_and_retains_exact_failures(self) -> None:
         rows = [
             self.result("alpha", "sequential", 1, wall=1.25, tokens=10, tools=2),
@@ -3459,6 +3480,94 @@ class RealWorldReportingTests(unittest.TestCase):
                         ).read_text(encoding="utf-8")
                     )
                     self.assertEqual(persisted, rewritten[1])
+
+    def test_post_admission_empty_rows_retain_identity_for_staging_and_arm_failures(self) -> None:
+        for name, staged_inputs, arm_failure in (
+            (
+                "pre-arm-staging",
+                OSError("staged inputs failed"),
+                AssertionError("run_repo_arm must not run"),
+            ),
+            (
+                "arm-exception",
+                lambda *_args: contextlib.nullcontext(self.root / "staged"),
+                OSError("run_repo_arm failed"),
+            ),
+        ):
+            with self.subTest(failure=name):
+                receipt, identity = self.admitted_receipt()
+                out_dir = self.root / name
+                arms = ("sequential", "parallel-off")
+                with (
+                    mock.patch.object(self.mod, "load_manifest", return_value={}),
+                    mock.patch.object(
+                        self.mod, "repo_entries", return_value=(self.repositories[0],)
+                    ),
+                    mock.patch.object(
+                        self.mod, "load_corpus", return_value={"repository": "alpha"}
+                    ),
+                    mock.patch.object(
+                        self.mod, "_corpus_matches_repository", return_value=True
+                    ),
+                    mock.patch.object(
+                        self.mod._DOCKER, "inspect_runtime", return_value=mock.Mock()
+                    ),
+                    mock.patch.object(
+                        self.mod, "load_qualification_receipt", return_value=receipt
+                    ),
+                    mock.patch.object(
+                        self.mod,
+                        "_staged_dataset_tree",
+                        side_effect=contextlib.nullcontext,
+                    ),
+                    mock.patch.object(
+                        self.mod, "_staged_graded_inputs", side_effect=staged_inputs
+                    ),
+                    mock.patch.object(
+                        self.mod, "run_repo_arm", side_effect=arm_failure
+                    ) as run_arm,
+                    mock.patch.object(
+                        self.mod, "_empty_run_result", wraps=self.mod._empty_run_result
+                    ) as empty_run,
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    status = self.mod.main(
+                        [
+                            "run",
+                            "--manifest",
+                            str(self.root / "manifest.json"),
+                            "--cache",
+                            str(self.root / "cache"),
+                            "--out",
+                            str(out_dir),
+                            "--arms",
+                            ",".join(arms),
+                            "--docker-image",
+                            "statefulbench-realworld:local",
+                        ]
+                    )
+
+                self.assertEqual(status, 1)
+                self.assertEqual(
+                    run_arm.call_count, 0 if name == "pre-arm-staging" else len(arms)
+                )
+                self.assertEqual(empty_run.call_count, len(arms))
+                summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+                self.assertEqual(len(summary["results"]), len(arms))
+                for row in summary["results"]:
+                    self.assertEqual(row["qualification"], identity)
+                    self.assertFalse(row["cleared"])
+                    self.assertEqual(row["agents"], [])
+                    persisted = json.loads(
+                        (
+                            out_dir
+                            / row["repository"]
+                            / row["arm"]
+                            / f"trial-{row['trial']}"
+                            / "results.json"
+                        ).read_text(encoding="utf-8")
+                    )
+                    self.assertEqual(persisted["qualification"], identity)
 
     def test_result_write_is_atomic_and_preserves_prior_valid_json(self) -> None:
         result = self.result("alpha", "sequential", 1, tokens=1)

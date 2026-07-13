@@ -1307,7 +1307,13 @@ def _agent_only_timing(
 
 
 
-def _empty_run_result(repo: dict, arm: str, trial: int, error: str | None = None) -> dict:
+def _empty_run_result(
+    repo: dict,
+    arm: str,
+    trial: int,
+    error: str | None = None,
+    qualification: dict | None = None,
+) -> dict:
     return {
         "repository": repo["key"],
         "arm": arm,
@@ -1325,7 +1331,7 @@ def _empty_run_result(repo: dict, arm: str, trial: int, error: str | None = None
         "evaluator_results": [],
         "agents": [],
         "artifacts": {},
-        "qualification": None,
+        "qualification": qualification,
         "runtime": {
             "image_id": None,
             "repo_digests": [],
@@ -2285,14 +2291,24 @@ def run_repo_arm(
             container_inspect=container_inspect,
         )
     if launch is None:
-        result = _empty_run_result(repo, arm, trial, "Docker runtime is required for agent execution")
+        result = _empty_run_result(
+            repo,
+            arm,
+            trial,
+            "Docker runtime is required for agent execution",
+            _qualification_row_identity(qualification_receipt),
+        )
         _write_run_result(out_dir, result)
         return result
     if server is None:
         server = _LITE.arm_stateful_server
     if arm == "parallel-on" and not cfg.stateful_binary:
         result = _empty_run_result(
-            repo, arm, trial, "parallel-on requires a resolvable stateful binary"
+            repo,
+            arm,
+            trial,
+            "parallel-on requires a resolvable stateful binary",
+            _qualification_row_identity(qualification_receipt),
         )
         _write_run_result(out_dir, result)
         return result
@@ -2892,7 +2908,13 @@ def main(argv: list[str] | None = None) -> int:
                                     credential_seed=_seed_shared_credential,
                                 )
                             except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
-                                result = _empty_run_result(repo, arm, trial, str(error))
+                                result = _empty_run_result(
+                                    repo,
+                                    arm,
+                                    trial,
+                                    str(error),
+                                    _qualification_row_identity(receipts[repo["key"]]),
+                                )
                             _write_run_result(arguments.out, result)
                             repo_results.append(result)
                             results.append(result)
@@ -2909,7 +2931,13 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     for trial in range(1, arguments.trials + 1):
                         for arm in arguments.arms:
-                            result = _empty_run_result(repo, arm, trial, str(error))
+                            result = _empty_run_result(
+                                repo,
+                                arm,
+                                trial,
+                                str(error),
+                                _qualification_row_identity(receipts[repo["key"]]),
+                            )
                             _write_run_result(arguments.out, result)
                             results.append(result)
         summary = build_run_summary(
