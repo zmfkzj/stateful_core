@@ -1826,6 +1826,74 @@ class QualificationTests(unittest.TestCase):
             [Path("/benchmark/datasets/statefulbench-realworld/manifest.json")],
         )
 
+    def test_dataset_stage_cleanup_invalidates_receipt_written_by_inner_qualification(self) -> None:
+        runtime = self.mod._DOCKER.DockerRuntime(
+            binary="docker",
+            image="statefulbench-realworld:local",
+            image_id="sha256:fixture",
+            repo_digests=(),
+            platform="linux/arm64",
+        )
+        tools = self._tools()
+
+        @contextlib.contextmanager
+        def stage(manifest: Path):
+            yield manifest
+            raise OSError("dataset stage cleanup failed")
+
+        qualified = {
+            "key": "fixture",
+            "error": None,
+            "tasks": [],
+            "base_suite_green": True,
+            "integrated_green": True,
+            "upstream_green": True,
+            "isolated_tasks": [],
+            "artifacts": {},
+        }
+        with (
+            mock.patch.dict(
+                self.mod.os.environ,
+                {"STATEFULBENCH_DOCKER_INNER": "qualification"},
+                clear=False,
+            ),
+            mock.patch.object(Path, "is_file", return_value=True),
+            mock.patch.object(self.mod, "_staged_dataset_tree", side_effect=stage),
+            mock.patch.object(self.mod, "_corpus_matches_repository", return_value=True),
+            mock.patch.object(
+                self.mod, "_inner_qualification_runtime", return_value=runtime
+            ),
+            mock.patch.object(
+                self.mod, "_qualification_tool_provenance", return_value=tools
+            ),
+            mock.patch.object(
+                self.mod, "qualify_repository", return_value=qualified
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            status = self.mod.main(
+                [
+                    "qualify",
+                    "--manifest",
+                    str(self.manifest),
+                    "--cache",
+                    str(self.cache),
+                    "--repo",
+                    "fixture",
+                    "--repo",
+                    "fixture-1",
+                    "--docker-image",
+                    runtime.image,
+                ]
+            )
+
+        self.assertEqual(status, 1)
+        for key in ("fixture", "fixture-1"):
+            self.assertFalse(
+                (self.cache / "qualification" / "receipts" / f"{key}.json").exists()
+            )
+
     def test_outer_qualification_invalidates_receipt_before_docker_failure(self) -> None:
         runtime = self.mod._DOCKER.DockerRuntime(
             binary="/docker",
@@ -3568,6 +3636,125 @@ class RealWorldReportingTests(unittest.TestCase):
                         ).read_text(encoding="utf-8")
                     )
                     self.assertEqual(persisted["qualification"], identity)
+
+    def test_dataset_stage_cleanup_downgrades_persisted_success_rows(self) -> None:
+        receipt, identity = self.admitted_receipt()
+        arms = ("sequential", "parallel-off")
+        out_dir = self.root / "dataset-cleanup"
+        results = [
+            {
+                **self.result(
+                    "alpha",
+                    arm,
+                    1,
+                    wall=float(index),
+                    tokens=index,
+                    tools=index + 1,
+                ),
+                "agents": [
+                    {
+                        "agent_id": f"agent-{index}",
+                        "kind": "task",
+                        "exit_code": 0,
+                        "timed_out": False,
+                    }
+                ],
+                "artifacts": {"run": {"stdout": f"artifacts/{arm}.log"}},
+                "qualification": identity,
+                "runtime": {
+                    "image_id": "sha256:fixture",
+                    "platform": "linux/arm64",
+                    "server_platform": "linux/arm64",
+                    "versions": {},
+                },
+            }
+            for index, arm in enumerate(arms, start=1)
+        ]
+        retained = json.loads(json.dumps(results))
+        writes = []
+        write_result = self.mod._write_run_result
+
+        @contextlib.contextmanager
+        def stage(manifest: Path):
+            yield manifest
+            raise OSError("dataset stage cleanup failed")
+
+        def record_write(out: Path, result: dict) -> None:
+            writes.append(json.loads(json.dumps(result)))
+            write_result(out, result)
+
+        with (
+            mock.patch.object(self.mod, "load_manifest", return_value={}),
+            mock.patch.object(
+                self.mod, "repo_entries", return_value=(self.repositories[0],)
+            ),
+            mock.patch.object(
+                self.mod, "load_corpus", return_value={"repository": "alpha"}
+            ),
+            mock.patch.object(
+                self.mod, "_corpus_matches_repository", return_value=True
+            ),
+            mock.patch.object(
+                self.mod._DOCKER, "inspect_runtime", return_value=mock.Mock()
+            ),
+            mock.patch.object(
+                self.mod, "load_qualification_receipt", return_value=receipt
+            ),
+            mock.patch.object(self.mod, "_staged_dataset_tree", side_effect=stage),
+            mock.patch.object(
+                self.mod,
+                "_staged_graded_inputs",
+                side_effect=lambda *_args: contextlib.nullcontext(self.root / "staged"),
+            ),
+            mock.patch.object(self.mod, "run_repo_arm", side_effect=results),
+            mock.patch.object(self.mod, "_write_run_result", side_effect=record_write),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            status = self.mod.main(
+                [
+                    "run",
+                    "--manifest",
+                    str(self.root / "manifest.json"),
+                    "--cache",
+                    str(self.root / "cache"),
+                    "--out",
+                    str(out_dir),
+                    "--arms",
+                    ",".join(arms),
+                    "--docker-image",
+                    "statefulbench-realworld:local",
+                ]
+            )
+
+        self.assertEqual(status, 1)
+        summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(summary["results"]), len(retained))
+        for original in retained:
+            key = (
+                original["repository"],
+                original["arm"],
+                original["trial"],
+            )
+            rewritten = [
+                result
+                for result in writes
+                if (result["repository"], result["arm"], result["trial"]) == key
+            ]
+            self.assertEqual(len(rewritten), 2)
+            self.assertTrue(rewritten[0]["cleared"])
+            self.assertFalse(rewritten[1]["cleared"])
+            self.assertIn("dataset stage cleanup failed", rewritten[1]["error"])
+            self.assertEqual(rewritten[1]["agents"], original["agents"])
+            self.assertEqual(rewritten[1]["artifacts"], original["artifacts"])
+            self.assertEqual(rewritten[1]["total_tokens"], original["total_tokens"])
+            self.assertEqual(rewritten[1]["qualification"], identity)
+        self.assertTrue(
+            all(
+                aggregate["comparison_error"] == "dataset stage cleanup failed"
+                for aggregate in summary["aggregates"]
+            )
+        )
 
     def test_result_write_is_atomic_and_preserves_prior_valid_json(self) -> None:
         result = self.result("alpha", "sequential", 1, tokens=1)

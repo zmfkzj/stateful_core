@@ -1697,6 +1697,96 @@ def _write_run_result(out_dir: Path, result: dict) -> None:
     _write_json_atomically(result_dir / "results.json", result)
 
 
+def _append_stage_cleanup_error(result: dict, error: str) -> None:
+    result["cleared"] = False
+    result["error"] = (
+        error if result.get("error") is None else f"{result['error']}; {error}"
+    )
+
+
+def _invalidate_stage_cleanup_receipts(
+    cache_dir: Path, manifest_path: Path, wanted: tuple[str, ...]
+) -> None:
+    try:
+        repositories = repo_entries(load_manifest(manifest_path))
+        selected = [
+            repo for repo in repositories if not wanted or repo["key"] in set(wanted)
+        ]
+    except (OSError, ValueError):
+        root = cache_dir / "qualification" / "receipts"
+        for receipt in root.glob("*.json"):
+            receipt.unlink(missing_ok=True)
+        return
+    for repository in selected:
+        remove_qualification_receipt(cache_dir, repository["key"])
+
+
+def _downgrade_stage_cleanup_run(arguments, error: str) -> None:
+    summary_path = arguments.out / "summary.json"
+    try:
+        previous = json.loads(summary_path.read_text(encoding="utf-8"))
+        previous_results = previous["results"]
+        if type(previous_results) is not list:
+            return
+    except (OSError, KeyError, TypeError, json.JSONDecodeError):
+        return
+    results = []
+    for previous_result in previous_results:
+        if type(previous_result) is not dict:
+            continue
+        try:
+            path = (
+                arguments.out
+                / previous_result["repository"]
+                / previous_result["arm"]
+                / f"trial-{previous_result['trial']}"
+                / "results.json"
+            )
+            result = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, KeyError, TypeError, json.JSONDecodeError):
+            continue
+        if type(result) is not dict:
+            continue
+        _append_stage_cleanup_error(result, error)
+        _write_run_result(arguments.out, result)
+        results.append(result)
+    if not results:
+        return
+    try:
+        repositories = repo_entries(load_manifest(arguments.manifest))
+        wanted = arguments.repos
+        selected = tuple(
+            repo for repo in repositories if not wanted or repo["key"] in set(wanted)
+        )
+        summary = build_run_summary(
+            selected,
+            arguments.arms,
+            arguments.trials,
+            arguments.model,
+            arguments.thinking,
+            results,
+            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        )
+    except (OSError, ValueError):
+        summary = {
+            **previous,
+            "arms": [_report_row(result) for result in results],
+            "results": results,
+            "aggregates": [],
+        }
+    summary["aggregates"] = [
+        {
+            "repo": aggregate["repo"],
+            "arm": aggregate["arm"],
+            "row_count": aggregate["row_count"],
+            "failures": aggregate["failures"],
+            "comparison_error": error,
+        }
+        for aggregate in summary["aggregates"]
+    ]
+    _write_json_atomically(summary_path, summary)
+
+
 def _arm_container_name(repo: dict, arm: str, trial: int) -> str:
     return f"statefulbench-{repo['key']}-{arm}-{trial}"
 
@@ -2779,13 +2869,29 @@ def main(argv: list[str] | None = None) -> int:
             manifest_index = staged_argv.index("--manifest")
         except ValueError as error:
             raise ValueError("--manifest is required") from error
-        with _staged_dataset_tree(arguments.manifest) as staged_manifest:
-            staged_argv[manifest_index + 1] = str(staged_manifest)
-            _STAGED_DATASET_ACTIVE = True
-            try:
-                return main(staged_argv)
-            finally:
-                _STAGED_DATASET_ACTIVE = False
+        completed = False
+        try:
+            with _staged_dataset_tree(arguments.manifest) as staged_manifest:
+                staged_argv[manifest_index + 1] = str(staged_manifest)
+                _STAGED_DATASET_ACTIVE = True
+                try:
+                    status = main(staged_argv)
+                    completed = True
+                finally:
+                    _STAGED_DATASET_ACTIVE = False
+        except OSError as error:
+            if not completed:
+                raise
+            if arguments.command == "qualify":
+                _invalidate_stage_cleanup_receipts(
+                    arguments.cache, arguments.manifest, tuple(arguments.repo or ())
+                )
+                print(f"Docker qualification failed: {error}", file=sys.stderr)
+            else:
+                _downgrade_stage_cleanup_run(arguments, str(error))
+                print(f"Docker run failed: {error}", file=sys.stderr)
+            return 1
+        return status
     if arguments.command == "qualify" and not inner_qualification:
         try:
             repo_root = Path(__file__).resolve().parents[3]
