@@ -12,11 +12,6 @@ from pathlib import Path
 
 def main() -> None:
     checkout = Path(sys.argv[1]).resolve()
-    dependencies = next(
-        parent / "pytest-asyncio-deps"
-        for parent in checkout.parents
-        if (parent / "pytest-asyncio-deps").is_dir()
-    )
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         metadata = root / "pytest_asyncio-0.dist-info"
@@ -40,9 +35,7 @@ def main() -> None:
         environment = os.environ.copy()
         environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
         environment["PYTHONWARNINGS"] = "default"
-        environment["PYTHONPATH"] = os.pathsep.join(
-            (str(root), str(checkout), str(dependencies)),
-        )
+        environment["PYTHONPATH"] = os.pathsep.join((str(root), str(checkout)))
         result = subprocess.run(
             [
                 sys.executable,

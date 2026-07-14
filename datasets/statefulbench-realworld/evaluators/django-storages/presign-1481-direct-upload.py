@@ -63,12 +63,7 @@ def storage_with(client: Client):
 
 def main() -> None:
     checkout = Path(sys.argv[1]).resolve()
-    deps = next(
-        parent / "django-storages-deps"
-        for parent in checkout.parents
-        if (parent / "django-storages-deps").is_dir()
-    )
-    sys.path[:0] = [str(checkout), str(deps)]
+    sys.path.insert(0, str(checkout))
     configure_django()
 
 

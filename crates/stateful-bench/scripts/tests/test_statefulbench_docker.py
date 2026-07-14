@@ -275,6 +275,7 @@ class DockerArmContainerTests(unittest.TestCase):
         self.assertNotIn("/home/agents", text)
         self.assertIn(self.runtime.image_id, command)
         self.assertEqual(command[-2:], ["sleep", "infinity"])
+        self.assertEqual(command[command.index("--ulimit") + 1], "nofile=4096:4096")
 
     def test_prepare_arm_runtime_initializes_one_shared_home_and_stateful_once(self) -> None:
         container = self.mod.ArmContainer(
@@ -760,6 +761,7 @@ class DockerQualificationTests(unittest.TestCase):
         self.assertIn("STATEFULBENCH_DOCKER_INNER=qualification", command)
         self.assertEqual(command.count("--repo"), 1)
         self.assertEqual(command[command.index("python3") - 1], self.runtime.image_id)
+        self.assertEqual(command[command.index("--ulimit") + 1], "nofile=4096:4096")
 
     def test_qualification_command_rejects_unsafe_mount_boundaries(self) -> None:
         with self.assertRaisesRegex(ValueError, "manifest"):

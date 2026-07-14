@@ -112,4 +112,16 @@ Gate 1.2 OMP startup controls: complete (fork commits ca8cbbcd4..adb6e9988; revi
 
 Base commit: 3a282ba
 Task-graph gates 1-10 and the OMP fork: cancelled by user; commits c0baf45..f6b6823 removed from dev (archived at archive/task-graph-gate2).
-Lite harness (5 parallel tasks + final review, 3 arms, efficiency metrics): complete (delivery commit on dev; final review clean after timeout-race fix)
+Lite harness (5 parallel tasks + final review, 3 arms, efficiency metrics): implemented; final commit pending
+
+## StatefulBench Docker runtime
+
+Base commit: d254d47
+Task 1: complete (commits d254d47..cd95a56, review clean; 8 focused tests; native linux/arm64 image built and inspected)
+Task 2: complete (commits cd95a56..806fbb6, review clean after immutable-image, container-attestation, and stale-receipt fixes; 43 focused tests; Requests qualified in Docker)
+Task 3: complete (commit 7ce1fa7, review clean after container-command completion and immutable-ID cleanup; 9 focused tests)
+Task 4: complete (commit 8ed35d6, review clean after host-fallback removal, Docker-client reap, and exit-record race fixes; 35 focused tests)
+Task 5: complete (commits 8ed35d6..f64f7ae, review clean after SQLite/path/redaction/provenance/cleanup hardening; 33 focused tests)
+Task 6: complete (commit 3b1ff49, review clean; credit-free all-three-arm Docker gate passed)
+Final hardening: complete (commits 4be3bea..916d499; final review ready to integrate after platform, provenance, staging, descendant, grading, timing, and cleanup fixes)
+Definitive verification: Docker 40 passed/1 opt-in skip, real-world 118 passed, lite 20 passed, live Docker E2E passed, Requests qualified against image aaebfb256063; dev pushed at 916d499.

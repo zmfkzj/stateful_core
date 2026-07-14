@@ -12,12 +12,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("repo", type=Path)
     repo = parser.parse_args().repo.resolve()
-    deps = next(
-        parent / "django-storages-deps"
-        for parent in repo.parents
-        if (parent / "django-storages-deps").is_dir()
-    )
-    sys.path[:0] = [str(repo), str(deps)]
+    sys.path.insert(0, str(repo))
     from django.conf import settings
 
     if not settings.configured:

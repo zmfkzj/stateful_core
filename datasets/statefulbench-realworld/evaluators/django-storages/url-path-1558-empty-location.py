@@ -5,12 +5,6 @@ import sys
 from pathlib import Path
 
 
-def dependencies(checkout: Path) -> Path:
-    return next(
-        parent / "django-storages-deps"
-        for parent in checkout.resolve().parents
-        if (parent / "django-storages-deps").is_dir()
-    )
 
 
 def storage(S3Storage, location):
@@ -28,7 +22,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("repo", type=Path)
     args = parser.parse_args()
-    sys.path[:0] = [str(args.repo), str(dependencies(args.repo))]
+    sys.path.insert(0, str(args.repo))
 
     from django.core.exceptions import SuspiciousOperation
     from storages.backends.s3 import S3Storage
