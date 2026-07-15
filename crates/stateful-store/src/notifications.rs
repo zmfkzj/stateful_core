@@ -188,6 +188,57 @@ impl Store {
         })
     }
 
+    pub fn poll_notifications<T: Serialize>(
+        &self,
+        request: &RequestEnvelope<T>,
+    ) -> StoreResult<CommandOutcome<Vec<NotificationRecord>>> {
+        let now = self.clock.now();
+        self.execute_command(request, "notification.poll", |reader| {
+            let notifications = typed_records::<NotificationRecord>(
+                reader,
+                CurrentAggregate::Notification,
+                &request.workspace.workspace_id,
+            )?;
+            let deliveries = typed_records::<DeliveryRecord>(
+                reader,
+                CurrentAggregate::Delivery,
+                &request.workspace.workspace_id,
+            )?;
+            let mut events = Vec::new();
+            let mut pending = Vec::new();
+            for notification in notifications.into_iter().filter(|notification| {
+                notification.target_agent_id == request.agent.agent_id && notification.status == "queued"
+            }) {
+                if deliveries.iter().any(|delivery| {
+                    delivery.notification_id == notification.notification_id && delivery.status == "delivered"
+                }) {
+                    continue;
+                }
+                let delivery = DeliveryRecord {
+                    delivery_id: notification.notification_id.clone(),
+                    notification_id: notification.notification_id.clone(),
+                    workspace_id: request.workspace.workspace_id.clone(),
+                    status: "delivered".into(),
+                    attempts: 1,
+                    last_error: None,
+                    retry_at: None,
+                    delivered_at: Some(timestamp(now)?),
+                    origin_event_seq: 0,
+                };
+                events.push(notification_delivery_event(
+                    request,
+                    events.len() as u32,
+                    now,
+                    RecoveryEvent::Delivered,
+                    &delivery,
+                    &notification,
+                )?);
+                pending.push(notification);
+            }
+            Ok(CommandPlan { events, response: pending, http_status: 200 })
+        })
+    }
+
     pub fn expire_notifications(
         &self,
         request: &RequestEnvelope<()>,

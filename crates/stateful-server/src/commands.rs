@@ -203,10 +203,10 @@ pub(crate) async fn notifications_poll(State(config): State<ServerConfig>, proto
         Err(response) => return response,
     };
     let request_id = request.request_id.to_string();
-    match lock_store(&config.store).and_then(|store| store.pending_notifications(&request.agent.agent_id, &request.workspace.workspace_id)) {
-        Ok(notifications) => Json(json!({"notifications": notifications})).into_response(),
-        Err(error) => protocol::store_error_response(&request_id, error),
-    }
+    protocol::command_response(
+        &request_id,
+        lock_store(&config.store).and_then(|store| store.poll_notifications(&request)),
+    )
 }
 
 pub(crate) async fn resume_next(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {

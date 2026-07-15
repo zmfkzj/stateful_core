@@ -67,7 +67,15 @@ pub(crate) fn parse_query<T: DeserializeOwned>(raw: Option<String>) -> Result<Qu
                 V2Error::new("invalid_query_envelope", "Query parameters contain invalid percent encoding."),
             )),
         };
-        if parameters.insert(key, Value::String(value)).is_some() {
+        let value = if key == "limit" {
+            value.parse::<u64>()
+                .map(serde_json::Number::from)
+                .map(Value::Number)
+                .unwrap_or_else(|_| Value::String(value))
+        } else {
+            Value::String(value)
+        };
+        if parameters.insert(key, value).is_some() {
             return Err(error_response(
                 StatusCode::BAD_REQUEST,
                 None,
