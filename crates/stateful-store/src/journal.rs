@@ -265,7 +265,7 @@ fn relation_name(relation: PresenceResourceRelation) -> &'static str {
 
 impl Store {
     pub fn execute_command<R>(
-        &mut self,
+        &self,
         request: &RequestEnvelope<impl Serialize>,
         route_kind: &'static str,
         build: impl FnOnce(&dyn ProjectionReader) -> StoreResult<CommandPlan<R>>,
@@ -275,7 +275,7 @@ impl Store {
     {
         request.validate().map_err(StoreError::V2)?;
         let request_sha256 = normalized_request_sha256(request)?;
-        let transaction = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction = self.conn.unchecked_transaction()?;
         if let Some(receipt) = load_receipt(&transaction, request.request_id)? {
             if receipt.route_kind != route_kind || receipt.request_sha256 != request_sha256 || receipt.agent_id != request.agent.agent_id || receipt.workspace_id != request.workspace.workspace_id || receipt.actor_id != request.agent.actor_id {
                 return Err(StoreError::IdempotencyKeyReused);
@@ -296,7 +296,7 @@ impl Store {
             let normalized = NewEvent::new(request.request_id, event.event_ordinal, self.clock.now(), event.payload)
                 .map_err(StoreError::V2)?;
             let event_seq = insert_journal_event(&transaction, &normalized, request, &occurred_at)?;
-            if let Some((column, value)) = self.corrupt_next_journal_metadata_for_tests.take() {
+            if let Some((column, value)) = self.corrupt_next_journal_metadata_for_tests.borrow_mut().take() {
                 corrupt_journal_field(&transaction, event_seq, &column, &value)?;
             }
             let expected = ExpectedJournalEnvelope::from_request(request);
@@ -372,7 +372,7 @@ impl Store {
 
     #[doc(hidden)]
     pub fn corrupt_next_journal_metadata_for_tests(&mut self, column: &str, value: &str) {
-        self.corrupt_next_journal_metadata_for_tests = Some((column.into(), value.into()));
+        *self.corrupt_next_journal_metadata_for_tests.borrow_mut() = Some((column.into(), value.into()));
     }
 
     pub fn workspace_version(&self, workspace_id: &str) -> StoreResult<u64> {

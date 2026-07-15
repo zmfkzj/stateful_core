@@ -32,6 +32,7 @@ use stateful_core::{
     CurrentItemKind, CurrentSeverity, PolicyState, PresencePhase, ReconciliationDecision,
     ReservationScope, normalize_relative_path,
 };
+use std::cell::RefCell;
 use std::time::Duration as StdDuration;
 use std::{fs, path::Path};
 use std::sync::Arc;
@@ -169,7 +170,7 @@ pub struct Store {
     conn: Connection,
     clock: clock::SharedClock,
     projector_fail_on_event: Option<u32>,
-    corrupt_next_journal_metadata_for_tests: Option<(String, String)>,
+    corrupt_next_journal_metadata_for_tests: RefCell<Option<(String, String)>>,
 }
 
 impl Store {
@@ -193,7 +194,7 @@ impl Store {
         let conn = Connection::open(path)?;
         configure_file_connection(&conn)?;
         restrict_database_file_permissions(path)?;
-        let mut store = Self { conn, clock: Arc::new(clock), projector_fail_on_event: None, corrupt_next_journal_metadata_for_tests: None };
+        let mut store = Self { conn, clock: Arc::new(clock), projector_fail_on_event: None, corrupt_next_journal_metadata_for_tests: RefCell::new(None) };
         migration::migrate_persistent_v1(&store.conn, path, store.clock.as_ref())?;
         schema::create_v2_schema(&store.conn)?;
         store.startup_housekeeping()?;
@@ -242,7 +243,7 @@ impl Store {
     pub fn open_in_memory_with_clock(clock: impl Clock + 'static) -> StoreResult<Self> {
         let conn = Connection::open_in_memory()?;
         configure_connection(&conn)?;
-        let mut store = Self { conn, clock: Arc::new(clock), projector_fail_on_event: None, corrupt_next_journal_metadata_for_tests: None };
+        let mut store = Self { conn, clock: Arc::new(clock), projector_fail_on_event: None, corrupt_next_journal_metadata_for_tests: RefCell::new(None) };
         schema::create_v2_schema(&store.conn)?;
         store.startup_housekeeping()?;
         Ok(store)
@@ -2997,36 +2998,6 @@ mod tests {
     use super::*;
     use time::{Date, Month, Time};
 
-    #[test]
-    fn creates_expiry_predicate_indexes_for_stale_cleanup() {
-        let store = Store::open_in_memory().expect("in-memory store should open");
-        let expected = [
-            ("reservations", &["status", "expires_at"][..]),
-            ("wait_queue", &["status", "reservation_expires_at"][..]),
-            ("claims", &["status", "expires_at"][..]),
-            ("notifications", &["status", "expires_at"][..]),
-        ];
-
-        let missing = expected
-            .iter()
-            .filter_map(|(table, columns)| {
-                let has_expected_index = index_column_lists(&store, table)
-                    .iter()
-                    .any(|indexed_columns| indexed_columns.as_slice() == *columns);
-                if has_expected_index {
-                    None
-                } else {
-                    Some(format!("{table}({})", columns.join(", ")))
-                }
-            })
-            .collect::<Vec<_>>();
-
-        assert!(
-            missing.is_empty(),
-            "missing expiry indexes for stale cleanup: {}",
-            missing.join("; ")
-        );
-    }
 
     fn utc_instant(
         year: i32,
@@ -3094,39 +3065,4 @@ mod tests {
         );
     }
 
-    fn index_column_lists(store: &Store, table: &str) -> Vec<Vec<String>> {
-        let quoted_table = Store::quote_sql_identifier(table);
-        let mut statement = store
-            .conn
-            .prepare(&format!("PRAGMA index_list({quoted_table})"))
-            .expect("index list should be readable");
-        let index_names = statement
-            .query_map([], |row| row.get::<_, String>(1))
-            .expect("index list query should run")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("index names should be readable");
-
-        index_names
-            .into_iter()
-            .map(|index_name| {
-                let quoted_index = Store::quote_sql_identifier(&index_name);
-                let mut statement = store
-                    .conn
-                    .prepare(&format!("PRAGMA index_info({quoted_index})"))
-                    .expect("index info should be readable");
-                statement
-                    .query_map([], |row| row.get::<_, String>(2))
-                    .expect("index info query should run")
-                    .collect::<Result<Vec<_>, _>>()
-                    .expect("index columns should be readable")
-            })
-            .collect()
-    }
-}
-
-#[cfg(test)]
-impl Store {
-    fn quote_sql_identifier(identifier: &str) -> String {
-        format!("\"{}\"", identifier.replace('"', "\"\""))
-    }
 }

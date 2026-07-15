@@ -74,7 +74,7 @@ fn corrupt_replay_fails_safely(column: &str, value: &str) {
 
 #[test]
 fn command_appends_projects_versions_receipts_and_commits_atomically() {
-    let mut store = store();
+    let store = store();
     let request = request(Uuid::new_v4(), json!({"intent":"deny"}));
 
     let outcome = store
@@ -110,7 +110,7 @@ fn command_appends_projects_versions_receipts_and_commits_atomically() {
 
 #[test]
 fn duplicate_request_returns_frozen_response_without_new_events() {
-    let mut store = store();
+    let store = store();
     let request = request(Uuid::new_v4(), json!({"intent":"deny"}));
     let first = store
         .execute_command(&request, "test.command", |_| Ok(command_plan(request.request_id, vec![event(request.request_id, 0, "authorization.denied")])))
@@ -128,7 +128,7 @@ fn duplicate_request_returns_frozen_response_without_new_events() {
 
 #[test]
 fn request_id_reuse_with_different_route_identity_or_payload_is_rejected() {
-    let mut store = store();
+    let store = store();
     let request_id = Uuid::new_v4();
     let original = request(request_id, json!({"intent":"deny"}));
     store
@@ -192,7 +192,7 @@ fn projector_failure_rolls_back_journal_projection_version_and_receipt() {
 
 #[test]
 fn audit_only_event_does_not_advance_workspace_version() {
-    let mut store = store();
+    let store = store();
     let request = request(Uuid::new_v4(), json!({"intent":"audit"}));
     store
         .execute_command(&request, "test.command", |_| Ok(command_plan(request.request_id, vec![event(request.request_id, 0, "authorization.allowed")])))
@@ -242,7 +242,7 @@ fn replay_into_empty_projection_tables_is_byte_equivalent() {
 
 #[test]
 fn event_sequence_and_id_are_stable_and_unique() {
-    let mut store = store();
+    let store = store();
     let request = request(Uuid::new_v4(), json!({"intent":"deny"}));
     let events = vec![
         event(request.request_id, 0, "authorization.denied"),

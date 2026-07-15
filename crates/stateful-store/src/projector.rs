@@ -1,9 +1,10 @@
 use crate::{StoreError, StoreResult, journal::JournalEvent, schema};
 use rusqlite::{Connection, params};
 use stateful_core::{
-    ActorType, ClaimEvent, EventData, EventPayload, HandoffEvent, HandoffRecord, HandoffStatus,
-    MigrationEvent, PresenceEvent, PresenceRecord, PresenceResource, ReservationEvent, WaitEvent,
-    WriteFenceEvent, FALLBACK_HANDOFF_RELEVANCE,
+    ActorType, AuthorizationEvent, ClaimEvent, ContextEvent, EventData, EventPayload, HandoffEvent,
+    HandoffRecord, HandoffStatus, HumanObservationEvent, MigrationEvent, NotificationEvent,
+    PresenceEvent, PresenceRecord, PresenceResource, ReadObservationEvent, RecoveryEvent,
+    ReservationEvent, WaitEvent, WriteFenceEvent, WriteIntentEvent, FALLBACK_HANDOFF_RELEVANCE,
 };
 
 pub(crate) struct Projector<'a> {
@@ -313,8 +314,10 @@ impl<'a> Projector<'a> {
 
     fn apply_aggregate(&self, table: &str, event: &JournalEvent) -> StoreResult<()> {
         let table = format!("{}{}", self.prefix, table);
-        let payload_json = serde_json::to_string(event.stored.payload())?;
-        match table.strip_prefix(self.prefix).unwrap_or(&table) {
+        let aggregate_table = table.strip_prefix(self.prefix).unwrap_or(&table);
+        let data = event_data(event).map(|data| projection_data(aggregate_table, data));
+        let payload_json = serde_json::to_string(data.unwrap_or(&serde_json::Value::Null))?;
+        match aggregate_table {
             "presence_current" => {
                 self.connection.execute(
                     &format!(
@@ -336,7 +339,6 @@ impl<'a> Projector<'a> {
                 )?;
             }
             "claim_current" | "write_fence_current" => {
-                let data = migration_seed_data(event);
                 let path = data.and_then(|data| data.get("relative_path")).and_then(serde_json::Value::as_str);
                 let expires_at = data.and_then(|data| data.get("expires_at")).and_then(serde_json::Value::as_str);
                 self.connection.execute(
@@ -349,7 +351,7 @@ impl<'a> Projector<'a> {
                 )?;
             }
             "wait_current" | "write_intent_current" => {
-                let operation_id = migration_seed_data(event)
+                let operation_id = data
                     .and_then(|data| data.get("request_id"))
                     .and_then(serde_json::Value::as_str);
                 self.connection.execute(
@@ -362,7 +364,6 @@ impl<'a> Projector<'a> {
                 )?;
             }
             "notification_current" => {
-                let data = migration_seed_data(event);
                 let target_agent_id = data.and_then(|data| data.get("target_agent_id")).and_then(serde_json::Value::as_str);
                 let version = data.and_then(|data| data.get("sequence")).and_then(serde_json::Value::as_i64).unwrap_or(0);
                 self.connection.execute(
@@ -431,6 +432,120 @@ impl<'a> Projector<'a> {
         }
         schema::create_v2_schema(connection)
     }
+}
+
+fn projection_data<'a>(table: &str, data: &'a serde_json::Value) -> &'a serde_json::Value {
+    let key = match table {
+        "reservation_current" => "reservation",
+        "claim_current" => "claim",
+        "wait_current" => "wait",
+        "write_fence_current" => "write_fence",
+        "human_observation_current" => "observation",
+        "notification_current" => "notification",
+        _ => return data,
+    };
+    data.get(key).unwrap_or(data)
+}
+
+fn event_data(event: &JournalEvent) -> Option<&serde_json::Value> {
+    let data: &EventData = match event.stored.payload() {
+        EventPayload::Migration(event) => match event {
+            MigrationEvent::Started(data)
+            | MigrationEvent::LegacyAuditImported(data)
+            | MigrationEvent::PresenceSnapshotSeeded(data)
+            | MigrationEvent::ReservationSnapshotSeeded(data)
+            | MigrationEvent::ClaimSnapshotSeeded(data)
+            | MigrationEvent::WaitSnapshotSeeded(data)
+            | MigrationEvent::WriteFenceSnapshotSeeded(data)
+            | MigrationEvent::HumanObservationSnapshotSeeded(data)
+            | MigrationEvent::LegacyHandoffSnapshotSeeded(data)
+            | MigrationEvent::DeliverySnapshotSeeded(data)
+            | MigrationEvent::Validated(data)
+            | MigrationEvent::Completed(data) => data,
+        },
+        EventPayload::Presence(event) => match event {
+            PresenceEvent::Registered(data)
+            | PresenceEvent::Heartbeat(data)
+            | PresenceEvent::GoalUpdated(data)
+            | PresenceEvent::PhaseUpdated(data)
+            | PresenceEvent::PlanUpdated(data)
+            | PresenceEvent::ResourcesUpdated(data)
+            | PresenceEvent::ToolStarted(data)
+            | PresenceEvent::ToolCompleted(data)
+            | PresenceEvent::Finalized(data)
+            | PresenceEvent::Expired(data) => data,
+        },
+        EventPayload::Reservation(event) => match event {
+            ReservationEvent::Declared(data)
+            | ReservationEvent::Refreshed(data)
+            | ReservationEvent::Released(data)
+            | ReservationEvent::Expired(data) => data,
+        },
+        EventPayload::Claim(event) => match event {
+            ClaimEvent::Acquired(data)
+            | ClaimEvent::ObservationRefreshed(data)
+            | ClaimEvent::Released(data)
+            | ClaimEvent::Expired(data) => data,
+        },
+        EventPayload::Wait(event) => match event {
+            WaitEvent::Requested(data)
+            | WaitEvent::BecameClaimable(data)
+            | WaitEvent::Claimed(data)
+            | WaitEvent::Cancelled(data)
+            | WaitEvent::Expired(data) => data,
+        },
+        EventPayload::WriteFence(event) => match event {
+            WriteFenceEvent::Acquired(data)
+            | WriteFenceEvent::ConflictObserved(data)
+            | WriteFenceEvent::Released(data)
+            | WriteFenceEvent::Expired(data) => data,
+        },
+        EventPayload::ReadObservation(event) => match event {
+            ReadObservationEvent::Started(data)
+            | ReadObservationEvent::Stabilized(data)
+            | ReadObservationEvent::Unstable(data)
+            | ReadObservationEvent::Aborted(data)
+            | ReadObservationEvent::Invalidated(data)
+            | ReadObservationEvent::Expired(data) => data,
+        },
+        EventPayload::WriteIntent(event) => match event {
+            WriteIntentEvent::Started(data)
+            | WriteIntentEvent::Committed(data)
+            | WriteIntentEvent::Failed(data)
+            | WriteIntentEvent::OutcomeUnknown(data)
+            | WriteIntentEvent::Reconciled(data) => data,
+        },
+        EventPayload::HumanObservation(event) => match event {
+            HumanObservationEvent::Observed(data)
+            | HumanObservationEvent::Reconciled(data)
+            | HumanObservationEvent::Expired(data) => data,
+        },
+        EventPayload::Handoff(event) => match event {
+            HandoffEvent::Finalized(data) | HandoffEvent::Expired(data) => data,
+        },
+        EventPayload::Authorization(event) => match event {
+            AuthorizationEvent::Allowed(data)
+            | AuthorizationEvent::Warned(data)
+            | AuthorizationEvent::Denied(data)
+            | AuthorizationEvent::OverrideGranted(data) => data,
+        },
+        EventPayload::Context(event) => match event {
+            ContextEvent::Rendered(data)
+            | ContextEvent::DeliveryCreated(data)
+            | ContextEvent::DeliveryAcknowledged(data)
+            | ContextEvent::DeliverySuperseded(data) => data,
+        },
+        EventPayload::Notification(event) => match event {
+            NotificationEvent::Created(data)
+            | NotificationEvent::Delivered(data)
+            | NotificationEvent::Expired(data)
+            | NotificationEvent::Coalesced(data) => data,
+        },
+        EventPayload::Recovery(event) => match event {
+            RecoveryEvent::Queued(data) | RecoveryEvent::Delivered(data) | RecoveryEvent::Failed(data) => data,
+        },
+    };
+    Some(&data.data)
 }
 
 fn presence_event_data(event: &PresenceEvent) -> Option<&EventData> {
