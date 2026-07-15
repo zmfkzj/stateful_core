@@ -60,6 +60,18 @@ fn store() -> Store {
     Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store should open")
 }
 
+fn corrupt_replay_fails_safely(column: &str, value: &str) {
+    let mut store = store();
+    let request = request(Uuid::new_v4(), json!({"intent":"deny"}));
+    store
+        .execute_command(&request, "test.command", |_| Ok(command_plan(request.request_id, vec![event(request.request_id, 0, "authorization.denied")])))
+        .expect("command should commit");
+    let before = store.projection_snapshot().expect("snapshot should load");
+    store.corrupt_journal_metadata_for_tests(column, value).expect("corruption should apply");
+    assert!(store.rebuild_projections().is_err(), "{column} corruption must fail replay");
+    assert_eq!(store.projection_snapshot().expect("snapshot should load"), before);
+}
+
 #[test]
 fn command_appends_projects_versions_receipts_and_commits_atomically() {
     let mut store = store();
@@ -152,6 +164,7 @@ fn request_id_reuse_with_different_route_identity_or_payload_is_rejected() {
 
 #[test]
 fn projector_failure_rolls_back_journal_projection_version_and_receipt() {
+    {
     let mut store = store();
     let request = request(Uuid::new_v4(), json!({"intent":"deny"}));
     store.fail_projector_on_event_for_tests(2);
@@ -166,6 +179,15 @@ fn projector_failure_rolls_back_journal_projection_version_and_receipt() {
     assert_eq!(store.projection_row_count().expect("projections should load"), 0);
     assert_eq!(store.workspace_version("workspace-1").expect("version should load"), 0);
     assert_eq!(store.command_receipt_count().expect("receipt count should load"), 0);
+    }
+    let mut corrupted_live_store = store();
+    let corrupted_live_request = request(Uuid::new_v4(), json!({"intent":"deny"}));
+    corrupted_live_store.corrupt_next_journal_metadata_for_tests("source_ref", "wrong-source");
+    assert!(corrupted_live_store
+        .execute_command(&corrupted_live_request, "test.command", |_| Ok(command_plan(corrupted_live_request.request_id, vec![event(corrupted_live_request.request_id, 0, "authorization.denied")])))
+        .is_err(), "post-insert envelope corruption must roll back live execution");
+    assert_eq!(corrupted_live_store.journal_event_count().expect("journal count should load"), 0);
+    assert_eq!(corrupted_live_store.projection_row_count().expect("projection count should load"), 0);
 }
 
 #[test]
@@ -212,6 +234,10 @@ fn replay_into_empty_projection_tables_is_byte_equivalent() {
     corrupt_store.corrupt_journal_metadata_for_tests("event_type", "presence.registered").expect("corruption should apply");
     assert!(corrupt_store.rebuild_projections().is_err(), "corrupt persisted metadata must fail replay");
     assert_eq!(corrupt_store.projection_snapshot().expect("snapshot should load"), corrupt_before);
+    corrupt_replay_fails_safely("actor_type", "robot");
+    corrupt_replay_fails_safely("affects_context", "2");
+    corrupt_replay_fails_safely("agent_id", "wrong-agent");
+    corrupt_replay_fails_safely("source_ref", "");
 }
 
 #[test]

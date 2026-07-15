@@ -7,7 +7,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use stateful_core::{
-    ActorType, EventPayload, NewEvent, PresenceRecord, RequestEnvelope, StoredEvent,
+    ActorType, AgentIdentity, EventPayload, NewEvent, PresenceRecord, RequestEnvelope,
+    SourceKind, SourceRef, StoredEvent, WorkspaceIdentity,
 };
 use std::collections::BTreeMap;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -177,7 +178,11 @@ impl Store {
             let normalized = NewEvent::new(request.request_id, event.event_ordinal, self.clock.now(), event.payload)
                 .map_err(StoreError::V2)?;
             let event_seq = insert_journal_event(&transaction, &normalized, request, &occurred_at)?;
-            let journal_event = load_journal_event(&transaction, event_seq)?;
+            if let Some((column, value)) = self.corrupt_next_journal_metadata_for_tests.take() {
+                corrupt_journal_field(&transaction, event_seq, &column, &value)?;
+            }
+            let expected = ExpectedJournalEnvelope::from_request(request);
+            let journal_event = load_journal_event(&transaction, event_seq, Some(&expected))?;
             projector.apply(&journal_event)?;
             first_event_seq.get_or_insert(event_seq);
             last_event_seq = Some(event_seq);
@@ -235,11 +240,12 @@ impl Store {
 
     #[doc(hidden)]
     pub fn corrupt_journal_metadata_for_tests(&mut self, column: &str, value: &str) -> StoreResult<()> {
-        if column != "event_type" {
-            return Err(StoreError::InvalidJournalEvent);
-        }
-        self.conn.execute("UPDATE journal_events SET event_type = ?1", [value])?;
-        Ok(())
+        corrupt_journal_field(&self.conn, 0, column, value)
+    }
+
+    #[doc(hidden)]
+    pub fn corrupt_next_journal_metadata_for_tests(&mut self, column: &str, value: &str) {
+        self.corrupt_next_journal_metadata_for_tests = Some((column.into(), value.into()));
     }
 
     pub fn workspace_version(&self, workspace_id: &str) -> StoreResult<u64> {
@@ -291,26 +297,32 @@ fn insert_journal_event(transaction: &Transaction<'_>, event: &NewEvent, request
     ).map_err(StoreError::from)
 }
 
+const JOURNAL_EVENT_COLUMNS: &str = "event_seq, event_id, request_id, event_ordinal, agent_id, turn_id, workspace_id, repo_id, worktree_id, root, branch, aggregate_kind, aggregate_id, event_type, event_schema_version, actor_id, actor_type, owner_id, parent_agent_id, parent_actor_id, source_kind, source_ref, causation_id, correlation_id, occurred_at, affects_context, payload_json";
+
 fn load_journal_events(connection: &Connection) -> StoreResult<Vec<JournalEvent>> {
-    let mut statement = connection.prepare(
-        "SELECT event_seq, event_id, request_id, event_ordinal, agent_id, workspace_id, actor_id, actor_type, aggregate_kind, aggregate_id, event_type, event_schema_version, occurred_at, affects_context, payload_json FROM journal_events ORDER BY event_seq",
-    )?;
+    let mut statement = connection.prepare(&format!(
+        "SELECT {JOURNAL_EVENT_COLUMNS} FROM journal_events ORDER BY event_seq"
+    ))?;
     statement
         .query_map([], persisted_journal_event_from_row)?
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
-        .map(PersistedJournalEvent::validate)
+        .map(|event| event.validate(None))
         .collect()
 }
 
-fn load_journal_event(connection: &Connection, event_seq: u64) -> StoreResult<JournalEvent> {
+fn load_journal_event(
+    connection: &Connection,
+    event_seq: u64,
+    expected: Option<&ExpectedJournalEnvelope>,
+) -> StoreResult<JournalEvent> {
     connection
         .query_row(
-            "SELECT event_seq, event_id, request_id, event_ordinal, agent_id, workspace_id, actor_id, actor_type, aggregate_kind, aggregate_id, event_type, event_schema_version, occurred_at, affects_context, payload_json FROM journal_events WHERE event_seq = ?1",
+            &format!("SELECT {JOURNAL_EVENT_COLUMNS} FROM journal_events WHERE event_seq = ?1"),
             [event_seq],
             persisted_journal_event_from_row,
         )?
-        .validate()
+        .validate(expected)
 }
 
 fn persisted_journal_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersistedJournalEvent> {
@@ -320,17 +332,47 @@ fn persisted_journal_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result
         request_id: row.get(2)?,
         event_ordinal: row.get(3)?,
         agent_id: row.get(4)?,
-        workspace_id: row.get(5)?,
-        actor_id: row.get(6)?,
-        actor_type: row.get(7)?,
-        aggregate_kind: row.get(8)?,
-        aggregate_id: row.get(9)?,
-        event_type: row.get(10)?,
-        event_schema_version: row.get(11)?,
-        occurred_at: row.get(12)?,
-        affects_context: row.get::<_, i64>(13)? != 0,
-        payload_json: row.get(14)?,
+        turn_id: row.get(5)?,
+        workspace_id: row.get(6)?,
+        repo_id: row.get(7)?,
+        worktree_id: row.get(8)?,
+        root: row.get(9)?,
+        branch: row.get(10)?,
+        aggregate_kind: row.get(11)?,
+        aggregate_id: row.get(12)?,
+        event_type: row.get(13)?,
+        event_schema_version: row.get(14)?,
+        actor_id: row.get(15)?,
+        actor_type: row.get(16)?,
+        owner_id: row.get(17)?,
+        parent_agent_id: row.get(18)?,
+        parent_actor_id: row.get(19)?,
+        source_kind: row.get(20)?,
+        source_ref: row.get(21)?,
+        causation_id: row.get(22)?,
+        correlation_id: row.get(23)?,
+        occurred_at: row.get(24)?,
+        affects_context: row.get(25)?,
+        payload_json: row.get(26)?,
     })
+}
+
+struct ExpectedJournalEnvelope {
+    request_id: String,
+    agent: AgentIdentity,
+    workspace: WorkspaceIdentity,
+    source: SourceRef,
+}
+
+impl ExpectedJournalEnvelope {
+    fn from_request<T>(request: &RequestEnvelope<T>) -> Self {
+        Self {
+            request_id: request.request_id.to_string(),
+            agent: request.agent.clone(),
+            workspace: request.workspace.clone(),
+            source: request.source.clone(),
+        }
+    }
 }
 
 struct PersistedJournalEvent {
@@ -339,22 +381,67 @@ struct PersistedJournalEvent {
     request_id: String,
     event_ordinal: u32,
     agent_id: String,
+    turn_id: Option<String>,
     workspace_id: String,
-    actor_id: String,
-    actor_type: String,
+    repo_id: Option<String>,
+    worktree_id: Option<String>,
+    root: Option<String>,
+    branch: Option<String>,
     aggregate_kind: String,
     aggregate_id: String,
     event_type: String,
     event_schema_version: u64,
+    actor_id: String,
+    actor_type: String,
+    owner_id: Option<String>,
+    parent_agent_id: Option<String>,
+    parent_actor_id: Option<String>,
+    source_kind: String,
+    source_ref: String,
+    causation_id: Option<String>,
+    correlation_id: Option<String>,
     occurred_at: String,
-    affects_context: bool,
+    affects_context: i64,
     payload_json: String,
 }
 
 impl PersistedJournalEvent {
-    fn validate(self) -> StoreResult<JournalEvent> {
-        if self.event_schema_version != 1 {
+    fn validate(self, expected: Option<&ExpectedJournalEnvelope>) -> StoreResult<JournalEvent> {
+        if self.event_schema_version != 1 || !(0..=1).contains(&self.affects_context) {
             return Err(StoreError::InvalidJournalEvent);
+        }
+        let actor_type = serde_json::from_value(serde_json::Value::String(self.actor_type.clone()))
+            .map_err(|_| StoreError::InvalidJournalEvent)?;
+        let agent = AgentIdentity {
+            agent_id: self.agent_id.clone(),
+            turn_id: self.turn_id.clone(),
+            actor_id: self.actor_id.clone(),
+            actor_type,
+            owner_id: self.owner_id.clone(),
+            parent_agent_id: self.parent_agent_id.clone(),
+            parent_actor_id: self.parent_actor_id.clone(),
+        };
+        agent.validate().map_err(StoreError::V2)?;
+        let workspace = WorkspaceIdentity {
+            root: required_identity_field(self.root.as_deref())?,
+            workspace_id: self.workspace_id.clone(),
+            repo_id: required_identity_field(self.repo_id.as_deref())?,
+            worktree_id: required_identity_field(self.worktree_id.as_deref())?,
+            branch: required_identity_field(self.branch.as_deref())?,
+        };
+        workspace.validate().map_err(StoreError::V2)?;
+        let source_kind: SourceKind = serde_json::from_value(serde_json::Value::String(self.source_kind.clone()))
+            .map_err(|_| StoreError::InvalidJournalEvent)?;
+        SourceRef {
+            kind: source_kind.clone(),
+            event: "journal".into(),
+            tool_name: None,
+            source_ref: self.source_ref.clone(),
+        }.validate().map_err(StoreError::V2)?;
+        for identifier in [&self.causation_id, &self.correlation_id] {
+            if let Some(identifier) = identifier {
+                Uuid::parse_str(identifier).map_err(|_| StoreError::InvalidJournalEvent)?;
+            }
         }
         let payload: EventPayload = serde_json::from_str(&self.payload_json)?;
         let mut event = NewEvent::new(
@@ -368,9 +455,31 @@ impl PersistedJournalEvent {
         if stored.aggregate_kind() != self.aggregate_kind
             || stored.aggregate_id() != self.aggregate_id
             || stored.event_type() != self.event_type
-            || stored.affects_context() != self.affects_context
+            || stored.affects_context() != (self.affects_context == 1)
         {
             return Err(StoreError::InvalidJournalEvent);
+        }
+        if let Some(expected) = expected {
+            if self.request_id != expected.request_id
+                || agent.agent_id != expected.agent.agent_id
+                || agent.turn_id != expected.agent.turn_id
+                || agent.actor_id != expected.agent.actor_id
+                || actor_type_name(&agent.actor_type) != actor_type_name(&expected.agent.actor_type)
+                || agent.owner_id != expected.agent.owner_id
+                || agent.parent_agent_id != expected.agent.parent_agent_id
+                || agent.parent_actor_id != expected.agent.parent_actor_id
+                || workspace.workspace_id != expected.workspace.workspace_id
+                || workspace.repo_id != expected.workspace.repo_id
+                || workspace.worktree_id != expected.workspace.worktree_id
+                || workspace.root != expected.workspace.root
+                || workspace.branch != expected.workspace.branch
+                || source_kind_name(&source_kind) != source_kind_name(&expected.source.kind)
+                || self.source_ref != expected.source.source_ref
+                || self.causation_id.is_some()
+                || self.correlation_id.is_some()
+            {
+                return Err(StoreError::InvalidJournalEvent);
+            }
         }
         Ok(JournalEvent {
             stored,
@@ -381,6 +490,35 @@ impl PersistedJournalEvent {
             occurred_at: self.occurred_at,
         })
     }
+}
+
+fn required_identity_field(value: Option<&str>) -> StoreResult<String> {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or(StoreError::InvalidJournalEvent)
+}
+
+fn corrupt_journal_field(
+    connection: &Connection,
+    event_seq: u64,
+    column: &str,
+    value: &str,
+) -> StoreResult<()> {
+    if !matches!(column, "event_type" | "actor_type" | "affects_context" | "agent_id" | "source_ref") {
+        return Err(StoreError::InvalidJournalEvent);
+    }
+    let query = if event_seq == 0 {
+        format!("UPDATE journal_events SET {column} = ?1")
+    } else {
+        format!("UPDATE journal_events SET {column} = ?1 WHERE event_seq = ?2")
+    };
+    if event_seq == 0 {
+        connection.execute(&query, [value])?;
+    } else {
+        connection.execute(&query, params![value, event_seq])?;
+    }
+    Ok(())
 }
 
 fn projection_snapshot(connection: &Connection, prefix: &str) -> StoreResult<BTreeMap<String, Vec<Vec<String>>>> {
