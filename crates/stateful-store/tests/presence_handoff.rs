@@ -6,6 +6,7 @@ use stateful_store::{
     Clock, FixedClock, PresenceRegistration, PresenceResourceUpdate, PresenceToolResult,
     PresenceToolStart, Store,
 };
+use tempfile::TempDir;
 use std::sync::{Arc, Mutex};
 use time::{Duration, OffsetDateTime, macros::datetime};
 use uuid::Uuid;
@@ -362,11 +363,16 @@ fn generic_presence_update_rejects_tool_only_fields_without_mutation() {
 
 #[test]
 fn relevant_presence_query_lazily_finalizes_expired_presence_once() {
+    let temp = TempDir::new().expect("temporary directory should exist");
+    let path = temp.path().join("presence.sqlite");
     let clock = MutableClock::new(NOW);
-    let mut store = Store::open_in_memory_with_clock(clock.clone()).expect("store should open");
-    store.register_presence(&register_request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, None))
-        .expect("registration should succeed");
+    {
+        let mut store = Store::open_with_clock(&path, clock.clone()).expect("store should open");
+        store.register_presence(&register_request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, None))
+            .expect("registration should succeed");
+    }
     clock.advance(Duration::minutes(16));
+    let mut store = Store::open_with_clock(&path, clock.clone()).expect("reopened store should open");
     let query = request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, ());
     assert!(store.presence_for_request(&query, "agent-1").expect("lazy query should succeed").is_none());
     let event_count = store.journal_event_count().expect("journal count should load");
