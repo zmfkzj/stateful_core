@@ -155,13 +155,23 @@ impl Store {
             let mut statement = self.conn.prepare(
                 "SELECT workspace_id FROM presence_current UNION SELECT workspace_id FROM handoff_current",
             )?;
-            statement.query_map([], |row| row.get::<_, String>(0))?
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?
         };
         for workspace_id in workspaces {
-            self.expire_current_state(&self.system_maintenance_request(&workspace_id)?)?;
+            self.maintain_workspace(&workspace_id)?;
         }
         Ok(())
+    }
+
+    pub fn run_maintenance(&mut self) -> StoreResult<()> {
+        self.startup_housekeeping()
+    }
+
+    fn maintain_workspace(&mut self, workspace_id: &str) -> StoreResult<()> {
+        let request = self.system_maintenance_request(workspace_id)?;
+        self.expire_current_state(&request)
     }
 
     fn system_maintenance_request(&self, workspace_id: &str) -> StoreResult<RequestEnvelope<()>> {
