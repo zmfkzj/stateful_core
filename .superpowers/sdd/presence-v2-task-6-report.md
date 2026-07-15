@@ -11,8 +11,8 @@
 
 - `stateful sandbox run --fs build --network disabled --write-dir v2-freshness-core-final --command 'cargo test -p stateful-core'` — pass.
 - `stateful sandbox run --fs build --network disabled --write-dir v2-freshness-store-suite-final --command 'cargo test -p stateful-store'` — pass.
-- Focused store freshness suite: 16 passing tests covering complete exact reads, incomplete classifications, concurrent operation IDs, the 60-minute expiry boundary, write intent/fence atomicity, committed version/invalidation/replay, failed release, unknown-outcome recovery/reconciliation, session finalization, and the semantic-marker structural-summary regression.
-- Current focused verification: `cargo test -p stateful-store --test freshness` — 16 passed; `cargo test -p stateful-core --test freshness_policy` — 4 passed.
+- Focused store freshness suite: 17 passing tests covering complete exact reads, incomplete classifications, concurrent operation IDs, the 60-minute expiry boundary, write intent/fence atomicity, committed version/invalidation/replay, failed release, unknown-outcome recovery/reconciliation, session finalization, and structural-summary regressions.
+- Current focused verification: `cargo test -p stateful-store --test freshness` — 17 passed; `cargo test -p stateful-core --test freshness_policy` — 5 passed. A persisted pre-fix structural observation whose stored status says `stabilized` is not stable or fresh authority; the server classifies it as unstable so awareness mode retains the hard stop, while maintenance still expires the stale row at its stored deadline.
 
 ## Self-review
 
@@ -21,11 +21,11 @@
 - Exact stability requires equal complete fingerprints from a full exact read. Semantic markers remain recorded but never affect stabilization; structural summaries, partial, truncated, failed, and ambiguous outcomes remain unstable.
 - Committed writes increment resource versions, invalidate other stable observations, create the writer’s stable observation, and release their fences in the same transaction. Replay is covered.
 - `evaluate_thin_safety` is the authoritative pure evaluator. It preserves invalid-target, unknown-outcome, stale-observation, active-fence, and human-change stops as denials in awareness mode; only missing/expired provenance becomes a warning.
-- Existing exact-file/delete/directory/nested scope coverage remains in the core policy suites. `server/policy_service.rs` adds only a thin delegating adapter to the core evaluator, avoiding a Task 8 route/runtime cutover.
+- Existing exact-file/delete/directory/nested scope coverage remains in the core policy suites. The server integration lives in `crates/stateful-server/src/commands.rs`, where `authorize_request` builds `ThinSafetyState` through `thin_safety_state` and delegates evaluation to `evaluate_thin_safety` rather than duplicating policy.
 
-## Deferred concern
+## Integration status
 
-`cargo test -p stateful-server --test routes --no-run` remains blocked by the intentional Task 5→Task 8 V1/V2 server cutover gap: 157 pre-existing compile errors, including unresolved old store imports and removed V1 Store methods in `server/lib.rs` and `policy_service.rs`. No server routes or runtime were changed for Task 6.
+Task 6 intentionally left the HTTP/runtime cutover to Task 8. The current V2 server command path now consumes the core evaluator from `crates/stateful-server/src/commands.rs`; there is no separate `policy_service.rs` adapter.
 
 ## Review fixes — unknown write reconciliation
 

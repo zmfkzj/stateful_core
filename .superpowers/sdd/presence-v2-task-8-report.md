@@ -41,19 +41,17 @@ Complete. The server exposes only the locked `stateful.v2` surface: 21 POST rout
 - `lost_poll_response_redelivers_until_sequence_acknowledgement` failed: the second poll returned `[]` after the first poll journaled a terminal delivery.
 - `unchanged_unknown_reconciliation_releases_fences_without_versions_or_peer_invalidations` failed: reconciliation created a resource version despite exact rereads matching every original `before`.
 - `stale_heartbeat_finalizes_before_returning_missing_presence_without_reusing_receipts` and `stale_heartbeat_cannot_revive_presence_when_a_live_handoff_already_exists` failed: heartbeat refreshed a live record after TTL, including when a prior fallback handoff was still relevant.
+- `successful_heartbeat_receipt_does_not_mask_later_presence_expiry` failed: retrying a previously successful heartbeat UUID after TTL replayed the frozen success receipt even though maintenance had finalized the presence.
 - `maintenance_leaves_started_write_intents_unclassified_without_post_fingerprints` was already green: `started_at` is persisted as a time tuple while the maintenance predicate only reads RFC 3339 strings, leaving the unsafe classifier unreachable. The dead classifier and its maintenance call were removed rather than making that path reachable.
 
 ### GREEN
 
 - Polling records no terminal delivery event; a new poll and SSE replay pending work until the target sends the sequence acknowledgement.
 - No-change `OutcomeUnknown` reconciliation emits `Reconciled`, releases fences, and leaves resource versions and peer observations untouched; changed reconciliation remains versioning/invalidation-capable.
-- Heartbeat first executes stale presence expiry through a fresh system-maintenance request, then returns the inner V2 `presence_not_found` error; retrying the caller UUID and a stale presence beside an existing live handoff create no revival.
+- Heartbeat first executes stale presence expiry through a fresh system-maintenance request and verifies that presence still exists before consulting the caller receipt, then returns the inner V2 `presence_not_found` error. Retries of both previously failed and previously successful caller UUIDs, plus a stale presence beside an existing live handoff, create no revival or false success.
 - Generic maintenance no longer guesses a `Started` write outcome; explicit `recover_write_intent` remains the post-fingerprint authority.
 
-### Residual Concern
+### Additional Verification
 
-- `StoreError::code()` still returns `store_error` for inner V2 errors; the heartbeat regression asserts the embedded V2 code directly. Server protocol mapping was covered by the V2 test suite.
-
-## Concerns
-
-See “Residual Concern” above.
+- `StoreError::code()` forwards nested V2 codes, so the lifecycle regression and server protocol mapping both report `presence_not_found`.
+- Focused verification passes: 20 presence/handoff tests, 17 freshness tests, 5 core freshness-policy tests, and 46 V2 server protocol tests.

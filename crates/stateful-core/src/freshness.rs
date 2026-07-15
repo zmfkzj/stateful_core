@@ -73,7 +73,7 @@ pub struct ReadObservationRecord {
 
 impl ReadObservationRecord {
     pub fn is_stable(&self) -> bool {
-        self.status == ReadObservationStatus::Stabilized
+        self.status == ReadObservationStatus::Stabilized && self.classification == ReadClassification::Exact
     }
 
     pub fn is_fresh_at(&self, now: OffsetDateTime) -> bool {

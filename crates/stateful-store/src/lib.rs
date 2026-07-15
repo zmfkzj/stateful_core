@@ -124,8 +124,9 @@ pub enum StoreError {
 pub type StoreResult<T> = Result<T, StoreError>;
 
 impl StoreError {
-    pub fn code(&self) -> &'static str {
+    pub fn code(&self) -> &str {
         match self {
+            Self::V2(error) => &error.code,
             Self::IdempotencyKeyReused => "idempotency_key_reused",
             Self::MigrationValidation(_) => "migration_validation",
             _ => "store_error",

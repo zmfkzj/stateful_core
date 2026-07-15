@@ -1,6 +1,8 @@
 use stateful_core::{
-    DecisionKind, FreshnessMode, ObservationFreshness, ThinSafetyState, evaluate_thin_safety,
+    ContentFingerprint, DecisionKind, FreshnessMode, ObservationFreshness, ReadClassification,
+    ReadObservationRecord, ReadObservationStatus, ThinSafetyState, evaluate_thin_safety,
 };
+use time::{Duration, macros::datetime};
 
 fn state(observation: ObservationFreshness) -> ThinSafetyState {
     ThinSafetyState {
@@ -60,4 +62,28 @@ fn thin_hard_stops_remain_denials_in_awareness_before_missing_provenance() {
             DecisionKind::Deny
         );
     }
+}
+
+#[test]
+fn persisted_structural_observation_is_never_fresh() {
+    let now = datetime!(2026-07-16 12:00 UTC);
+    let fingerprint = ContentFingerprint::missing();
+    let observation = ReadObservationRecord {
+        workspace_id: "workspace-1".into(),
+        agent_id: "agent-1".into(),
+        operation_id: "read-1".into(),
+        path: "src/lib.rs".into(),
+        status: ReadObservationStatus::Stabilized,
+        classification: ReadClassification::StructuralSummary,
+        before: fingerprint.clone(),
+        after: Some(fingerprint),
+        semantic_marker: Some("legacy-marker".into()),
+        observed_at: now,
+        expires_at: Some(now + Duration::hours(1)),
+        resource_version: 1,
+        origin_event_seq: 1,
+    };
+
+    assert!(!observation.is_stable());
+    assert!(!observation.is_fresh_at(now));
 }

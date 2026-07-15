@@ -107,6 +107,9 @@ impl Store {
     ) -> StoreResult<CommandOutcome<PresenceRecord>> {
         let maintenance = self.system_maintenance_request(&request.workspace.workspace_id)?;
         self.expire_current_state(&maintenance)?;
+        if self.presence_record(&request.workspace.workspace_id, &request.agent.agent_id)?.is_none() {
+            return Err(missing_presence());
+        }
         let now = self.clock.now();
         self.execute_command(request, "presence.heartbeat", |reader| {
             let mut presence = reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?

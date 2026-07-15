@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use stateful_core::{
     AuthorizationInput, Decision, DecisionKind, FreshnessMode, ObservationFreshness, PolicyState,
-    QueryEnvelope, ReadObservationStatus, RequestEnvelope, ReservationScope, ThinSafetyState,
+    QueryEnvelope, RequestEnvelope, ReservationScope, ThinSafetyState,
     V2Error, WriteIntentStart, WriteTarget, authorize_action, evaluate_thin_safety,
     normalize_relative_path,
 };
@@ -535,7 +535,7 @@ fn thin_safety_state(
         &target.path,
     )? {
         None => ObservationFreshness::Missing,
-        Some(record) if record.status != ReadObservationStatus::Stabilized => ObservationFreshness::Unstable,
+        Some(record) if !record.is_stable() => ObservationFreshness::Unstable,
         Some(record) if !record.is_fresh_at(store.now()) => ObservationFreshness::Expired,
         Some(record) if !target.before.is_complete_exact() || record.after.as_ref() != Some(&target.before) => ObservationFreshness::Changed,
         Some(record) => match store.resource_version(&request.workspace.workspace_id, &target.path)? {

@@ -129,7 +129,9 @@ impl Store {
                 CurrentAggregate::ReadObservation,
                 &request.workspace.workspace_id,
             )? {
-                if record.is_stable() && !record.is_fresh_at(now) {
+                if record.status == ReadObservationStatus::Stabilized
+                    && record.expires_at.is_none_or(|expires_at| expires_at <= now)
+                {
                     record.status = ReadObservationStatus::Expired;
                     expired.push(record.path.clone());
                     events.push(read_event(

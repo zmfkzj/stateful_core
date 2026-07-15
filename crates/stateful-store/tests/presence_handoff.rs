@@ -242,6 +242,7 @@ fn stale_heartbeat_finalizes_before_returning_missing_presence_without_reusing_r
     let first = store
         .heartbeat_presence(&heartbeat)
         .expect_err("stale heartbeat must not revive an expired presence");
+    assert_eq!(first.code(), "presence_not_found");
     assert!(matches!(first, stateful_store::StoreError::V2(error) if error.code == "presence_not_found"));
     assert!(handoff(&mut store, "agent-1").is_some(), "expiry must commit the fallback handoff");
     let event_count = store.journal_event_count().expect("journal count");
@@ -252,6 +253,26 @@ fn stale_heartbeat_finalizes_before_returning_missing_presence_without_reusing_r
     assert!(matches!(repeated, stateful_store::StoreError::V2(error) if error.code == "presence_not_found"));
     assert_eq!(store.journal_event_count().expect("journal count"), event_count);
     assert!(presence(&mut store, "agent-1").is_none());
+}
+
+#[test]
+fn successful_heartbeat_receipt_does_not_mask_later_presence_expiry() {
+    let clock = MutableClock::new(NOW);
+    let mut store = Store::open_in_memory_with_clock(clock.clone()).expect("store should open");
+    store
+        .register_presence(&register_request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, None))
+        .expect("registration should succeed");
+    let heartbeat = request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, ());
+    store.heartbeat_presence(&heartbeat).expect("initial heartbeat should succeed");
+    clock.advance(Duration::minutes(16));
+
+    let error = store
+        .heartbeat_presence(&heartbeat)
+        .expect_err("a cached heartbeat success must not hide later expiry");
+
+    assert!(matches!(error, stateful_store::StoreError::V2(error) if error.code == "presence_not_found"));
+    assert!(presence(&mut store, "agent-1").is_none());
+    assert!(handoff(&mut store, "agent-1").is_some());
 }
 
 #[test]
