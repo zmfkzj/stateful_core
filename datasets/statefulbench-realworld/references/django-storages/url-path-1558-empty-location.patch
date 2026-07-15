@@ -1,0 +1,17 @@
+diff --git a/storages/backends/s3.py b/storages/backends/s3.py
+--- a/storages/backends/s3.py
++++ b/storages/backends/s3.py
+@@ -667,7 +667,12 @@ class S3Storage(CompressStorageMixin, BaseStorage):
+ 
+     def url(self, name, parameters=None, expire=None, http_method=None):
+         # Preserve the trailing slash after normalizing the path.
+-        name = self._normalize_name(clean_name(name))
++        cleaned_name = clean_name(name)
++        if not self.location and (
++            cleaned_name == ".." or cleaned_name.startswith("../")
++        ):
++            raise SuspiciousOperation("Attempted access to '%s' denied." % name)
++        name = self._normalize_name(cleaned_name)
+         params = parameters.copy() if parameters else {}
+         if expire is None:
+             expire = self.querystring_expire

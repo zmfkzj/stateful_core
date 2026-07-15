@@ -1,0 +1,12 @@
+diff --git a/src/xdist/scheduler/loadscope.py b/src/xdist/scheduler/loadscope.py
+--- a/src/xdist/scheduler/loadscope.py
++++ b/src/xdist/scheduler/loadscope.py
+@@ -371,7 +371,7 @@ class LoadScopeScheduling:
+             work_unit = unsorted_workqueue.setdefault(scope, {})
+             work_unit[nodeid] = False
+ 
+-        if self.config.option.loadscopereorder:
++        if self.config.option.loadscopereorder and len(self.nodes) > 1:
+             # Insert tests scopes into work queue ordered by number of tests.
+             for scope, nodeids in sorted(
+                 unsorted_workqueue.items(), key=lambda item: -len(item[1])

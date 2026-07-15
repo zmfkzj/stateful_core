@@ -1,0 +1,23 @@
+--- a/src/click/core.py
++++ b/src/click/core.py
+@@ -899,6 +899,20 @@
+                     if default_value is UNSET:
+                         default_value = None
+                     kwargs[param.name] = param.type_cast_value(ctx, default_value)
++                    ctx.set_parameter_source(
++                        param.name,
++                        (
++                            ParameterSource.DEFAULT_MAP
++                            if ctx._default_map_has(param.name)
++                            else ParameterSource.DEFAULT
++                        ),
++                    )
++                elif param.expose_value:
++                    ctx.set_parameter_source(
++                        param.name,
++                        self.get_parameter_source(param.name)
++                        or ParameterSource.COMMANDLINE,
++                    )
+ 
+             # Track all kwargs as params, so that forward() will pass
+             # them on in subsequent calls.

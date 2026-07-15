@@ -1,0 +1,426 @@
+diff --git a/pytest_asyncio/plugin.py b/pytest_asyncio/plugin.py
+index 38b75e4..24b265b 100644
+--- a/pytest_asyncio/plugin.py
++++ b/pytest_asyncio/plugin.py
+@@ -7,6 +7,7 @@ import contextlib
+ import contextvars
+ import enum
+ import functools
++import importlib
+ import inspect
+ import socket
+ import sys
+@@ -134,11 +135,17 @@ def pytest_addoption(parser: Parser, pluginmanager: PytestPluginManager) -> None
+         type="bool",
+         default="false",
+     )
++    parser.addini(
++        "asyncio_loop_factory",
++        type="string",
++        help="dotted module:callable used to create asyncio event loops",
++        default=None,
++    )
+     parser.addini(
+         "asyncio_default_fixture_loop_scope",
+         type="string",
+         help="default scope of the asyncio event loop used to execute async fixtures",
+-        default=None,
++        default="function",
+     )
+     parser.addini(
+         "asyncio_default_test_loop_scope",
+@@ -271,15 +278,39 @@ def _collect_hook_loop_factories(
+         raise pytest.UsageError(_INVALID_LOOP_FACTORIES)
+     return factories
+ 
++def _get_marker_loop_factory(item: Item) -> LoopFactory | None:
++    asyncio_marker = item.get_closest_marker("asyncio")
++    if asyncio_marker is None:
++        return None
++    _, selected_factory_names = _parse_asyncio_marker(
++        asyncio_marker, warn_on_scope=False
++    )
++    if selected_factory_names is None:
++        return None
++    hook_factories = _collect_hook_loop_factories(item.config, item)
++    if hook_factories is None:
++        raise pytest.UsageError(
++            "mark.asyncio 'loop_factories' requires at least one "
++            "pytest_asyncio_loop_factories hook implementation."
++        )
++    if len(selected_factory_names) != 1:
++        raise pytest.UsageError(
++            "mark.asyncio 'loop_factories' added after collection must name "
++            "exactly one factory."
++        )
++    factory_name = selected_factory_names[0]
++    try:
++        return hook_factories[factory_name]
++    except KeyError:
++        pytest.skip(
++            reason=(
++                f"Loop factory {factory_name!r} is not available."
++                f" Available factories:"
++                f" {', '.join(hook_factories)}."
++            ),
++        )
++
+ 
+-_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET = """\
+-The configuration option "asyncio_default_fixture_loop_scope" is unset.
+-The event loop scope for asynchronous fixtures will default to the "fixture" caching \
+-scope. Future versions of pytest-asyncio will default the loop scope for asynchronous \
+-fixtures to "function" scope. Set the default fixture loop scope explicitly in order \
+-to avoid unexpected behavior in the future. Valid fixture loop scopes are: \
+-"function", "class", "module", "package", "session"
+-"""
+ 
+ 
+ def _validate_scope(scope: str | None, option_name: str) -> None:
+@@ -294,10 +323,10 @@ def _validate_scope(scope: str | None, option_name: str) -> None:
+ 
+ 
+ def pytest_configure(config: Config) -> None:
++    _get_configured_loop_factory(config)
++
+     default_fixture_loop_scope = config.getini("asyncio_default_fixture_loop_scope")
+     _validate_scope(default_fixture_loop_scope, "asyncio_default_fixture_loop_scope")
+-    if not default_fixture_loop_scope:
+-        warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+ 
+     default_test_loop_scope = config.getini("asyncio_default_test_loop_scope")
+     _validate_scope(default_test_loop_scope, "asyncio_default_test_loop_scope")
+@@ -399,32 +428,71 @@ def _wrap_asyncgen_fixture(
+         **kwargs: AsyncGenFixtureParams.kwargs,
+     ):
+         gen_obj = fixture_function(*args, **kwargs)
++        teardown_requested: asyncio.Event | None = None
++        fixture_task: asyncio.Task[Any] | None = None
++        fixture_context: contextvars.Context | None = None
+ 
+         async def setup():
+-            res = await gen_obj.__anext__()
+-            return res
++            nonlocal fixture_task
++            nonlocal teardown_requested
++            nonlocal fixture_context
++
++            result: asyncio.Future[AsyncGenFixtureYieldType] = (
++                asyncio.get_running_loop().create_future()
++            )
++            teardown_requested = asyncio.Event()
++
++            async def run_fixture() -> None:
++                nonlocal fixture_context
++                try:
++                    fixture_value = await gen_obj.__anext__()
++                    fixture_context = contextvars.copy_context()
++                    result.set_result(fixture_value)
++                except BaseException as exc:
++                    if not result.done():
++                        result.set_exception(exc)
++                    return
++
++                try:
++                    await teardown_requested.wait()
++                    try:
++                        await gen_obj.__anext__()
++                    except StopAsyncIteration:
++                        pass
++                    else:
++                        msg = "Async generator fixture didn't stop."
++                        msg += "Yield only once."
++                        raise ValueError(msg)
++                except asyncio.CancelledError:
++                    try:
++                        await gen_obj.__anext__()
++                    except StopAsyncIteration:
++                        pass
++                    raise
++
++            fixture_task = asyncio.create_task(run_fixture())
++            return await result
+ 
+         context = contextvars.copy_context()
+         result = runner.run(setup(), context=context)
+ 
+-        reset_contextvars = _apply_contextvar_changes(context)
++        assert fixture_context is not None
++        reset_contextvars = _apply_contextvar_changes(fixture_context)
+ 
+         def finalizer() -> None:
+-            """Yield again, to finalize."""
++            """Finish the fixture in the task that yielded its value."""
+ 
+             async def async_finalizer() -> None:
+-                try:
+-                    await gen_obj.__anext__()
+-                except StopAsyncIteration:
+-                    pass
+-                else:
+-                    msg = "Async generator fixture didn't stop."
+-                    msg += "Yield only once."
+-                    raise ValueError(msg)
++                assert teardown_requested is not None
++                assert fixture_task is not None
++                teardown_requested.set()
++                await fixture_task
+ 
+-            runner.run(async_finalizer(), context=context)
+-            if reset_contextvars is not None:
+-                reset_contextvars()
++            try:
++                runner.run(async_finalizer(), context=context)
++            finally:
++                if reset_contextvars is not None:
++                    reset_contextvars()
+ 
+         request.addfinalizer(finalizer)
+         return result
+@@ -562,8 +630,9 @@ class PytestAsyncioFunction(Function):
+         runner_fixture_id = f"_{self._loop_scope}_scoped_runner"
+         runner = self._request.getfixturevalue(runner_fixture_id)
+         context = contextvars.copy_context()
++        timeout = self.get_closest_marker("asyncio").kwargs.get("timeout")
+         synchronized_obj = _synchronize_coroutine(
+-            getattr(*self._synchronization_target_attr), runner, context
++            getattr(*self._synchronization_target_attr), runner, context, timeout
+         )
+         with MonkeyPatch.context() as c:
+             c.setattr(*self._synchronization_target_attr, synchronized_obj)
+@@ -735,6 +804,14 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
+     asyncio_marker = _resolve_asyncio_marker(metafunc.definition)
+     if asyncio_marker is None:
+         return
++    policy_fixture_name = event_loop_policy.__name__
++    if policy_fixture_name not in metafunc.fixturenames:
++        metafunc.fixturenames.append(policy_fixture_name)
++        fixturedefs = metafunc.definition.session._fixturemanager.getfixturedefs(
++            policy_fixture_name, metafunc.definition
++        )
++        if fixturedefs is not None:
++            metafunc._arg2fixturedefs[policy_fixture_name] = fixturedefs
+     marker_loop_scope, marker_selected_factory_names = _parse_asyncio_marker(
+         asyncio_marker
+     )
+@@ -875,7 +952,23 @@ def pytest_pyfunc_call(pyfuncitem: Function) -> object | None:
+                     # no stacklevel points at the users code, so we set stacklevel=1
+                     # so it at least indicates that it's the plugin complaining.
+                     # Pytest gives the test file & name in the warnings summary at least
+-
++        elif inspect.iscoroutinefunction(pyfuncitem.obj):
++            asyncio_marker = pyfuncitem.get_closest_marker("asyncio")
++            assert asyncio_marker is not None
++            marker_loop_scope, _ = _parse_asyncio_marker(asyncio_marker)
++            runner = pyfuncitem._request.getfixturevalue(
++                f"_{marker_loop_scope or _get_default_test_loop_scope(pyfuncitem.config)}_scoped_runner"
++            )
++            synchronized = _synchronize_coroutine(
++                pyfuncitem.obj,
++                runner,
++                contextvars.copy_context(),
++                asyncio_marker.kwargs.get("timeout"),
++            )
++            with MonkeyPatch.context() as patch:
++                patch.setattr(pyfuncitem, "obj", synchronized)
++                yield
++            return
+         else:
+             pyfuncitem.warn(
+                 pytest.PytestWarning(
+@@ -894,6 +987,7 @@ def _synchronize_coroutine(
+     func: Callable[..., CoroutineType],
+     runner: asyncio.Runner,
+     context: contextvars.Context,
++    timeout: float | None = None,
+ ):
+     """
+     Return a sync wrapper around a coroutine executing it in the
+@@ -903,6 +997,8 @@ def _synchronize_coroutine(
+     @functools.wraps(func)
+     def inner(*args, **kwargs):
+         coro = func(*args, **kwargs)
++        if timeout is not None:
++            coro = asyncio.wait_for(coro, timeout)
+         runner.run(coro, context=context)
+ 
+     return inner
+@@ -968,14 +1066,17 @@ Use the "pytest_asyncio_loop_factories" hook to customize event loop creation.\
+ 
+ 
+ def _parse_asyncio_marker(
+-    asyncio_marker: Mark,
++    asyncio_marker: Mark, *, warn_on_scope: bool = True
+ ) -> tuple[_ScopeName | None, Sequence[str] | None]:
+     assert asyncio_marker.name == "asyncio"
+     _validate_asyncio_marker(asyncio_marker)
+     if "scope" in asyncio_marker.kwargs:
+         if "loop_scope" in asyncio_marker.kwargs:
+             raise pytest.UsageError(_DUPLICATE_LOOP_SCOPE_DEFINITION_ERROR)
+-        warnings.warn(PytestDeprecationWarning(_MARKER_SCOPE_KWARG_DEPRECATION_WARNING))
++        if warn_on_scope:
++            warnings.warn(
++                PytestDeprecationWarning(_MARKER_SCOPE_KWARG_DEPRECATION_WARNING)
++            )
+     scope = asyncio_marker.kwargs.get("loop_scope") or asyncio_marker.kwargs.get(
+         "scope"
+     )
+@@ -997,11 +1098,12 @@ def _parse_asyncio_marker(
+ def _validate_asyncio_marker(asyncio_marker: Mark) -> None:
+     if asyncio_marker.args or (
+         asyncio_marker.kwargs
+-        and set(asyncio_marker.kwargs) - {"loop_scope", "scope", "loop_factories"}
++        and set(asyncio_marker.kwargs)
++        - {"loop_scope", "scope", "loop_factories", "timeout"}
+     ):
+         msg = (
+-            "mark.asyncio accepts only keyword arguments 'loop_scope' and"
+-            " 'loop_factories'."
++            "mark.asyncio accepts only keyword arguments 'loop_scope', "
++            "'loop_factories', and 'timeout'."
+         )
+         raise ValueError(msg)
+ 
+@@ -1019,6 +1121,10 @@ Please ensure that your tests don't close the event loop. \
+ Here is the traceback of the exception triggered during teardown:
+ %s
+ """
++_RUNNER_LOOP_CHANGE_WARNING = """\
++pytest-asyncio detected that a test changed the current event loop. \
++Restore the runner's loop before the test finishes.\
++"""
+ 
+ 
+ def _create_scoped_runner_fixture(scope: _ScopeName) -> Callable:
+@@ -1031,34 +1137,58 @@ def _create_scoped_runner_fixture(scope: _ScopeName) -> Callable:
+         _asyncio_loop_factory,
+         request: FixtureRequest,
+     ) -> Iterator[Runner]:
++        try:
++            old_loop = _get_event_loop_no_warn()
++        except RuntimeError:
++            old_loop = None
+         new_loop_policy = event_loop_policy
++        loop_factory = _asyncio_loop_factory or _get_marker_loop_factory(
++            request._pyfuncitem
++        )
+         debug_mode = _get_asyncio_debug(request.config)
+-        with _temporary_event_loop_policy(new_loop_policy):
+-            runner = Runner(
+-                debug=debug_mode,
+-                loop_factory=_asyncio_loop_factory,
+-            ).__enter__()
+-            if _asyncio_loop_factory is not None:
+-                _set_event_loop(runner.get_loop())
+-            try:
+-                yield runner
+-            except Exception as e:
+-                runner.__exit__(type(e), e, e.__traceback__)
+-            else:
+-                with warnings.catch_warnings():
+-                    warnings.filterwarnings(
+-                        "ignore", ".*BaseEventLoop.shutdown_asyncgens.*", RuntimeWarning
+-                    )
++        try:
++            with _temporary_event_loop_policy(new_loop_policy):
++                runner = Runner(
++                    debug=debug_mode,
++                    loop_factory=loop_factory,
++                ).__enter__()
++                runner_loop = runner.get_loop()
++                if loop_factory is not None:
++                    _set_event_loop(runner_loop)
++
++                def loop_changed() -> bool:
+                     try:
+-                        runner.__exit__(None, None, None)
++                        current_loop = _get_event_loop_no_warn()
+                     except RuntimeError:
+-                        warnings.warn(
+-                            _RUNNER_TEARDOWN_WARNING % traceback.format_exc(),
+-                            RuntimeWarning,
++                        current_loop = None
++                    return scope == "function" and current_loop not in (
++                        None, runner_loop, old_loop
++                    )
++
++                try:
++                    yield runner
++                except Exception as e:
++                    changed_loop = loop_changed()
++                    runner.__exit__(type(e), e, e.__traceback__)
++                    if changed_loop:
++                        warnings.warn(_RUNNER_LOOP_CHANGE_WARNING, RuntimeWarning)
++                else:
++                    changed_loop = loop_changed()
++                    with warnings.catch_warnings():
++                        warnings.filterwarnings(
++                            "ignore", ".*BaseEventLoop.shutdown_asyncgens.*", RuntimeWarning
+                         )
+-            finally:
+-                if _asyncio_loop_factory is not None:
+-                    _set_event_loop(None)
++                        try:
++                            runner.__exit__(None, None, None)
++                        except RuntimeError:
++                            warnings.warn(
++                                _RUNNER_TEARDOWN_WARNING % traceback.format_exc(),
++                                RuntimeWarning,
++                            )
++                    if changed_loop:
++                        warnings.warn(_RUNNER_LOOP_CHANGE_WARNING, RuntimeWarning)
++        finally:
++            _set_event_loop(old_loop)
+ 
+     return _scoped_runner
+ 
+@@ -1074,12 +1204,46 @@ def _asyncio_loop_factory(request: FixtureRequest) -> LoopFactory | None:
+     return getattr(request, "param", None)
+ 
+ 
+-@pytest.fixture(scope="session", autouse=True)
+-def event_loop_policy() -> AbstractEventLoopPolicy:
+-    """Return an instance of the policy used to create asyncio event loops."""
++@pytest.fixture(scope="session")
++def event_loop_policy(request: FixtureRequest) -> AbstractEventLoopPolicy:
++    """Return the policy used to create asyncio event loops."""
++    loop_factory = _get_configured_loop_factory(request.config)
++    if loop_factory is not None:
++        return _ConfiguredLoopPolicy(loop_factory)
+     return _get_event_loop_policy()
+ 
+ 
++class _ConfiguredLoopPolicy(asyncio.DefaultEventLoopPolicy):
++    def __init__(self, loop_factory: LoopFactory) -> None:
++        super().__init__()
++        self._loop_factory = loop_factory
++
++    def new_event_loop(self) -> AbstractEventLoop:
++        return self._loop_factory()
++
++
++def _get_configured_loop_factory(config: Config) -> LoopFactory | None:
++    configured_factory = config.getini("asyncio_loop_factory")
++    if not configured_factory:
++        return None
++    module_name, separator, factory_name = configured_factory.partition(":")
++    if not module_name or not separator or not factory_name:
++        raise pytest.UsageError(
++            "asyncio_loop_factory must name a callable as 'module:callable'."
++        )
++    try:
++        factory = getattr(importlib.import_module(module_name), factory_name)
++    except (ImportError, AttributeError) as error:
++        raise pytest.UsageError(
++            f"asyncio_loop_factory {configured_factory!r} cannot be imported."
++        ) from error
++    if not callable(factory):
++        raise pytest.UsageError(
++            f"asyncio_loop_factory {configured_factory!r} is not callable."
++        )
++    return factory
++
++
+ def is_async_test(item: Item) -> TypeIs[PytestAsyncioFunction]:
+     """Returns whether a test item is a pytest-asyncio test"""
+     return isinstance(item, PytestAsyncioFunction)

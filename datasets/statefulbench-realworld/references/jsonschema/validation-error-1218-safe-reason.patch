@@ -1,0 +1,53 @@
+diff --git a/jsonschema/_keywords.py b/jsonschema/_keywords.py
+index f30f954..71e73d3 100644
+--- a/jsonschema/_keywords.py
++++ b/jsonschema/_keywords.py
+@@ -284,7 +284,10 @@ def type(validator, types, instance, schema):
+ 
+     if not any(validator.is_type(instance, type) for type in types):
+         reprs = ", ".join(repr(type) for type in types)
+-        yield ValidationError(f"{instance!r} is not of type {reprs}")
++        yield ValidationError(
++            f"{instance!r} is not of type {reprs}",
++            reason=f"Expected type {reprs}.",
++        )
+ 
+ 
+ def properties(validator, properties, instance, schema):
+diff --git a/jsonschema/exceptions.py b/jsonschema/exceptions.py
+index 2e5d4ca..948fa47 100644
+--- a/jsonschema/exceptions.py
++++ b/jsonschema/exceptions.py
+@@ -65,6 +65,7 @@ class _Error(Exception):
+         schema_path: Iterable[str | int] = (),
+         parent: _Error | None = None,
+         type_checker: _types.TypeChecker = _unset,  # type: ignore[assignment]
++        reason: str | None = None,
+     ) -> None:
+         super().__init__(
+             message,
+@@ -87,6 +88,7 @@ class _Error(Exception):
+         self.validator_value = validator_value
+         self.instance = instance
+         self.schema = schema
++        self.reason = reason
+         self.parent = parent
+         self._type_checker = type_checker
+ 
+@@ -177,7 +179,7 @@ class _Error(Exception):
+     def _contents(self):
+         attrs = (
+             "message", "cause", "context", "validator", "validator_value",
+-            "path", "schema_path", "instance", "schema", "parent",
++            "path", "schema_path", "instance", "schema", "parent", "reason",
+         )
+         return {attr: getattr(self, attr) for attr in attrs}
+ 
+@@ -200,6 +202,7 @@
+ class ValidationError(_Error):
+     """
+     An instance was invalid under a provided schema.
+     """
+ 
++    reason: str | None
+     _word_for_schema_in_error_message = "schema"

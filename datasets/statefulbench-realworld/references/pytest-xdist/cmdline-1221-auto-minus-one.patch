@@ -1,0 +1,28 @@
+diff --git a/src/xdist/plugin.py b/src/xdist/plugin.py
+--- a/src/xdist/plugin.py
++++ b/src/xdist/plugin.py
+@@ -133,8 +133,8 @@ def pytest_xdist_auto_num_workers(config: pytest.Config) -> int:
+     return 1
+ 
+ 
+-def parse_numprocesses(s: str) -> int | Literal["auto", "logical"]:
+-    if s in ("auto", "logical"):
++def parse_numprocesses(s: str) -> int | Literal["auto", "auto-1", "logical"]:
++    if s in ("auto", "auto-1", "logical"):
+         return s  # type: ignore[return-value]
+     elif s is not None:
+         return int(s)
+@@ -425,10 +425,12 @@ def pytest_cmdline_main(config: pytest.Config) -> None:
+         config.option.dist = "load"
+ 
+     usepdb = config.getoption("usepdb", False)  # a core option
+-    if config.option.numprocesses in ("auto", "logical"):
++    if config.option.numprocesses in ("auto", "auto-1", "logical"):
+         if usepdb:
+             config.option.numprocesses = 0
+             config.option.dist = "no"
+         else:
+             auto_num_cpus = config.hook.pytest_xdist_auto_num_workers(config=config)
++            if config.option.numprocesses == "auto-1":
++                auto_num_cpus = max(auto_num_cpus - 1, 0)
+             config.option.numprocesses = auto_num_cpus

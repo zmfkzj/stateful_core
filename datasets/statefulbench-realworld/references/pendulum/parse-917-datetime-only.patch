@@ -1,0 +1,64 @@
+diff --git a/src/pendulum/__init__.py b/src/pendulum/__init__.py
+index 51cffd2..b45d1fd 100644
+--- a/src/pendulum/__init__.py
++++ b/src/pendulum/__init__.py
+@@ -31,5 +31,6 @@ from pendulum.helpers import week_starts_at
+ from pendulum.interval import Interval
+ from pendulum.parser import parse as parse
++from pendulum.parser import parse_dt as parse_dt
+ from pendulum.time import Time
+ from pendulum.tz import UTC
+ from pendulum.tz import fixed_timezone
+@@ -423,6 +424,7 @@ __all__ = [
+     "naive",
+     "now",
+     "parse",
++    "parse_dt",
+     "set_local_timezone",
+     "set_locale",
+     "test_local_timezone",
+diff --git a/src/pendulum/parser.py b/src/pendulum/parser.py
+index 55ac9fe..6502ae0 100644
+--- a/src/pendulum/parser.py
++++ b/src/pendulum/parser.py
+@@ -6,14 +6,15 @@ import typing as t
+ 
+ import pendulum
+ 
++from pendulum.datetime import DateTime
+ from pendulum.duration import Duration
+ from pendulum.parsing import _Interval
+ from pendulum.parsing import parse as base_parse
++from pendulum.parsing.exceptions import ParserError
+ from pendulum.tz.timezone import UTC
+ 
+ 
+ if t.TYPE_CHECKING:
+     from pendulum.date import Date
+-    from pendulum.datetime import DateTime
+     from pendulum.interval import Interval
+     from pendulum.time import Time
+@@ -31,11 +32,22 @@
+ 
+-def parse(text: str, **options: t.Any) -> Date | Time | DateTime | Duration:
++def parse(
++    text: str, **options: t.Any
++) -> Date | Time | DateTime | Duration | Interval[DateTime]:
+     # Use the mock now value if it exists
+     options["now"] = options.get("now")
+ 
+     return _parse(text, **options)
+ 
+ 
++def parse_dt(text: str, **options: t.Any) -> DateTime:
++    parsed = parse(text, **options)
++
++    if not isinstance(parsed, DateTime):
++        raise ParserError("The parsed value is not a datetime")
++
++    return parsed
++
++
+ def _parse(
+     text: str, **options: t.Any
+ ) -> Date | DateTime | Time | Duration | Interval[DateTime]:

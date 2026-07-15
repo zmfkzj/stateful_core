@@ -1,0 +1,47 @@
+--- a/storages/backends/s3.py
++++ b/storages/backends/s3.py
+@@ -665,13 +665,15 @@ class S3Storage(CompressStorageMixin, BaseStorage):
+         else:
+             return make_naive(entry.last_modified)
+ 
+-    def url(self, name, parameters=None, expire=None, http_method=None):
++    def url(
++        self, name, parameters=None, expire=None, http_method=None, _presigned_method="get_object"
++    ):
+         # Preserve the trailing slash after normalizing the path.
+         name = self._normalize_name(clean_name(name))
+         params = parameters.copy() if parameters else {}
+         if expire is None:
+             expire = self.querystring_expire
+ 
+-        if self.custom_domain:
++        if self.custom_domain and _presigned_method == "get_object":
+             url = "{}//{}/{}{}".format(
+                 self.url_protocol,
+@@ -691,12 +693,21 @@ class S3Storage(CompressStorageMixin, BaseStorage):
+         params["Bucket"] = self.bucket.name
+         params["Key"] = name
+ 
+-        connection = (
+-            self.connection if self.querystring_auth else self.unsigned_connection
++        connection = self.connection if (
++            self.querystring_auth or _presigned_method != "get_object"
++        ) else self.unsigned_connection
++        return connection.meta.client.generate_presigned_url(
++            _presigned_method, Params=params, ExpiresIn=expire, HttpMethod=http_method
+         )
+-        url = connection.meta.client.generate_presigned_url(
+-            "get_object", Params=params, ExpiresIn=expire, HttpMethod=http_method
++
++    def generate_presigned_upload_url(self, name, parameters=None, expire=None):
++        """Generate a direct-upload URL (benchmark-defined extension)."""
++        return self.url(
++            name,
++            parameters=parameters,
++            expire=expire,
++            http_method="PUT",
++            _presigned_method="put_object",
+         )
+-        return url
+ 
+     def get_available_name(self, name, max_length=None):

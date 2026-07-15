@@ -1,0 +1,11 @@
+--- a/src/attr/_make.py
++++ b/src/attr/_make.py
+@@ -408,7 +408,7 @@ def _transform_attrs(
+         ca_list = []
+         annot_names = set()
+         for attr_name, type in anns.items():
+-            if _is_class_var(type):
++            if _is_class_var(getattr(type, "__forward_arg__", type)):
+                 continue
+             annot_names.add(attr_name)
+             a = cd.get(attr_name, NOTHING)

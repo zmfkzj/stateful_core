@@ -1,0 +1,18 @@
+diff --git a/authlib/integrations/httpx_client/oauth2_client.py b/authlib/integrations/httpx_client/oauth2_client.py
+--- a/authlib/integrations/httpx_client/oauth2_client.py
++++ b/authlib/integrations/httpx_client/oauth2_client.py
+@@ -1,3 +1,4 @@
++import inspect
+ import typing
+ from contextlib import asynccontextmanager
+ 
+@@ -171,7 +172,8 @@ class AsyncOAuth2Client(_OAuth2Client, httpx.AsyncClient):
+             resp = await self.get(url, headers=headers, auth=auth, **kwargs)
+ 
+         for hook in self.compliance_hook["access_token_response"]:
+-            resp = hook(resp)
++            result = hook(resp)
++            resp = await result if inspect.isawaitable(result) else result
+ 
+         return self.parse_response_token(resp)
+ 

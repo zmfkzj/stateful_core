@@ -1,0 +1,15 @@
+diff --git a/src/requests/models.py b/src/requests/models.py
+--- a/src/requests/models.py
++++ b/src/requests/models.py
+@@ -646,7 +646,9 @@ class PreparedRequest(RequestEncodingMixin, RequestHooksMixin):
+             self.prepare_content_length(body)
+ 
+-            # Add content-type if it wasn't explicitly provided.
+-            if content_type and ("content-type" not in self.headers):
++            # Multipart boundaries must match the encoded body.
++            if files and content_type:
++                self.headers["Content-Type"] = content_type
++            elif content_type and ("content-type" not in self.headers):
+                 self.headers["Content-Type"] = content_type
+ 
+         self.body = body  # type: ignore[assignment]  # body transforms from DataType to BodyType

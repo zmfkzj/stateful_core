@@ -1,0 +1,400 @@
+diff --git a/src/click/core.py b/src/click/core.py
+index cc8fb47..d53742b 100644
+--- a/src/click/core.py
++++ b/src/click/core.py
+@@ -5,6 +5,7 @@ import enum
+ import errno
+ import inspect
+ import os
++import threading
+ import sys
+ import typing as t
+ from abc import ABC
+@@ -505,6 +506,8 @@ class Context:
+         self._close_callbacks = []
+         self._depth = 0
+         self._parameter_source = {}
++        #: Additional parameters attached to this active context.
++        self.dynamic_params: list[Parameter] = []
+         # Tracks whether the option that currently owns each parameter slot in
+         # :attr:`params` had its ``default`` set explicitly by the user. Used
+         # to tie-break feature-switch groups where multiple options share a
+@@ -724,8 +727,8 @@ class Context:
+             parent_command_path = [self.parent.command_path]
+ 
+             if isinstance(self.parent.command, Command):
+-                for param in self.parent.command.get_params(self):
+-                    parent_command_path.extend(param.get_usage_pieces(self))
++                for param in self.parent.command.get_params(self.parent):
++                    parent_command_path.extend(param.get_usage_pieces(self.parent))
+ 
+             rv = f"{' '.join(parent_command_path)} {rv}"
+         return rv.lstrip()
+@@ -899,6 +902,20 @@ class Context:
+                     if default_value is UNSET:
+                         default_value = None
+                     kwargs[param.name] = param.type_cast_value(ctx, default_value)
++                    ctx.set_parameter_source(
++                        param.name,
++                        (
++                            ParameterSource.DEFAULT_MAP
++                            if ctx._default_map_has(param.name)
++                            else ParameterSource.DEFAULT
++                        ),
++                    )
++                elif param.expose_value:
++                    ctx.set_parameter_source(
++                        param.name,
++                        self.get_parameter_source(param.name)
++                        or ParameterSource.COMMANDLINE,
++                    )
+ 
+             # Track all kwargs as params, so that forward() will pass
+             # them on in subsequent calls.
+@@ -1101,7 +1118,7 @@ class Command:
+         return formatter.getvalue().rstrip("\n")
+ 
+     def get_params(self, ctx: Context) -> list[Parameter]:
+-        params = self.params
++        params = [*self.params, *ctx.dynamic_params]
+         help_option = self.get_help_option(ctx)
+ 
+         if help_option is not None:
+@@ -1356,6 +1373,14 @@ class Command:
+             self.parse_args(ctx, args)
+         return ctx
+ 
++    @classmethod
++    def make_dynamic_context(cls, ctx: Context, **extra: t.Any) -> Context:
++        """Create a child context that parses this context's dynamic parameters."""
++        extra.setdefault("default_map", ctx.default_map)
++        command = Command(name=None, params=ctx.dynamic_params, no_args_is_help=False)
++        command.context_class = type(ctx)
++        return command.make_context(info_name=None, args=ctx.args, parent=ctx, **extra)
++
+     def parse_args(self, ctx: Context, args: list[str]) -> list[str]:
+         if not args and self.no_args_is_help and not ctx.resilient_parsing:
+             raise NoArgsIsHelpError(ctx)
+@@ -1990,10 +2015,70 @@ class Group(Command):
+         return ctx.args
+ 
+     def invoke(self, ctx: Context) -> t.Any:
++        def _run_awaitable(value: t.Any) -> t.Any:
++            if not inspect.isawaitable(value):
++                return value
++
++            import asyncio
++
++            try:
++                asyncio.get_running_loop()
++            except RuntimeError:
++                async def runner() -> t.Any:
++                    return await value
++
++                return asyncio.run(runner())
++
++            if inspect.iscoroutine(value):
++                value.close()
++
++            ctx.fail(_("Cannot invoke an async command while an event loop is running."))
++
+         def _process_result(value: t.Any) -> t.Any:
++            def _run_embedded_awaitable(value: t.Any) -> t.Any:
++                if not inspect.isawaitable(value):
++                    return value
++
++                import asyncio
++
++                async def runner() -> t.Any:
++                    return await value
++
++                try:
++                    asyncio.get_running_loop()
++                except RuntimeError:
++                    return asyncio.run(runner())
++
++                result: list[t.Any] = []
++                error: list[BaseException] = []
++                import contextvars
++                copied_context = contextvars.copy_context()
++
++                def run_in_thread() -> None:
++                    try:
++                        def run() -> None:
++                            with ctx:
++                                result.append(asyncio.run(runner()))
++
++                        copied_context.run(run)
++                    except BaseException as exc:
++                        error.append(exc)
++
++                thread = threading.Thread(target=run_in_thread)
++                thread.start()
++                thread.join()
++
++                if error:
++                    raise error[0]
++
++                return result[0]
++
++            value = _run_embedded_awaitable(value)
++
+             if self._result_callback is not None:
+                 value = ctx.invoke(self._result_callback, value, **ctx.params)
+-            return value
++
++            return _run_embedded_awaitable(value)
+ 
+         if not ctx._protected_args:
+             if self.invoke_without_command:
+@@ -2020,10 +2105,10 @@ class Group(Command):
+                 cmd_name, cmd, args = self.resolve_command(ctx, args)
+                 assert cmd is not None
+                 ctx.invoked_subcommand = cmd_name
+-                super().invoke(ctx)
++                _run_awaitable(super().invoke(ctx))
+                 sub_ctx = cmd.make_context(cmd_name, args, parent=ctx)
+                 with sub_ctx:
+-                    return _process_result(sub_ctx.command.invoke(sub_ctx))
++                    return _process_result(_run_awaitable(sub_ctx.command.invoke(sub_ctx)))
+ 
+         # In chain mode we create the contexts step by step, but after the
+         # base command has been invoked.  Because at that point we do not
+@@ -2032,7 +2117,7 @@ class Group(Command):
+         # but nothing else.
+         with ctx:
+             ctx.invoked_subcommand = "*" if args else None
+-            super().invoke(ctx)
++            _run_awaitable(super().invoke(ctx))
+ 
+             # Otherwise we make every single context and invoke them in a
+             # chain.  In that case the return value to the result processor
+@@ -2054,7 +2139,7 @@ class Group(Command):
+             rv = []
+             for sub_ctx in contexts:
+                 with sub_ctx:
+-                    rv.append(sub_ctx.command.invoke(sub_ctx))
++                    rv.append(_run_awaitable(sub_ctx.command.invoke(sub_ctx)))
+             return _process_result(rv)
+ 
+     def resolve_command(
+@@ -3274,7 +3359,10 @@ class Option(Parameter):
+                 any_prefix_is_slash = True
+ 
+             if not self.is_flag and not self.count:
+-                rv += f" {self.make_metavar(ctx=ctx)}"
++                metavar = HelpFormatter.format_option_metavar(
++                    self.make_metavar(ctx=ctx), self.multiple
++                )
++                rv += f" {metavar}"
+ 
+             return rv
+ 
+diff --git a/src/click/formatting.py b/src/click/formatting.py
+index c4aa2de..4dc6c71 100644
+--- a/src/click/formatting.py
++++ b/src/click/formatting.py
+@@ -34,6 +34,7 @@ def wrap_text(
+     initial_indent: str = "",
+     subsequent_indent: str = "",
+     preserve_paragraphs: bool = False,
++    break_on_hyphens: bool = True,
+ ) -> str:
+     """A helper function that intelligently wraps text.  By default, it
+     assumes that it operates on a single paragraph of text but if the
+@@ -67,6 +68,7 @@ def wrap_text(
+         initial_indent=initial_indent,
+         subsequent_indent=subsequent_indent,
+         replace_whitespace=False,
++        break_on_hyphens=break_on_hyphens,
+     )
+     if not preserve_paragraphs:
+         return wrapper.fill(text)
+@@ -155,6 +157,10 @@ class HelpFormatter:
+         """Decreases the indentation."""
+         self.current_indent -= self.indent_increment
+ 
++    @staticmethod
++    def format_option_metavar(metavar: str, multiple: bool) -> str:
++        return f"{metavar}..." if multiple and not metavar.endswith("...") else metavar
++
+     def write_usage(self, prog: str, args: str = "", prefix: str | None = None) -> None:
+         """Writes a usage line into the buffer.
+ 
+@@ -186,6 +192,7 @@ class HelpFormatter:
+                     text_width,
+                     initial_indent=usage_prefix,
+                     subsequent_indent=indent,
++                    break_on_hyphens=False,
+                 )
+             )
+         else:
+@@ -195,7 +202,11 @@ class HelpFormatter:
+             indent = " " * (max(self.current_indent, term_len(prefix)) + 4)
+             self.write(
+                 wrap_text(
+-                    args, text_width, initial_indent=indent, subsequent_indent=indent
++                    args,
++                    text_width,
++                    initial_indent=indent,
++                    subsequent_indent=indent,
++                    break_on_hyphens=False,
+                 )
+             )
+ 
+diff --git a/src/click/shell_completion.py b/src/click/shell_completion.py
+index 5652214..b51982f 100644
+--- a/src/click/shell_completion.py
++++ b/src/click/shell_completion.py
+@@ -610,8 +610,51 @@ def _resolve_context(
+     :param prog_name: Name of the executable in the shell.
+     :param args: List of complete args before the incomplete value.
+     """
++    def _trim_incomplete_option(command: Command, args: list[str]) -> list[str]:
++        if args:
++            for param in command.params:
++                if (
++                    isinstance(param, Option)
++                    and not param.is_flag
++                    and not param.count
++                    and param.flag_value is None
++                    and args[-1] in param.opts
++                ):
++                    return args[:-1]
++
++        return args
++
++    def _make_context(
++        command: Command,
++        info_name: str | None,
++        args: list[str],
++        **extra: t.Any,
++    ) -> Context:
++        default_map = extra.get("default_map")
++        parent = extra.get("parent")
++
++        if (
++            default_map is None
++            and parent is not None
++            and parent.default_map is not None
++        ):
++            default_map = parent.default_map.get(info_name)
++
++        default_map = dict(default_map or ())
++
++        for param in command.params:
++            if param.name is not None and callable(param.default):
++                default_map.setdefault(param.name, None)
++
++        if default_map:
++            extra["default_map"] = default_map
++
++        return command.make_context(info_name, args, **extra)
++
+     ctx_args["resilient_parsing"] = True
+-    with cli.make_context(prog_name, args.copy(), **ctx_args) as ctx:
++    with _make_context(
++        cli, prog_name, _trim_incomplete_option(cli, args.copy()), **ctx_args
++    ) as ctx:
+         args = ctx._protected_args + ctx.args
+ 
+         while args:
+@@ -624,8 +667,12 @@ def _resolve_context(
+                     if cmd is None:
+                         return ctx
+ 
+-                    with cmd.make_context(
+-                        name, args, parent=ctx, resilient_parsing=True
++                    with _make_context(
++                        cmd,
++                        name,
++                        _trim_incomplete_option(cmd, args),
++                        parent=ctx,
++                        resilient_parsing=True,
+                     ) as sub_ctx:
+                         ctx = sub_ctx
+                         args = ctx._protected_args + ctx.args
+@@ -638,9 +685,10 @@ def _resolve_context(
+                         if cmd is None:
+                             return ctx
+ 
+-                        with cmd.make_context(
++                        with _make_context(
++                            cmd,
+                             name,
+-                            args,
++                            _trim_incomplete_option(cmd, args),
+                             parent=ctx,
+                             allow_extra_args=True,
+                             allow_interspersed_args=False,
+diff --git a/src/click/termui.py b/src/click/termui.py
+index 4bd74ed..07aea54 100644
+--- a/src/click/termui.py
++++ b/src/click/termui.py
+@@ -249,6 +249,8 @@ def confirm(
+     prompt_suffix: str = ": ",
+     show_default: bool = True,
+     err: bool = False,
++    input_stream: t.TextIO | None = None,
++    type: ParamType[bool] | t.Any | None = None,
+ ) -> bool:
+     """Prompts for confirmation (yes/no question).
+ 
+@@ -274,6 +276,8 @@ def confirm(
+     .. versionadded:: 4.0
+         Added the ``err`` parameter.
+     """
++    value_proc = convert_type(type, default) if type is not None else None
++
+     prompt = _build_prompt(
+         text,
+         prompt_suffix,
+@@ -281,20 +285,40 @@ def confirm(
+         "y/n" if default is None else ("Y/n" if default else "y/N"),
+     )
+ 
++    def prompt_func() -> str:
++        if input_stream is None:
++            return _readline_prompt(visible_prompt_func, prompt, err)
++
++        echo(prompt, nl=False, err=err)
++        value = input_stream.readline()
++
++        if value == "":
++            raise EOFError
++
++        return value
++
+     while True:
+         try:
+-            value = _readline_prompt(visible_prompt_func, prompt, err).lower().strip()
++            value = prompt_func().strip()
+         except (KeyboardInterrupt, EOFError):
+             raise Abort() from None
+-        if value in ("y", "yes"):
+-            rv = True
+-        elif value in ("n", "no"):
+-            rv = False
+-        elif default is not None and value == "":
++        if default is not None and value == "":
+             rv = default
++        elif value_proc is not None:
++            try:
++                rv = value_proc(value)
++            except UsageError as e:
++                echo(_("Error: {message}").format(message=e.message), err=err)
++                continue
+         else:
+-            echo(_("Error: invalid input"), err=err)
+-            continue
++            normalized_value = value.lower()
++            if normalized_value in ("y", "yes"):
++                rv = True
++            elif normalized_value in ("n", "no"):
++                rv = False
++            else:
++                echo(_("Error: invalid input"), err=err)
++                continue
+         break
+     if abort and not rv:
+         raise Abort()

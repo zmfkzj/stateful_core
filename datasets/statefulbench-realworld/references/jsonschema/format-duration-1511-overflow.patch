@@ -1,0 +1,29 @@
+diff --git a/jsonschema/_format.py b/jsonschema/_format.py
+--- a/jsonschema/_format.py
++++ b/jsonschema/_format.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ from contextlib import suppress
++import decimal
+ from datetime import date, datetime
+ from uuid import UUID
+ import ipaddress
+@@ -135,7 +136,8 @@
+         func, raises = self.checkers[format]
+         result, cause = None, None
+         try:
+             result = func(instance)
+         except raises as e:
++            result = False
+             cause = e
+         if not result:
+@@ -524,7 +525,7 @@ with suppress(ImportError):
+     @_checks_drafts(
+         draft201909="duration",
+         draft202012="duration",
+-        raises=isoduration.DurationParsingException,
++        raises=(isoduration.DurationParsingException, decimal.Overflow),
+     )
+     def is_duration(instance: object) -> bool:
+         if not isinstance(instance, str):

@@ -1,0 +1,21 @@
+diff --git a/authlib/oidc/core/grants/code.py b/authlib/oidc/core/grants/code.py
+--- a/authlib/oidc/core/grants/code.py
++++ b/authlib/oidc/core/grants/code.py
+@@ -143,7 +143,16 @@ class OpenIDCode(OpenIDToken):
+         raise NotImplementedError()
+ 
+     def validate_openid_authorization_request(self, grant, redirect_uri):
+-        validate_nonce(grant.request, self.exists_nonce, self.require_nonce)
++        request = grant.request
++        validate_nonce(request, self.exists_nonce, self.require_nonce)
++
++        acr_values = request.payload.data.get("acr_values")
++        if acr_values is not None:
++            if not isinstance(acr_values, str) or not acr_values.strip():
++                from authlib.oauth2.rfc6749 import InvalidRequestError
++
++                raise InvalidRequestError("Invalid 'acr_values' parameter.")
++            request.acr_values = tuple(acr_values.split())
+ 
+     def __call__(self, grant):
+         grant.register_hook("after_create_token_response", self.process_token)

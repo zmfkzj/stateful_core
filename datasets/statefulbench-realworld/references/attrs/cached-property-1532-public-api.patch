@@ -1,0 +1,11 @@
+--- a/src/attr/_make.py
++++ b/src/attr/_make.py
+@@ -915,6 +915,8 @@
+             for name, cached_prop in cd.items()
+             if isinstance(cached_prop, cached_property)
+         }
++        if cached_properties:
++            cd["__attrs_cached_properties__"] = dict(cached_properties)
+ 
+         # Collect methods with a `__class__` reference that are shadowed in the new class.
+         # To know to update them.

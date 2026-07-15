@@ -1,0 +1,46 @@
+diff --git a/pytest_asyncio/plugin.py b/pytest_asyncio/plugin.py
+--- a/pytest_asyncio/plugin.py
++++ b/pytest_asyncio/plugin.py
+@@ -561,9 +561,10 @@ class PytestAsyncioFunction(Function):
+     def runtest(self) -> None:
+         runner_fixture_id = f"_{self._loop_scope}_scoped_runner"
+         runner = self._request.getfixturevalue(runner_fixture_id)
+         context = contextvars.copy_context()
++        timeout = self.get_closest_marker("asyncio").kwargs.get("timeout")
+         synchronized_obj = _synchronize_coroutine(
+-            getattr(*self._synchronization_target_attr), runner, context
++            getattr(*self._synchronization_target_attr), runner, context, timeout
+         )
+         with MonkeyPatch.context() as c:
+             c.setattr(*self._synchronization_target_attr, synchronized_obj)
+@@ -894,6 +895,7 @@ def _synchronize_coroutine(
+     func: Callable[..., CoroutineType],
+     runner: asyncio.Runner,
+     context: contextvars.Context,
++    timeout: float | None = None,
+ ):
+     """
+     Return a sync wrapper around a coroutine executing it in the
+@@ -903,6 +905,8 @@ def _synchronize_coroutine(
+     @functools.wraps(func)
+     def inner(*args, **kwargs):
+         coro = func(*args, **kwargs)
++        if timeout is not None:
++            coro = asyncio.wait_for(coro, timeout)
+         runner.run(coro, context=context)
+ 
+     return inner
+@@ -998,9 +1002,10 @@ def _validate_asyncio_marker(asyncio_marker: Mark) -> None:
+     if asyncio_marker.args or (
+         asyncio_marker.kwargs
+-        and set(asyncio_marker.kwargs) - {"loop_scope", "scope", "loop_factories"}
++        and set(asyncio_marker.kwargs)
++        - {"loop_scope", "scope", "loop_factories", "timeout"}
+     ):
+         msg = (
+-            "mark.asyncio accepts only keyword arguments 'loop_scope' and"
+-            " 'loop_factories'."
++            "mark.asyncio accepts only keyword arguments 'loop_scope', "
++            "'loop_factories', and 'timeout'."
+         )
+         raise ValueError(msg)

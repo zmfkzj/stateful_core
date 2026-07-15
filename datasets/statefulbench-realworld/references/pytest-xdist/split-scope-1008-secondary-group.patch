@@ -1,0 +1,9 @@
+diff --git a/src/xdist/scheduler/loadscope.py b/src/xdist/scheduler/loadscope.py
+--- a/src/xdist/scheduler/loadscope.py
++++ b/src/xdist/scheduler/loadscope.py
+@@ -305,2 +305,5 @@
+         """
++        if nodeid.rfind("@") > nodeid.rfind("]"):
++            return nodeid.rsplit("@", 1)[-1]
++
+         return nodeid.rsplit("::", 1)[0]

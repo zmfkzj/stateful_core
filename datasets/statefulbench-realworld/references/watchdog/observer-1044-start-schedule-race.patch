@@ -1,0 +1,25 @@
+diff --git a/src/watchdog/observers/api.py b/src/watchdog/observers/api.py
+--- a/src/watchdog/observers/api.py
++++ b/src/watchdog/observers/api.py
+@@ -276,13 +276,14 @@ class BaseObserver(EventDispatcher):
+         return self._emitters
+ 
+     def start(self) -> None:
+-        for emitter in self._emitters.copy():
+-            try:
+-                emitter.start()
+-            except Exception:
+-                self._remove_emitter(emitter)
+-                raise
+-        super().start()
++        with self._lock:
++            for emitter in self._emitters.copy():
++                try:
++                    emitter.start()
++                except Exception:
++                    self._remove_emitter(emitter)
++                    raise
++            super().start()
+ 
+     def __enter__(self) -> Self:
+         """Context manager entry. Starts the observer if not already running."""

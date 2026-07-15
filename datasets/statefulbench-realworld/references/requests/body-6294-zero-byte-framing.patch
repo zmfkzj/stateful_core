@@ -1,0 +1,17 @@
+diff --git a/src/requests/models.py b/src/requests/models.py
+--- a/src/requests/models.py
++++ b/src/requests/models.py
+@@ -624,7 +633,11 @@ class PreparedRequest(RequestEncodingMixin, RequestHooksMixin):
+                     "Streamed bodies and files are mutually exclusive."
+                 )
+ 
+-            if length:
++            if length or (
++                length == 0
++                and getattr(data, "seek", None) is not None
++                and getattr(data, "tell", None) is not None
++            ):
+                 self.headers["Content-Length"] = builtin_str(length)
+             else:
+                 self.headers["Transfer-Encoding"] = "chunked"
+         else:

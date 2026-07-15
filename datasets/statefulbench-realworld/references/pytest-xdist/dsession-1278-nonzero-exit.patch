@@ -1,0 +1,12 @@
+diff --git a/src/xdist/dsession.py b/src/xdist/dsession.py
+--- a/src/xdist/dsession.py
++++ b/src/xdist/dsession.py
+@@ -263,7 +263,8 @@ class DSession:
+         if maximum_reached:
+             if self._max_worker_restart == 0:
+                 msg = f"worker {node.gateway.id} crashed and worker restarting disabled"
+             else:
+                 msg = f"maximum crashed workers reached: {self._max_worker_restart}"
+             self._summary_report = msg
++            self.shouldstop = msg
+             self.report_line("\n" + msg)

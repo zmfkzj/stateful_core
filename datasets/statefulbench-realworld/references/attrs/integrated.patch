@@ -1,0 +1,279 @@
+diff --git a/src/attr/_make.py b/src/attr/_make.py
+index 6794464..ebd9f63 100644
+--- a/src/attr/_make.py
++++ b/src/attr/_make.py
+@@ -403,17 +403,17 @@ def _transform_attrs(
+         ca_names = {
+             name
+             for name, attr in cd.items()
+-            if attr.__class__ is _CountingAttr
++            if isinstance(attr, _CountingAttr)
+         }
+         ca_list = []
+         annot_names = set()
+         for attr_name, type in anns.items():
+-            if _is_class_var(type):
++            if _is_class_var(getattr(type, "__forward_arg__", type)):
+                 continue
+             annot_names.add(attr_name)
+             a = cd.get(attr_name, NOTHING)
+ 
+-            if a.__class__ is not _CountingAttr:
++            if not isinstance(a, _CountingAttr):
+                 a = attrib(a)
+             ca_list.append((attr_name, a))
+ 
+@@ -431,7 +431,7 @@ def _transform_attrs(
+             (
+                 (name, attr)
+                 for name, attr in cd.items()
+-                if attr.__class__ is _CountingAttr
++                if isinstance(attr, _CountingAttr)
+             ),
+             key=lambda e: e[1].counter,
+         )
+@@ -808,13 +808,28 @@ class _ClassBuilder:
+             if PY_3_10_PLUS:
+                 cls = abc.update_abstractmethods(cls)
+ 
++        for a in self._attrs:
++            default = a.default
++            factory_name = (
++                getattr(default.factory, "__name__", None)
++                if isinstance(default, Factory) and default.takes_self
++                else None
++            )
++            factory = cls.__dict__.get(factory_name) if factory_name else None
++            if a.inherited and factory is not None and factory is not default.factory:
++                for method_name in ("__init__", "__attrs_init__"):
++                    method = cls.__dict__.get(method_name)
++                    if method is not None:
++                        method.__globals__[_INIT_FACTORY_PAT % a.name] = factory
+         # The method gets only called if it's not inherited from a base class.
+         # _has_own_attribute does NOT work properly for classmethods.
+         if (
+             getattr(cls, "__attrs_init_subclass__", None)
+             and "__attrs_init_subclass__" not in cls.__dict__
+         ):
+-            cls.__attrs_init_subclass__()
++            cls.__attrs_init_subclass__(
++                **cls.__dict__.get("__attrs_init_subclass_kwargs__", {})
++            )
+ 
+         return cls
+ 
+@@ -915,10 +930,35 @@ class _ClassBuilder:
+             for name, cached_prop in cd.items()
+             if isinstance(cached_prop, cached_property)
+         }
++        if cached_properties:
++            cd["__attrs_cached_properties__"] = dict(cached_properties)
+ 
+         # Collect methods with a `__class__` reference that are shadowed in the new class.
+         # To know to update them.
+         additional_closure_functions_to_update = []
++
++        class _SlottedCachedProperty:
++            def __init__(self, slot, func):
++                self.slot = slot
++                self.func = func
++
++            def __get__(self, instance, owner=None):
++                if instance is None:
++                    return self
++
++                try:
++                    return self.slot.__get__(instance, owner)
++                except AttributeError:
++                    value = self.func(instance)
++                    self.slot.__set__(instance, value)
++                    return value
++
++            def __set__(self, instance, value):
++                self.slot.__set__(instance, value)
++
++            def __delete__(self, instance):
++                self.slot.__delete__(instance)
++
+         if cached_properties:
+             class_annotations = _get_annotations(self._cls)
+             for name, func in cached_properties.items():
+@@ -930,14 +970,7 @@ class _ClassBuilder:
+                 annotation = inspect.signature(func).return_annotation
+                 if annotation is not inspect.Parameter.empty:
+                     class_annotations[name] = annotation
+-
+-            original_getattr = cd.get("__getattr__")
+-            if original_getattr is not None:
+-                additional_closure_functions_to_update.append(original_getattr)
+-
+-            cd["__getattr__"] = _make_cached_property_getattr(
+-                cached_properties, original_getattr, self._cls
+-            )
++                    cd["__annotations__"] = class_annotations
+ 
+         # We only add the names of attributes that aren't inherited.
+         # Setting __slots__ to inherited attributes wastes memory.
+@@ -952,18 +985,30 @@ class _ClassBuilder:
+             for slot, slot_descriptor in existing_slots.items()
+             if slot in slot_names
+         }
++        for name in cached_properties:
++            reused_slots.pop(name, None)
+         slot_names = [name for name in slot_names if name not in reused_slots]
+         cd.update(reused_slots)
+         if self._cache_hash:
+             slot_names.append(_HASH_CACHE_FIELD)
+ 
+-        cd["__slots__"] = tuple(slot_names)
++        slot_docs = {
++            a.name: a.metadata["slot_doc"]
++            for a in self._attrs
++            if a.name in slot_names and "slot_doc" in a.metadata
++        }
++        cd["__slots__"] = {name: slot_docs.get(name) for name in slot_names}
+ 
+         cd["__qualname__"] = self._cls.__qualname__
+ 
+         # Create new class based on old class and our methods.
+         cls = type(self._cls)(self._cls.__name__, self._cls.__bases__, cd)
+ 
++        for name, func in cached_properties.items():
++            slot = getattr(cls, name)
++            slot = getattr(slot, "slot", slot)
++            setattr(cls, name, _SlottedCachedProperty(slot, func))
++
+         # The following is a fix for
+         # <https://github.com/python-attrs/attrs/issues/102>.
+         # If a method mentions `__class__` or uses the no-arg super(), the
+@@ -1139,17 +1184,24 @@ class _ClassBuilder:
+ 
+         return self
+ 
+-    def add_eq(self):
++    def add_eq(self, make_eq=True, unsafe_identity_hash=False):
+         cd = self._cls_dict
++        if unsafe_identity_hash:
++            cd["__hash__"] = object.__hash__
++
+ 
+         script, globs = _make_eq_script(self._attrs)
+ 
+         def _attach_eq(cls_dict, globs):
+-            cls_dict["__eq__"] = self._add_method_dunders(globs["__eq__"])
++            attrs_eq = self._add_method_dunders(globs["__eq__"])
++            cls_dict["__attrs_eq__"] = attrs_eq
++            if make_eq:
++                cls_dict["__eq__"] = attrs_eq
+ 
+         self._script_snippets.append((script, globs, _attach_eq))
+ 
+-        cd["__ne__"] = __ne__
++        if make_eq:
++            cd["__ne__"] = __ne__
+ 
+         return self
+ 
+@@ -1348,6 +1400,7 @@ def attrs(
+     match_args=True,
+     unsafe_hash=None,
+     force_kw_only=True,
++    unsafe_identity_hash=False,
+ ):
+     r"""
+     A class decorator that adds :term:`dunder methods` according to the
+@@ -1439,6 +1492,12 @@ def attrs(
+         )
+ 
+     eq_, order_ = _determine_attrs_eq_order(cmp, eq, order, None)
++    if unsafe_identity_hash and (
++        hash is not None or unsafe_hash is not None or cache_hash
++    ):
++        msg = "unsafe_identity_hash cannot be combined with hash, unsafe_hash, or cache_hash."
++        raise TypeError(msg)
++
+ 
+     #  unsafe_hash takes precedence due to PEP 681.
+     if unsafe_hash is not None:
+@@ -1462,10 +1521,16 @@ def attrs(
+         eq = not is_exc and _determine_whether_to_implement(
+             cls, eq_, auto_detect, ("__eq__", "__ne__")
+         )
++        if unsafe_identity_hash and eq is not False:
++            msg = "unsafe_identity_hash requires a custom __eq__."
++            raise TypeError(msg)
++
+ 
+         Hashability = ClassProps.Hashability
+ 
+-        if is_exc:
++        if unsafe_identity_hash:
++            hashability = Hashability.LEAVE_ALONE
++        elif is_exc:
+             hashability = Hashability.LEAVE_ALONE
+         elif hash is True:
+             hashability = (
+@@ -1551,8 +1616,8 @@ def attrs(
+         if props.added_str:
+             builder.add_str()
+ 
+-        if props.added_eq:
+-            builder.add_eq()
++        if props.added_eq or _has_own_attribute(cls, "__eq__") or unsafe_identity_hash:
++            builder.add_eq(props.added_eq, unsafe_identity_hash)
+         if props.added_ordering:
+             builder.add_order()
+ 
+
+diff --git a/src/attr/_next_gen.py b/src/attr/_next_gen.py
+index db386ac..eac6ab3 100644
+--- a/src/attr/_next_gen.py
++++ b/src/attr/_next_gen.py
+@@ -43,6 +43,7 @@ def define(
+     on_setattr=None,
+     field_transformer=None,
+     match_args=True,
++    unsafe_identity_hash=False,
+     force_kw_only=False,
+ ):
+     r"""
+@@ -360,6 +361,7 @@ def define(
+             repr=repr,
+             hash=hash,
+             unsafe_hash=unsafe_hash,
++            unsafe_identity_hash=unsafe_identity_hash,
+             init=init,
+             slots=slots,
+             frozen=frozen,
+
+diff --git a/tests/test_slots.py b/tests/test_slots.py
+--- a/tests/test_slots.py
++++ b/tests/test_slots.py
+@@ -785,9 +785,6 @@ def test_slots_cached_property_works_on_frozen_instances():
+     assert A(x=1).f == 1
+ 
+ 
+-@pytest.mark.xfail(
+-    PY_3_14_PLUS, reason="3.14 does not infer the type anymore."
+-)
+ def test_slots_cached_property_infers_type():
+     """
+     Infers type of cached property on Python 3.13 and earlier.
+@@ -1034,7 +1031,7 @@ def test_slots_sub_class_avoids_duplicated_slots():
+             return self.x * 2
+ 
+     assert B(1).f == 2
+-    assert B.__slots__ == ()
++    assert B.__slots__ == {"f": None}
+ 
+ 
+ def test_slots_sub_class_with_actual_slot():
+@@ -1055,7 +1052,7 @@ def test_slots_sub_class_with_actual_slot():
+         f: int = attr.ib()
+ 
+     assert B(1, 2).f == 2
+-    assert B.__slots__ == ()
++    assert B.__slots__ == {}
+ 
+ 
+ def test_slots_cached_property_is_not_called_at_construction():

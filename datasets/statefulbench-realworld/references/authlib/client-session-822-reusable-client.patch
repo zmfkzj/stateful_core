@@ -1,0 +1,45 @@
+diff --git a/authlib/integrations/base_client/sync_app.py b/authlib/integrations/base_client/sync_app.py
+--- a/authlib/integrations/base_client/sync_app.py
++++ b/authlib/integrations/base_client/sync_app.py
+@@ -1,3 +1,4 @@
++from contextlib import contextmanager
+ import logging
+ import time
+ 
+@@ -233,7 +234,7 @@ class OAuth2Base:
+         session.headers["User-Agent"] = self._user_agent
+         return session
+ 
+-    def _get_oauth_client(self, **metadata):
++    def _get_oauth_client(self, token=None, **metadata):
+         client_kwargs = {}
+         client_kwargs.update(self.client_kwargs)
+         client_kwargs.update(metadata)
+@@ -257,6 +258,8 @@ class OAuth2Base:
+             self.compliance_fix(session)
+ 
+         session.headers["User-Agent"] = self._user_agent
++        if token is not None:
++            session.token = token
+         return session
+ 
+     @staticmethod
+@@ -305,6 +308,18 @@ class OAuth2Base:
+ 
+ 
+ class OAuth2Mixin(_RequestMixin, OAuth2Base):
++    @contextmanager
++    def client(self, token=None, request=None):
++        """Yield one authenticated OAuth client for multiple requests."""
++        if token is None:
++            token = self._get_requested_token(request)
++        if token is None:
++            raise MissingTokenError()
++
++        metadata = self.load_server_metadata()
++        with self._get_oauth_client(token=token, **metadata) as session:
++            yield session
++
+     def _on_update_token(self, token, refresh_token=None, access_token=None):
+         if callable(self._update_token):
+             self._update_token(

@@ -1,0 +1,63 @@
+diff --git a/src/click/core.py b/src/click/core.py
+--- a/src/click/core.py
++++ b/src/click/core.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++import asyncio
+ import collections.abc as cabc
+ import enum
+ import errno
+@@ -1990,6 +1991,23 @@ class Group(Command):
+         return ctx.args
+ 
+     def invoke(self, ctx: Context) -> t.Any:
++        def _run_awaitable(value: t.Any) -> t.Any:
++            if not inspect.isawaitable(value):
++                return value
++
++            try:
++                asyncio.get_running_loop()
++            except RuntimeError:
++                async def runner() -> t.Any:
++                    return await value
++
++                return asyncio.run(runner())
++
++            if inspect.iscoroutine(value):
++                value.close()
++
++            ctx.fail(_("Cannot invoke an async command while an event loop is running."))
++
+         def _process_result(value: t.Any) -> t.Any:
+             if self._result_callback is not None:
+                 value = ctx.invoke(self._result_callback, value, **ctx.params)
+@@ -2020,10 +2038,10 @@ class Group(Command):
+                 cmd_name, cmd, args = self.resolve_command(ctx, args)
+                 assert cmd is not None
+                 ctx.invoked_subcommand = cmd_name
+-                super().invoke(ctx)
++                _run_awaitable(super().invoke(ctx))
+                 sub_ctx = cmd.make_context(cmd_name, args, parent=ctx)
+                 with sub_ctx:
+-                    return _process_result(sub_ctx.command.invoke(sub_ctx))
++                    return _process_result(_run_awaitable(sub_ctx.command.invoke(sub_ctx)))
+ 
+         # In chain mode we create the contexts step by step, but after the
+         # base command has been invoked.  Because at that point we do not
+@@ -2032,7 +2050,7 @@ class Group(Command):
+         # but nothing else.
+         with ctx:
+             ctx.invoked_subcommand = "*" if args else None
+-            super().invoke(ctx)
++            _run_awaitable(super().invoke(ctx))
+ 
+             # Otherwise we make every single context and invoke them in a
+             # chain.  In that case the return value to the result processor
+@@ -2054,5 +2072,5 @@ class Group(Command):
+             rv = []
+             for sub_ctx in contexts:
+                 with sub_ctx:
+-                    rv.append(sub_ctx.command.invoke(sub_ctx))
++                    rv.append(_run_awaitable(sub_ctx.command.invoke(sub_ctx)))
+             return _process_result(rv)

@@ -1,0 +1,12 @@
+diff --git a/authlib/oauth2/client.py b/authlib/oauth2/client.py
+--- a/authlib/oauth2/client.py
++++ b/authlib/oauth2/client.py
+@@ -303,6 +303,8 @@ class OAuth2Client:
+             token = self.token
+         if not token.is_expired(leeway=self.leeway):
+             return True
++        if self.metadata.get("token_auto_update", True) is False:
++            return False
+         refresh_token = token.get("refresh_token")
+         url = self.metadata.get("token_endpoint")
+         if refresh_token and url:

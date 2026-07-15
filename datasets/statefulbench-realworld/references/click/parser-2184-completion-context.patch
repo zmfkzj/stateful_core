@@ -1,0 +1,40 @@
+--- a/src/click/shell_completion.py
++++ b/src/click/shell_completion.py
+@@ -614,3 +614,19 @@ def _resolve_context(
++    def _trim_incomplete_option(command: Command, args: list[str]) -> list[str]:
++        if args:
++            for param in command.params:
++                if (
++                    isinstance(param, Option)
++                    and not param.is_flag
++                    and not param.count
++                    and param.flag_value is None
++                    and args[-1] in param.opts
++                ):
++                    return args[:-1]
++
++        return args
++
+     ctx_args["resilient_parsing"] = True
+-    with cli.make_context(prog_name, args.copy(), **ctx_args) as ctx:
++    with cli.make_context(
++        prog_name, _trim_incomplete_option(cli, args.copy()), **ctx_args
++    ) as ctx:
+         args = ctx._protected_args + ctx.args
+@@ -628,3 +644,6 @@ def _resolve_context(
+                     with cmd.make_context(
+-                        name, args, parent=ctx, resilient_parsing=True
++                        name,
++                        _trim_incomplete_option(cmd, args),
++                        parent=ctx,
++                        resilient_parsing=True,
+                     ) as sub_ctx:
+@@ -641,7 +660,7 @@ def _resolve_context(
+ 
+                         with cmd.make_context(
+                             name,
+-                            args,
++                            _trim_incomplete_option(cmd, args),
+                             parent=ctx,
+                             allow_extra_args=True,
+                             allow_interspersed_args=False,

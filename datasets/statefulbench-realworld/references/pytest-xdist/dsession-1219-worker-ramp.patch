@@ -1,0 +1,42 @@
+diff --git a/src/xdist/dsession.py b/src/xdist/dsession.py
+--- a/src/xdist/dsession.py
++++ b/src/xdist/dsession.py
+@@ -5,6 +5,7 @@ from enum import auto
+ from enum import Enum
+ from queue import Empty
+ from queue import Queue
++import time
+ import sys
+ from typing import Any
+ import warnings
+@@ -87,16 +88,26 @@ class DSession:
+         soon as nodes start they will emit the worker_workerready event.
+         """
+         self.nodemanager = NodeManager(self.config)
+-        nodes = self.nodemanager.setup_nodes(putevent=self.queue.put)
+-        self._active_nodes.update(nodes)
+-        self._session = session
+         ramp = self.config.getoption("ramp")
+         if ramp:
+-            workers = len(nodes)
++            specs = self.nodemanager.specs
++            self.config.hook.pytest_xdist_setupnodes(config=self.config, specs=specs)
++            workers = len(specs)
+             workers_noun = "worker" if workers == 1 else "workers"
+             self.report_line(
+                 f"ramping test start over {ramp:g}s across {workers} {workers_noun}"
+             )
++            nodes = []
++            for worker_index, spec in enumerate(specs):
++                nodes.append(
++                    self.nodemanager.setup_node(spec, self.queue.put, worker_index)
++                )
++                if worker_index + 1 < workers:
++                    time.sleep(ramp / (workers - 1))
++        else:
++            nodes = self.nodemanager.setup_nodes(putevent=self.queue.put)
++        self._active_nodes.update(nodes)
++        self._session = session
+ 
+     @pytest.hookimpl
+     def pytest_sessionfinish(self) -> None:

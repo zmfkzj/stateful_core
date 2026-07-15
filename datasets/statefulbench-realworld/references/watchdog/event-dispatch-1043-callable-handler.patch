@@ -1,0 +1,14 @@
+diff --git a/src/watchdog/observers/api.py b/src/watchdog/observers/api.py
+index 4e7bc2a..c8b17c3 100644
+--- a/src/watchdog/observers/api.py
++++ b/src/watchdog/observers/api.py
+@@ -424,5 +424,8 @@ class BaseObserver(EventDispatcher):
+             # registered after every dispatch.
+             for handler in self._handlers[watch].copy():
+                 if handler in self._handlers[watch]:
+-                    handler.dispatch(event)
++                    if hasattr(handler, "dispatch"):
++                        handler.dispatch(event)
++                    else:
++                        handler(event)
+         event_queue.task_done()

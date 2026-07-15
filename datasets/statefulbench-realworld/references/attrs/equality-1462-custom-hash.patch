@@ -1,0 +1,87 @@
+diff --git a/src/attr/_make.py b/src/attr/_make.py
+--- a/src/attr/_make.py
++++ b/src/attr/_make.py
+@@ -1139,9 +1139,14 @@ class _ClassBuilder:
+ 
+         return self
+ 
+-    def add_eq(self):
++    def add_eq(self, make_eq=True, unsafe_identity_hash=False):
+         cd = self._cls_dict
+ 
++        if unsafe_identity_hash:
++            cd["__hash__"] = object.__hash__
++        if not make_eq:
++            return self
++
+         script, globs = _make_eq_script(self._attrs)
+ 
+         def _attach_eq(cls_dict, globs):
+@@ -1323,6 +1328,7 @@ def attrs(
+     match_args=True,
+     unsafe_hash=None,
+     force_kw_only=True,
++    unsafe_identity_hash=False,
+ ):
+     r"""
+     A class decorator that adds :term:`dunder methods` according to the
+@@ -1418,6 +1424,12 @@ def attrs(
+ 
+     eq_, order_ = _determine_attrs_eq_order(cmp, eq, order, None)
+ 
++    if unsafe_identity_hash and (
++        hash is not None or unsafe_hash is not None or cache_hash
++    ):
++        msg = "unsafe_identity_hash cannot be combined with hash, unsafe_hash, or cache_hash."
++        raise TypeError(msg)
++
+     #  unsafe_hash takes precedence due to PEP 681.
+     if unsafe_hash is not None:
+         hash = unsafe_hash
+@@ -1443,9 +1457,15 @@ def attrs(
+             cls, eq_, auto_detect, ("__eq__", "__ne__")
+         )
+ 
++        if unsafe_identity_hash and eq is not False:
++            msg = "unsafe_identity_hash requires a custom __eq__."
++            raise TypeError(msg)
++
+         Hashability = ClassProps.Hashability
+ 
+-        if is_exc:
++        if unsafe_identity_hash:
++            hashability = Hashability.LEAVE_ALONE
++        elif is_exc:
+             hashability = Hashability.LEAVE_ALONE
+         elif hash is True:
+             hashability = (
+@@ -1551,8 +1570,8 @@ def attrs(
+         if props.added_str:
+             builder.add_str()
+ 
+-        if props.added_eq:
+-            builder.add_eq()
++        if props.added_eq or unsafe_identity_hash:
++            builder.add_eq(props.added_eq, unsafe_identity_hash)
+         if props.added_ordering:
+             builder.add_order()
+ 
+diff --git a/src/attr/_next_gen.py b/src/attr/_next_gen.py
+--- a/src/attr/_next_gen.py
++++ b/src/attr/_next_gen.py
+@@ -43,6 +43,7 @@ def define(
+     on_setattr=None,
+     field_transformer=None,
+     match_args=True,
++    unsafe_identity_hash=False,
+     force_kw_only=False,
+ ):
+     r"""
+@@ -369,6 +370,7 @@ def define(
+             repr=repr,
+             hash=hash,
+             unsafe_hash=unsafe_hash,
++            unsafe_identity_hash=unsafe_identity_hash,
+             init=init,
+             slots=slots,
+             frozen=frozen,
