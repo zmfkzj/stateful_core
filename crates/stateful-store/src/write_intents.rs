@@ -28,9 +28,25 @@ impl Store {
         &self,
         request: &RequestEnvelope<WriteIntentStart>,
     ) -> StoreResult<CommandOutcome<WriteIntentStartResult>> {
+        self.start_write_intent_for(request, request.payload.clone(), "write_intent.start")
+    }
+
+    pub fn start_write_intent_authorized<T: serde::Serialize>(
+        &self,
+        request: &RequestEnvelope<T>,
+        payload: WriteIntentStart,
+    ) -> StoreResult<CommandOutcome<WriteIntentStartResult>> {
+        self.start_write_intent_for(request, payload, "server.authorize")
+    }
+
+    fn start_write_intent_for<T: serde::Serialize>(
+        &self,
+        request: &RequestEnvelope<T>,
+        payload: WriteIntentStart,
+        route_kind: &'static str,
+    ) -> StoreResult<CommandOutcome<WriteIntentStartResult>> {
         let now = self.clock.now();
-        let payload = request.payload.clone();
-        self.execute_command(request, "write_intent.start", |reader| {
+        self.execute_command(request, route_kind, |reader| {
             if payload.operation_id.trim().is_empty() || payload.action.trim().is_empty() {
                 return Err(StoreError::InvalidWriteIntent);
             }

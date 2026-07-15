@@ -1,6 +1,6 @@
 use crate::{CoordinationMode, RUNTIME_CAPABILITIES, ServerConfig, SharedStore, protocol};
 use axum::{Json, extract::{RawQuery, State}, http::{HeaderMap, StatusCode}, response::{IntoResponse, Response, sse::{Event as SseEvent, KeepAlive, Sse}}};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use stateful_core::{
     AuthorizationInput, Decision, DecisionKind, FreshnessMode, ObservationFreshness, PolicyState,
@@ -32,8 +32,7 @@ const fn default_events_limit() -> u64 {
 pub(crate) struct SaveCheckPayload {
     paths: Vec<String>,
 }
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct AuthorizePayload {
     #[serde(default)]
     reservation_id: Option<String>,
@@ -143,12 +142,15 @@ pub(crate) async fn authorize(State(config): State<ServerConfig>, protocol::V2Js
     if let Err(response) = authorize_request(&mut store, config.coordination_mode, &request) {
         return response;
     }
-    let write_request = retarget(&request, WriteIntentStart {
+    let write_payload = WriteIntentStart {
         operation_id: request.payload.operation_id.clone(),
         action: request.payload.action.clone(),
         targets: request.payload.targets.clone(),
-    });
-    protocol::command_response(&request_id, store.start_write_intent(&write_request))
+    };
+    protocol::command_response(
+        &request_id,
+        store.start_write_intent_authorized(&request, write_payload),
+    )
 }
 
 pub(crate) async fn human_observe(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
