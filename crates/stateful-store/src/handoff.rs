@@ -123,19 +123,31 @@ impl Store {
     }
 
     fn has_stale_current_state(&self, workspace_id: &str, now: OffsetDateTime) -> StoreResult<bool> {
-        let now = crate::format_timestamp(now);
-        self.conn.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM presence_current
-                WHERE workspace_id = ?1 AND json_extract(payload_json, '$.expires_at') <= ?2
-                  AND (json_extract(payload_json, '$.busy_until') IS NULL OR json_extract(payload_json, '$.busy_until') <= ?2)
-                UNION ALL
-                SELECT 1 FROM handoff_current
-                WHERE workspace_id = ?1 AND json_extract(payload_json, '$.expires_at') <= ?2
-            )",
-            params![workspace_id, now],
-            |row| row.get::<_, bool>(0),
-        ).map_err(crate::StoreError::from)
+        let mut statement = self.conn.prepare(
+            "SELECT payload_json, 'presence' FROM presence_current WHERE workspace_id = ?1
+             UNION ALL
+             SELECT payload_json, 'handoff' FROM handoff_current WHERE workspace_id = ?1",
+        )?;
+        let rows = statement.query_map([workspace_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (payload, kind) = row?;
+            if kind == "presence" {
+                let presence: PresenceRecord = serde_json::from_str(&payload)?;
+                if presence.expires_at <= now
+                    && presence.busy_until.is_none_or(|busy_until| busy_until <= now)
+                {
+                    return Ok(true);
+                }
+            } else {
+                let handoff: HandoffRecord = serde_json::from_str(&payload)?;
+                if handoff.expires_at <= now {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     pub(crate) fn startup_housekeeping(&mut self) -> StoreResult<()> {

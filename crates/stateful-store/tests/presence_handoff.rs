@@ -8,7 +8,7 @@ use stateful_store::{
 };
 use tempfile::TempDir;
 use std::sync::{Arc, Mutex};
-use time::{Duration, OffsetDateTime, macros::datetime};
+use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339, macros::datetime};
 use uuid::Uuid;
 
 const NOW: OffsetDateTime = datetime!(2026-07-15 12:00 UTC);
@@ -486,4 +486,31 @@ fn non_stale_reads_and_reopens_do_not_create_expiry_receipts() {
     let store = Store::open_with_clock(&path, clock).expect("unchanged reopen should succeed");
     assert_eq!(store.journal_event_count().expect("journal count should load"), 1);
     assert_eq!(store.command_receipt_count().expect("receipt count should load"), 1);
+}
+
+#[test]
+fn expiry_preflight_compares_offset_timestamps_as_instants() {
+    let clock = MutableClock::new(NOW);
+    let mut store = Store::open_in_memory_with_clock(clock.clone()).expect("store should open");
+    store.register_presence(&register_request(Uuid::new_v4(), "expired", "expired-actor", ActorType::Agent, None))
+        .expect("registration should succeed");
+    store.start_presence_tool(&request(Uuid::new_v4(), "expired", "expired-actor", ActorType::Agent, PresenceToolStart {
+        tool_name: "tool".into(),
+        deadline: Some(OffsetDateTime::parse("2026-07-15T15:00:00+02:00", &Rfc3339).expect("deadline should parse")),
+    })).expect("tool should start");
+    clock.advance(Duration::minutes(61));
+    assert!(presence(&mut store, "expired").is_none());
+
+    let future_clock = MutableClock::new(NOW);
+    let mut future_store = Store::open_in_memory_with_clock(future_clock.clone()).expect("store should open");
+    future_store.register_presence(&register_request(Uuid::new_v4(), "future", "future-actor", ActorType::Agent, None))
+        .expect("registration should succeed");
+    future_store.start_presence_tool(&request(Uuid::new_v4(), "future", "future-actor", ActorType::Agent, PresenceToolStart {
+        tool_name: "tool".into(),
+        deadline: Some(OffsetDateTime::parse("2026-07-15T10:45:00-02:00", &Rfc3339).expect("deadline should parse")),
+    })).expect("tool should start");
+    future_clock.advance(Duration::minutes(20));
+    let receipts = future_store.command_receipt_count().expect("receipt count should load");
+    assert!(presence(&mut future_store, "future").is_some());
+    assert_eq!(future_store.command_receipt_count().expect("receipt count should load"), receipts);
 }
