@@ -13,6 +13,10 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 use rustix::fs::{FlockOperation, flock};
+#[cfg(test)]
+use std::sync::{Arc, LazyLock, Mutex};
+
+
 
 const CHECKPOINT: &str = "stateful.v2.event-journal";
 const SHADOW_PREFIX: &str = "_v2_shadow_";
@@ -42,6 +46,13 @@ const REQUIRED_LEGACY_COLUMNS: &[(&str, &[&str])] = &[
     ("notifications", &["notification_id", "sequence", "target_agent_id", "workspace_id", "kind", "payload_json", "status", "created_at", "expires_at"]),
     ("outbox", &["outbox_id", "agent_id", "workspace_id", "sequence", "event_type", "payload_json", "sync_status"]),
 ];
+#[cfg(test)]
+type MigrationTestHook = Arc<dyn Fn() + Send + Sync>;
+#[cfg(test)]
+static MIGRATION_TEST_HOOK: LazyLock<Mutex<Option<MigrationTestHook>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+
 
 #[derive(Clone)]
 struct Metadata {
@@ -111,6 +122,10 @@ pub(crate) fn migrate_persistent_v1(
         preflight(connection)?;
         let source_data_version = data_version(connection)?;
         let backup = create_backup(connection, database_path)?;
+        #[cfg(test)]
+        if let Some(hook) = MIGRATION_TEST_HOOK.lock().expect("migration hook lock should not poison").clone() {
+            hook();
+        }
         connection.execute_batch("BEGIN EXCLUSIVE")?;
         if data_version(connection)? != source_data_version {
             connection.execute_batch("ROLLBACK")?;
@@ -597,4 +612,134 @@ fn format_timestamp(timestamp: OffsetDateTime) -> StoreResult<String> {
 
 fn invalid(message: impl Into<String>) -> StoreResult<()> {
     Err(StoreError::MigrationValidation(message.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::FixedClock;
+    use std::{
+        sync::{
+            Arc, Barrier, Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+        thread,
+    };
+    use tempfile::TempDir;
+
+    #[test]
+    fn writer_after_backup_retries_without_retaining_a_stale_rollback_backup() {
+        let temp = TempDir::new().expect("temporary directory should exist");
+        let path = temp.path().join("legacy.sqlite");
+        let connection = Connection::open(&path).expect("fixture should open");
+        connection.execute_batch(include_str!("../tests/fixtures/v1_persistent_state.sql")).expect("fixture should apply");
+        drop(connection);
+
+        let backup = path.with_extension("v1.backup.sqlite");
+        let backup_created = Arc::new(Barrier::new(2));
+        let writer_committed = Arc::new(Barrier::new(2));
+        let paused = Arc::new(AtomicBool::new(false));
+        let first_backup_updated_at = Arc::new(Mutex::new(None));
+        let hook_backup = backup.clone();
+        let hook_backup_created = Arc::clone(&backup_created);
+        let hook_writer_committed = Arc::clone(&writer_committed);
+        let hook_paused = Arc::clone(&paused);
+        let hook_first_backup_updated_at = Arc::clone(&first_backup_updated_at);
+        *MIGRATION_TEST_HOOK.lock().expect("migration hook lock should not poison") = Some(Arc::new(move || {
+            if !hook_paused.swap(true, Ordering::SeqCst) {
+                *hook_first_backup_updated_at.lock().expect("backup timestamp lock should not poison") = Some(
+                    Connection::open(&hook_backup)
+                        .expect("first backup should open")
+                        .query_row(
+                            "SELECT updated_at FROM agents WHERE agent_id = 'agent-alpha'",
+                            [],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .expect("first backup should contain the legacy row"),
+                );
+                hook_backup_created.wait();
+                hook_writer_committed.wait();
+            }
+        }));
+
+        let migration_path = path.clone();
+        let migration = thread::spawn(move || {
+            let connection = Connection::open(&migration_path).expect("migration connection should open");
+            migrate_persistent_v1(
+                &connection,
+                &migration_path,
+                &FixedClock::new(
+                    OffsetDateTime::parse("2026-07-15T11:30:00Z", &Rfc3339)
+                        .expect("clock should parse"),
+                ),
+            )
+        });
+
+        backup_created.wait();
+        let writer_result = (|| {
+            let writer = Connection::open(&path).expect("second writer connection should open");
+            writer.execute_batch(
+                "BEGIN IMMEDIATE;
+                 UPDATE agents
+                    SET updated_at = '2026-07-15T11:20:00Z'
+                  WHERE agent_id = 'agent-alpha';
+                 COMMIT;",
+            )
+        })();
+        writer_committed.wait();
+        writer_result.expect("second writer should commit the authoritative legacy change");
+        migration
+            .join()
+            .expect("migration thread should join")
+            .expect("migration should reject the stale backup and retry");
+        *MIGRATION_TEST_HOOK.lock().expect("migration hook lock should not poison") = None;
+
+        assert_eq!(
+            first_backup_updated_at
+                .lock()
+                .expect("backup timestamp lock should not poison")
+                .as_deref(),
+            Some("2026-07-15T11:00:00Z"),
+            "the first completed backup must be the pre-writer snapshot",
+        );
+        assert!(
+            !path.with_extension("v1.backup.1.sqlite").exists(),
+            "a stale rollback backup must not survive beside the retained retry backup",
+        );
+        let migrated = Connection::open(&path).expect("migrated database should open");
+        let journal_updated_at: String = migrated
+            .query_row(
+                "SELECT occurred_at
+                   FROM journal_events
+                  WHERE event_type = 'migration.presence_snapshot_seeded'
+                    AND aggregate_id = 'agent-alpha'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("journal should contain the committed legacy row");
+        let canonical_updated_at: String = migrated
+            .query_row(
+                "SELECT occurred_at
+                   FROM presence_current
+                  WHERE workspace_id = 'workspace-main'
+                    AND agent_id = 'agent-alpha'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("canonical projection should contain the committed legacy row");
+        assert_eq!(journal_updated_at, "2026-07-15T11:20:00Z");
+        assert_eq!(canonical_updated_at, journal_updated_at);
+
+        let retained_backup = Connection::open(&backup).expect("retained retry backup should open");
+        assert_eq!(
+            retained_backup
+                .query_row(
+                    "SELECT updated_at FROM agents WHERE agent_id = 'agent-alpha'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("retained backup should contain the authoritative legacy row"),
+            "2026-07-15T11:20:00Z",
+        );
+    }
 }

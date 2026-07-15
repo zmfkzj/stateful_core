@@ -3115,3 +3115,10 @@ mod tests {
             .collect()
     }
 }
+
+#[cfg(test)]
+impl Store {
+    fn quote_sql_identifier(identifier: &str) -> String {
+        format!("\"{}\"", identifier.replace('"', "\"\""))
+    }
+}
