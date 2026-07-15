@@ -436,9 +436,11 @@ fn append_claim_seeds(connection: &Connection, now: &str, contexts: &BTreeMap<St
 }
 
 fn append_wait_seeds(connection: &Connection, contexts: &BTreeMap<String, Metadata>, pending: &mut Vec<PendingEvent>) -> StoreResult<()> {
-    let mut statement = connection.prepare("SELECT wait_id, request_id, agent_id, workspace_id, repo_id, worktree_id, root, branch, relative_path, action, status, requested_at, reservation_expires_at, blocking_agent_id, purpose FROM wait_queue ORDER BY workspace_id, requested_at, wait_id")?;
-    for row in statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, Option<String>>(5)?, row.get::<_, Option<String>>(6)?, row.get::<_, Option<String>>(7)?, row.get::<_, String>(8)?, row.get::<_, String>(9)?, row.get::<_, String>(10)?, row.get::<_, String>(11)?, row.get::<_, Option<String>>(12)?, row.get::<_, Option<String>>(13)?, row.get::<_, String>(14)?)))? {
-        let (wait_id, request_id, agent_id, workspace_id, repo_id, worktree_id, root, branch, relative_path, action, status, requested_at, reservation_expires_at, blocking_agent_id, purpose) = row?;
+    let mut statement = connection.prepare("SELECT wait_id, request_id, agent_id, workspace_id, repo_id, worktree_id, root, branch, relative_path, action, status, requested_at, reservation_expires_at, blocking_agent_id, purpose FROM wait_queue")?;
+    let mut rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, Option<String>>(5)?, row.get::<_, Option<String>>(6)?, row.get::<_, Option<String>>(7)?, row.get::<_, String>(8)?, row.get::<_, String>(9)?, row.get::<_, String>(10)?, row.get::<_, String>(11)?, row.get::<_, Option<String>>(12)?, row.get::<_, Option<String>>(13)?, row.get::<_, String>(14)?)))?.collect::<Result<Vec<_>, _>>()?;
+    rows.sort_by_key(|row| (row.3.clone(), parse_timestamp(&row.11).expect("preflight validated wait timestamp"), row.0.clone()));
+    for row in rows {
+        let (wait_id, request_id, agent_id, workspace_id, repo_id, worktree_id, root, branch, relative_path, action, status, requested_at, reservation_expires_at, blocking_agent_id, purpose) = row;
         pending.push(PendingEvent {
             payload: EventPayload::Migration(MigrationEvent::WaitSnapshotSeeded(seed_data("wait", &wait_id, json!({"request_id": request_id, "relative_path": relative_path, "action": action, "status": status, "reservation_expires_at": reservation_expires_at, "blocking_agent_id": blocking_agent_id, "purpose": purpose})))),
             occurred_at: requested_at,
