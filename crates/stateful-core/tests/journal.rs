@@ -133,3 +133,19 @@ fn non_snapshot_migration_events_keep_request_ordinal_type_identifiers() {
 
     assert_eq!(event.event_id, Uuid::new_v5(&request_id, b"3:migration.started"));
 }
+
+#[test]
+fn migration_snapshot_seed_rejects_aggregate_key_mismatch() {
+    let mut data = EventData::new("claim-other");
+    data.data = json!({
+        "legacy_entity_kind": "claim",
+        "legacy_primary_key": "claim-active",
+    });
+    assert!(NewEvent::new(
+        Uuid::parse_str("8d5ddf45-9ce3-44ac-953e-3b776cd1783d").expect("valid UUID"),
+        3,
+        OffsetDateTime::parse("2026-05-31T12:00:00Z", &time::format_description::well_known::Rfc3339).expect("valid timestamp"),
+        EventPayload::Migration(MigrationEvent::ClaimSnapshotSeeded(data)),
+    )
+    .is_err());
+}

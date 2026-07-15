@@ -28,6 +28,13 @@ impl<'a> Projector<'a> {
         if self.fail_on_event == Some(self.applied_events) {
             return Err(StoreError::ProjectorFailure);
         }
+        if matches!(
+            event.stored.payload(),
+            EventPayload::Migration(MigrationEvent::LegacyAuditImported(_))
+        ) || migration_snapshot_is_terminal(event) {
+            return Ok(());
+        }
+
 
         let table = migration_seed_projection_table(event).or_else(|| match event.stored.aggregate_kind() {
             "presence" => Some("presence_current"),
@@ -200,4 +207,20 @@ fn migration_seed_data(event: &JournalEvent) -> Option<&serde_json::Value> {
         | EventPayload::Migration(MigrationEvent::DeliverySnapshotSeeded(data)) => Some(&data.data),
         _ => None,
     }
+}
+
+fn migration_snapshot_is_terminal(event: &JournalEvent) -> bool {
+    let terminal: &[&str] = match event.stored.payload() {
+        EventPayload::Migration(MigrationEvent::ClaimSnapshotSeeded(_)) => {
+            &["released", "expired", "cancelled"]
+        }
+        EventPayload::Migration(MigrationEvent::WriteFenceSnapshotSeeded(_)) => {
+            &["released", "expired"]
+        }
+        _ => return false,
+    };
+    migration_seed_data(event)
+        .and_then(|data| data.get("status"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|status| terminal.contains(&status))
 }

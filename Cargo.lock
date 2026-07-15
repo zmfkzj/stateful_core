@@ -1231,6 +1231,7 @@ name = "stateful-store"
 version = "0.1.1"
 dependencies = [
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

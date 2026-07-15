@@ -334,6 +334,12 @@ fn migration_snapshot_event_id(payload: &EventPayload) -> Result<Option<Uuid>, V
             "invalid_migration_seed",
             "migration snapshot seed data must include legacy_primary_key.",
         ))?;
+    if data.aggregate_id != primary_key {
+        return Err(V2Error::new(
+            "invalid_migration_seed",
+            "migration snapshot seed aggregate_id must match legacy_primary_key.",
+        ));
+    }
     migration_seed_event_id(entity_kind, primary_key).map(Some)
 }
 

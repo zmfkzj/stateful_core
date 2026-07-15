@@ -8,9 +8,11 @@ use crate::{
 use rusqlite::{Connection, OptionalExtension, backup::Backup, params};
 use serde_json::{Map, Value, json};
 use stateful_core::{EventData, EventPayload, MigrationEvent, NewEvent, LEGACY_MIGRATION_NAMESPACE};
-use std::{collections::BTreeMap, fs, path::{Path, PathBuf}, time::Duration};
+use std::{collections::BTreeMap, fs::{self, File}, path::{Path, PathBuf}, time::Duration};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
+
+use rustix::fs::{FlockOperation, flock};
 
 const CHECKPOINT: &str = "stateful.v2.event-journal";
 const SHADOW_PREFIX: &str = "_v2_shadow_";
@@ -70,62 +72,96 @@ struct PendingEvent {
     metadata: Metadata,
 }
 
+struct MigrationGuard(File);
+
+impl MigrationGuard {
+    fn acquire(database_path: &Path) -> StoreResult<Self> {
+        let file = File::options()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(database_path.with_extension("v2.migration.lock"))?;
+        flock(&file, FlockOperation::LockExclusive)
+            .map_err(|error| StoreError::MigrationValidation(format!("could not acquire migration guard: {error}")))?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for MigrationGuard {
+    fn drop(&mut self) {
+        let _ = flock(&self.0, FlockOperation::Unlock);
+    }
+}
+
 pub(crate) fn migrate_persistent_v1(
     connection: &Connection,
     database_path: &Path,
     clock: &dyn Clock,
 ) -> StoreResult<()> {
-    if has_checkpoint(connection)? {
-        validate_ready(connection)?;
-        return Ok(());
-    }
-    if !has_legacy_tables(connection)? {
-        return Ok(());
-    }
+    let _guard = MigrationGuard::acquire(database_path)?;
+    loop {
+        if has_checkpoint(connection)? {
+            validate_ready(connection)?;
+            return Ok(());
+        }
+        if !has_legacy_tables(connection)? {
+            return Ok(());
+        }
 
-    preflight(connection)?;
-    let backup = create_backup(connection, database_path)?;
-    connection.execute_batch("BEGIN EXCLUSIVE")?;
-    let result = (|| {
         preflight(connection)?;
-        let now = format_timestamp(clock.now())?;
-        let pending = collect_pending_events(connection, &now)?;
-
-        schema::create_v2_schema(connection)?;
-        schema::create_projection_tables_with_prefix(connection, SHADOW_PREFIX)?;
-        let mut projector = Projector::new(connection, SHADOW_PREFIX, None);
-        let request_id = Uuid::new_v5(&LEGACY_MIGRATION_NAMESPACE, b"stateful.v1-to-v2-migration");
-        for (ordinal, pending) in pending.into_iter().enumerate() {
-            let event = NewEvent::new(request_id, ordinal as u32, parse_timestamp(&pending.occurred_at)?, pending.payload)?;
-            let event = append_migration_event(connection, &event, pending.metadata.journal())?;
-            projector.apply(&event)?;
+        let source_data_version = data_version(connection)?;
+        let backup = create_backup(connection, database_path)?;
+        connection.execute_batch("BEGIN EXCLUSIVE")?;
+        if data_version(connection)? != source_data_version {
+            connection.execute_batch("ROLLBACK")?;
+            fs::remove_file(&backup)?;
+            continue;
         }
+        let result = (|| {
+            preflight(connection)?;
+            let now = format_timestamp(clock.now())?;
+            let pending = collect_pending_events(connection, &now)?;
 
-        replay_and_compare(connection)?;
-        append_lifecycle_event(connection, &mut projector, request_id, "validated", &now)?;
-        append_lifecycle_event(connection, &mut projector, request_id, "completed", &now)?;
-        replay_and_compare(connection)?;
+            schema::create_v2_schema(connection)?;
+            schema::create_projection_tables_with_prefix(connection, SHADOW_PREFIX)?;
+            let mut projector = Projector::new(connection, SHADOW_PREFIX, None);
+            let request_id = Uuid::new_v5(&LEGACY_MIGRATION_NAMESPACE, b"stateful.v1-to-v2-migration");
+            for (ordinal, pending) in pending.into_iter().enumerate() {
+                let event = NewEvent::new(request_id, ordinal as u32, parse_timestamp(&pending.occurred_at)?, pending.payload)?;
+                let event = append_migration_event(connection, &event, pending.metadata.journal())?;
+                projector.apply(&event)?;
+            }
 
-        schema::replace_projections_from_prefix(connection, SHADOW_PREFIX)?;
-        schema::drop_projection_tables_with_prefix(connection, REPLAY_PREFIX)?;
-        connection.execute(
-            "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
-            params![CHECKPOINT, now],
-        )?;
-        for table in LEGACY_TABLES {
-            connection.execute_batch(&format!("DROP TABLE {table};"))?;
+            replay_and_compare(connection)?;
+            append_lifecycle_event(connection, &mut projector, request_id, "validated", &now)?;
+            append_lifecycle_event(connection, &mut projector, request_id, "completed", &now)?;
+            replay_and_compare(connection)?;
+
+            schema::replace_projections_from_prefix(connection, SHADOW_PREFIX)?;
+            schema::drop_projection_tables_with_prefix(connection, REPLAY_PREFIX)?;
+            connection.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![CHECKPOINT, now],
+            )?;
+            for table in LEGACY_TABLES {
+                connection.execute_batch(&format!("DROP TABLE {table};"))?;
+            }
+            if !backup.exists() {
+                return Err(StoreError::MigrationValidation("SQLite backup disappeared before cutover".into()));
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let _ = connection.execute_batch("ROLLBACK");
+            return Err(error);
         }
-        if !backup.exists() {
-            return Err(StoreError::MigrationValidation("SQLite backup disappeared before cutover".into()));
-        }
-        Ok(())
-    })();
-    if let Err(error) = result {
-        let _ = connection.execute_batch("ROLLBACK");
-        return Err(error);
+        connection.execute_batch("COMMIT")?;
+        return validate_ready(connection);
     }
-    connection.execute_batch("COMMIT")?;
-    validate_ready(connection)
+}
+
+fn data_version(connection: &Connection) -> StoreResult<i64> {
+    connection.query_row("PRAGMA data_version", [], |row| row.get(0)).map_err(StoreError::from)
 }
 
 fn has_checkpoint(connection: &Connection) -> StoreResult<bool> {
@@ -276,7 +312,7 @@ fn collect_pending_events(connection: &Connection, now: &str) -> StoreResult<Vec
     append_reservation_seeds(connection, &contexts, &mut pending)?;
     append_claim_seeds(connection, &contexts, &mut pending)?;
     append_wait_seeds(connection, &contexts, &mut pending)?;
-    append_fence_seeds(connection, &contexts, &mut pending)?;
+    append_fence_seeds(connection, now, &contexts, &mut pending)?;
     append_human_seeds(connection, &contexts, &mut pending)?;
     append_handoff_seeds(connection, &contexts, &mut pending)?;
     append_delivery_seeds(connection, &contexts, &mut pending)?;
@@ -304,11 +340,17 @@ fn append_presence_seeds(connection: &Connection, now: &str, contexts: &BTreeMap
     let mut agents = connection.prepare("SELECT agent_id, workspace_id, updated_at FROM agents ORDER BY workspace_id, agent_id")?;
     for row in agents.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))? {
         let (agent_id, workspace_id, updated_at) = row?;
-        let mut activities = connection.prepare("SELECT activity_id, phase, expires_at FROM activities WHERE agent_id = ?1 AND workspace_id = ?2 AND (expires_at IS NULL OR expires_at > ?3) ORDER BY expires_at DESC, activity_id DESC")?;
-        let values = activities.query_map(params![agent_id, workspace_id, now], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)))?.collect::<Result<Vec<_>, _>>()?;
-        let mut source_activity_ids = values.iter().map(|(activity_id, _, _)| activity_id.clone()).collect::<Vec<_>>();
-        source_activity_ids.sort();
-        let selected = values.first();
+        let now = parse_timestamp(now)?;
+        let mut activities = connection.prepare("SELECT activity_id, phase, expires_at FROM activities WHERE agent_id = ?1 AND workspace_id = ?2 ORDER BY activity_id")?;
+        let rows = activities.query_map(params![agent_id, workspace_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)))?.collect::<Result<Vec<_>, _>>()?;
+        let mut values = Vec::new();
+        for row in rows {
+            if row.2.as_deref().map(parse_timestamp).transpose()?.is_none_or(|expires_at| expires_at > now) {
+                values.push(row);
+            }
+        }
+        let source_activity_ids = values.iter().map(|(activity_id, _, _)| activity_id.clone()).collect::<Vec<_>>();
+        let selected = latest_activity(&values)?;
         let data = json!({
             "agent_id": agent_id,
             "selected_activity_id": selected.map(|value| value.0.clone()),
@@ -323,6 +365,24 @@ fn append_presence_seeds(connection: &Connection, now: &str, contexts: &BTreeMap
         });
     }
     Ok(())
+}
+
+fn latest_activity(values: &[(String, String, Option<String>)]) -> StoreResult<Option<&(String, String, Option<String>)>> {
+    let mut selected: Option<(Option<OffsetDateTime>, &str, &(String, String, Option<String>))> = None;
+    for value in values {
+        let expires_at = value.2.as_deref().map(parse_timestamp).transpose()?;
+        let replaces = match selected.as_ref() {
+            None => true,
+            Some((current_expires_at, current_id, _)) => {
+                expires_at > *current_expires_at
+                    || (expires_at == *current_expires_at && value.0.as_str() > *current_id)
+            }
+        };
+        if replaces {
+            selected = Some((expires_at, value.0.as_str(), value));
+        }
+    }
+    Ok(selected.map(|(_, _, value)| value))
 }
 
 fn append_reservation_seeds(connection: &Connection, contexts: &BTreeMap<String, Metadata>, pending: &mut Vec<PendingEvent>) -> StoreResult<()> {
@@ -366,12 +426,19 @@ fn append_wait_seeds(connection: &Connection, contexts: &BTreeMap<String, Metada
     Ok(())
 }
 
-fn append_fence_seeds(connection: &Connection, contexts: &BTreeMap<String, Metadata>, pending: &mut Vec<PendingEvent>) -> StoreResult<()> {
+fn append_fence_seeds(connection: &Connection, now: &str, contexts: &BTreeMap<String, Metadata>, pending: &mut Vec<PendingEvent>) -> StoreResult<()> {
     let mut statement = connection.prepare("SELECT fence_id, agent_id, workspace_id, relative_path, action, acquired_at, expires_at, released_at FROM write_fences ORDER BY workspace_id, fence_id")?;
     for row in statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?, row.get::<_, Option<String>>(7)?)))? {
         let (fence_id, agent_id, workspace_id, relative_path, action, acquired_at, expires_at, released_at) = row?;
+        let status = if released_at.is_some() {
+            "released"
+        } else if parse_timestamp(&expires_at)? <= parse_timestamp(now)? {
+            "expired"
+        } else {
+            "active"
+        };
         pending.push(PendingEvent {
-            payload: EventPayload::Migration(MigrationEvent::WriteFenceSnapshotSeeded(seed_data("write_fence", &fence_id, json!({"relative_path": relative_path, "action": action, "acquired_at": acquired_at, "expires_at": expires_at, "released_at": released_at})))),
+            payload: EventPayload::Migration(MigrationEvent::WriteFenceSnapshotSeeded(seed_data("write_fence", &fence_id, json!({"relative_path": relative_path, "action": action, "status": status, "acquired_at": acquired_at, "expires_at": expires_at, "released_at": released_at})))),
             occurred_at: acquired_at,
             metadata: metadata(&workspace_id, &agent_id, None, None, None, None, contexts),
         });
@@ -393,14 +460,14 @@ fn append_human_seeds(connection: &Connection, contexts: &BTreeMap<String, Metad
 }
 
 fn append_handoff_seeds(connection: &Connection, contexts: &BTreeMap<String, Metadata>, pending: &mut Vec<PendingEvent>) -> StoreResult<()> {
-    let mut statement = connection.prepare("SELECT event_id, workspace_id, payload_json, created_at FROM events WHERE event_type = 'ActivityFinalized' ORDER BY created_at, event_id")?;
-    for row in statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)))? {
-        let (event_id, workspace_id, payload_json, created_at) = row?;
+    let mut statement = connection.prepare("SELECT event_id, agent_id, workspace_id, payload_json, created_at FROM events WHERE event_type = 'ActivityFinalized' ORDER BY created_at, event_id")?;
+    for row in statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?)))? {
+        let (event_id, agent_id, workspace_id, payload_json, created_at) = row?;
         let cleanup_count = serde_json::from_str::<Value>(&payload_json)?.get("cleanup_count").and_then(Value::as_u64).unwrap_or(0);
         pending.push(PendingEvent {
             payload: EventPayload::Migration(MigrationEvent::LegacyHandoffSnapshotSeeded(seed_data("handoff", &event_id, json!({"status": "unknown", "actor_id": "unknown", "goal": "", "next_plan": "", "resources": [], "cleanup_count": cleanup_count, "legacy_event_id": event_id})))),
             occurred_at: created_at,
-            metadata: metadata(&workspace_id, "unknown", None, None, None, None, contexts),
+            metadata: metadata(&workspace_id, &agent_id, None, None, None, None, contexts),
         });
     }
     Ok(())
@@ -433,9 +500,11 @@ fn append_delivery_seeds(connection: &Connection, contexts: &BTreeMap<String, Me
 fn append_lifecycle_event(connection: &Connection, projector: &mut Projector<'_>, request_id: Uuid, lifecycle: &str, now: &str) -> StoreResult<()> {
     let manifest = json!({"normalizations": [
         "legacy audits are ordered by created_at,event_id and remain non-projectable",
-        "multiple live activities select latest expiry then activity_id while preserving source_activity_ids",
+        "multiple live activities select latest expiry instant then activity_id while preserving source_activity_ids",
         "legacy claim content hashes remain legacy_base_observation and never become read provenance",
         "unavailable actor fields are unknown and unavailable handoff fields are empty",
+        "claims without a legacy timestamp use expires_at or the Unix epoch as occurred_at",
+        "outbox rows use the Unix epoch as occurred_at because v1 stored no outbox timestamp",
     ]});
     let payload = match lifecycle {
         "validated" => EventPayload::Migration(MigrationEvent::Validated(EventData { aggregate_id: CHECKPOINT.into(), repeated: false, data: manifest })),
@@ -479,15 +548,14 @@ fn workspace_contexts(connection: &Connection) -> StoreResult<BTreeMap<String, M
     Ok(contexts)
 }
 
-fn metadata(workspace_id: &str, agent_id: &str, repo_id: Option<String>, worktree_id: Option<String>, root: Option<String>, branch: Option<String>, contexts: &BTreeMap<String, Metadata>) -> Metadata {
-    let fallback = contexts.get(workspace_id);
+fn metadata(workspace_id: &str, agent_id: &str, repo_id: Option<String>, worktree_id: Option<String>, root: Option<String>, branch: Option<String>, _contexts: &BTreeMap<String, Metadata>) -> Metadata {
     Metadata {
         agent_id: known(Some(agent_id.into())),
         workspace_id: known(Some(workspace_id.into())),
-        repo_id: repo_id.map_or_else(|| fallback.map(|value| value.repo_id.clone()).unwrap_or_else(|| "unknown".into()), |value| known(Some(value))),
-        worktree_id: worktree_id.map_or_else(|| fallback.map(|value| value.worktree_id.clone()).unwrap_or_else(|| "unknown".into()), |value| known(Some(value))),
-        root: root.map_or_else(|| fallback.map(|value| value.root.clone()).unwrap_or_else(|| "unknown".into()), |value| known(Some(value))),
-        branch: branch.map_or_else(|| fallback.map(|value| value.branch.clone()).unwrap_or_else(|| "unknown".into()), |value| known(Some(value))),
+        repo_id: known(repo_id),
+        worktree_id: known(worktree_id),
+        root: known(root),
+        branch: known(branch),
     }
 }
 
