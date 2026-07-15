@@ -61,8 +61,9 @@ fn event_payload_rejects_kind_payload_mismatch() {
         "payload": event.payload,
     });
 
-    let error = StoredEvent::from_json(invalid.to_string()).expect_err("mismatch must fail");
-    assert_eq!(error.code, "event_metadata_mismatch");
+    let error = serde_json::from_value::<StoredEvent>(invalid)
+        .expect_err("direct event deserialization must reject mismatched metadata");
+    assert!(error.to_string().contains("event_metadata_mismatch"));
 }
 
 #[test]

@@ -1,5 +1,5 @@
 use crate::V2Error;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as DeError};
 use serde_json::Value;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -294,19 +294,57 @@ impl NewEvent {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StoredEvent {
-    pub event_seq: u64,
-    pub event_id: Uuid,
-    pub request_id: Uuid,
-    pub event_ordinal: u32,
-    pub aggregate_kind: String,
-    pub aggregate_id: String,
-    pub event_type: String,
+    event_seq: u64,
+    event_id: Uuid,
+    request_id: Uuid,
+    event_ordinal: u32,
+    aggregate_kind: String,
+    aggregate_id: String,
+    event_type: String,
     #[serde(with = "time::serde::rfc3339")]
-    pub observed_at: OffsetDateTime,
-    pub affects_context: bool,
-    pub payload: EventPayload,
+    observed_at: OffsetDateTime,
+    affects_context: bool,
+    payload: EventPayload,
+}
+
+#[derive(Deserialize)]
+struct StoredEventWire {
+    event_seq: u64,
+    event_id: Uuid,
+    request_id: Uuid,
+    event_ordinal: u32,
+    aggregate_kind: String,
+    aggregate_id: String,
+    event_type: String,
+    #[serde(with = "time::serde::rfc3339")]
+    observed_at: OffsetDateTime,
+    affects_context: bool,
+    payload: EventPayload,
+}
+
+impl<'de> Deserialize<'de> for StoredEvent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = StoredEventWire::deserialize(deserializer)?;
+        let event = Self {
+            event_seq: wire.event_seq,
+            event_id: wire.event_id,
+            request_id: wire.request_id,
+            event_ordinal: wire.event_ordinal,
+            aggregate_kind: wire.aggregate_kind,
+            aggregate_id: wire.aggregate_id,
+            event_type: wire.event_type,
+            observed_at: wire.observed_at,
+            affects_context: wire.affects_context,
+            payload: wire.payload,
+        };
+        event.validate().map_err(D::Error::custom)?;
+        Ok(event)
+    }
 }
 
 impl StoredEvent {
@@ -331,6 +369,46 @@ impl StoredEvent {
         };
         stored.validate()?;
         Ok(stored)
+    }
+
+    pub const fn event_seq(&self) -> u64 {
+        self.event_seq
+    }
+
+    pub const fn event_id(&self) -> Uuid {
+        self.event_id
+    }
+
+    pub const fn request_id(&self) -> Uuid {
+        self.request_id
+    }
+
+    pub const fn event_ordinal(&self) -> u32 {
+        self.event_ordinal
+    }
+
+    pub fn aggregate_kind(&self) -> &str {
+        &self.aggregate_kind
+    }
+
+    pub fn aggregate_id(&self) -> &str {
+        &self.aggregate_id
+    }
+
+    pub fn event_type(&self) -> &str {
+        &self.event_type
+    }
+
+    pub const fn observed_at(&self) -> OffsetDateTime {
+        self.observed_at
+    }
+
+    pub const fn affects_context(&self) -> bool {
+        self.affects_context
+    }
+
+    pub fn payload(&self) -> &EventPayload {
+        &self.payload
     }
 
     pub fn from_json(input: impl AsRef<str>) -> Result<Self, V2Error> {

@@ -1,32 +1,47 @@
 use axum::{Json, http::StatusCode};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use stateful_core::{ProtocolVersion, RequestEnvelope};
+use stateful_core::{AgentIdentity, SourceRef, WorkspaceIdentity};
 
 #[derive(Debug, Deserialize)]
-pub struct ProtocolEnvelope {
-    #[serde(flatten)]
-    pub request: RequestEnvelope,
-    pub payload: Value,
+enum LegacyProtocolVersion {
+    #[serde(rename = "stateful.v1")]
+    V1,
 }
 
-pub fn require_v1_envelope(body: Value) -> Result<ProtocolEnvelope, ProtocolError> {
-    let envelope: ProtocolEnvelope = serde_json::from_value(body).map_err(|_| ProtocolError)?;
-    match envelope.request.protocol_version {
-        ProtocolVersion::V1 => Ok(envelope),
-    }
+#[derive(Debug, Deserialize)]
+pub(crate) struct LegacyRequestEnvelope {
+    #[serde(rename = "protocol_version")]
+    _protocol_version: LegacyProtocolVersion,
+    #[serde(rename = "request_id")]
+    _request_id: String,
+    pub(crate) observed_at: String,
+    pub(crate) agent: AgentIdentity,
+    pub(crate) workspace: WorkspaceIdentity,
+    pub(crate) source: SourceRef,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ProtocolEnvelope {
+    #[serde(flatten)]
+    pub(crate) request: LegacyRequestEnvelope,
+    pub(crate) payload: Value,
+}
+
+pub(crate) fn require_v1_envelope(body: Value) -> Result<ProtocolEnvelope, ProtocolError> {
+    serde_json::from_value(body).map_err(|_| ProtocolError)
 }
 
 #[derive(Debug)]
-pub struct ProtocolError;
+pub(crate) struct ProtocolError;
 
 impl ProtocolError {
-    pub fn response(self) -> (StatusCode, Json<Value>) {
+    pub(crate) fn response(self) -> (StatusCode, Json<Value>) {
         protocol_mismatch_response()
     }
 }
 
-pub fn protocol_mismatch_response() -> (StatusCode, Json<Value>) {
+pub(crate) fn protocol_mismatch_response() -> (StatusCode, Json<Value>) {
     (
         StatusCode::BAD_REQUEST,
         Json(json!({

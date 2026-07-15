@@ -284,7 +284,7 @@ async fn authorize(
         Ok(payload) => payload,
         Err(_) => return protocol::protocol_mismatch_response(),
     };
-    let stateful_core::RequestEnvelope {
+    let protocol::LegacyRequestEnvelope {
         agent,
         workspace,
         source,
