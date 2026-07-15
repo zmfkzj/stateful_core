@@ -68,9 +68,16 @@ fn recovery_outbox_preserves_original_request_id_and_retries_idempotently() {
     let addr = listener.local_addr().expect("listener address should load");
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let (mut stream, request) = accept_v2_request(&listener);
-        tx.send(request).expect("request should send to test");
-        write_json_response(&mut stream, r#"{"outbox_id":"outbox-1"}"#);
+        let (first, request) = accept_v2_request(&listener);
+        tx.send(request).expect("first request should send to test");
+        drop(first);
+
+        let (mut second, request) = accept_v2_request(&listener);
+        tx.send(request).expect("second request should send to test");
+        write_json_response(
+            &mut second,
+            r#"{"outbox_id":"outbox-1","status":"ok","sync_status":"synced","duplicate":true}"#,
+        );
     });
 
     let original = serde_json::json!({
@@ -101,8 +108,10 @@ fn recovery_outbox_preserves_original_request_id_and_retries_idempotently() {
             "payload": {"reason": "offline"}
         }
     });
+    let frozen_original = serde_json::to_string(&original).expect("request should serialize");
+    let outbox_file = paths.outbox_dir.join("s1.jsonl");
     fs::write(
-        paths.outbox_dir.join("s1.jsonl"),
+        &outbox_file,
         serde_json::json!({
             "outbox_id": "outbox-1",
             "agent_id": "s1",
@@ -110,7 +119,7 @@ fn recovery_outbox_preserves_original_request_id_and_retries_idempotently() {
             "sequence": 1,
             "route": "/v2/outbox/sync",
             "request_id": "018f1a33-e3c1-7000-b2a6-d16cc4f05a52",
-            "request_envelope": serde_json::to_string(&original).expect("request should serialize"),
+            "request_envelope": frozen_original,
             "sync_status": "pending"
         })
         .to_string(),
@@ -118,17 +127,40 @@ fn recovery_outbox_preserves_original_request_id_and_retries_idempotently() {
     .expect("outbox fixture should write");
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
+    sync_outbox_with_runtime(&paths, &runtime)
+        .expect_err("disconnected replay should remain pending for retry");
+    assert!(outbox_file.exists(), "failed replay should remain pending");
+    let pending: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&outbox_file).expect("pending outbox should read"))
+            .expect("pending record should parse");
+    assert_eq!(pending["attempts"], 1);
+    assert_eq!(pending["sync_status"], "pending");
+    assert_eq!(pending["request_id"], original["request_id"]);
+    assert_eq!(pending["request_envelope"], frozen_original);
+
     assert_eq!(
-        sync_outbox_with_runtime(&paths, &runtime).expect("outbox should sync"),
+        sync_outbox_with_runtime(&paths, &runtime).expect("duplicate receipt should sync"),
         1
     );
-    let request = rx.recv_timeout(Duration::from_secs(2)).expect("request should arrive");
-    assert!(request.contains("POST /v2/outbox/sync HTTP/1.1"));
-    let body = request.split_once("\r\n\r\n").expect("body separator").1;
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(body).expect("request body should parse"),
-        original
-    );
+    assert!(!outbox_file.exists(), "success receipt should clear pending outbox");
+
+    let first = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("first request should arrive");
+    let second = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("second request should arrive");
+    assert!(first.contains("POST /v2/outbox/sync HTTP/1.1"));
+    assert!(second.contains("POST /v2/outbox/sync HTTP/1.1"));
+    for request in [&first, &second] {
+        let body = request.split_once("\r\n\r\n").expect("body separator").1;
+        assert_eq!(body, frozen_original);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(body)
+                .expect("request body should parse")["request_id"],
+            original["request_id"]
+        );
+    }
 }
 
 #[cfg(unix)]
