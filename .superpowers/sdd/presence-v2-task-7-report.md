@@ -26,12 +26,14 @@ Implemented core and store versioned coordination-context delivery on canonical 
 - Notification coalescing now advances its target-agent sequence. Delivery callbacks carry that sequence and stale callbacks are accepted inertly rather than marking a newer coalesced payload delivered.
 - Context-invalidated notification and recovery transport lifecycle events do not advance the canonical workspace context version.
 - Claimable waits render as a concrete actionable item. The recipient's own coordination records use the active-scope source reference and informational severity, instead of implying another-agent conflict.
+- Own coordination is informational only for reservation, claim, wait, and write-fence ownership. Own unknown-write safety states remain blocking with their reconciliation action.
+- Boundary coverage exercises lifecycle transport neutrality through queued expiry, same-agent cross-workspace ACK/cursor isolation, resource-filtered presence/handoff/final-state delivery, heartbeat and identical-refresh no-churn, and durable reconnect replay before and after ACK.
 
 ## Verification
 
-`stateful sandbox run --fs build --network disabled --write-dir task7-core-store-final3 --command 'cargo test -p stateful-core -p stateful-store'`
+`stateful sandbox run --fs build --network disabled --write-dir task7-core-store-final4 --command 'cargo test -p stateful-core -p stateful-store'`
 
-Passed: all Stateful Core and Stateful Store unit, integration, and doc-test suites, including 11 focused context-delivery tests.
+Passed: all Stateful Core and Stateful Store unit, integration, and doc-test suites, including 17 focused context-delivery tests.
 
 `stateful sandbox run --fs build --network disabled --write-dir task7-server-check --command 'cargo check -p stateful-server'`
 

@@ -646,7 +646,9 @@ fn item_from_current(
     .with_workspace(workspace_id);
     if let Some(agent_id) = agent_id {
         item = item.with_agent(agent_id);
-        if agent_id == target_agent_id {
+        if agent_id == target_agent_id
+            && matches!(kind, "reservation" | "claim" | "wait" | "write_fence")
+        {
             item.severity = CurrentSeverity::Info;
             item.source_refs.push(stateful_core::AGENT_CONTEXT_SCOPE_SOURCE_REF.into());
         }
