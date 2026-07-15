@@ -12,9 +12,17 @@ Complete. The server exposes only the locked `stateful.v2` surface: 21 POST rout
 - Added shared core reservation and thin-safety policy evaluation; awareness is the default and enforcement is explicit.
 - Added runtime identity capabilities, readiness gated by schema/replay checks, lifecycle maintenance, presence/handoff queries, context delivery ACK, notifications, and outbox handlers.
 
+## Test Suite Split
+
+- `v2_protocol.rs`: 33 protocol surface, parsing, auth/error-envelope, and request-ID tests.
+- `v2_coordination.rs`: 2 store-backed reservation, authorization, and human-flow tests.
+- `v2_delivery.rs`: 5 acknowledgement, polling, SSE, and workspace-event delivery tests.
+- `v2_lifecycle.rs`: 6 health, runtime identity, and maintenance-expiry tests.
+- Total: 46 V2 server integration tests; `tests/support/mod.rs` owns the shared request and router helpers.
+
 ## Verification
 
-- `cargo test -p stateful-server` — 46 route/protocol tests passed.
+- `cargo test -p stateful-server` — 46 V2 server integration tests passed across the four suites.
 - `cargo test -p stateful-core` — 46 tests passed.
 - `cargo test -p stateful-store` — 107 tests passed.
 - Active server source has no V1 or legacy symbols; route wiring contains exactly 21 POST and 4 GET V2 registrations; server source contains no direct projection writes.
@@ -54,4 +62,4 @@ Complete. The server exposes only the locked `stateful.v2` surface: 21 POST rout
 ### Additional Verification
 
 - `StoreError::code()` forwards nested V2 codes, so the lifecycle regression and server protocol mapping both report `presence_not_found`.
-- Focused verification passes: 20 presence/handoff tests, 17 freshness tests, 5 core freshness-policy tests, and 46 V2 server protocol tests.
+- Focused verification passes: 20 presence/handoff tests, 17 freshness tests, 5 core freshness-policy tests, and all 46 V2 server tests across the four domain suites.
