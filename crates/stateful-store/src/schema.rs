@@ -9,6 +9,7 @@ pub(crate) const PROJECTION_TABLES: &[&str] = &[
     "wait_current",
     "write_fence_current",
     "read_observation_current",
+    "read_operation_current",
     "write_intent_current",
     "human_observation_current",
     "human_acknowledgement_current",
@@ -137,6 +138,15 @@ pub(crate) fn create_v2_schema(connection: &Connection) -> StoreResult<()> {
             origin_event_seq INTEGER NOT NULL,
             PRIMARY KEY (workspace_id, agent_id, path)
         );
+        CREATE TABLE IF NOT EXISTS read_operation_current (
+            workspace_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            operation_id TEXT NOT NULL,
+            path TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            origin_event_seq INTEGER NOT NULL,
+            PRIMARY KEY (workspace_id, agent_id, operation_id)
+        );
         CREATE TABLE IF NOT EXISTS write_intent_current (
             workspace_id TEXT NOT NULL,
             aggregate_id TEXT NOT NULL,
@@ -222,6 +232,8 @@ pub(crate) fn create_v2_schema(connection: &Connection) -> StoreResult<()> {
             ON write_fence_current(workspace_id, path, expires_at);
         CREATE INDEX IF NOT EXISTS idx_wait_current_operation
             ON wait_current(workspace_id, operation_id);
+        CREATE INDEX IF NOT EXISTS idx_read_operation_current_path
+            ON read_operation_current(workspace_id, agent_id, path);
         CREATE INDEX IF NOT EXISTS idx_write_intent_current_operation
             ON write_intent_current(workspace_id, operation_id);
         CREATE INDEX IF NOT EXISTS idx_resource_write_current_path

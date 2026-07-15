@@ -4,8 +4,8 @@ use stateful_core::{
     ActorType, AuthorizationEvent, ClaimEvent, ContextEvent, EventData, EventPayload, HandoffEvent,
     HandoffRecord, HandoffStatus, HumanAcknowledgementEvent, HumanObservationEvent, MigrationEvent,
     NotificationEvent, PresenceEvent, PresenceRecord, PresenceResource, ReadObservationEvent,
-    RecoveryEvent, ReservationEvent, WaitEvent, WriteFenceEvent, WriteIntentEvent,
-    FALLBACK_HANDOFF_RELEVANCE,
+    ReadObservationRecord, RecoveryEvent, ReservationEvent, ResourceVersion, WaitEvent,
+    WriteFenceEvent, WriteIntentEvent, FALLBACK_HANDOFF_RELEVANCE,
 };
 
 pub(crate) struct Projector<'a> {
@@ -55,6 +55,12 @@ impl<'a> Projector<'a> {
         }
         if let Some(agent_id) = cleanup_agent_id(event) {
             self.apply_coordination_cleanup(event, agent_id)?;
+            if event.stored.affects_context() {
+                self.apply_workspace_version(event)?;
+            }
+            return Ok(());
+        }
+        if self.apply_freshness(event)? {
             if event.stored.affects_context() {
                 self.apply_workspace_version(event)?;
             }
@@ -171,6 +177,95 @@ impl<'a> Projector<'a> {
         }
     }
 
+    fn apply_freshness(&self, event: &JournalEvent) -> StoreResult<bool> {
+        match event.stored.payload() {
+            EventPayload::ReadObservation(ReadObservationEvent::Started(data)) => {
+                let Some(value) = data.data.get("read_observation") else {
+                    return Ok(false);
+                };
+                let record: ReadObservationRecord = serde_json::from_value(value.clone())?;
+                let table = format!("{}read_operation_current", self.prefix);
+                self.connection.execute(
+                    &format!(
+                        "INSERT INTO {table} (workspace_id, agent_id, operation_id, path, payload_json, origin_event_seq)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                         ON CONFLICT(workspace_id, agent_id, operation_id)
+                         DO UPDATE SET path=excluded.path, payload_json=excluded.payload_json, origin_event_seq=excluded.origin_event_seq"
+                    ),
+                    params![
+                        &record.workspace_id,
+                        &record.agent_id,
+                        &record.operation_id,
+                        &record.path,
+                        serde_json::to_string(&record)?,
+                        event.stored.event_seq(),
+                    ],
+                )?;
+                Ok(true)
+            }
+            EventPayload::ReadObservation(
+                ReadObservationEvent::Stabilized(_)
+                | ReadObservationEvent::Unstable(_)
+                | ReadObservationEvent::Aborted(_)
+                | ReadObservationEvent::Invalidated(_)
+                | ReadObservationEvent::Expired(_),
+            ) => {
+                let Some(data) = event_data(event) else {
+                    return Ok(false);
+                };
+                let Some(value) = data.get("read_observation") else {
+                    return Ok(false);
+                };
+                let record: ReadObservationRecord = serde_json::from_value(value.clone())?;
+                self.apply_aggregate("read_observation_current", event)?;
+                let operations = format!("{}read_operation_current", self.prefix);
+                self.connection.execute(
+                    &format!(
+                        "DELETE FROM {operations}
+                         WHERE workspace_id = ?1 AND agent_id = ?2 AND operation_id = ?3"
+                    ),
+                    params![&record.workspace_id, &record.agent_id, &record.operation_id],
+                )?;
+                Ok(true)
+            }
+            EventPayload::WriteIntent(WriteIntentEvent::Committed(data)) => {
+                self.apply_aggregate("write_intent_current", event)?;
+                let versions = data.data.get("resource_versions")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+                for value in versions.as_array().into_iter().flatten() {
+                    let version: ResourceVersion = serde_json::from_value(value.clone())?;
+                    let table = format!("{}resource_write_current", self.prefix);
+                    self.connection.execute(
+                        &format!(
+                            "INSERT INTO {table} (workspace_id, path, payload_json, origin_event_seq)
+                             VALUES (?1, ?2, ?3, ?4)
+                             ON CONFLICT(workspace_id, path)
+                             DO UPDATE SET payload_json=excluded.payload_json, origin_event_seq=excluded.origin_event_seq"
+                        ),
+                        params![
+                            &version.workspace_id,
+                            &version.path,
+                            serde_json::to_string(&version)?,
+                            event.stored.event_seq(),
+                        ],
+                    )?;
+                }
+                Ok(true)
+            }
+            EventPayload::WriteIntent(
+                WriteIntentEvent::Started(_)
+                | WriteIntentEvent::Failed(_)
+                | WriteIntentEvent::OutcomeUnknown(_)
+                | WriteIntentEvent::Reconciled(_),
+            ) => {
+                self.apply_aggregate("write_intent_current", event)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     fn apply_presence_or_handoff(&self, event: &JournalEvent) -> StoreResult<bool> {
         match event.stored.payload() {
             EventPayload::Presence(PresenceEvent::Finalized(_) | PresenceEvent::Expired(_)) => {
@@ -182,6 +277,16 @@ impl<'a> Projector<'a> {
                 )?;
                 self.connection.execute(
                     &format!("DELETE FROM {resources} WHERE workspace_id = ?1 AND agent_id = ?2"),
+                    params![event.workspace_id, event.stored.aggregate_id()],
+                )?;
+                let observations = format!("{}read_observation_current", self.prefix);
+                let operations = format!("{}read_operation_current", self.prefix);
+                self.connection.execute(
+                    &format!("DELETE FROM {observations} WHERE workspace_id = ?1 AND agent_id = ?2"),
+                    params![event.workspace_id, event.stored.aggregate_id()],
+                )?;
+                self.connection.execute(
+                    &format!("DELETE FROM {operations} WHERE workspace_id = ?1 AND agent_id = ?2"),
                     params![event.workspace_id, event.stored.aggregate_id()],
                 )?;
                 Ok(true)
@@ -332,13 +437,21 @@ impl<'a> Projector<'a> {
                 )?;
             }
             "read_observation_current" => {
+                let agent_id = data
+                    .and_then(|data| data.get("agent_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(&event.agent_id);
+                let path = data
+                    .and_then(|data| data.get("path"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(event.stored.aggregate_id());
                 self.connection.execute(
                     &format!(
                         "INSERT INTO {table} (workspace_id, agent_id, path, payload_json, origin_event_seq)
                          VALUES (?1, ?2, ?3, ?4, ?5)
                          ON CONFLICT(workspace_id, agent_id, path) DO UPDATE SET payload_json=excluded.payload_json, origin_event_seq=excluded.origin_event_seq"
                     ),
-                    params![event.workspace_id, event.agent_id, event.stored.aggregate_id(), payload_json, event.stored.event_seq()],
+                    params![event.workspace_id, agent_id, path, payload_json, event.stored.event_seq()],
                 )?;
             }
             "claim_current" | "write_fence_current" => {
@@ -355,7 +468,7 @@ impl<'a> Projector<'a> {
             }
             "wait_current" | "write_intent_current" => {
                 let operation_id = data
-                    .and_then(|data| data.get("request_id"))
+                    .and_then(|data| data.get(if aggregate_table == "wait_current" { "request_id" } else { "operation_id" }))
                     .and_then(serde_json::Value::as_str);
                 self.connection.execute(
                     &format!(
@@ -443,6 +556,8 @@ fn projection_data<'a>(table: &str, data: &'a serde_json::Value) -> &'a serde_js
         "claim_current" => "claim",
         "wait_current" => "wait",
         "write_fence_current" => "write_fence",
+        "read_observation_current" => "read_observation",
+        "write_intent_current" => "write_intent",
         "human_observation_current" => "observation",
         "human_acknowledgement_current" => "acknowledgement",
         "notification_current" => "notification",

@@ -7,11 +7,13 @@ mod journal;
 mod migration;
 mod notifications;
 mod outbox;
+mod observations;
 mod presence;
 mod projector;
 mod reservations;
 mod schema;
 mod write_fences;
+mod write_intents;
 pub use activity::{ActivityFinalization, ActivityStart};
 pub use claims::{ClaimAcquire, ClaimBatchAcquireResult, ClaimObservation, ClaimPath, ClaimRelease, ClaimRecord};
 pub use clock::{Clock, FixedClock, SystemClock};
@@ -21,8 +23,7 @@ pub use human::{
     HumanReconciliationAcknowledgementRecord,
 };
 pub use journal::{
-    CommandOutcome, CommandPlan, CurrentAggregate, CurrentRecord, ProjectionReader,
-    ReadObservationRecord, ReplayReport,
+    CommandOutcome, CommandPlan, CurrentAggregate, CurrentRecord, ProjectionReader, ReplayReport,
 };
 pub use notifications::{
     DeliveryAttempt, DeliveryRecord, NotificationCreate, NotificationDelivery, NotificationRecord,
@@ -36,7 +37,9 @@ pub use reservations::{
     WaitCancellation, WaitGrant, WaitRecord, WaitRequest,
 };
 pub use stateful_core::PresenceRecord;
+pub use stateful_core::{ReadObservationRecord, ResourceVersion, WriteIntentRecord};
 pub use write_fences::{WriteFenceAcquire, WriteFenceRecord, WriteFenceRelease};
+pub use write_intents::WriteIntentStartResult;
 
 use rusqlite::Connection;
 use serde_json::Value;
@@ -100,6 +103,16 @@ pub enum StoreError {
     MissingScope,
     #[error("invalid timestamp: {0}")]
     InvalidTimestamp(String),
+    #[error("read operation is invalid")]
+    InvalidReadOperation,
+    #[error("read operation was not found")]
+    ReadOperationNotFound,
+    #[error("write intent is invalid")]
+    InvalidWriteIntent,
+    #[error("write intent was not found")]
+    WriteIntentNotFound,
+    #[error("write intent owner mismatch")]
+    WriteIntentOwnerMismatch,
 }
 
 pub type StoreResult<T> = Result<T, StoreError>;
@@ -171,19 +184,23 @@ impl Store {
         aggregate: CurrentAggregate,
         workspace_id: &str,
     ) -> StoreResult<Vec<CurrentRecord>> {
-        let table = match aggregate {
-            CurrentAggregate::Reservation => "reservation_current",
-            CurrentAggregate::Claim => "claim_current",
-            CurrentAggregate::Wait => "wait_current",
-            CurrentAggregate::WriteFence => "write_fence_current",
-            CurrentAggregate::HumanObservation => "human_observation_current",
-            CurrentAggregate::HumanAcknowledgement => "human_acknowledgement_current",
-            CurrentAggregate::Notification => "notification_current",
-            CurrentAggregate::Delivery => "delivery_current",
+        let (table, id_column) = match aggregate {
+            CurrentAggregate::Reservation => ("reservation_current", "aggregate_id"),
+            CurrentAggregate::Claim => ("claim_current", "aggregate_id"),
+            CurrentAggregate::Wait => ("wait_current", "aggregate_id"),
+            CurrentAggregate::WriteFence => ("write_fence_current", "aggregate_id"),
+            CurrentAggregate::ReadObservation => ("read_observation_current", "path"),
+            CurrentAggregate::ReadOperation => ("read_operation_current", "operation_id"),
+            CurrentAggregate::WriteIntent => ("write_intent_current", "aggregate_id"),
+            CurrentAggregate::ResourceWrite => ("resource_write_current", "path"),
+            CurrentAggregate::HumanObservation => ("human_observation_current", "aggregate_id"),
+            CurrentAggregate::HumanAcknowledgement => ("human_acknowledgement_current", "aggregate_id"),
+            CurrentAggregate::Notification => ("notification_current", "aggregate_id"),
+            CurrentAggregate::Delivery => ("delivery_current", "aggregate_id"),
         };
         let mut statement = self.conn.prepare(&format!(
-            "SELECT aggregate_id, payload_json, origin_event_seq FROM {table}
-             WHERE workspace_id = ?1 ORDER BY aggregate_id"
+            "SELECT {id_column}, payload_json, origin_event_seq FROM {table}
+             WHERE workspace_id = ?1 ORDER BY {id_column}"
         ))?;
         statement
             .query_map([workspace_id], |row| {

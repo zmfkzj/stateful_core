@@ -22,6 +22,10 @@ impl ContentFingerprint {
             sha256: None,
         }
     }
+
+    pub fn is_complete_exact(&self) -> bool {
+        !self.exists || self.sha256.as_deref().is_some_and(|hash| !hash.is_empty())
+    }
 }
 
 pub fn fingerprint_path(path: &Path) -> io::Result<ContentFingerprint> {

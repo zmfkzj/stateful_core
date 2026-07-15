@@ -1,6 +1,6 @@
 use stateful_core::{
-    AuthorizationInput, Decision, DecisionKind, SourceKind, normalize_relative_path,
-    normalized_relative_path_is_empty,
+    AuthorizationInput, Decision, DecisionKind, FreshnessMode, SourceKind, ThinSafetyState,
+    evaluate_thin_safety, normalize_relative_path, normalized_relative_path_is_empty,
 };
 use stateful_store::{
     ClaimObservation, Event, ReservationRequestInput, Store, StoreError, WaitRecord,
@@ -142,6 +142,19 @@ impl FromStr for CoordinationMode {
             _ => Err("coordination mode must be 'enforcement' or 'awareness'".to_string()),
         }
     }
+}
+
+pub(crate) fn evaluate_freshness_safety(
+    state: ThinSafetyState,
+    coordination_mode: CoordinationMode,
+) -> Decision {
+    evaluate_thin_safety(
+        state,
+        match coordination_mode {
+            CoordinationMode::Enforcement => FreshnessMode::Enforcement,
+            CoordinationMode::Awareness => FreshnessMode::Awareness,
+        },
+    )
 }
 
 pub struct PolicyService<'a> {

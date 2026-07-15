@@ -1,5 +1,6 @@
 mod context;
 mod fingerprint;
+mod freshness;
 mod journal;
 mod path;
 mod policy;
@@ -17,6 +18,12 @@ pub use path::{
     normalize_directory_path, normalize_relative_path, normalized_relative_path_is_empty,
 };
 pub use fingerprint::{ContentFingerprint, fingerprint_path, fingerprint_reader};
+pub use freshness::{
+    OBSERVATION_TTL, FreshnessMode, ObservationFreshness, ReadClassification, ReadCompletion,
+    ReadObservationRecord, ReadObservationStart, ReadObservationStatus, ResourceVersion,
+    ThinSafetyState, WriteIntentCompletion, WriteIntentOutcome, WriteIntentRecord,
+    WriteIntentStart, WriteIntentStatus, WriteTarget, evaluate_thin_safety, observation_status,
+};
 pub use journal::{
     AuthorizationEvent, ClaimEvent, ContextEvent, EventData, EventPayload, HandoffEvent,
     HumanAcknowledgementEvent, HumanObservationEvent, LEGACY_MIGRATION_NAMESPACE, MigrationEvent,
