@@ -92,6 +92,33 @@ fn store() -> Store {
     Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store should open")
 }
 
+
+fn presence(store: &mut Store, agent_id: &str) -> Option<stateful_core::PresenceRecord> {
+    store.presence_for_request(
+        &request(Uuid::new_v4(), agent_id, &format!("{agent_id}-actor"), ActorType::Agent, ()),
+        agent_id,
+    ).expect("presence query should succeed")
+}
+
+fn handoff(store: &mut Store, agent_id: &str) -> Option<stateful_core::HandoffRecord> {
+    store.handoff_for_request(
+        &request(Uuid::new_v4(), agent_id, &format!("{agent_id}-actor"), ActorType::Agent, ()),
+        agent_id,
+    ).expect("handoff query should succeed")
+}
+
+fn presence_count(store: &mut Store) -> u64 {
+    store.presence_count_for_request(
+        &request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, ()),
+    ).expect("presence count query should succeed")
+}
+
+fn resources(store: &mut Store, agent_id: &str) -> Vec<stateful_core::PresenceResource> {
+    store.presence_resources_for_request(
+        &request(Uuid::new_v4(), agent_id, &format!("{agent_id}-actor"), ActorType::Agent, ()),
+        agent_id,
+    ).expect("resource query should succeed")
+}
 #[test]
 fn registration_upserts_one_presence_per_workspace_and_agent() {
     let mut store = store();
@@ -102,8 +129,8 @@ fn registration_upserts_one_presence_per_workspace_and_agent() {
         .resume_presence(&register_request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, None))
         .expect("resume should succeed");
 
-    assert_eq!(store.presence_count("workspace-1").expect("presence count should load"), 1);
-    let presence = store.presence_record("workspace-1", "agent-1").expect("presence should load").expect("presence should remain live");
+    assert_eq!(presence_count(&mut store), 1);
+    let presence = presence(&mut store, "agent-1").expect("presence should remain live");
     assert_eq!(presence.goal_excerpt.as_deref(), Some("first goal"));
     assert_eq!(presence.actor_id, "actor-1");
 }
@@ -121,7 +148,7 @@ fn registration_preserves_root_subagent_human_system_and_unknown_attribution() {
         store
             .register_presence(&register_request(Uuid::new_v4(), agent_id, actor_id, actor_type.clone(), None))
             .expect("registration should succeed");
-        let presence = store.presence_record("workspace-1", agent_id).expect("presence should load").expect("presence should exist");
+        let presence = presence(&mut store, agent_id).expect("presence should exist");
         assert_eq!(presence.actor_id, actor_id);
         assert_eq!(presence.actor_type, actor_type);
         assert_eq!(presence.owner_id.as_deref(), Some("owner-1"));
@@ -144,7 +171,7 @@ fn first_prompt_captures_normalized_goal_and_explicit_update_replaces_it() {
         .expect("goal update should succeed");
 
     assert_eq!(
-        store.presence_record("workspace-1", "agent-1").expect("presence should load").expect("presence should exist").goal_excerpt.as_deref(),
+        presence(&mut store, "agent-1").expect("presence should exist").goal_excerpt.as_deref(),
         Some("ship final version"),
     );
 }
@@ -173,7 +200,7 @@ fn resource_relations_are_idempotent_and_semantic_changes_version_once() {
         }))
         .expect("semantic relation should succeed");
     assert_eq!(store.workspace_version("workspace-1").expect("version should load"), changed_version + 1);
-    assert_eq!(store.presence_resources("workspace-1", "agent-1").expect("resources should load").len(), 2);
+    assert_eq!(resources(&mut store, "agent-1").len(), 2);
 }
 
 #[test]
@@ -189,16 +216,16 @@ fn busy_tool_defers_expiry_but_never_beyond_sixty_minutes() {
             deadline: Some(NOW + Duration::hours(2)),
         }))
         .expect("tool start should succeed");
-    let presence = store.presence_record("workspace-1", "agent-1").expect("presence should load").expect("presence should exist");
-    assert_eq!(presence.phase, Some(PresencePhase::Testing));
-    assert_eq!(presence.busy_until, Some(NOW + Duration::minutes(60)));
+    let record = presence(&mut store, "agent-1").expect("presence should exist");
+    assert_eq!(record.phase, Some(PresencePhase::Testing));
+    assert_eq!(record.busy_until, Some(NOW + Duration::minutes(60)));
 
     clock.advance(Duration::minutes(16));
     store.expire_stale_presences(&request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, ())).expect("maintenance should succeed");
-    assert!(store.presence_record("workspace-1", "agent-1").expect("presence should load").is_some());
+    assert!(presence(&mut store, "agent-1").is_some());
     clock.advance(Duration::minutes(45));
     store.expire_stale_presences(&request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, ())).expect("maintenance should succeed");
-    assert!(store.presence_record("workspace-1", "agent-1").expect("presence should load").is_none());
+    assert!(presence(&mut store, "agent-1").is_none());
 }
 
 #[test]
@@ -217,8 +244,8 @@ fn explicit_handoff_finalizes_presence_and_cleans_coordination_in_one_transactio
     });
     let outcome = store.finalize_handoff(&finalize_request).expect("explicit finalization should succeed");
     assert!(!outcome.duplicate);
-    assert!(store.presence_record("workspace-1", "agent-1").expect("presence should load").is_none());
-    let handoff = store.handoff_record("workspace-1", "agent-1").expect("handoff should load").expect("handoff should exist");
+    assert!(presence(&mut store, "agent-1").is_none());
+    let handoff = handoff(&mut store, "agent-1").expect("handoff should exist");
     assert!(handoff.explicit);
     assert_eq!(handoff.status, HandoffStatus::Done);
     assert_eq!(store.journal_event_types_for_request(finalize_request.request_id).expect("journal should load"), vec![
@@ -235,7 +262,7 @@ fn explicit_handoff_finalizes_presence_and_cleans_coordination_in_one_transactio
         status: HandoffStatus::Done, summary: "done".into(), files_changed: vec![], tests_run: vec![], remaining_work: vec![], next_plan: None,
     })).is_err());
     assert_eq!(failing_store.journal_event_count().expect("journal count should load"), before);
-    assert!(failing_store.presence_record("workspace-1", "agent-2").expect("presence should load").is_some());
+    assert!(presence(&mut failing_store, "agent-2").is_some());
 }
 
 #[test]
@@ -262,7 +289,7 @@ fn stop_without_explicit_handoff_creates_unknown_fallback() {
         .expect("tool result should succeed");
     store.stop_presence(&request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, ())).expect("stop should succeed");
 
-    let handoff = store.handoff_record("workspace-1", "agent-1").expect("handoff should load").expect("fallback should exist");
+    let handoff = handoff(&mut store, "agent-1").expect("fallback should exist");
     assert!(!handoff.explicit);
     assert_eq!(handoff.status, HandoffStatus::Unknown);
     assert!(handoff.summary.contains("no explicit handoff"));
@@ -281,10 +308,10 @@ fn ttl_expiry_lazily_creates_the_same_fallback_once() {
         .expect("registration should succeed");
     clock.advance(Duration::minutes(16));
     store.expire_stale_presences(&request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, ())).expect("lazy expiry should succeed");
-    let fallback = store.handoff_record("workspace-1", "agent-1").expect("handoff should load").expect("fallback should exist");
+    let fallback = handoff(&mut store, "agent-1").expect("fallback should exist");
     let event_count = store.journal_event_count().expect("journal count should load");
     store.expire_stale_presences(&request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, ())).expect("repeat expiry should succeed");
-    assert_eq!(store.handoff_record("workspace-1", "agent-1").expect("handoff should load"), Some(fallback));
+    assert_eq!(handoff(&mut store, "agent-1"), Some(fallback));
     assert_eq!(store.journal_event_count().expect("journal count should load"), event_count);
 }
 
@@ -320,11 +347,11 @@ fn explicit_and_fallback_handoffs_expire_after_their_distinct_windows() {
 
     clock.advance(Duration::hours(25));
     store.expire_stale_handoffs(&request(Uuid::new_v4(), "explicit", "explicit-actor", ActorType::Agent, ())).expect("maintenance should succeed");
-    assert!(store.handoff_record("workspace-1", "fallback").expect("handoff should load").is_none());
-    assert!(store.handoff_record("workspace-1", "explicit").expect("handoff should load").is_some());
+    assert!(handoff(&mut store, "fallback").is_none());
+    assert!(handoff(&mut store, "explicit").is_some());
     clock.advance(Duration::days(7));
     store.expire_stale_handoffs(&request(Uuid::new_v4(), "explicit", "explicit-actor", ActorType::Agent, ())).expect("maintenance should succeed");
-    assert!(store.handoff_record("workspace-1", "explicit").expect("handoff should load").is_none());
+    assert!(handoff(&mut store, "explicit").is_none());
 }
 
 #[test]
@@ -333,7 +360,7 @@ fn generic_presence_update_rejects_tool_only_fields_without_mutation() {
     let mut store = Store::open_in_memory_with_clock(clock.clone()).expect("store should open");
     store.register_presence(&register_request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, None))
         .expect("registration should succeed");
-    let before = store.presence_record("workspace-1", "agent-1").expect("presence should load").expect("presence should exist");
+    let before = presence(&mut store, "agent-1").expect("presence should exist");
 
     assert!(store.update_presence(&request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, PresenceUpdate {
         last_result: Some("unbounded tool stdout must not be accepted".into()),
@@ -344,7 +371,7 @@ fn generic_presence_update_rejects_tool_only_fields_without_mutation() {
         ..Default::default()
     })).is_err());
     assert_eq!(
-        store.presence_record("workspace-1", "agent-1").expect("presence should load").expect("presence should exist"),
+        presence(&mut store, "agent-1").expect("presence should exist"),
         before,
     );
 
@@ -356,7 +383,7 @@ fn generic_presence_update_rejects_tool_only_fields_without_mutation() {
         tool_name: "cargo test".into(), deadline: Some(NOW + Duration::minutes(80)),
     })).expect("repeated tool start should refresh without extending its cap");
     assert_eq!(
-        store.presence_record("workspace-1", "agent-1").expect("presence should load").expect("presence should exist").busy_until,
+        presence(&mut store, "agent-1").expect("presence should exist").busy_until,
         Some(NOW + Duration::minutes(30)),
     );
 }
@@ -373,12 +400,48 @@ fn relevant_presence_query_lazily_finalizes_expired_presence_once() {
     }
     clock.advance(Duration::minutes(16));
     let mut store = Store::open_with_clock(&path, clock.clone()).expect("reopened store should open");
+    assert_eq!(
+        store.journal_event_count().expect("startup journal should load"),
+        7,
+        "reopening must finalize the expired presence before a query runs",
+    );
     let query = request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, ());
     assert!(store.presence_for_request(&query, "agent-1").expect("lazy query should succeed").is_none());
     let event_count = store.journal_event_count().expect("journal count should load");
-    assert!(store.handoff_record("workspace-1", "agent-1").expect("handoff should load").is_some());
+    assert!(handoff(&mut store, "agent-1").is_some());
     assert!(store.presence_for_request(&request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, ()), "agent-1")
         .expect("repeat lazy query should succeed")
         .is_none());
     assert_eq!(store.journal_event_count().expect("journal count should load"), event_count);
+}
+
+#[test]
+fn startup_expires_fallback_and_explicit_handoffs_at_their_relevance_windows() {
+    let temp = TempDir::new().expect("temporary directory should exist");
+    let path = temp.path().join("handoff.sqlite");
+    let clock = MutableClock::new(NOW);
+    {
+        let mut store = Store::open_with_clock(&path, clock.clone()).expect("store should open");
+        for agent_id in ["explicit", "fallback"] {
+            store.register_presence(&register_request(Uuid::new_v4(), agent_id, &format!("{agent_id}-actor"), ActorType::Agent, None))
+                .expect("registration should succeed");
+        }
+        store.finalize_handoff(&request(Uuid::new_v4(), "explicit", "explicit-actor", ActorType::Agent, ExplicitHandoff {
+            status: HandoffStatus::Done, summary: "complete".into(), files_changed: vec![], tests_run: vec![], remaining_work: vec![], next_plan: None,
+        })).expect("explicit handoff should succeed");
+        store.stop_presence(&request(Uuid::new_v4(), "fallback", "fallback-actor", ActorType::Agent, ()))
+            .expect("fallback should succeed");
+    }
+    clock.advance(Duration::hours(25));
+    let mut store = Store::open_with_clock(&path, clock.clone()).expect("reopened store should expire fallback");
+    assert_eq!(store.journal_event_count().expect("startup journal should load"), 15);
+    let query = request(Uuid::new_v4(), "explicit", "explicit-actor", ActorType::Agent, ());
+    assert!(store.handoff_for_request(&query, "fallback").expect("fallback query should succeed").is_none());
+    assert!(store.handoff_for_request(&query, "explicit").expect("explicit query should succeed").is_some());
+    drop(store);
+
+    clock.advance(Duration::days(7));
+    let mut store = Store::open_with_clock(&path, clock.clone()).expect("reopened store should expire explicit handoff");
+    assert_eq!(store.journal_event_count().expect("startup journal should load"), 16);
+    assert!(store.handoff_for_request(&query, "explicit").expect("explicit query should succeed").is_none());
 }

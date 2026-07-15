@@ -317,7 +317,7 @@ fn migrated_presence_and_handoff_project_to_typed_records_before_commands() {
     let mut store = open_legacy(&path).expect("legacy database should migrate");
 
     let presence = store
-        .presence_record("workspace-main", "agent-alpha")
+        .presence_for_request(&request("agent-alpha", ()), "agent-alpha")
         .expect("typed migrated presence should load")
         .expect("migrated agent should remain present");
     assert_eq!(presence.agent_id, "agent-alpha");
@@ -326,7 +326,7 @@ fn migrated_presence_and_handoff_project_to_typed_records_before_commands() {
         .resume_presence(&request("agent-alpha", PresenceRegistration { first_prompt: None }))
         .expect("commands must accept a migrated presence projection");
     let handoff = store
-        .handoff_record("workspace-main", "agent-alpha")
+        .handoff_for_request(&request("agent-alpha", ()), "agent-alpha")
         .expect("typed migrated handoff should load")
         .expect("legacy finalized activity should project a handoff");
     assert_eq!(handoff.status, HandoffStatus::Unknown);

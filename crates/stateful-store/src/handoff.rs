@@ -8,6 +8,7 @@ use stateful_core::{
     FALLBACK_HANDOFF_RELEVANCE,
 };
 use time::OffsetDateTime;
+use uuid::Uuid;
 
 impl Store {
     pub fn finalize_handoff(
@@ -88,7 +89,79 @@ impl Store {
         })
     }
 
-    pub fn handoff_record(&self, workspace_id: &str, agent_id: &str) -> StoreResult<Option<HandoffRecord>> {
+    pub(crate) fn expire_current_state(&mut self, request: &RequestEnvelope<()>) -> StoreResult<()> {
+        self.expire_stale_presences(request)?;
+        let mut handoff_request = request.clone();
+        handoff_request.request_id = Uuid::new_v4();
+        self.expire_stale_handoffs(&handoff_request)?;
+        Ok(())
+    }
+
+    pub(crate) fn startup_housekeeping(&mut self) -> StoreResult<()> {
+        let workspaces = {
+            let mut statement = self.conn.prepare(
+                "SELECT workspace_id FROM presence_current UNION SELECT workspace_id FROM handoff_current",
+            )?;
+            statement.query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for workspace_id in workspaces {
+            self.expire_current_state(&self.system_maintenance_request(&workspace_id)?)?;
+        }
+        Ok(())
+    }
+
+    fn system_maintenance_request(&self, workspace_id: &str) -> StoreResult<RequestEnvelope<()>> {
+        let identity = self.conn.query_row(
+            "SELECT repo_id, worktree_id, root, branch FROM journal_events WHERE workspace_id = ?1 ORDER BY event_seq DESC LIMIT 1",
+            [workspace_id],
+            |row| Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            )),
+        ).optional()?;
+        let (repo_id, worktree_id, root, branch) = identity.unwrap_or_default();
+        RequestEnvelope::new(
+            Uuid::new_v4(),
+            self.clock.now(),
+            stateful_core::AgentIdentity {
+                agent_id: "stateful-maintenance".into(),
+                turn_id: None,
+                actor_id: "stateful-maintenance".into(),
+                actor_type: stateful_core::ActorType::System,
+                owner_id: None,
+                parent_agent_id: None,
+                parent_actor_id: None,
+            },
+            stateful_core::WorkspaceIdentity {
+                root: root.unwrap_or_else(|| "/".into()),
+                workspace_id: workspace_id.into(),
+                repo_id: repo_id.unwrap_or_else(|| "unknown".into()),
+                worktree_id: worktree_id.unwrap_or_else(|| "unknown".into()),
+                branch: branch.unwrap_or_else(|| "unknown".into()),
+            },
+            stateful_core::SourceRef {
+                kind: stateful_core::SourceKind::Server,
+                event: "startup_maintenance".into(),
+                tool_name: None,
+                source_ref: "stateful.startup-maintenance".into(),
+            },
+            (),
+        ).map_err(crate::StoreError::from)
+    }
+
+    pub fn handoff_for_request(
+        &mut self,
+        request: &RequestEnvelope<()>,
+        agent_id: &str,
+    ) -> StoreResult<Option<HandoffRecord>> {
+        self.expire_current_state(request)?;
+        self.handoff_record(&request.workspace.workspace_id, agent_id)
+    }
+
+    fn handoff_record(&self, workspace_id: &str, agent_id: &str) -> StoreResult<Option<HandoffRecord>> {
         self.conn.query_row(
             "SELECT payload_json, origin_event_seq FROM handoff_current WHERE workspace_id = ?1 AND aggregate_id = ?2",
             params![workspace_id, agent_id],

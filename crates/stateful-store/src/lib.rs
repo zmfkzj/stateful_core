@@ -193,9 +193,10 @@ impl Store {
         let conn = Connection::open(path)?;
         configure_file_connection(&conn)?;
         restrict_database_file_permissions(path)?;
-        let store = Self { conn, clock: Arc::new(clock), projector_fail_on_event: None, corrupt_next_journal_metadata_for_tests: None };
+        let mut store = Self { conn, clock: Arc::new(clock), projector_fail_on_event: None, corrupt_next_journal_metadata_for_tests: None };
         migration::migrate_persistent_v1(&store.conn, path, store.clock.as_ref())?;
         schema::create_v2_schema(&store.conn)?;
+        store.startup_housekeeping()?;
         Ok(store)
     }
 
@@ -241,8 +242,9 @@ impl Store {
     pub fn open_in_memory_with_clock(clock: impl Clock + 'static) -> StoreResult<Self> {
         let conn = Connection::open_in_memory()?;
         configure_connection(&conn)?;
-        let store = Self { conn, clock: Arc::new(clock), projector_fail_on_event: None, corrupt_next_journal_metadata_for_tests: None };
+        let mut store = Self { conn, clock: Arc::new(clock), projector_fail_on_event: None, corrupt_next_journal_metadata_for_tests: None };
         schema::create_v2_schema(&store.conn)?;
+        store.startup_housekeeping()?;
         Ok(store)
     }
 

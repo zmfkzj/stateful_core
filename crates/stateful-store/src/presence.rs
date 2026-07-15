@@ -224,7 +224,7 @@ impl Store {
         })
     }
 
-    pub fn presence_record(&self, workspace_id: &str, agent_id: &str) -> StoreResult<Option<PresenceRecord>> {
+    fn presence_record(&self, workspace_id: &str, agent_id: &str) -> StoreResult<Option<PresenceRecord>> {
         self.conn.query_row(
             "SELECT payload_json, origin_event_seq FROM presence_current WHERE workspace_id = ?1 AND agent_id = ?2",
             params![workspace_id, agent_id],
@@ -243,11 +243,11 @@ impl Store {
         request: &RequestEnvelope<()>,
         agent_id: &str,
     ) -> StoreResult<Option<PresenceRecord>> {
-        self.expire_stale_presences(request)?;
+        self.expire_current_state(request)?;
         self.presence_record(&request.workspace.workspace_id, agent_id)
     }
 
-    pub fn presence_resources(&self, workspace_id: &str, agent_id: &str) -> StoreResult<Vec<PresenceResource>> {
+    fn presence_resources(&self, workspace_id: &str, agent_id: &str) -> StoreResult<Vec<PresenceResource>> {
         let mut statement = self.conn.prepare(
             "SELECT payload_json, origin_event_seq FROM presence_resource_current WHERE workspace_id = ?1 AND agent_id = ?2 ORDER BY relative_path, relation",
         )?;
@@ -260,8 +260,25 @@ impl Store {
         })?.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
     }
 
-    pub fn presence_count(&self, workspace_id: &str) -> StoreResult<u64> {
+    fn presence_count(&self, workspace_id: &str) -> StoreResult<u64> {
         self.conn.query_row("SELECT COUNT(*) FROM presence_current WHERE workspace_id = ?1", [workspace_id], |row| row.get(0)).map_err(StoreError::from)
+    }
+
+    pub fn presence_resources_for_request(
+        &mut self,
+        request: &RequestEnvelope<()>,
+        agent_id: &str,
+    ) -> StoreResult<Vec<PresenceResource>> {
+        self.expire_current_state(request)?;
+        self.presence_resources(&request.workspace.workspace_id, agent_id)
+    }
+
+    pub fn presence_count_for_request(
+        &mut self,
+        request: &RequestEnvelope<()>,
+    ) -> StoreResult<u64> {
+        self.expire_current_state(request)?;
+        self.presence_count(&request.workspace.workspace_id)
     }
 }
 
