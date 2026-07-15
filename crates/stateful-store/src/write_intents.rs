@@ -305,7 +305,15 @@ impl Store {
                 rereads.insert(target.path.clone(), observation.clone());
                 posts.insert(target.path.clone(), after);
             }
-            let versions = next_resource_versions(reader, request, &intent, &posts)?;
+            let unchanged = intent
+                .targets
+                .iter()
+                .all(|target| posts[&target.path] == target.before);
+            let versions = if unchanged {
+                Vec::new()
+            } else {
+                next_resource_versions(reader, request, &intent, &posts)?
+            };
             let mut reconciled = intent.clone();
             reconciled.status = WriteIntentStatus::Reconciled;
             reconciled.completed_at = Some(now);
@@ -317,63 +325,33 @@ impl Store {
                 &reconciled,
                 &versions,
             )?];
-            for version in &versions {
-                let mut observation = rereads
-                    .remove(&version.path)
-                    .ok_or(StoreError::InvalidReadOperation)?;
-                observation.resource_version = version.version;
-                events.push(read_event(
+            if !unchanged {
+                for version in &versions {
+                    let mut observation = rereads
+                        .remove(&version.path)
+                        .ok_or(StoreError::InvalidReadOperation)?;
+                    observation.resource_version = version.version;
+                    events.push(read_event(
+                        request,
+                        events.len() as u32,
+                        now,
+                        ReadObservationEvent::Stabilized,
+                        &observation,
+                    )?);
+                }
+                append_peer_observation_invalidations(
                     request,
-                    events.len() as u32,
+                    reader,
                     now,
-                    ReadObservationEvent::Stabilized,
-                    &observation,
-                )?);
+                    &intent.targets,
+                    &mut events,
+                )?;
             }
-            append_peer_observation_invalidations(
-                request,
-                reader,
-                now,
-                &intent.targets,
-                &mut events,
-            )?;
             append_fence_releases(request, reader, now, &intent, &mut events)?;
             Ok(CommandPlan { events, response: reconciled, http_status: 200 })
         })
     }
 
-    pub fn expire_started_write_intents(
-        &self,
-        request: &RequestEnvelope<()>,
-    ) -> StoreResult<CommandOutcome<Vec<String>>> {
-        let now = self.clock.now();
-        self.execute_command(request, "write_intent.expire", |reader| {
-            let mut events = Vec::new();
-            let mut expired_ids = Vec::new();
-            for intent in typed_records::<WriteIntentRecord>(
-                reader,
-                CurrentAggregate::WriteIntent,
-                &request.workspace.workspace_id,
-            )? {
-                if intent.status == WriteIntentStatus::Started && intent.started_at + WRITE_FENCE_TTL <= now {
-                    let mut expired_intent = intent.clone();
-                    expired_intent.status = WriteIntentStatus::OutcomeUnknown;
-                    expired_intent.completed_at = Some(now);
-                    events.push(intent_event(
-                        request,
-                        events.len() as u32,
-                        now,
-                        WriteIntentEvent::OutcomeUnknown,
-                        &expired_intent,
-                        &[],
-                    )?);
-                    append_fence_releases(request, reader, now, &intent, &mut events)?;
-                    expired_ids.push(intent.intent_id);
-                }
-            }
-            Ok(CommandPlan { events, response: expired_ids, http_status: 200 })
-        })
-    }
 
     pub fn active_write_intent(
         &self,

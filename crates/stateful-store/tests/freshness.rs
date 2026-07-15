@@ -1,7 +1,7 @@
 use stateful_core::{
     ActorType, AgentIdentity, ContentFingerprint, PresencePhase, ReadClassification, ReadCompletion,
     ReadObservationStart, RequestEnvelope, SourceKind, SourceRef, WorkspaceIdentity,
-    WriteIntentCompletion, WriteIntentStart, WriteTarget,
+    WriteIntentCompletion, WriteIntentStart, WriteIntentStatus, WriteTarget,
 };
 use stateful_store::{ActivityFinalization, ActivityStart, FixedClock, Store};
 use time::{Duration, macros::datetime, OffsetDateTime};
@@ -616,6 +616,73 @@ fn changed_unknown_reconciliation_versions_rereads_and_invalidates_peers() {
         .expect("fence reads")
         .is_none());
     store.rebuild_projections().expect("reconciliation must replay");
+}
+
+#[test]
+fn unchanged_unknown_reconciliation_releases_fences_without_versions_or_peer_invalidations() {
+    let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    let before = fingerprint(b"before");
+    start_read(&store, "agent-2", "peer-read", "src/lib.rs", before.clone());
+    complete_read(
+        &store,
+        "agent-2",
+        "peer-read",
+        "src/lib.rs",
+        ReadClassification::Exact,
+        Some(before.clone()),
+        None,
+    );
+    let intent = store
+        .start_write_intent(&request(
+            "agent-1",
+            WriteIntentStart {
+                operation_id: "write-1".into(),
+                action: "write_file".into(),
+                targets: vec![WriteTarget { path: "src/lib.rs".into(), before: before.clone() }],
+            },
+        ))
+        .expect("intent starts")
+        .response;
+    store
+        .recover_write_intent(&request(
+            "agent-1",
+            (intent.intent_id.clone(), vec![("src/lib.rs".into(), fingerprint(b"changed"))]),
+        ))
+        .expect("changed recovery journals unknown outcome");
+    start_read(&store, "agent-1", "reread", "src/lib.rs", before.clone());
+    complete_read(
+        &store,
+        "agent-1",
+        "reread",
+        "src/lib.rs",
+        ReadClassification::Exact,
+        Some(before),
+        None,
+    );
+
+    let reconciled = store
+        .reconcile_write_intent(&request("agent-1", intent.intent_id))
+        .expect("unchanged exact reread reconciles")
+        .response;
+
+    assert_eq!(reconciled.status, WriteIntentStatus::Reconciled);
+    assert!(store
+        .resource_version("workspace-1", "src/lib.rs")
+        .expect("resource version reads")
+        .is_none());
+    assert!(store
+        .read_observation("workspace-1", "agent-2", "src/lib.rs")
+        .expect("peer observation reads")
+        .expect("peer observation remains auditable")
+        .is_stable());
+    assert!(store
+        .active_write_intent("workspace-1", "src/lib.rs")
+        .expect("intent reads")
+        .is_none());
+    assert!(store
+        .active_write_fence("workspace-1", "src/lib.rs")
+        .expect("fence reads")
+        .is_none());
 }
 
 #[test]

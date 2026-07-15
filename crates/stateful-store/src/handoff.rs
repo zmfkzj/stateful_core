@@ -188,9 +188,6 @@ impl Store {
         if self.has_expired_current_record(workspace_id, CurrentAggregate::ReadObservation, &["stabilized"], "expires_at", None)? {
             self.expire_read_observations(&maintenance_request(&request))?;
         }
-        if self.has_expired_current_record(workspace_id, CurrentAggregate::WriteIntent, &["started"], "started_at", Some(Duration::minutes(5)))? {
-            self.expire_started_write_intents(&maintenance_request(&request))?;
-        }
         if self.has_expired_current_record(workspace_id, CurrentAggregate::HumanObservation, &["pending"], "expires_at", None)? {
             self.expire_human_observations(&maintenance_request(&request))?;
         }
@@ -224,7 +221,7 @@ impl Store {
                     .is_ok_and(|timestamp| timestamp + grace.unwrap_or(Duration::ZERO) <= now)
         }))
     }
-    fn system_maintenance_request(&self, workspace_id: &str) -> StoreResult<RequestEnvelope<()>> {
+    pub(crate) fn system_maintenance_request(&self, workspace_id: &str) -> StoreResult<RequestEnvelope<()>> {
         let identity = self.conn.query_row(
             "SELECT repo_id, worktree_id, root, branch FROM journal_events WHERE workspace_id = ?1 ORDER BY event_seq DESC LIMIT 1",
             [workspace_id],

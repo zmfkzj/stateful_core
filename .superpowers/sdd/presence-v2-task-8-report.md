@@ -29,11 +29,31 @@ Complete. The server exposes only the locked `stateful.v2` surface: 21 POST rout
 ## Hardening Status
 
 - Complete: structured POST/GET V2 extraction; phase/action/claim/per-target/fingerprint/Store-clock authorization checks; workspace-scoped event SQL; structured caller 4xx and sanitized internal 5xx mapping; live SSE polling with `Last-Event-ID`; atomic receipted notification polling; authorization receipts bound to the full original authorization envelope.
-- Complete: maintenance expires every workspace's stale presence/handoff, reservations, claims, claimable waits, fences, observations, started write intents, human observations, notifications, and context deliveries without no-op receipts; each transition is journaled, replayable, and idempotent.
+- Complete: maintenance expires stale presence/handoff, reservations, claims, claimable waits, fences, observations, human observations, notifications, and context deliveries without no-op receipts; `Started` write intents remain unclassified until explicit fingerprint recovery.
 - Complete: notification delivery callbacks require the target identity and exact live sequence; acknowledged reconnects do not replay.
-- Complete: `/v2/presence/update` register has a distinct command receipt route; poll-delivered notifications cannot replay through SSE; poll, callback, and each SSE interval journal expiry before delivery.
+- Complete: polling returns queued notifications without terminalizing delivery; only an explicit delivery callback or sequence acknowledgement prevents later poll/SSE replay.
 - Complete: expired context acknowledgements cannot advance a cursor; resume runs maintenance; `Last-Event-ID` must belong to the target workspace; bearer failures use the V2 error envelope; corrupt journal metadata makes readiness return `503`.
+
+## Delivery and Recovery Lifecycle Correction
+
+### RED
+
+- `lost_poll_response_redelivers_until_sequence_acknowledgement` failed: the second poll returned `[]` after the first poll journaled a terminal delivery.
+- `unchanged_unknown_reconciliation_releases_fences_without_versions_or_peer_invalidations` failed: reconciliation created a resource version despite exact rereads matching every original `before`.
+- `stale_heartbeat_finalizes_before_returning_missing_presence_without_reusing_receipts` failed: heartbeat returned a refreshed live `PresenceRecord` after TTL.
+- `maintenance_leaves_started_write_intents_unclassified_without_post_fingerprints` was already green: `started_at` is persisted as a time tuple while the maintenance predicate only reads RFC 3339 strings, leaving the unsafe classifier unreachable. The dead classifier and its maintenance call were removed rather than making that path reachable.
+
+### GREEN
+
+- Polling records no terminal delivery event; a new poll and SSE replay pending work until the target sends the sequence acknowledgement.
+- No-change `OutcomeUnknown` reconciliation emits `Reconciled`, releases fences, and leaves resource versions and peer observations untouched; changed reconciliation remains versioning/invalidation-capable.
+- Heartbeat first executes stale presence expiry through a fresh system-maintenance request, then returns the inner V2 `presence_not_found` error; retrying the caller UUID creates no new receipt or revival.
+- Generic maintenance no longer guesses a `Started` write outcome; explicit `recover_write_intent` remains the post-fingerprint authority.
+
+### Residual Concern
+
+- `StoreError::code()` still returns `store_error` for inner V2 errors; the heartbeat regression asserts the embedded V2 code directly. Server protocol mapping was covered by the V2 test suite.
 
 ## Concerns
 
-None.
+See “Residual Concern” above.

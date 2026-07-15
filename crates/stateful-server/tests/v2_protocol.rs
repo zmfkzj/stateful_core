@@ -743,7 +743,7 @@ async fn request_id_reused_between_register_routes_is_rejected() {
 }
 
 #[tokio::test]
-async fn notifications_polled_once_do_not_replay_to_sse() {
+async fn lost_poll_response_redelivers_until_sequence_acknowledgement() {
     let app = app();
     let wait = successful_post(
         &app,
@@ -761,20 +761,53 @@ async fn notifications_polled_once_do_not_replay_to_sse() {
         })),
     )
     .await;
-    let polled = successful_post(
+    let first = successful_post(
         &app,
         "/v2/notifications/poll",
         envelope_for("agent-2", "00000000-0000-4000-8000-00000000d316", json!({})),
     )
     .await;
-    assert_eq!(polled.as_array().map(Vec::len), Some(1));
-    assert_eq!(polled[0]["notification_id"], wait["wait_id"]);
+    let second = successful_post(
+        &app,
+        "/v2/notifications/poll",
+        envelope_for("agent-2", "00000000-0000-4000-8000-00000000d317", json!({})),
+    )
+    .await;
+    assert_eq!(first.as_array().map(Vec::len), Some(1));
+    assert_eq!(second, first, "a lost poll response must remain pending");
+    assert_eq!(first[0]["notification_id"], wait["wait_id"]);
+
+    let response = app.clone().oneshot(stream_get(None)).await.expect("stream response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.into_body().into_data_stream();
+    let bytes = tokio::time::timeout(Duration::from_secs(1), stream.next())
+        .await
+        .expect("unacknowledged notification arrives")
+        .expect("stream remains open")
+        .expect("SSE data is valid");
+    let event = String::from_utf8(bytes.to_vec()).expect("SSE is UTF-8");
+    assert!(event.contains(wait["wait_id"].as_str().expect("wait id")));
+
+    let acknowledged = successful_post(
+        &app,
+        "/v2/notifications/poll",
+        envelope_for("agent-2", "00000000-0000-4000-8000-00000000d318", json!({"sequence": 1})),
+    )
+    .await;
+    assert_eq!(acknowledged, json!([wait["wait_id"]]));
+    let after_ack = successful_post(
+        &app,
+        "/v2/notifications/poll",
+        envelope_for("agent-2", "00000000-0000-4000-8000-00000000d319", json!({})),
+    )
+    .await;
+    assert_eq!(after_ack, json!([]));
     let response = app.oneshot(stream_get(None)).await.expect("stream response");
     assert_eq!(response.status(), StatusCode::OK);
     let mut stream = response.into_body().into_data_stream();
     assert!(
         tokio::time::timeout(Duration::from_millis(250), stream.next()).await.is_err(),
-        "a poll-delivered notification must not replay to SSE",
+        "acknowledged notification must not replay to SSE",
     );
 }
 

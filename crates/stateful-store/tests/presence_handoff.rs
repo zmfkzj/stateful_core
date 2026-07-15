@@ -1,6 +1,7 @@
 use stateful_core::{
     ActorType, AgentIdentity, ExplicitHandoff, HandoffStatus, PresencePhase, PresenceResourceRelation,
-    PresenceUpdate, RequestEnvelope, SourceKind, SourceRef, WorkspaceIdentity,
+    PresenceUpdate, RequestEnvelope, SourceKind, SourceRef, WorkspaceIdentity, WriteIntentStart,
+    WriteIntentStatus, WriteTarget,
 };
 use stateful_store::{
     Clock, FixedClock, PresenceRegistration, PresenceResourceUpdate, PresenceToolResult,
@@ -226,6 +227,63 @@ fn busy_tool_defers_expiry_but_never_beyond_sixty_minutes() {
     clock.advance(Duration::minutes(45));
     store.expire_stale_presences(&request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, ())).expect("maintenance should succeed");
     assert!(presence(&mut store, "agent-1").is_none());
+}
+
+#[test]
+fn stale_heartbeat_finalizes_before_returning_missing_presence_without_reusing_receipts() {
+    let clock = MutableClock::new(NOW);
+    let mut store = Store::open_in_memory_with_clock(clock.clone()).expect("store should open");
+    store
+        .register_presence(&register_request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, None))
+        .expect("registration should succeed");
+    clock.advance(Duration::minutes(61));
+    let heartbeat = request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, ());
+
+    let first = store
+        .heartbeat_presence(&heartbeat)
+        .expect_err("stale heartbeat must not revive an expired presence");
+    assert!(matches!(first, stateful_store::StoreError::V2(error) if error.code == "presence_not_found"));
+    assert!(handoff(&mut store, "agent-1").is_some(), "expiry must commit the fallback handoff");
+    let event_count = store.journal_event_count().expect("journal count");
+
+    let repeated = store
+        .heartbeat_presence(&heartbeat)
+        .expect_err("repeated stale heartbeat remains safely missing");
+    assert!(matches!(repeated, stateful_store::StoreError::V2(error) if error.code == "presence_not_found"));
+    assert_eq!(store.journal_event_count().expect("journal count"), event_count);
+    assert!(presence(&mut store, "agent-1").is_none());
+}
+
+#[test]
+fn maintenance_leaves_started_write_intents_unclassified_without_post_fingerprints() {
+    let clock = MutableClock::new(NOW);
+    let mut store = Store::open_in_memory_with_clock(clock.clone()).expect("store should open");
+    let before = stateful_core::fingerprint_reader(std::io::Cursor::new(b"before"))
+        .expect("test fingerprint");
+    let intent = store
+        .start_write_intent(&request(
+            Uuid::new_v4(),
+            "agent-1",
+            "actor-1",
+            ActorType::Agent,
+            WriteIntentStart {
+                operation_id: "write-1".into(),
+                action: "write_file".into(),
+                targets: vec![WriteTarget { path: "src/lib.rs".into(), before }],
+            },
+        ))
+        .expect("intent starts")
+        .response;
+    clock.advance(Duration::minutes(6));
+
+    store.run_maintenance().expect("maintenance succeeds");
+
+    let active = store
+        .active_write_intent("workspace-1", "src/lib.rs")
+        .expect("intent reads")
+        .expect("maintenance cannot infer a write outcome");
+    assert_eq!(active.intent_id, intent.intent_id);
+    assert_eq!(active.status, WriteIntentStatus::Started);
 }
 
 #[test]
