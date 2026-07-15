@@ -173,7 +173,6 @@ impl Store {
         let request = self.system_maintenance_request(workspace_id)?;
         self.expire_current_state(&request)
     }
-
     fn system_maintenance_request(&self, workspace_id: &str) -> StoreResult<RequestEnvelope<()>> {
         let identity = self.conn.query_row(
             "SELECT repo_id, worktree_id, root, branch FROM journal_events WHERE workspace_id = ?1 ORDER BY event_seq DESC LIMIT 1",
@@ -302,6 +301,7 @@ fn explicit_handoff_record(
         origin_event_seq: 0,
     }
 }
+
 
 fn fallback_handoff_record(
     request: &RequestEnvelope<()>,

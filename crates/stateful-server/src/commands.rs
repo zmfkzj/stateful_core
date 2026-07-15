@@ -1,5 +1,5 @@
 use crate::{CoordinationMode, RUNTIME_CAPABILITIES, ServerConfig, SharedStore, protocol};
-use axum::{Json, extract::{Query, State}, http::StatusCode, response::{IntoResponse, Response, sse::{Event as SseEvent, Sse}}};
+use axum::{Json, extract::{RawQuery, State}, http::{HeaderMap, StatusCode}, response::{IntoResponse, Response, sse::{Event as SseEvent, KeepAlive, Sse}}};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use stateful_core::{
@@ -9,7 +9,8 @@ use stateful_core::{
     normalize_relative_path,
 };
 use stateful_store::{PresenceRegistration, Store, StoreError};
-use std::convert::Infallible;
+use std::{convert::Infallible, time::Duration};
+use tokio_stream::StreamExt;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct CurrentQuery {
@@ -48,7 +49,7 @@ pub(crate) struct WriteReconcilePayload {
 
 pub(crate) async fn session_register(
     State(config): State<ServerConfig>,
-    Json(body): Json<Value>,
+    protocol::V2Json(body): protocol::V2Json,
 ) -> Response {
     let request = match protocol::parse_request::<PresenceRegistration>(body) {
         Ok(request) => request,
@@ -60,7 +61,7 @@ pub(crate) async fn session_register(
 
 pub(crate) async fn presence_update(
     State(config): State<ServerConfig>,
-    Json(body): Json<Value>,
+    protocol::V2Json(body): protocol::V2Json,
 ) -> Response {
     let kind = body.pointer("/payload/kind").and_then(Value::as_str).unwrap_or("update");
     match kind {
@@ -79,21 +80,21 @@ pub(crate) async fn presence_update(
     }
 }
 
-pub(crate) async fn read_start(State(config): State<ServerConfig>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn read_start(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
     command(config, body, |store, request| store.start_read_observation(request))
 }
 
-pub(crate) async fn read_complete(State(config): State<ServerConfig>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn read_complete(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
     command(config, body, |store, request| store.complete_read_observation(request))
 }
 
-pub(crate) async fn write_complete(State(config): State<ServerConfig>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn write_complete(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
     command(config, body, |store, request| store.complete_write_intent(request))
 }
 
 pub(crate) async fn activity_finalize(
     State(config): State<ServerConfig>,
-    Json(body): Json<Value>,
+    protocol::V2Json(body): protocol::V2Json,
 ) -> Response {
     if body.pointer("/payload/status").is_some() {
         command(config, body, |store, request| store.finalize_handoff(request))
@@ -102,31 +103,31 @@ pub(crate) async fn activity_finalize(
     }
 }
 
-pub(crate) async fn reservation_declare(State(config): State<ServerConfig>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn reservation_declare(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
     command(config, body, |store, request| store.declare_reservation(request))
 }
 
-pub(crate) async fn reservation_request(State(config): State<ServerConfig>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn reservation_request(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
     command(config, body, |store, request| store.request_wait(request))
 }
 
-pub(crate) async fn reservation_claim(State(config): State<ServerConfig>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn reservation_claim(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
     command(config, body, |store, request| store.grant_next_wait(request))
 }
 
-pub(crate) async fn reservation_cancel(State(config): State<ServerConfig>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn reservation_cancel(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
     command(config, body, |store, request| store.cancel_wait(request))
 }
 
-pub(crate) async fn claim_acquire(State(config): State<ServerConfig>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn claim_acquire(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
     command(config, body, |store, request| store.acquire_claim(request))
 }
 
-pub(crate) async fn claim_release(State(config): State<ServerConfig>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn claim_release(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
     command(config, body, |store, request| store.release_claim(request))
 }
 
-pub(crate) async fn authorize(State(config): State<ServerConfig>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn authorize(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
     let request = match protocol::parse_request::<AuthorizePayload>(body) {
         Ok(request) => request,
         Err(response) => return response,
@@ -150,13 +151,13 @@ pub(crate) async fn authorize(State(config): State<ServerConfig>, Json(body): Js
     protocol::command_response(&request_id, store.start_write_intent(&write_request))
 }
 
-pub(crate) async fn human_observe(State(config): State<ServerConfig>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn human_observe(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
     command(config, body, |store, request| store.record_human_observation(request))
 }
 
 pub(crate) async fn human_save_check(
     State(config): State<ServerConfig>,
-    Json(body): Json<Value>,
+    protocol::V2Json(body): protocol::V2Json,
 ) -> Response {
     let request = match protocol::parse_request::<SaveCheckPayload>(body) {
         Ok(request) => request,
@@ -172,7 +173,7 @@ pub(crate) async fn human_save_check(
     }
 }
 
-pub(crate) async fn reconcile_ack(State(config): State<ServerConfig>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn reconcile_ack(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
     if body.pointer("/payload/intent_id").is_some() {
         let request = match protocol::parse_request::<WriteReconcilePayload>(body) {
             Ok(request) => request,
@@ -185,18 +186,18 @@ pub(crate) async fn reconcile_ack(State(config): State<ServerConfig>, Json(body)
     command(config, body, |store, request| store.acknowledge_human_reconciliation(request))
 }
 
-pub(crate) async fn context_render(State(config): State<ServerConfig>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn context_render(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
     command(config, body, |store, request| {
         store.run_maintenance()?;
         store.render_context(request)
     })
 }
 
-pub(crate) async fn context_ack(State(config): State<ServerConfig>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn context_ack(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
     command(config, body, |store, request| store.acknowledge_context(request))
 }
 
-pub(crate) async fn notifications_poll(State(config): State<ServerConfig>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn notifications_poll(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
     let request = match protocol::parse_request::<Value>(body) {
         Ok(request) => request,
         Err(response) => return response,
@@ -208,7 +209,7 @@ pub(crate) async fn notifications_poll(State(config): State<ServerConfig>, Json(
     }
 }
 
-pub(crate) async fn resume_next(State(config): State<ServerConfig>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn resume_next(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
     let request = match protocol::parse_request::<Value>(body) {
         Ok(request) => request,
         Err(response) => return response,
@@ -227,7 +228,7 @@ pub(crate) async fn resume_next(State(config): State<ServerConfig>, Json(body): 
     }
 }
 
-pub(crate) async fn outbox_sync(State(config): State<ServerConfig>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn outbox_sync(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
     if body.pointer("/payload/event_type").is_some() {
         command(config, body, |store, request| store.enqueue_outbox(request))
     } else {
@@ -237,11 +238,12 @@ pub(crate) async fn outbox_sync(State(config): State<ServerConfig>, Json(body): 
 
 pub(crate) async fn current(
     State(config): State<ServerConfig>,
-    Query(request): Query<QueryEnvelope<CurrentQuery>>,
+    RawQuery(raw): RawQuery,
 ) -> Response {
-    if let Err(error) = request.validate() {
-        return protocol::error_response(StatusCode::BAD_REQUEST, Some(&request.request_id.to_string()), error);
-    }
+    let request = match protocol::parse_query::<CurrentQuery>(raw) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     let request_id = request.request_id.to_string();
     let unit = unit_query_request(&request);
     let result = lock_store(&config.store).and_then(|mut store| {
@@ -271,25 +273,27 @@ pub(crate) async fn current(
 
 pub(crate) async fn events(
     State(config): State<ServerConfig>,
-    Query(request): Query<QueryEnvelope<EventsQuery>>,
+    RawQuery(raw): RawQuery,
 ) -> Response {
-    if let Err(error) = request.validate() {
-        return protocol::error_response(StatusCode::BAD_REQUEST, Some(&request.request_id.to_string()), error);
-    }
+    let request = match protocol::parse_query::<EventsQuery>(raw) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     let request_id = request.request_id.to_string();
-    match lock_store(&config.store).and_then(|store| store.recent_events(request.query.limit)) {
-        Ok(events) => Json(json!({"events": events.into_iter().filter(|event| event.workspace_id == request.workspace.workspace_id).collect::<Vec<_>>() })).into_response(),
+    match lock_store(&config.store).and_then(|store| store.recent_workspace_events(&request.workspace.workspace_id, request.query.limit)) {
+        Ok(events) => Json(json!({"events": events})).into_response(),
         Err(error) => protocol::store_error_response(&request_id, error),
     }
 }
 
 pub(crate) async fn runtime_identity(
     State(config): State<ServerConfig>,
-    Query(request): Query<QueryEnvelope<Value>>,
+    RawQuery(raw): RawQuery,
 ) -> Response {
-    if let Err(error) = request.validate() {
-        return protocol::error_response(StatusCode::BAD_REQUEST, Some(&request.request_id.to_string()), error);
-    }
+    let request = match protocol::parse_query::<Value>(raw) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     let request_id = request.request_id.to_string();
     match lock_store(&config.store).and_then(|store| store.workspace_version(&request.workspace.workspace_id)) {
         Ok(workspace_version) => Json(json!({
@@ -306,26 +310,46 @@ pub(crate) async fn runtime_identity(
 
 pub(crate) async fn notifications_stream(
     State(config): State<ServerConfig>,
-    Query(request): Query<QueryEnvelope<Value>>,
+    headers: HeaderMap,
+    RawQuery(raw): RawQuery,
 ) -> Response {
-    if let Err(error) = request.validate() {
-        return protocol::error_response(StatusCode::BAD_REQUEST, Some(&request.request_id.to_string()), error);
-    }
-    let request_id = request.request_id.to_string();
-    let notifications = match lock_store(&config.store).and_then(|store| store.pending_notifications(&request.agent.agent_id, &request.workspace.workspace_id)) {
-        Ok(notifications) => notifications,
-        Err(error) => return protocol::store_error_response(&request_id, error),
+    let request = match protocol::parse_query::<Value>(raw) {
+        Ok(request) => request,
+        Err(response) => return response,
     };
-    let stream = tokio_stream::iter(notifications.into_iter().map(|notification| {
-        Ok::<_, Infallible>(
-            SseEvent::default()
-                .id(notification.sequence.to_string())
-                .event("notification")
-                .json_data(notification)
-                .expect("notification JSON is serializable"),
-        )
-    }));
-    Sse::new(stream).into_response()
+    let mut cursor = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or_default();
+    let store = config.store.clone();
+    let agent_id = request.agent.agent_id;
+    let workspace_id = request.workspace.workspace_id;
+    let stream = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(Duration::from_millis(100)))
+        .filter_map(move |_| {
+            let notification = lock_store(&store)
+                .and_then(|store| store.pending_notifications(&agent_id, &workspace_id))
+                .ok()
+                .and_then(|notifications| {
+                    notifications
+                        .into_iter()
+                        .filter(|notification| notification.sequence > cursor)
+                        .min_by_key(|notification| notification.sequence)
+                });
+            notification.map(|notification| {
+                cursor = notification.sequence;
+                Ok::<_, Infallible>(
+                    SseEvent::default()
+                        .id(notification.sequence.to_string())
+                        .event("notification")
+                        .json_data(notification)
+                        .expect("notification JSON is serializable"),
+                )
+            })
+        });
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+        .into_response()
 }
 
 fn command<T, R>(
@@ -436,7 +460,8 @@ fn thin_safety_state(
     )? {
         None => ObservationFreshness::Missing,
         Some(record) if record.status != ReadObservationStatus::Stabilized => ObservationFreshness::Unstable,
-        Some(record) if !record.is_fresh_at(request.observed_at) => ObservationFreshness::Expired,
+        Some(record) if !record.is_fresh_at(store.now()) => ObservationFreshness::Expired,
+        Some(record) if !target.before.is_complete_exact() || record.after.as_ref() != Some(&target.before) => ObservationFreshness::Changed,
         Some(record) => match store.resource_version(&request.workspace.workspace_id, &target.path)? {
             Some(version) if version.version != record.resource_version => ObservationFreshness::Changed,
             _ => ObservationFreshness::Stable,
@@ -451,7 +476,7 @@ fn thin_safety_state(
     })
 }
 
-fn authorization_decision(store: &Store, request: &RequestEnvelope<AuthorizePayload>) -> Result<Decision, StoreError> {
+fn authorization_decision(store: &mut Store, request: &RequestEnvelope<AuthorizePayload>) -> Result<Decision, StoreError> {
     let Some(reservation_id) = request.payload.reservation_id.as_deref() else {
         return Ok(Decision::deny(
             "missing_reservation",
@@ -461,34 +486,74 @@ fn authorization_decision(store: &Store, request: &RequestEnvelope<AuthorizePayl
     };
     let reservation = store.reservation(&request.workspace.workspace_id, reservation_id)?;
     let Some(reservation) = reservation.filter(|reservation| {
-        reservation.agent_id == request.agent.agent_id && reservation.status == "active"
+        reservation.agent_id == request.agent.agent_id
+            && reservation.status == "active"
+            && reservation.action == request.payload.action
     }) else {
         return Ok(Decision::deny(
             "missing_reservation",
-            "The supplied reservation is not active for this agent.",
-            "Declare or claim an active reservation before writing.",
+            "The supplied reservation is not active for this agent and action.",
+            "Declare an active reservation for the requested action.",
         ));
     };
     let scope = if reservation.relative_path.ends_with('/') {
-        ReservationScope::directory(reservation.relative_path)
+        ReservationScope::directory(reservation.relative_path.clone())
     } else {
-        ReservationScope::file(reservation.relative_path)
+        ReservationScope::file(reservation.relative_path.clone())
     };
-    let state = PolicyState::default().with_active_reservation_scopes(vec![scope]);
-    let input = match request.payload.action.as_str() {
-        "write_file" => request.payload.targets.first().map(|target| AuthorizationInput::write_file(&target.path)),
-        "write_directory" => request.payload.targets.first().map(|target| AuthorizationInput::write_directory(&target.path)),
-        "delete_file" => request.payload.targets.first().map(|target| AuthorizationInput::delete_file(&target.path)),
-        "rename_file" => request.payload.targets.first().zip(request.payload.targets.get(1)).map(|(from, to)| AuthorizationInput::rename_file(&from.path, &to.path)),
-        "move_file" => request.payload.targets.first().zip(request.payload.targets.get(1)).map(|(from, to)| AuthorizationInput::move_file(&from.path, &to.path)),
-        _ => None,
-    };
-    Ok(match input {
-        Some(input) => authorize_action(&state, input),
-        None => Decision::deny(
+    let mut state = PolicyState::default().with_active_reservation_scopes(vec![scope]);
+    if let Some(presence) = store.presence_for_request(&retarget(request, ()), &request.agent.agent_id)?
+        && let Some(phase) = presence.phase
+    {
+        state = state.with_presence_phase(phase);
+    }
+    if request.payload.targets.is_empty() {
+        return Ok(Decision::deny(
+            "invalid_write_action",
+            "Write action requires at least one target.",
+            "Provide the target paths for the supported action.",
+        ));
+    }
+    for target in &request.payload.targets {
+        let claimed = store.active_claims_for_path(&request.workspace.workspace_id, &target.path)?
+            .into_iter()
+            .any(|claim| {
+                claim.reservation_id == reservation.reservation_id
+                    && claim.agent_id == request.agent.agent_id
+                    && claim.action == request.payload.action
+            });
+        if !claimed {
+            return Ok(Decision::deny(
+                "missing_claim",
+                "Each write target requires an active claim held by this reservation.",
+                "Acquire an active claim for every target before writing.",
+            ));
+        }
+    }
+    let decisions = match request.payload.action.as_str() {
+        "write_file" => request.payload.targets.iter()
+            .map(|target| authorize_action(&state, AuthorizationInput::write_file(&target.path)))
+            .collect::<Vec<_>>(),
+        "write_directory" => request.payload.targets.iter()
+            .map(|target| authorize_action(&state, AuthorizationInput::write_directory(&target.path)))
+            .collect::<Vec<_>>(),
+        "delete_file" => request.payload.targets.iter()
+            .map(|target| authorize_action(&state, AuthorizationInput::delete_file(&target.path)))
+            .collect::<Vec<_>>(),
+        "rename_file" if request.payload.targets.len() == 2 => vec![authorize_action(
+            &state,
+            AuthorizationInput::rename_file(&request.payload.targets[0].path, &request.payload.targets[1].path),
+        )],
+        "move_file" if request.payload.targets.len() == 2 => vec![authorize_action(
+            &state,
+            AuthorizationInput::move_file(&request.payload.targets[0].path, &request.payload.targets[1].path),
+        )],
+        _ => vec![Decision::deny(
             "invalid_write_action",
             "Write action and target set are invalid.",
             "Provide a supported action with its required target paths.",
-        ),
-    })
+        )],
+    };
+    Ok(decisions.into_iter().find(|decision| decision.decision == DecisionKind::Deny)
+        .unwrap_or_else(|| Decision::allow("authorized", "Action is authorized.")))
 }

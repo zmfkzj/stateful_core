@@ -183,6 +183,10 @@ impl Store {
         Ok(store)
     }
 
+    pub fn now(&self) -> time::OffsetDateTime {
+        self.clock.now()
+    }
+
     pub(crate) fn current_records(
         &self,
         aggregate: CurrentAggregate,
@@ -253,6 +257,34 @@ impl Store {
         )?;
         statement
             .query_map([limit], |row| {
+                let payload: String = row.get(8)?;
+                Ok(EventRecord {
+                    event_id: row.get(0)?,
+                    event_type: row.get(1)?,
+                    agent_id: row.get(2)?,
+                    workspace_id: row.get(3)?,
+                    repo_id: row.get(4)?,
+                    worktree_id: row.get(5)?,
+                    root: row.get(6)?,
+                    branch: row.get(7)?,
+                    payload: serde_json::from_str(&payload).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(error))
+                    })?,
+                    created_at: row.get(9)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn recent_workspace_events(&self, workspace_id: &str, limit: u64) -> StoreResult<Vec<EventRecord>> {
+        let mut statement = self.conn.prepare(
+            "SELECT event_id, event_type, agent_id, workspace_id, repo_id, worktree_id, root, branch,
+                    payload_json, occurred_at
+             FROM journal_events WHERE workspace_id = ?1 ORDER BY event_seq DESC LIMIT ?2",
+        )?;
+        statement
+            .query_map(rusqlite::params![workspace_id, limit], |row| {
                 let payload: String = row.get(8)?;
                 Ok(EventRecord {
                     event_id: row.get(0)?,

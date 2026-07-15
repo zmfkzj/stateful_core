@@ -214,3 +214,25 @@ async fn awareness_warns_for_missing_read_provenance_while_enforcement_denies() 
     assert_eq!(enforcement.status(), StatusCode::FORBIDDEN);
     assert_eq!(response_json(enforcement).await["reason_code"], "missing_read_provenance");
 }
+
+#[tokio::test]
+async fn malformed_post_and_invalid_flattened_query_return_v2_errors() {
+    let post_response = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v2/session/register")
+                .header("authorization", "Bearer test-token")
+                .header("content-type", "application/json")
+                .body(Body::from("{"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(post_response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response_json(post_response).await["protocol_version"], "stateful.v2");
+
+    let get_response = app().oneshot(get("/v2/current?protocol_version=stateful.v1")).await.unwrap();
+    assert_eq!(get_response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response_json(get_response).await["protocol_version"], "stateful.v2");
+}

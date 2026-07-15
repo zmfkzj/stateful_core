@@ -255,6 +255,19 @@ impl Store {
             .map(Ok)
             .transpose()
     }
+
+    pub fn active_claims_for_path(&self, workspace_id: &str, path: &str) -> StoreResult<Vec<ClaimRecord>> {
+        let path = normalized_scope(path)?;
+        let now = self.clock.now();
+        let claims = self.current_records(CurrentAggregate::Claim, workspace_id)?
+            .into_iter()
+            .map(record_from_current::<ClaimRecord>)
+            .collect::<StoreResult<Vec<_>>>()?
+            .into_iter()
+            .filter(|claim| claim.status == "active" && !expired(&claim.expires_at, now) && claim.relative_path == path)
+            .collect();
+        Ok(claims)
+    }
 }
 
 pub(crate) fn claim_event<T>(
