@@ -342,6 +342,39 @@ impl Store {
         })
     }
 
+    pub fn expire_started_write_intents(
+        &self,
+        request: &RequestEnvelope<()>,
+    ) -> StoreResult<CommandOutcome<Vec<String>>> {
+        let now = self.clock.now();
+        self.execute_command(request, "write_intent.expire", |reader| {
+            let mut events = Vec::new();
+            let mut expired_ids = Vec::new();
+            for intent in typed_records::<WriteIntentRecord>(
+                reader,
+                CurrentAggregate::WriteIntent,
+                &request.workspace.workspace_id,
+            )? {
+                if intent.status == WriteIntentStatus::Started && intent.started_at + WRITE_FENCE_TTL <= now {
+                    let mut expired_intent = intent.clone();
+                    expired_intent.status = WriteIntentStatus::OutcomeUnknown;
+                    expired_intent.completed_at = Some(now);
+                    events.push(intent_event(
+                        request,
+                        events.len() as u32,
+                        now,
+                        WriteIntentEvent::OutcomeUnknown,
+                        &expired_intent,
+                        &[],
+                    )?);
+                    append_fence_releases(request, reader, now, &intent, &mut events)?;
+                    expired_ids.push(intent.intent_id);
+                }
+            }
+            Ok(CommandPlan { events, response: expired_ids, http_status: 200 })
+        })
+    }
+
     pub fn active_write_intent(
         &self,
         workspace_id: &str,

@@ -153,7 +153,9 @@ impl Store {
     pub(crate) fn startup_housekeeping(&mut self) -> StoreResult<()> {
         let workspaces = {
             let mut statement = self.conn.prepare(
-                "SELECT workspace_id FROM presence_current UNION SELECT workspace_id FROM handoff_current",
+                "SELECT workspace_id FROM presence_current
+                 UNION SELECT workspace_id FROM handoff_current
+                 UNION SELECT workspace_id FROM write_intent_current",
             )?;
             statement
                 .query_map([], |row| row.get::<_, String>(0))?
@@ -171,7 +173,9 @@ impl Store {
 
     fn maintain_workspace(&mut self, workspace_id: &str) -> StoreResult<()> {
         let request = self.system_maintenance_request(workspace_id)?;
-        self.expire_current_state(&request)
+        self.expire_current_state(&request)?;
+        self.expire_started_write_intents(&maintenance_request(&request))?;
+        Ok(())
     }
     fn system_maintenance_request(&self, workspace_id: &str) -> StoreResult<RequestEnvelope<()>> {
         let identity = self.conn.query_row(
@@ -302,6 +306,12 @@ fn explicit_handoff_record(
     }
 }
 
+
+fn maintenance_request(request: &RequestEnvelope<()>) -> RequestEnvelope<()> {
+    let mut request = request.clone();
+    request.request_id = Uuid::new_v4();
+    request
+}
 
 fn fallback_handoff_record(
     request: &RequestEnvelope<()>,
