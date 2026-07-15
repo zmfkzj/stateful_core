@@ -6,10 +6,10 @@ use crate::{
 };
 use serde_json::json;
 use stateful_core::{
-    EventData, EventPayload, NewEvent, OBSERVATION_TTL, ReadClassification, ReadObservationEvent,
-    ReadObservationRecord, ReadObservationStatus, RequestEnvelope, ResourceVersion,
-    WriteFenceEvent, WriteIntentCompletion, WriteIntentEvent, WriteIntentOutcome, WriteIntentRecord,
-    WriteIntentStart, WriteIntentStatus, WriteTarget,
+    Decision, EventData, EventPayload, NewEvent, OBSERVATION_TTL, ReadClassification,
+    ReadObservationEvent, ReadObservationRecord, ReadObservationStatus, RequestEnvelope,
+    ResourceVersion, WriteFenceEvent, WriteIntentCompletion, WriteIntentEvent, WriteIntentOutcome,
+    WriteIntentRecord, WriteIntentStart, WriteIntentStatus, WriteTarget,
 };
 use std::collections::{BTreeMap, HashSet};
 use time::{Duration, OffsetDateTime};
@@ -21,6 +21,8 @@ const WRITE_FENCE_TTL: Duration = Duration::minutes(5);
 pub struct WriteIntentStartResult {
     pub intent_id: String,
     pub fence_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<Decision>,
 }
 
 impl Store {
@@ -28,15 +30,16 @@ impl Store {
         &self,
         request: &RequestEnvelope<WriteIntentStart>,
     ) -> StoreResult<CommandOutcome<WriteIntentStartResult>> {
-        self.start_write_intent_for(request, request.payload.clone(), "write_intent.start")
+        self.start_write_intent_for(request, request.payload.clone(), "write_intent.start", None)
     }
 
     pub fn start_write_intent_authorized<T: serde::Serialize>(
         &self,
         request: &RequestEnvelope<T>,
         payload: WriteIntentStart,
+        decision: Decision,
     ) -> StoreResult<CommandOutcome<WriteIntentStartResult>> {
-        self.start_write_intent_for(request, payload, "server.authorize")
+        self.start_write_intent_for(request, payload, "server.authorize", Some(decision))
     }
 
     fn start_write_intent_for<T: serde::Serialize>(
@@ -44,6 +47,7 @@ impl Store {
         request: &RequestEnvelope<T>,
         payload: WriteIntentStart,
         route_kind: &'static str,
+        decision: Option<Decision>,
     ) -> StoreResult<CommandOutcome<WriteIntentStartResult>> {
         let now = self.clock.now();
         self.execute_command(request, route_kind, |reader| {
@@ -136,6 +140,7 @@ impl Store {
                 response: WriteIntentStartResult {
                     intent_id,
                     fence_ids: intent.fence_ids,
+                    decision,
                 },
                 http_status: 200,
             })

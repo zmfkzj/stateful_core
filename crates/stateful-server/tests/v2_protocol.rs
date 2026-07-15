@@ -203,7 +203,10 @@ async fn awareness_warns_for_missing_read_provenance_while_enforcement_denies() 
     }));
     let awareness = app().oneshot(post("/v2/authorize", body.clone())).await.unwrap();
     assert_eq!(awareness.status(), StatusCode::OK);
-    assert!(response_json(awareness).await["intent_id"].is_string());
+    let awareness = response_json(awareness).await;
+    assert!(awareness["intent_id"].is_string());
+    assert_eq!(awareness["decision"]["decision"], "warn");
+    assert_eq!(awareness["decision"]["reason_code"], "missing_read_provenance");
 
     let enforcement = build_router(
         ServerConfig::new("test-token").with_coordination_mode(stateful_server::CoordinationMode::Enforcement),

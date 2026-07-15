@@ -139,9 +139,10 @@ pub(crate) async fn authorize(State(config): State<ServerConfig>, protocol::V2Js
     if let Err(error) = store.run_maintenance() {
         return protocol::store_error_response(&request_id, error);
     }
-    if let Err(response) = authorize_request(&mut store, config.coordination_mode, &request) {
-        return response;
-    }
+    let decision = match authorize_request(&mut store, config.coordination_mode, &request) {
+        Ok(decision) => decision,
+        Err(response) => return response,
+    };
     let write_payload = WriteIntentStart {
         operation_id: request.payload.operation_id.clone(),
         action: request.payload.action.clone(),
@@ -149,7 +150,7 @@ pub(crate) async fn authorize(State(config): State<ServerConfig>, protocol::V2Js
     };
     protocol::command_response(
         &request_id,
-        store.start_write_intent_authorized(&request, write_payload),
+        store.start_write_intent_authorized(&request, write_payload, decision),
     )
 }
 
@@ -407,12 +408,13 @@ fn authorize_request(
     store: &mut Store,
     mode: CoordinationMode,
     request: &RequestEnvelope<AuthorizePayload>,
-) -> Result<(), Response> {
+) -> Result<Decision, Response> {
     let request_id = request.request_id.to_string();
     let freshness_mode = match mode {
         CoordinationMode::Awareness => FreshnessMode::Awareness,
         CoordinationMode::Enforcement => FreshnessMode::Enforcement,
     };
+    let mut result = Decision::allow("authorized", "Action is authorized.");
     for target in &request.payload.targets {
         let safety = thin_safety_state(store, request, target)
             .map_err(|error| protocol::store_error_response(&request_id, error))?;
@@ -420,14 +422,31 @@ fn authorize_request(
         if decision.decision == DecisionKind::Deny {
             return Err((StatusCode::FORBIDDEN, Json(decision)).into_response());
         }
+        if decision.decision == DecisionKind::Warn {
+            result = decision;
+        }
     }
 
     let decision = authorization_decision(store, request)
         .map_err(|error| protocol::store_error_response(&request_id, error))?;
-    if decision.decision == DecisionKind::Deny && mode == CoordinationMode::Enforcement {
-        return Err((StatusCode::FORBIDDEN, Json(decision)).into_response());
+    if decision.decision == DecisionKind::Deny {
+        if mode == CoordinationMode::Enforcement {
+            return Err((StatusCode::FORBIDDEN, Json(decision)).into_response());
+        }
+        if result.decision == DecisionKind::Warn {
+            return Ok(result);
+        }
+        return Ok(Decision {
+            decision: DecisionKind::Warn,
+            reason_code: decision.reason_code,
+            message: decision.message,
+            required_next_action: decision.required_next_action,
+        });
     }
-    Ok(())
+    if decision.decision == DecisionKind::Warn {
+        result = decision;
+    }
+    Ok(result)
 }
 
 fn thin_safety_state(
