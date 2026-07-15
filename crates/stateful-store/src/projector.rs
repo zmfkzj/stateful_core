@@ -228,7 +228,9 @@ impl<'a> Projector<'a> {
                 )?;
                 Ok(true)
             }
-            EventPayload::WriteIntent(WriteIntentEvent::Committed(data)) => {
+            EventPayload::WriteIntent(
+                WriteIntentEvent::Committed(data) | WriteIntentEvent::Reconciled(data),
+            ) => {
                 self.apply_aggregate("write_intent_current", event)?;
                 let versions = data.data.get("resource_versions")
                     .cloned()
@@ -256,8 +258,7 @@ impl<'a> Projector<'a> {
             EventPayload::WriteIntent(
                 WriteIntentEvent::Started(_)
                 | WriteIntentEvent::Failed(_)
-                | WriteIntentEvent::OutcomeUnknown(_)
-                | WriteIntentEvent::Reconciled(_),
+                | WriteIntentEvent::OutcomeUnknown(_),
             ) => {
                 self.apply_aggregate("write_intent_current", event)?;
                 Ok(true)

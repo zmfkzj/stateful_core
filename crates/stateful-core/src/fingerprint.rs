@@ -24,7 +24,21 @@ impl ContentFingerprint {
     }
 
     pub fn is_complete_exact(&self) -> bool {
-        !self.exists || self.sha256.as_deref().is_some_and(|hash| !hash.is_empty())
+        match self {
+            Self {
+                exists: false,
+                byte_len: 0,
+                sha256: None,
+            } => true,
+            Self {
+                exists: true,
+                sha256: Some(hash),
+                ..
+            } => {
+                hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            }
+            _ => false,
+        }
     }
 }
 

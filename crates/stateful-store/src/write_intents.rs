@@ -165,27 +165,13 @@ impl Store {
                         &completed,
                         &versions,
                     )?);
-                    for observation in typed_records::<ReadObservationRecord>(
+                    append_peer_observation_invalidations(
+                        request,
                         reader,
-                        CurrentAggregate::ReadObservation,
-                        &request.workspace.workspace_id,
-                    )? {
-                        if observation.agent_id != request.agent.agent_id
-                            && observation.is_stable()
-                            && intent.targets.iter().any(|target| target.path == observation.path)
-                        {
-                            let mut invalidated = observation;
-                            invalidated.status = ReadObservationStatus::Invalidated;
-                            invalidated.expires_at = None;
-                            events.push(read_event(
-                                request,
-                                events.len() as u32,
-                                now,
-                                ReadObservationEvent::Invalidated,
-                                &invalidated,
-                            )?);
-                        }
-                    }
+                        now,
+                        &intent.targets,
+                        &mut events,
+                    )?;
                     for (target, version) in intent.targets.iter().zip(&versions) {
                         let writer_observation = ReadObservationRecord {
                             workspace_id: request.workspace.workspace_id.clone(),
@@ -275,16 +261,30 @@ impl Store {
                 CurrentAggregate::ReadObservation,
                 &request.workspace.workspace_id,
             )?;
-            if !intent.targets.iter().all(|target| {
-                observations.iter().any(|observation| {
-                    observation.agent_id == request.agent.agent_id
-                        && observation.path == target.path
-                        && observation.classification == ReadClassification::Exact
-                        && observation.is_fresh_at(now)
-                })
-            }) {
-                return Err(StoreError::InvalidReadOperation);
+            let mut rereads = BTreeMap::new();
+            let mut posts = BTreeMap::new();
+            for target in &intent.targets {
+                let observation = observations
+                    .iter()
+                    .find(|observation| {
+                        observation.agent_id == request.agent.agent_id
+                            && observation.path == target.path
+                            && observation.classification == ReadClassification::Exact
+                            && observation.is_fresh_at(now)
+                            && observation.origin_event_seq > intent.origin_event_seq
+                            && observation.before.is_complete_exact()
+                    })
+                    .ok_or(StoreError::InvalidReadOperation)?;
+                let after = observation
+                    .after
+                    .as_ref()
+                    .filter(|fingerprint| fingerprint.is_complete_exact())
+                    .cloned()
+                    .ok_or(StoreError::InvalidReadOperation)?;
+                rereads.insert(target.path.clone(), observation.clone());
+                posts.insert(target.path.clone(), after);
             }
+            let versions = next_resource_versions(reader, request, &intent, &posts)?;
             let mut reconciled = intent.clone();
             reconciled.status = WriteIntentStatus::Reconciled;
             reconciled.completed_at = Some(now);
@@ -294,8 +294,28 @@ impl Store {
                 now,
                 WriteIntentEvent::Reconciled,
                 &reconciled,
-                &[],
+                &versions,
             )?];
+            for version in &versions {
+                let mut observation = rereads
+                    .remove(&version.path)
+                    .ok_or(StoreError::InvalidReadOperation)?;
+                observation.resource_version = version.version;
+                events.push(read_event(
+                    request,
+                    events.len() as u32,
+                    now,
+                    ReadObservationEvent::Stabilized,
+                    &observation,
+                )?);
+            }
+            append_peer_observation_invalidations(
+                request,
+                reader,
+                now,
+                &intent.targets,
+                &mut events,
+            )?;
             append_fence_releases(request, reader, now, &intent, &mut events)?;
             Ok(CommandPlan { events, response: reconciled, http_status: 200 })
         })
@@ -365,7 +385,7 @@ fn normalize_targets(targets: Vec<WriteTarget>) -> StoreResult<Vec<WriteTarget>>
     let mut normalized = Vec::with_capacity(targets.len());
     for mut target in targets {
         target.path = normalized_scope(&target.path)?;
-        if !seen.insert(target.path.clone()) {
+        if !target.before.is_complete_exact() || !seen.insert(target.path.clone()) {
             return Err(StoreError::InvalidWriteIntent);
         }
         normalized.push(target);
@@ -402,7 +422,7 @@ fn post_fingerprints(
     let mut values = BTreeMap::new();
     for (path, fingerprint) in fingerprints {
         let path = normalized_scope(&path)?;
-        if values.insert(path, fingerprint).is_some() {
+        if !fingerprint.is_complete_exact() || values.insert(path, fingerprint).is_some() {
             return Err(StoreError::InvalidWriteIntent);
         }
     }
@@ -412,9 +432,9 @@ fn post_fingerprints(
     Ok(values)
 }
 
-fn next_resource_versions(
+fn next_resource_versions<T>(
     reader: &dyn crate::ProjectionReader,
-    request: &RequestEnvelope<WriteIntentCompletion>,
+    request: &RequestEnvelope<T>,
     intent: &WriteIntentRecord,
     posts: &BTreeMap<String, stateful_core::ContentFingerprint>,
 ) -> StoreResult<Vec<ResourceVersion>> {
@@ -432,6 +452,37 @@ fn next_resource_versions(
         intent_id: intent.intent_id.clone(),
         origin_event_seq: 0,
     }).collect())
+}
+
+fn append_peer_observation_invalidations<T>(
+    request: &RequestEnvelope<T>,
+    reader: &dyn crate::ProjectionReader,
+    now: OffsetDateTime,
+    targets: &[WriteTarget],
+    events: &mut Vec<NewEvent>,
+) -> StoreResult<()> {
+    for observation in typed_records::<ReadObservationRecord>(
+        reader,
+        CurrentAggregate::ReadObservation,
+        &request.workspace.workspace_id,
+    )? {
+        if observation.agent_id != request.agent.agent_id
+            && observation.is_stable()
+            && targets.iter().any(|target| target.path == observation.path)
+        {
+            let mut invalidated = observation;
+            invalidated.status = ReadObservationStatus::Invalidated;
+            invalidated.expires_at = None;
+            events.push(read_event(
+                request,
+                events.len() as u32,
+                now,
+                ReadObservationEvent::Invalidated,
+                &invalidated,
+            )?);
+        }
+    }
+    Ok(())
 }
 
 fn append_fence_releases<T>(

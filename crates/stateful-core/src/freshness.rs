@@ -77,7 +77,7 @@ impl ReadObservationRecord {
     }
 
     pub fn is_fresh_at(&self, now: OffsetDateTime) -> bool {
-        self.is_stable() && self.expires_at.is_some_and(|expires_at| expires_at >= now)
+        self.is_stable() && self.expires_at.is_some_and(|expires_at| expires_at > now)
     }
 }
 
@@ -87,12 +87,15 @@ pub fn observation_status(
     after: Option<&ContentFingerprint>,
     semantic_marker: Option<&str>,
 ) -> ReadObservationStatus {
+    if classification == ReadClassification::Failed {
+        return ReadObservationStatus::Aborted;
+    }
+    if !before.is_complete_exact() || after.is_some_and(|after| !after.is_complete_exact()) {
+        return ReadObservationStatus::Unstable;
+    }
     match classification {
-        ReadClassification::Failed => ReadObservationStatus::Aborted,
         ReadClassification::Exact => match after {
-            Some(after) if before == after && before.is_complete_exact() && after.is_complete_exact() => {
-                ReadObservationStatus::Stabilized
-            }
+            Some(after) if before == after => ReadObservationStatus::Stabilized,
             _ => ReadObservationStatus::Unstable,
         },
         ReadClassification::StructuralSummary => {
@@ -105,6 +108,7 @@ pub fn observation_status(
         ReadClassification::Partial | ReadClassification::Truncated | ReadClassification::Ambiguous => {
             ReadObservationStatus::Unstable
         }
+        ReadClassification::Failed => unreachable!("handled before fingerprint validation"),
     }
 }
 

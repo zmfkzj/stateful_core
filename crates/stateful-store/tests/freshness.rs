@@ -106,6 +106,7 @@ fn exact_successful_unchanged_read_stabilizes_observation() {
     assert_eq!(observation.resource_version, 0);
     assert_eq!(observation.expires_at, Some(NOW + Duration::minutes(30)));
     store.rebuild_projections().expect("read observation must replay");
+    assert!(!observation.is_fresh_at(NOW + Duration::minutes(30)));
 }
 
 #[test]
@@ -152,6 +153,32 @@ fn file_change_during_read_records_unstable_observation() {
         "src/lib.rs",
         ReadClassification::Exact,
         Some(fingerprint(b"after")),
+        None,
+    );
+
+    assert!(!store
+        .read_observation("workspace-1", "agent-1", "src/lib.rs")
+        .expect("observation reads")
+        .expect("observation exists")
+        .is_stable());
+}
+
+#[test]
+fn incomplete_present_fingerprint_cannot_stabilize_an_exact_read() {
+    let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    let incomplete = ContentFingerprint {
+        exists: true,
+        byte_len: 4,
+        sha256: Some("not-a-sha256".into()),
+    };
+    start_read(&store, "agent-1", "read-1", "src/lib.rs", incomplete.clone());
+    complete_read(
+        &store,
+        "agent-1",
+        "read-1",
+        "src/lib.rs",
+        ReadClassification::Exact,
+        Some(incomplete),
         None,
     );
 
@@ -357,6 +384,86 @@ fn failed_write_releases_intent_and_fence() {
 }
 
 #[test]
+fn write_intent_start_rejects_an_incomplete_present_fingerprint() {
+    let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    let incomplete = ContentFingerprint {
+        exists: true,
+        byte_len: 4,
+        sha256: Some("not-a-sha256".into()),
+    };
+
+    assert!(store
+        .start_write_intent(&request(
+            "agent-1",
+            WriteIntentStart {
+                operation_id: "write-1".into(),
+                action: "write_file".into(),
+                targets: vec![WriteTarget { path: "src/lib.rs".into(), before: incomplete }],
+            },
+        ))
+        .is_err());
+}
+
+#[test]
+fn write_intent_completion_rejects_an_incomplete_present_fingerprint() {
+    let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    let intent = store
+        .start_write_intent(&request(
+            "agent-1",
+            WriteIntentStart {
+                operation_id: "write-1".into(),
+                action: "write_file".into(),
+                targets: vec![WriteTarget { path: "src/lib.rs".into(), before: fingerprint(b"before") }],
+            },
+        ))
+        .expect("intent starts")
+        .response;
+    let incomplete = ContentFingerprint {
+        exists: true,
+        byte_len: 4,
+        sha256: Some("not-a-sha256".into()),
+    };
+
+    assert!(store
+        .complete_write_intent(&request(
+            "agent-1",
+            WriteIntentCompletion::committed(
+                intent.intent_id,
+                vec![("src/lib.rs".into(), incomplete)],
+            ),
+        ))
+        .is_err());
+}
+
+#[test]
+fn write_intent_recovery_rejects_an_incomplete_present_fingerprint() {
+    let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    let intent = store
+        .start_write_intent(&request(
+            "agent-1",
+            WriteIntentStart {
+                operation_id: "write-1".into(),
+                action: "write_file".into(),
+                targets: vec![WriteTarget { path: "src/lib.rs".into(), before: fingerprint(b"before") }],
+            },
+        ))
+        .expect("intent starts")
+        .response;
+    let incomplete = ContentFingerprint {
+        exists: true,
+        byte_len: 4,
+        sha256: Some("not-a-sha256".into()),
+    };
+
+    assert!(store
+        .recover_write_intent(&request(
+            "agent-1",
+            (intent.intent_id, vec![("src/lib.rs".into(), incomplete)]),
+        ))
+        .is_err());
+}
+
+#[test]
 fn missing_post_hook_with_unchanged_file_resolves_unknown_no_change() {
     let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
     let before = fingerprint(b"before");
@@ -382,9 +489,71 @@ fn missing_post_hook_with_unchanged_file_resolves_unknown_no_change() {
 }
 
 #[test]
-fn missing_post_hook_with_changed_file_blocks_until_matching_reconcile_ack() {
+fn changed_unknown_requires_an_exact_reread_after_the_unknown_event() {
     let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
     let before = fingerprint(b"before");
+    let intent = store
+        .start_write_intent(&request(
+            "agent-1",
+            WriteIntentStart {
+                operation_id: "write-1".into(),
+                action: "write_file".into(),
+                targets: vec![WriteTarget { path: "src/lib.rs".into(), before: before.clone() }],
+            },
+        ))
+        .expect("intent starts")
+        .response;
+    start_read(&store, "agent-1", "before-unknown", "src/lib.rs", before.clone());
+    complete_read(
+        &store,
+        "agent-1",
+        "before-unknown",
+        "src/lib.rs",
+        ReadClassification::Exact,
+        Some(before),
+        None,
+    );
+    let changed = fingerprint(b"changed");
+    store
+        .recover_write_intent(&request(
+            "agent-1",
+            (intent.intent_id.clone(), vec![("src/lib.rs".into(), changed.clone())]),
+        ))
+        .expect("changed recovery journals unknown outcome");
+
+    assert!(store
+        .reconcile_write_intent(&request("agent-1", intent.intent_id.clone()))
+        .is_err());
+
+    start_read(&store, "agent-1", "after-unknown", "src/lib.rs", changed.clone());
+    complete_read(
+        &store,
+        "agent-1",
+        "after-unknown",
+        "src/lib.rs",
+        ReadClassification::Exact,
+        Some(changed),
+        None,
+    );
+    store
+        .reconcile_write_intent(&request("agent-1", intent.intent_id))
+        .expect("reread after the unknown outcome reconciles");
+}
+
+#[test]
+fn changed_unknown_reconciliation_versions_rereads_and_invalidates_peers() {
+    let mut store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    let before = fingerprint(b"before");
+    start_read(&store, "agent-2", "peer-read", "src/lib.rs", before.clone());
+    complete_read(
+        &store,
+        "agent-2",
+        "peer-read",
+        "src/lib.rs",
+        ReadClassification::Exact,
+        Some(before.clone()),
+        None,
+    );
     let intent = store
         .start_write_intent(&request(
             "agent-1",
@@ -396,33 +565,56 @@ fn missing_post_hook_with_changed_file_blocks_until_matching_reconcile_ack() {
         ))
         .expect("intent starts")
         .response;
+    let changed = fingerprint(b"changed");
     store
         .recover_write_intent(&request(
             "agent-1",
-            (intent.intent_id.clone(), vec![("src/lib.rs".into(), fingerprint(b"changed"))]),
+            (intent.intent_id.clone(), vec![("src/lib.rs".into(), changed.clone())]),
         ))
         .expect("changed recovery journals unknown outcome");
-    assert!(store
-        .active_write_intent("workspace-1", "src/lib.rs")
-        .expect("intent reads")
-        .is_some());
-    start_read(&store, "agent-1", "reconcile-read", "src/lib.rs", fingerprint(b"changed"));
+    start_read(&store, "agent-1", "reconcile-read", "src/lib.rs", changed.clone());
     complete_read(
         &store,
         "agent-1",
         "reconcile-read",
         "src/lib.rs",
         ReadClassification::Exact,
-        Some(fingerprint(b"changed")),
+        Some(changed.clone()),
         None,
     );
+
     store
         .reconcile_write_intent(&request("agent-1", intent.intent_id))
         .expect("exact reread reconciles matching intent");
+
+    let version = store
+        .resource_version("workspace-1", "src/lib.rs")
+        .expect("resource version reads")
+        .expect("reconciliation versions the changed resource");
+    assert_eq!(version.version, 1);
+    assert_eq!(version.fingerprint, changed);
+    assert!(!store
+        .read_observation("workspace-1", "agent-2", "src/lib.rs")
+        .expect("peer observation reads")
+        .expect("peer observation remains auditable")
+        .is_stable());
+    assert_eq!(
+        store
+            .read_observation("workspace-1", "agent-1", "src/lib.rs")
+            .expect("writer observation reads")
+            .expect("writer observation exists")
+            .resource_version,
+        1
+    );
     assert!(store
         .active_write_intent("workspace-1", "src/lib.rs")
         .expect("intent reads")
         .is_none());
+    assert!(store
+        .active_write_fence("workspace-1", "src/lib.rs")
+        .expect("fence reads")
+        .is_none());
+    store.rebuild_projections().expect("reconciliation must replay");
 }
 
 #[test]
