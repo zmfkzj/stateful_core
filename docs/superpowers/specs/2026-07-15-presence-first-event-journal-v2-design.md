@@ -1,7 +1,7 @@
 # Presence-First Event Journal V2 Design
 
 **Date:** 2026-07-15  
-**Status:** Written-spec self-review complete; user review pending  
+**Status:** Approved for implementation planning
 **Base:** `main` at `7070190`  
 **Benchmark source:** selective port from `dev` at `b5e875e`
 
@@ -94,7 +94,9 @@ Every v2 mutation uses a common envelope:
 ```text
 event_seq           SQLite monotonic sequence
 event_id            globally unique idempotency key
+request_id          originating command/query idempotency key
 agent_id
+turn_id?
 workspace_id
 repo_id?
 worktree_id?
@@ -147,6 +149,8 @@ A command executes in one SQLite transaction:
 7. commit all effects together.
 
 Any failure rolls back the entire command. A successful retry with the same idempotency key returns the prior result and does not append duplicate events.
+
+Mutation `request_id` values are globally unique client-generated UUIDs. A transactional command receipt stores the route kind, HTTP status, typed response, and committed event-sequence range. Receipts are idempotency bookkeeping rather than canonical coordination projections, but they commit or roll back in the same transaction as the journal and projections. A duplicate mutation returns the frozen receipt without rerunning policy or projectors.
 
 ### 6.3 Projections
 
@@ -317,6 +321,8 @@ Only an exact file read creates a write baseline.
 
 A stable observation is valid only for the same agent session and until the earliest of explicit invalidation, session finalization, or 60 minutes after the completed read. Expired evidence follows the missing-observation warning path.
 
+Read and write lifecycle events carry the runtime tool-operation id so pre/post hooks cannot pair concurrent operations by path alone. Runtime adapters classify a read as exact only when the tool reports the entire file body without a range, structural summary, or truncation; ambiguous or partial results may update presence but never stabilize a write baseline.
+
 ```text
 PreToolUse exact read
   -> ReadObservationStarted(before exists/hash/size)
@@ -370,6 +376,8 @@ Awareness overlap does not create a wait queue or lazy replay operation. It reco
 The clean cutover removes `/v1/*` routes and the `stateful.v1` envelope. Bundled clients and install assets move together.
 
 Every v2 request uses a `stateful.v2` envelope containing request id, observed time, full agent identity, full workspace identity, and source reference. Route-specific bodies are typed payloads inside that envelope.
+
+POST routes encode the envelope as the JSON request body with the typed route payload nested under `payload`. GET routes encode the same envelope fields plus typed query fields in the query string; they do not accept an implicit server-side identity.
 
 Representative routes:
 
