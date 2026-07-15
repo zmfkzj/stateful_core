@@ -74,10 +74,12 @@ impl Store {
                     events.push(claim_event(request, events.len() as u32, now, ClaimEvent::Released, &claim)?);
                 }
             }
+            let mut cancelled_wait_ids = Vec::new();
             for mut wait in typed_records::<WaitRecord>(reader, CurrentAggregate::Wait, workspace_id)? {
                 if wait.agent_id == request.agent.agent_id && matches!(wait.status.as_str(), "queued" | "claimable") {
                     wait.status = "canceled".into();
                     wait.reservation_expires_at = None;
+                    cancelled_wait_ids.push(wait.wait_id.clone());
                     events.push(wait_event(request, events.len() as u32, now, WaitEvent::Cancelled, &wait)?);
                 }
             }
@@ -96,6 +98,7 @@ impl Store {
                     workspace_id,
                     &reservation.relative_path,
                     &released_reservation_ids,
+                    &cancelled_wait_ids,
                     true,
                     &mut events,
                 )?;

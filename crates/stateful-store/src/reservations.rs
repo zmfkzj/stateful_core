@@ -178,7 +178,7 @@ impl Store {
             }
             append_grant_for_path(
                 request, reader, now, &reservation.workspace_id, &reservation.relative_path,
-                std::slice::from_ref(&reservation.reservation_id), true, &mut events,
+                std::slice::from_ref(&reservation.reservation_id), &[], true, &mut events,
             )?;
             Ok(CommandPlan { events, response: reservation, http_status: 200 })
         })
@@ -254,7 +254,7 @@ impl Store {
                     events.push(reservation_event(request, events.len() as u32, now, ReservationEvent::Released, &reservation)?);
                     append_grant_for_path(
                         request, reader, now, &reservation.workspace_id, &reservation.relative_path,
-                        std::slice::from_ref(&reservation.reservation_id), true, &mut events,
+                        std::slice::from_ref(&reservation.reservation_id), &[], true, &mut events,
                     )?;
                 }
             }
@@ -271,7 +271,7 @@ impl Store {
         self.execute_command(request, "wait.grant", |reader| {
             let mut events = Vec::new();
             let wait = append_grant_for_path(
-                request, reader, now, &request.workspace.workspace_id, &relative_path, &[], false, &mut events,
+                request, reader, now, &request.workspace.workspace_id, &relative_path, &[], &[], false, &mut events,
             )?;
             Ok(CommandPlan { events, response: wait, http_status: 200 })
         })
@@ -307,7 +307,7 @@ impl Store {
             }
             for path in released_paths {
                 append_grant_for_path(
-                    request, reader, now, &request.workspace.workspace_id, &path, &expired_ids, true, &mut events,
+                    request, reader, now, &request.workspace.workspace_id, &path, &expired_ids, &[], true, &mut events,
                 )?;
             }
             Ok(CommandPlan { events, response: expired_ids, http_status: 200 })
@@ -382,6 +382,7 @@ pub(crate) fn append_grant_for_path<T>(
     workspace_id: &str,
     relative_path: &str,
     ignored_reservation_ids: &[String],
+    ignored_wait_ids: &[String],
     grant_all_non_conflicting: bool,
     events: &mut Vec<NewEvent>,
 ) -> StoreResult<Option<WaitRecord>> {
@@ -402,7 +403,11 @@ pub(crate) fn append_grant_for_path<T>(
     };
 
     let mut waits = typed_records::<WaitRecord>(reader, CurrentAggregate::Wait, workspace_id)?;
-    waits.sort_by(|left, right| left.requested_at.cmp(&right.requested_at).then_with(|| left.wait_id.cmp(&right.wait_id)));
+    waits.sort_by(|left, right| {
+        left.requested_at.cmp(&right.requested_at)
+            .then_with(|| left.origin_event_seq.cmp(&right.origin_event_seq))
+            .then_with(|| left.wait_id.cmp(&right.wait_id))
+    });
     let notifications = typed_records::<serde_json::Value>(reader, CurrentAggregate::Notification, workspace_id)?;
     let mut sequence = notifications.iter()
         .filter_map(|notification| notification.get("sequence").and_then(serde_json::Value::as_u64))
@@ -413,6 +418,7 @@ pub(crate) fn append_grant_for_path<T>(
     let mut first = None;
     for mut wait in waits {
         if wait.status != "queued"
+            || ignored_wait_ids.contains(&wait.wait_id)
             || !scopes_conflict(&wait.relative_path, relative_path)
             || candidate_is_blocked(&wait.relative_path)
             || granted.iter().any(|scope| scopes_conflict(scope, &wait.relative_path))

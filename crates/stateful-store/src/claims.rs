@@ -218,6 +218,7 @@ impl Store {
                     &reservation.workspace_id,
                     &reservation.relative_path,
                     std::slice::from_ref(&reservation.reservation_id),
+                    &[],
                     true,
                     &mut events,
                 )?;

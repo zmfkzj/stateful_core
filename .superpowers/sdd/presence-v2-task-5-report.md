@@ -1,7 +1,7 @@
 # Task 5 Report
 
 ## Status
-Implementation and package verification are complete in `940f664`, pushed to `origin/presence-first-event-journal-v2`.
+Implementation and package verification are complete; the final commit and push contain the lifecycle correction follow-up.
 
 ## Verification
 The approved package command below is the current verification evidence.
@@ -26,3 +26,16 @@ None.
 - Candidate promotion checks all active reservation scopes; partial directory-claim release retains sibling claims/reservation; activity finalization passes the full release set; and all four replay paths are asserted.
 - Empty Adopt/Reapply ACKs, non-clearing AskUser/Abandon ACKs, and unmatched Reapply ACKs persist dedicated replayable acknowledgement records with decision, normalized files, and summary.
 - Duplicate/ancestor claim batches reject rather than silently omit a result. Dedicated behavioral tests also cover two-store duplicates, claimable cancellation promotion, queued-only grants, outbox identity collision, fence refresh action, released-fence owner grace, and expired callbacks.
+
+## Lifecycle correction follow-up
+
+### RED
+- `stateful sandbox run --fs build --network disabled --write-dir v2-lifecycle-red-retry --command 'cargo test -p stateful-store --test coordination_aggregates'` — 22 passed and 3 failed as intended: submission ordering used random `wait_id`; activity finalization re-granted an owner wait it had planned to cancel; and a duplicate fence ID produced two response entries.
+
+### GREEN
+- `stateful sandbox run --fs build --network disabled --write-dir v2-lifecycle-green --command 'cargo test -p stateful-store --test coordination_aggregates'` — 25 passed, 0 failed.
+- `stateful sandbox run --fs build --network disabled --write-dir v2-lifecycle-packages --command 'cargo test -p stateful-store -p stateful-core'` — 112 stateful-store tests and 41 stateful-core tests passed (153 total), 0 failed; both doc-test binaries passed with 0 tests.
+
+### Corrections
+- Wait promotion now uses journal submission sequence before UUID and activity finalization excludes every owner wait it plans to cancel from the same promotion pass.
+- Duplicate fence IDs are de-duplicated during release planning, yielding one transition and one response record.

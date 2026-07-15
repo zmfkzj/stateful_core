@@ -84,24 +84,40 @@ fn claim_acquisition_refresh_and_release_are_atomic_journaled_transitions() {
 }
 
 #[test]
-fn wait_grant_is_fifo_and_uses_wait_id_as_notification_identity() {
-    let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
-    let first = store.request_wait(&request("agent-1", Uuid::new_v4(), WaitRequest { relative_path: "src/lib.rs".into(), action: "write_file".into(), purpose: "First.".into(), blocking_agent_id: None }))
-        .expect("first wait queues").response;
-    let second = store.request_wait(&request("agent-2", Uuid::new_v4(), WaitRequest { relative_path: "src/lib.rs".into(), action: "write_file".into(), purpose: "Second.".into(), blocking_agent_id: None }))
-        .expect("second wait queues").response;
-    let grant = request("agent-1", Uuid::new_v4(), WaitGrant { relative_path: "src/lib.rs".into() });
-    let granted = store.grant_next_wait(&grant).expect("first waiter grants").response.expect("waiter granted");
-    let expected = if first.wait_id < second.wait_id { &first } else { &second };
-    let queued = if first.wait_id < second.wait_id { &second } else { &first };
-    assert_eq!(granted.wait_id, expected.wait_id);
+fn wait_grant_uses_submission_order_before_random_wait_id_and_replays() {
+    let mut store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    let (first, second) = loop {
+        let first_id = store.request_wait(&request("agent-1", Uuid::new_v4(), WaitRequest {
+            relative_path: "src/lib.rs".into(), action: "write_file".into(), purpose: "First.".into(), blocking_agent_id: None,
+        })).expect("first wait queues").response.wait_id;
+        let second_id = store.request_wait(&request("agent-2", Uuid::new_v4(), WaitRequest {
+            relative_path: "src/lib.rs".into(), action: "write_file".into(), purpose: "Second.".into(), blocking_agent_id: None,
+        })).expect("second wait queues").response.wait_id;
+        let first = store.wait("workspace-1", &first_id).expect("first wait reads").expect("first wait exists");
+        let second = store.wait("workspace-1", &second_id).expect("second wait reads").expect("second wait exists");
+        if first.wait_id > second.wait_id {
+            break (first, second);
+        }
+        store.cancel_wait(&request("agent-1", Uuid::new_v4(), WaitCancellation {
+            wait_id: first.wait_id,
+        })).expect("first retry wait cancels");
+        store.cancel_wait(&request("agent-2", Uuid::new_v4(), WaitCancellation {
+            wait_id: second.wait_id,
+        })).expect("second retry wait cancels");
+    };
+
+    let granted = store.grant_next_wait(&request("agent-3", Uuid::new_v4(), WaitGrant {
+        relative_path: "src/lib.rs".into(),
+    })).expect("first submitted wait grants").response.expect("waiter grants");
+
+    assert!(first.origin_event_seq < second.origin_event_seq);
+    assert_eq!(granted.wait_id, first.wait_id, "submission sequence wins before random wait ID");
     assert_eq!(
-        store.pending_notifications(&expected.agent_id, "workspace-1").expect("notifications read")[0].notification_id,
-        expected.wait_id,
+        store.pending_notifications(&first.agent_id, "workspace-1").expect("notifications read")[0].notification_id,
+        first.wait_id,
     );
-    assert!(store.grant_next_wait(&request("agent-1", Uuid::new_v4(), WaitGrant { relative_path: "src/lib.rs".into() }))
-        .expect("active reservation blocks second grant").response.is_none());
-    assert_eq!(store.wait("workspace-1", &queued.wait_id).expect("wait reads").expect("other remains").status, "queued");
+    assert_eq!(store.wait("workspace-1", &second.wait_id).expect("wait reads").expect("other remains").status, "queued");
+    store.rebuild_projections().expect("FIFO grant replays");
 }
 
 #[test]
@@ -385,6 +401,31 @@ fn activity_finalization_promotes_after_all_owner_reservations_are_planned_for_r
 }
 
 #[test]
+fn activity_finalization_cancels_its_overlapping_wait_before_promoting_successor() {
+    let mut store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    store.start_activity(&request("agent-1", Uuid::new_v4(), ActivityStart {
+        phase: stateful_core::PresencePhase::Editing,
+    })).expect("activity starts");
+    store.declare_reservation(&request("agent-1", Uuid::new_v4(), declaration("src/a.rs")))
+        .expect("owner reservation declares");
+    let owner_wait = store.request_wait(&request("agent-1", Uuid::new_v4(), WaitRequest {
+        relative_path: "src/".into(), action: "write_directory".into(), purpose: "Owner wait.".into(),
+        blocking_agent_id: Some("agent-2".into()),
+    })).expect("owner wait queues").response;
+    let successor_wait = store.request_wait(&request("agent-2", Uuid::new_v4(), WaitRequest {
+        relative_path: "src/".into(), action: "write_directory".into(), purpose: "Successor wait.".into(),
+        blocking_agent_id: Some("agent-1".into()),
+    })).expect("successor wait queues").response;
+
+    store.finalize_activity(&request("agent-1", Uuid::new_v4(), ActivityFinalization {}))
+        .expect("activity finalizes");
+
+    assert_eq!(store.wait("workspace-1", &owner_wait.wait_id).expect("owner wait reads").expect("wait exists").status, "canceled");
+    assert_eq!(store.wait("workspace-1", &successor_wait.wait_id).expect("successor wait reads").expect("wait exists").status, "claimable");
+    store.rebuild_projections().expect("finalization cleanup replays");
+}
+
+#[test]
 fn empty_adopt_and_reapply_acks_are_journaled_without_clearing_observations() {
     let mut store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
     store.record_human_observation(&request("agent-2", Uuid::new_v4(), HumanObservationInput {
@@ -603,6 +644,29 @@ fn duplicate_fence_refreshes_the_same_fence_with_the_new_action() {
         store.write_fence("workspace-1", &original.fence_id).expect("fence reads").expect("fence exists").action,
         "write_directory",
     );
+}
+
+#[test]
+fn duplicate_fence_release_id_emits_one_transition_and_receipted_result() {
+    let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    let fence = store.acquire_write_fences(&request("agent-1", Uuid::new_v4(), WriteFenceAcquire {
+        paths: vec!["src/lib.rs".into()], action: "write_file".into(),
+    })).expect("fence acquires").response.fences.remove(0);
+    let release = request("agent-1", Uuid::new_v4(), WriteFenceRelease {
+        fence_ids: vec![fence.fence_id.clone(), fence.fence_id.clone()],
+    });
+    let before = store.journal_event_count().expect("journal count");
+
+    let released = store.release_write_fences(&release).expect("duplicate fence IDs release once");
+
+    assert_eq!(released.response.len(), 1);
+    assert_eq!(released.response[0].status, "released");
+    assert_eq!(store.journal_event_count().expect("journal count"), before + 1);
+    assert_eq!(
+        store.journal_event_types_for_request(release.request_id).expect("release event types"),
+        vec!["write_fence.released"],
+    );
+    assert!(store.release_write_fences(&release).expect("receipt replays").duplicate);
 }
 
 #[test]

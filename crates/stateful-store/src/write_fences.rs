@@ -3,6 +3,7 @@ use crate::{
     reservations::{expired, normalized_scope, record_from_current, scopes_conflict, timestamp, typed_records},
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use serde_json::json;
 use stateful_core::{EventData, EventPayload, NewEvent, RequestEnvelope, WriteFenceEvent};
 use time::{Duration, OffsetDateTime};
@@ -121,7 +122,11 @@ impl Store {
             let existing = typed_records::<WriteFenceRecord>(reader, CurrentAggregate::WriteFence, &request.workspace.workspace_id)?;
             let mut released = Vec::new();
             let mut events = Vec::new();
+            let mut processed = HashSet::with_capacity(fence_ids.len());
             for fence_id in &fence_ids {
+                if !processed.insert(fence_id) {
+                    continue;
+                }
                 let mut fence = existing.iter().find(|fence| fence.fence_id == *fence_id)
                     .cloned().ok_or(StoreError::ClaimNotFound)?;
                 if fence.agent_id != request.agent.agent_id { return Err(StoreError::ClaimOwnerMismatch); }
