@@ -775,7 +775,14 @@ fn migration_seed_projection_table(event: &JournalEvent) -> Option<&'static str>
         EventPayload::Migration(MigrationEvent::WriteFenceSnapshotSeeded(_)) => Some("write_fence_current"),
         EventPayload::Migration(MigrationEvent::HumanObservationSnapshotSeeded(_)) => Some("human_observation_current"),
         EventPayload::Migration(MigrationEvent::LegacyHandoffSnapshotSeeded(_)) => Some("handoff_current"),
-        EventPayload::Migration(MigrationEvent::DeliverySnapshotSeeded(_)) => Some("notification_current"),
+        EventPayload::Migration(MigrationEvent::DeliverySnapshotSeeded(data)) => match data
+            .data
+            .get("delivery_kind")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("outbox") => Some("delivery_current"),
+            _ => Some("notification_current"),
+        },
         _ => None,
     }
 }

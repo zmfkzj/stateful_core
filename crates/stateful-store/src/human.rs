@@ -14,6 +14,7 @@ use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 const EPHEMERAL_OBSERVATION_TTL: Duration = Duration::minutes(5);
+const HUMAN_WRITE_OBSERVATION_TTL: Duration = Duration::hours(24);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -131,7 +132,11 @@ impl Store {
                 observed_at: timestamp(observed_at)?,
                 summary: payload.summary,
                 status: if attributed { "reconciled".into() } else { "pending".into() },
-                expires_at: payload.kind.is_ephemeral().then(|| timestamp(observed_at + EPHEMERAL_OBSERVATION_TTL)).transpose()?,
+                expires_at: Some(timestamp(observed_at + if payload.kind.is_ephemeral() {
+                    EPHEMERAL_OBSERVATION_TTL
+                } else {
+                    HUMAN_WRITE_OBSERVATION_TTL
+                })?),
                 reconciled_at: attributed.then(|| timestamp(observed_at)).transpose()?,
                 decision: None,
                 reconciled_by_agent_id: attributed_owner,

@@ -30,7 +30,8 @@ pub use journal::{
     CommandOutcome, CommandPlan, CurrentAggregate, CurrentRecord, ProjectionReader, ReplayReport,
 };
 pub use notifications::{
-    DeliveryAttempt, DeliveryRecord, NotificationCreate, NotificationDelivery, NotificationRecord,
+    DeliveryAttempt, DeliveryRecord, NotificationAcknowledgement, NotificationCreate,
+    NotificationDelivery, NotificationRecord,
 };
 pub use outbox::{OutboxDelivery, OutboxEntry, OutboxRecord, SyncStatus};
 pub use presence::{

@@ -36,6 +36,11 @@ pub struct NotificationDelivery {
     pub retry_at: Option<OffsetDateTime>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationAcknowledgement {
+    pub sequence: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationRecord {
     pub notification_id: String,
@@ -149,6 +154,12 @@ impl Store {
             let notifications = typed_records::<NotificationRecord>(reader, CurrentAggregate::Notification, &request.workspace.workspace_id)?;
             let notification = notifications.into_iter().find(|notification| notification.notification_id == payload.notification_id)
                 .ok_or(StoreError::ReservationRequestNotFound)?;
+            if notification.target_agent_id != request.agent.agent_id {
+                return Err(StoreError::V2(stateful_core::V2Error::new(
+                    "notification_target_mismatch",
+                    "Only the notification target may acknowledge delivery.",
+                )));
+            }
             let mut delivery = typed_records::<DeliveryRecord>(reader, CurrentAggregate::Delivery, &request.workspace.workspace_id)?
                 .into_iter().find(|delivery| delivery.notification_id == payload.notification_id)
                 .unwrap_or(DeliveryRecord {
@@ -185,6 +196,74 @@ impl Store {
                 events.push(notification_event(request, 1, now, NotificationEvent::Delivered, &notification)?);
             }
             Ok(CommandPlan { events, response: delivery, http_status: 200 })
+        })
+    }
+
+    pub fn acknowledge_notifications(
+        &self,
+        request: &RequestEnvelope<NotificationAcknowledgement>,
+    ) -> StoreResult<CommandOutcome<Vec<String>>> {
+        let now = self.clock.now();
+        let sequence = request.payload.sequence;
+        self.execute_command(request, "notification.acknowledge", |reader| {
+            let notifications = typed_records::<NotificationRecord>(
+                reader,
+                CurrentAggregate::Notification,
+                &request.workspace.workspace_id,
+            )?;
+            let deliveries = typed_records::<DeliveryRecord>(
+                reader,
+                CurrentAggregate::Delivery,
+                &request.workspace.workspace_id,
+            )?;
+            let mut events = Vec::new();
+            let mut acknowledged = Vec::new();
+            for mut notification in notifications.into_iter().filter(|notification| {
+                notification.target_agent_id == request.agent.agent_id
+                    && notification.status == "queued"
+                    && notification.sequence <= sequence
+            }) {
+                let mut delivery = deliveries
+                    .iter()
+                    .find(|delivery| delivery.notification_id == notification.notification_id)
+                    .cloned()
+                    .unwrap_or(DeliveryRecord {
+                        delivery_id: notification.notification_id.clone(),
+                        notification_id: notification.notification_id.clone(),
+                        workspace_id: request.workspace.workspace_id.clone(),
+                        status: "queued".into(),
+                        attempts: 0,
+                        last_error: None,
+                        retry_at: None,
+                        delivered_at: None,
+                        origin_event_seq: 0,
+                    });
+                if delivery.status != "delivered" {
+                    delivery.status = "delivered".into();
+                    delivery.attempts += 1;
+                    delivery.last_error = None;
+                    delivery.retry_at = None;
+                    delivery.delivered_at = Some(timestamp(now)?);
+                    events.push(notification_delivery_event(
+                        request,
+                        events.len() as u32,
+                        now,
+                        RecoveryEvent::Delivered,
+                        &delivery,
+                        &notification,
+                    )?);
+                }
+                notification.status = "delivered".into();
+                events.push(notification_event(
+                    request,
+                    events.len() as u32,
+                    now,
+                    NotificationEvent::Delivered,
+                    &notification,
+                )?);
+                acknowledged.push(notification.notification_id);
+            }
+            Ok(CommandPlan { events, response: acknowledged, http_status: 200 })
         })
     }
 

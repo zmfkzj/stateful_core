@@ -654,7 +654,7 @@ fn stale_notification_callback_cannot_deliver_a_coalesced_newer_version() {
     assert_ne!(first.sequence, second.sequence);
     store
         .record_notification_delivery(&request(
-            "agent-1",
+            "agent-2",
             Uuid::new_v4(),
             NotificationDelivery {
                 notification_id: first.notification_id,
@@ -784,7 +784,7 @@ fn notification_lifecycle_transport_never_advances_context_version() {
     for outcome in [DeliveryAttempt::Attempted, DeliveryAttempt::Failed, DeliveryAttempt::Delivered] {
         store
             .record_notification_delivery(&request(
-                "agent-1",
+                "agent-2",
                 Uuid::new_v4(),
                 NotificationDelivery {
                     notification_id: coalesced.notification_id.clone(),

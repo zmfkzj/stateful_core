@@ -1,4 +1,6 @@
-use crate::{CommandOutcome, CommandPlan, ProjectionReader, Store, StoreResult};
+use crate::{
+    CommandOutcome, CommandPlan, CurrentAggregate, ProjectionReader, Store, StoreResult,
+};
 use rusqlite::{OptionalExtension, params};
 use serde_json::json;
 use stateful_core::{
@@ -7,7 +9,7 @@ use stateful_core::{
     ReservationEvent, WaitEvent, WriteFenceEvent, EXPLICIT_HANDOFF_RELEVANCE,
     FALLBACK_HANDOFF_RELEVANCE,
 };
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 impl Store {
@@ -152,11 +154,7 @@ impl Store {
 
     pub(crate) fn startup_housekeeping(&mut self) -> StoreResult<()> {
         let workspaces = {
-            let mut statement = self.conn.prepare(
-                "SELECT workspace_id FROM presence_current
-                 UNION SELECT workspace_id FROM handoff_current
-                 UNION SELECT workspace_id FROM write_intent_current",
-            )?;
+            let mut statement = self.conn.prepare("SELECT DISTINCT workspace_id FROM journal_events")?;
             statement
                 .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?
@@ -173,9 +171,58 @@ impl Store {
 
     fn maintain_workspace(&mut self, workspace_id: &str) -> StoreResult<()> {
         let request = self.system_maintenance_request(workspace_id)?;
-        self.expire_current_state(&request)?;
-        self.expire_started_write_intents(&maintenance_request(&request))?;
+        if self.has_stale_current_state(workspace_id, self.clock.now())? {
+            self.expire_current_state(&maintenance_request(&request))?;
+        }
+        if self.has_expired_current_record(workspace_id, CurrentAggregate::Reservation, &["active"], "expires_at", None)?
+            || self.has_expired_current_record(workspace_id, CurrentAggregate::Wait, &["claimable"], "reservation_expires_at", None)?
+        {
+            self.expire_reservations(&maintenance_request(&request))?;
+        }
+        if self.has_expired_current_record(workspace_id, CurrentAggregate::Claim, &["active"], "expires_at", None)? {
+            self.expire_claims(&maintenance_request(&request))?;
+        }
+        if self.has_expired_current_record(workspace_id, CurrentAggregate::WriteFence, &["active"], "expires_at", None)? {
+            self.expire_write_fences(&maintenance_request(&request))?;
+        }
+        if self.has_expired_current_record(workspace_id, CurrentAggregate::ReadObservation, &["stabilized"], "expires_at", None)? {
+            self.expire_read_observations(&maintenance_request(&request))?;
+        }
+        if self.has_expired_current_record(workspace_id, CurrentAggregate::WriteIntent, &["started"], "started_at", Some(Duration::minutes(5)))? {
+            self.expire_started_write_intents(&maintenance_request(&request))?;
+        }
+        if self.has_expired_current_record(workspace_id, CurrentAggregate::HumanObservation, &["pending"], "expires_at", None)? {
+            self.expire_human_observations(&maintenance_request(&request))?;
+        }
+        if self.has_expired_current_record(workspace_id, CurrentAggregate::Notification, &["queued"], "expires_at", None)? {
+            self.expire_notifications(&maintenance_request(&request))?;
+        }
+        if self.has_expired_current_record(workspace_id, CurrentAggregate::ContextDelivery, &["pending", "superseded"], "expires_at", None)? {
+            self.expire_context_deliveries(&maintenance_request(&request))?;
+        }
         Ok(())
+    }
+
+    fn has_expired_current_record(
+        &self,
+        workspace_id: &str,
+        aggregate: CurrentAggregate,
+        statuses: &[&str],
+        timestamp_field: &str,
+        grace: Option<Duration>,
+    ) -> StoreResult<bool> {
+        let now = self.clock.now();
+        Ok(self.current_records(aggregate, workspace_id)?.into_iter().any(|record| {
+            let Some(status) = record.payload.get("status").and_then(serde_json::Value::as_str) else {
+                return false;
+            };
+            let Some(timestamp) = record.payload.get(timestamp_field).and_then(serde_json::Value::as_str) else {
+                return false;
+            };
+            statuses.contains(&status)
+                && OffsetDateTime::parse(timestamp, &Rfc3339)
+                    .is_ok_and(|timestamp| timestamp + grace.unwrap_or(Duration::ZERO) <= now)
+        }))
     }
     fn system_maintenance_request(&self, workspace_id: &str) -> StoreResult<RequestEnvelope<()>> {
         let identity = self.conn.query_row(

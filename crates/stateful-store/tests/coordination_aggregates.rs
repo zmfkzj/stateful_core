@@ -6,10 +6,10 @@ use stateful_core::{
 };
 use stateful_store::{
     ActivityFinalization, ActivityStart, ClaimAcquire, ClaimPath, Clock, DeliveryAttempt, FixedClock,
-    HumanObservationConfidence, HumanObservationInput, HumanObservationKind, NotificationCreate,
-    NotificationDelivery, OutboxDelivery, OutboxEntry, ReconciliationAckInput, ReservationDeclaration,
-    ReservationHeartbeat, ReservationRelease, Store, SyncStatus, WaitCancellation, WaitGrant, WaitRequest,
-    WriteFenceAcquire, WriteFenceRelease,
+    HumanObservationConfidence, HumanObservationInput, HumanObservationKind, NotificationAcknowledgement,
+    NotificationCreate, NotificationDelivery, OutboxDelivery, OutboxEntry, ReconciliationAckInput,
+    ReservationDeclaration, ReservationHeartbeat, ReservationRelease, Store, SyncStatus, WaitCancellation,
+    WaitGrant, WaitRequest, WriteFenceAcquire, WriteFenceRelease,
 };
 use std::sync::{Arc, Mutex};
 use time::{Duration, OffsetDateTime, macros::datetime};
@@ -161,6 +161,73 @@ fn expiring_a_reservation_promotes_the_next_waiter() {
 }
 
 #[test]
+fn maintenance_expires_reservations_in_workspaces_without_presence() {
+    let clock = MutableClock::new(NOW);
+    let mut store = Store::open_in_memory_with_clock(clock.clone()).expect("store opens");
+    let mut request = request("agent-1", Uuid::new_v4(), declaration("src/lib.rs"));
+    request.workspace.workspace_id = "workspace-2".into();
+    let reservation = store
+        .declare_reservation(&request)
+        .expect("reservation declares")
+        .response;
+
+    clock.advance(Duration::minutes(16));
+    store.run_maintenance().expect("maintenance succeeds");
+    assert_eq!(
+        store
+            .reservation("workspace-2", &reservation.reservation_id)
+            .expect("reservation reads")
+            .expect("reservation exists")
+            .status,
+        "expired",
+    );
+    let events_after_expiry = store.journal_event_count().expect("journal count");
+    store.run_maintenance().expect("repeated maintenance succeeds");
+    assert_eq!(
+        store.journal_event_count().expect("journal count"),
+        events_after_expiry,
+        "repeated maintenance is event-idempotent",
+    );
+    store.rebuild_projections().expect("maintenance replays");
+}
+
+#[test]
+fn maintenance_expires_human_writes_so_they_no_longer_block() {
+    let clock = MutableClock::new(NOW);
+    let mut store = Store::open_in_memory_with_clock(clock.clone()).expect("store opens");
+    store
+        .record_human_observation(&request(
+            "agent-2",
+            Uuid::new_v4(),
+            HumanObservationInput {
+                relative_path: "src/lib.rs".into(),
+                kind: HumanObservationKind::Save,
+                confidence: HumanObservationConfidence::High,
+                source: "watcher".into(),
+                summary: "human save".into(),
+                observed_at: None,
+            },
+        ))
+        .expect("human write records");
+    assert_eq!(
+        store
+            .unreconciled_human_observations("workspace-1", &["src/lib.rs".into()])
+            .expect("human blocks load")
+            .len(),
+        1,
+    );
+
+    clock.advance(Duration::hours(24));
+    store.run_maintenance().expect("maintenance succeeds");
+    assert!(
+        store
+            .unreconciled_human_observations("workspace-1", &["src/lib.rs".into()])
+            .expect("expired human writes no longer block")
+            .is_empty(),
+    );
+}
+
+#[test]
 fn releasing_a_directory_reservation_promotes_nonconflicting_child_waiters() {
     let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
     let reservation = store.declare_reservation(&request("agent-1", Uuid::new_v4(), declaration("src/")))
@@ -240,10 +307,10 @@ fn delivery_callbacks_are_idempotent_and_terminal_activity_emits_no_notification
     let notification = store.create_notification(&request("agent-1", Uuid::new_v4(), NotificationCreate {
         target_agent_id: "agent-2".into(), kind: "context".into(), payload: json!({"v": 1}), coalesce_key: Some("context-agent-2".into()),
     })).expect("notification queues").response;
-    let delivery = request("agent-1", Uuid::new_v4(), NotificationDelivery { notification_id: notification.notification_id.clone(), sequence: notification.sequence, outcome: DeliveryAttempt::Delivered, error: None, retry_at: None });
+    let delivery = request("agent-2", Uuid::new_v4(), NotificationDelivery { notification_id: notification.notification_id.clone(), sequence: notification.sequence, outcome: DeliveryAttempt::Delivered, error: None, retry_at: None });
     store.record_notification_delivery(&delivery).expect("delivery records");
     let before = store.journal_event_count().expect("journal count");
-    store.record_notification_delivery(&request("agent-1", Uuid::new_v4(), NotificationDelivery { notification_id: notification.notification_id.clone(), sequence: notification.sequence, outcome: DeliveryAttempt::Delivered, error: None, retry_at: None }))
+    store.record_notification_delivery(&request("agent-2", Uuid::new_v4(), NotificationDelivery { notification_id: notification.notification_id.clone(), sequence: notification.sequence, outcome: DeliveryAttempt::Delivered, error: None, retry_at: None }))
         .expect("repeated callback is inert");
     assert_eq!(store.journal_event_count().expect("journal count"), before);
     store.start_activity(&request("agent-1", Uuid::new_v4(), ActivityStart { phase: stateful_core::PresencePhase::Editing })).expect("activity starts");
@@ -251,6 +318,76 @@ fn delivery_callbacks_are_idempotent_and_terminal_activity_emits_no_notification
     store.finalize_activity(&request("agent-1", Uuid::new_v4(), ActivityFinalization {})).expect("activity finalizes");
     assert_eq!(store.journal_event_count().expect("journal count"), before_finalize + 1);
     store.rebuild_projections().expect("all aggregates replay");
+}
+
+#[test]
+fn notification_acknowledgements_are_bound_to_target_and_sequence() {
+    let mut store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    let first = store
+        .create_notification(&request(
+            "agent-1",
+            Uuid::new_v4(),
+            NotificationCreate {
+                target_agent_id: "agent-2".into(),
+                kind: "reservation".into(),
+                payload: json!({"wait_id": "wait-1"}),
+                coalesce_key: None,
+            },
+        ))
+        .expect("first notification queues")
+        .response;
+    let second = store
+        .create_notification(&request(
+            "agent-1",
+            Uuid::new_v4(),
+            NotificationCreate {
+                target_agent_id: "agent-2".into(),
+                kind: "reservation".into(),
+                payload: json!({"wait_id": "wait-2"}),
+                coalesce_key: None,
+            },
+        ))
+        .expect("second notification queues")
+        .response;
+
+    assert!(
+        store
+            .acknowledge_notifications(&request(
+                "agent-1",
+                Uuid::new_v4(),
+                NotificationAcknowledgement { sequence: first.sequence },
+            ))
+            .expect("foreign acknowledgement is safe")
+            .response
+            .is_empty(),
+    );
+    let acknowledged = store
+        .acknowledge_notifications(&request(
+            "agent-2",
+            Uuid::new_v4(),
+            NotificationAcknowledgement { sequence: first.sequence },
+        ))
+        .expect("target acknowledgement succeeds");
+    assert_eq!(acknowledged.response, vec![first.notification_id]);
+    assert_eq!(
+        store
+            .pending_notifications("agent-2", "workspace-1")
+            .expect("pending notifications load")
+            .into_iter()
+            .map(|notification| notification.notification_id)
+            .collect::<Vec<_>>(),
+        vec![second.notification_id],
+    );
+    let before = store.journal_event_count().expect("journal count");
+    store
+        .acknowledge_notifications(&request(
+            "agent-2",
+            Uuid::new_v4(),
+            NotificationAcknowledgement { sequence: first.sequence },
+        ))
+        .expect("repeated acknowledgement is inert");
+    assert_eq!(store.journal_event_count().expect("journal count"), before);
+    store.rebuild_projections().expect("acknowledgements replay");
 }
 
 #[test]
@@ -707,7 +844,7 @@ fn expired_notification_callback_is_inert() {
     store.expire_notifications(&request("agent-1", Uuid::new_v4(), ())).expect("notification expires");
     let before = store.journal_event_count().expect("journal count");
 
-    let callback = store.record_notification_delivery(&request("agent-1", Uuid::new_v4(), NotificationDelivery {
+    let callback = store.record_notification_delivery(&request("agent-2", Uuid::new_v4(), NotificationDelivery {
         notification_id: notification.notification_id.clone(), sequence: notification.sequence, outcome: DeliveryAttempt::Delivered, error: None, retry_at: None,
     })).expect("late callback is accepted inertly");
 

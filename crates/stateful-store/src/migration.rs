@@ -424,8 +424,37 @@ fn append_reservation_seeds(connection: &Connection, contexts: &BTreeMap<String,
     let mut statement = connection.prepare("SELECT reservation_id, agent_id, workspace_id, purpose, scopes_json, status, declared_at, expires_at FROM reservations ORDER BY workspace_id, reservation_id")?;
     for row in statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?, row.get::<_, Option<String>>(7)?)))? {
         let (reservation_id, agent_id, workspace_id, purpose, scopes_json, status, declared_at, expires_at) = row?;
+        let scopes = serde_json::from_str::<Value>(&scopes_json)?;
+        let scope = scopes.as_array().and_then(|scopes| scopes.first());
+        let relative_path = scope
+            .and_then(|scope| scope.get("path"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let action = if scope
+            .and_then(|scope| scope.get("kind"))
+            .and_then(Value::as_str)
+            == Some("directory")
+        {
+            "write_directory"
+        } else {
+            "write_file"
+        };
+        let max_expires_at = expires_at.clone().unwrap_or_else(|| declared_at.clone());
         pending.push(PendingEvent {
-            payload: EventPayload::Migration(MigrationEvent::ReservationSnapshotSeeded(seed_data("reservation", &reservation_id, json!({"agent_id": agent_id, "purpose": purpose, "scopes": serde_json::from_str::<Value>(&scopes_json)?, "status": status, "declared_at": declared_at, "expires_at": expires_at})))),
+            payload: EventPayload::Migration(MigrationEvent::ReservationSnapshotSeeded(seed_data("reservation", &reservation_id, json!({
+                "reservation_id": reservation_id,
+                "agent_id": agent_id,
+                "workspace_id": workspace_id,
+                "relative_path": relative_path,
+                "action": action,
+                "purpose": purpose,
+                "status": status,
+                "declared_at": declared_at,
+                "expires_at": expires_at,
+                "max_expires_at": max_expires_at,
+                "wait_id": null,
+                "scopes": scopes,
+            })))),
             occurred_at: declared_at,
             metadata: metadata(&workspace_id, &agent_id, None, None, None, None, contexts),
         });
@@ -436,7 +465,7 @@ fn append_reservation_seeds(connection: &Connection, contexts: &BTreeMap<String,
 fn append_claim_seeds(connection: &Connection, now: &str, contexts: &BTreeMap<String, Metadata>, pending: &mut Vec<PendingEvent>) -> StoreResult<()> {
     let mut statement = connection.prepare("SELECT claim_id, reservation_id, agent_id, workspace_id, repo_id, relative_path, absolute_path, purpose, action, status, expires_at, observed_exists, observed_content_hash FROM claims ORDER BY workspace_id, claim_id")?;
     for row in statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, Option<String>>(5)?, row.get::<_, Option<String>>(6)?, row.get::<_, Option<String>>(7)?, row.get::<_, String>(8)?, row.get::<_, String>(9)?, row.get::<_, Option<String>>(10)?, row.get::<_, Option<i64>>(11)?, row.get::<_, Option<String>>(12)?)))? {
-        let (claim_id, reservation_id, agent_id, workspace_id, repo_id, relative_path, absolute_path, purpose, action, status, expires_at, observed_exists, observed_content_hash) = row?;
+        let (claim_id, reservation_id, agent_id, workspace_id, repo_id, relative_path, _absolute_path, _purpose, action, status, expires_at, observed_exists, observed_content_hash) = row?;
         let agent_id = agent_id.unwrap_or_else(|| "unknown".into());
         let status = if status == "active"
             && expires_at.as_deref().map(parse_timestamp).transpose()?.is_some_and(|expires_at| expires_at <= parse_timestamp(now).expect("preflight validated migration clock"))
@@ -445,10 +474,29 @@ fn append_claim_seeds(connection: &Connection, now: &str, contexts: &BTreeMap<St
         } else {
             status.as_str()
         };
-        let legacy_base_observation = json!({"exists": observed_exists, "content_hash": observed_content_hash});
+        let legacy_base_observation = json!({"exists": observed_exists, "content_hash": observed_content_hash.clone()});
+        let expires_at = expires_at.unwrap_or_else(|| now.into());
+        let reservation_id = reservation_id.unwrap_or_else(|| format!("legacy-reservation-{claim_id}"));
+        let relative_path = relative_path.unwrap_or_else(|| "unknown".into());
+        let observation = observed_exists.map(|exists| json!({
+            "exists": exists != 0,
+            "content_hash": observed_content_hash,
+        }));
         pending.push(PendingEvent {
-            payload: EventPayload::Migration(MigrationEvent::ClaimSnapshotSeeded(seed_data("claim", &claim_id, json!({"reservation_id": reservation_id, "relative_path": relative_path, "absolute_path": absolute_path, "purpose": purpose, "action": action, "status": status, "expires_at": expires_at, "legacy_base_observation": legacy_base_observation})))),
-            occurred_at: expires_at.clone().unwrap_or_else(|| "1970-01-01T00:00:00Z".into()),
+            payload: EventPayload::Migration(MigrationEvent::ClaimSnapshotSeeded(seed_data("claim", &claim_id, json!({
+                "claim_id": claim_id,
+                "reservation_id": reservation_id,
+                "agent_id": agent_id,
+                "workspace_id": workspace_id,
+                "relative_path": relative_path,
+                "action": action,
+                "status": status,
+                "acquired_at": now,
+                "expires_at": expires_at,
+                "observation": observation,
+                "legacy_base_observation": legacy_base_observation,
+            })))),
+            occurred_at: expires_at.clone(),
             metadata: metadata(&workspace_id, &agent_id, repo_id, None, None, None, contexts),
         });
     }
@@ -461,8 +509,22 @@ fn append_wait_seeds(connection: &Connection, contexts: &BTreeMap<String, Metada
     rows.sort_by_key(|row| (row.3.clone(), parse_timestamp(&row.11).expect("preflight validated wait timestamp"), row.0.clone()));
     for row in rows {
         let (wait_id, request_id, agent_id, workspace_id, repo_id, worktree_id, root, branch, relative_path, action, status, requested_at, reservation_expires_at, blocking_agent_id, purpose) = row;
+        let status = if status == "waiting" { "queued" } else { status.as_str() };
         pending.push(PendingEvent {
-            payload: EventPayload::Migration(MigrationEvent::WaitSnapshotSeeded(seed_data("wait", &wait_id, json!({"request_id": request_id, "relative_path": relative_path, "action": action, "status": status, "reservation_expires_at": reservation_expires_at, "blocking_agent_id": blocking_agent_id, "purpose": purpose})))),
+            payload: EventPayload::Migration(MigrationEvent::WaitSnapshotSeeded(seed_data("wait", &wait_id, json!({
+                "wait_id": wait_id,
+                "request_id": request_id.unwrap_or_else(|| format!("migration-{wait_id}")),
+                "agent_id": agent_id,
+                "workspace_id": workspace_id,
+                "relative_path": relative_path,
+                "action": action,
+                "status": status,
+                "requested_at": requested_at,
+                "reservation_expires_at": reservation_expires_at,
+                "blocking_agent_id": blocking_agent_id,
+                "reservation_id": null,
+                "purpose": purpose,
+            })))),
             occurred_at: requested_at,
             metadata: metadata(&workspace_id, &agent_id, repo_id, worktree_id, root, branch, contexts),
         });
@@ -482,7 +544,17 @@ fn append_fence_seeds(connection: &Connection, now: &str, contexts: &BTreeMap<St
             "active"
         };
         pending.push(PendingEvent {
-            payload: EventPayload::Migration(MigrationEvent::WriteFenceSnapshotSeeded(seed_data("write_fence", &fence_id, json!({"relative_path": relative_path, "action": action, "status": status, "acquired_at": acquired_at, "expires_at": expires_at, "released_at": released_at})))),
+            payload: EventPayload::Migration(MigrationEvent::WriteFenceSnapshotSeeded(seed_data("write_fence", &fence_id, json!({
+                "fence_id": fence_id,
+                "agent_id": agent_id,
+                "workspace_id": workspace_id,
+                "relative_path": relative_path,
+                "action": action,
+                "status": status,
+                "acquired_at": acquired_at,
+                "expires_at": expires_at,
+                "released_at": released_at,
+            })))),
             occurred_at: acquired_at,
             metadata: metadata(&workspace_id, &agent_id, None, None, None, None, contexts),
         });
@@ -493,9 +565,29 @@ fn append_fence_seeds(connection: &Connection, now: &str, contexts: &BTreeMap<St
 fn append_human_seeds(connection: &Connection, contexts: &BTreeMap<String, Metadata>, pending: &mut Vec<PendingEvent>) -> StoreResult<()> {
     let mut statement = connection.prepare("SELECT observation_id, workspace_id, relative_path, kind, source, confidence, observed_exists, observed_content_hash, observed_at, summary, expires_at, reconciled_at, reconcile_decision, reconciled_by_agent_id FROM human_observations ORDER BY workspace_id, observation_id")?;
     for row in statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, i64>(6)?, row.get::<_, Option<String>>(7)?, row.get::<_, String>(8)?, row.get::<_, String>(9)?, row.get::<_, Option<String>>(10)?, row.get::<_, Option<String>>(11)?, row.get::<_, Option<String>>(12)?, row.get::<_, Option<String>>(13)?)))? {
-        let (observation_id, workspace_id, relative_path, kind, source, confidence, observed_exists, observed_content_hash, observed_at, summary, expires_at, reconciled_at, reconcile_decision, reconciled_by_agent_id) = row?;
+        let (observation_id, workspace_id, relative_path, kind, source, confidence, _observed_exists, _observed_content_hash, observed_at, summary, expires_at, reconciled_at, reconcile_decision, reconciled_by_agent_id) = row?;
+        let kind = match kind.as_str() {
+            "save" | "change" | "delete" | "presence" | "dirty" => kind,
+            _ => "change".into(),
+        };
+        let confidence = if confidence == "high" { "high" } else { "low" };
+        let status = if reconciled_at.is_some() { "reconciled" } else { "pending" };
         pending.push(PendingEvent {
-            payload: EventPayload::Migration(MigrationEvent::HumanObservationSnapshotSeeded(seed_data("human_observation", &observation_id, json!({"relative_path": relative_path, "kind": kind, "source": source, "confidence": confidence, "observed_exists": observed_exists == 1, "observed_content_hash": observed_content_hash, "summary": summary, "expires_at": expires_at, "reconciled_at": reconciled_at, "reconcile_decision": reconcile_decision, "reconciled_by_agent_id": reconciled_by_agent_id})))),
+            payload: EventPayload::Migration(MigrationEvent::HumanObservationSnapshotSeeded(seed_data("human_observation", &observation_id, json!({
+                "observation_id": observation_id,
+                "workspace_id": workspace_id,
+                "relative_path": relative_path,
+                "kind": kind,
+                "source": source,
+                "confidence": confidence,
+                "observed_at": observed_at,
+                "summary": summary,
+                "status": status,
+                "expires_at": expires_at,
+                "reconciled_at": reconciled_at,
+                "decision": reconcile_decision,
+                "reconciled_by_agent_id": reconciled_by_agent_id,
+            })))),
             occurred_at: observed_at,
             metadata: metadata(&workspace_id, "unknown", None, None, None, None, contexts),
         });
@@ -521,19 +613,58 @@ fn append_delivery_seeds(connection: &Connection, contexts: &BTreeMap<String, Me
     let mut notifications = connection.prepare("SELECT notification_id, sequence, target_agent_id, workspace_id, kind, payload_json, status, created_at, expires_at FROM notifications ORDER BY workspace_id, sequence, notification_id")?;
     for row in notifications.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?, row.get::<_, String>(7)?, row.get::<_, Option<String>>(8)?)))? {
         let (notification_id, sequence, target_agent_id, workspace_id, kind, payload_json, status, created_at, expires_at) = row?;
+        let status = if status == "pending" { "queued" } else { status.as_str() };
         let primary_key = format!("notification:{notification_id}");
         pending.push(PendingEvent {
-            payload: EventPayload::Migration(MigrationEvent::DeliverySnapshotSeeded(seed_data("delivery", &primary_key, json!({"delivery_kind": "notification", "notification_id": notification_id, "sequence": sequence, "target_agent_id": target_agent_id, "kind": kind, "payload": serde_json::from_str::<Value>(&payload_json)?, "status": status, "expires_at": expires_at})))),
+            payload: EventPayload::Migration(MigrationEvent::DeliverySnapshotSeeded(seed_data("delivery", &primary_key, json!({
+                "delivery_kind": "notification",
+                "notification": {
+                    "notification_id": notification_id,
+                    "sequence": sequence,
+                    "target_agent_id": target_agent_id,
+                    "workspace_id": workspace_id,
+                    "kind": kind,
+                    "payload": serde_json::from_str::<Value>(&payload_json)?,
+                    "status": status,
+                    "created_at": created_at,
+                    "expires_at": expires_at,
+                    "coalesce_key": null,
+                },
+            })))),
             occurred_at: created_at,
             metadata: metadata(&workspace_id, "unknown", None, None, None, None, contexts),
         });
     }
     let mut outbox = connection.prepare("SELECT outbox_id, agent_id, workspace_id, sequence, event_type, payload_json, sync_status FROM outbox ORDER BY workspace_id, sequence, outbox_id")?;
     for row in outbox.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?)))? {
-        let (outbox_id, agent_id, workspace_id, sequence, event_type, payload_json, sync_status) = row?;
+        let (outbox_id, _agent_id, workspace_id, sequence, event_type, payload_json, sync_status) = row?;
+        let delivery_status = if sync_status == "delivered" { "delivered" } else { "queued" };
+        let outbox_status = if sync_status == "delivered" { "synced" } else { "pending" };
         let primary_key = format!("outbox:{outbox_id}");
         pending.push(PendingEvent {
-            payload: EventPayload::Migration(MigrationEvent::DeliverySnapshotSeeded(seed_data("delivery", &primary_key, json!({"delivery_kind": "outbox", "outbox_id": outbox_id, "sequence": sequence, "target_agent_id": agent_id, "event_type": event_type, "payload": serde_json::from_str::<Value>(&payload_json)?, "status": sync_status})))),
+            payload: EventPayload::Migration(MigrationEvent::DeliverySnapshotSeeded(seed_data("delivery", &primary_key, json!({
+                "delivery_kind": "outbox",
+                "delivery": {
+                    "delivery_id": primary_key,
+                    "notification_id": outbox_id,
+                    "workspace_id": workspace_id,
+                    "status": delivery_status,
+                    "attempts": 0,
+                    "last_error": null,
+                    "retry_at": null,
+                    "delivered_at": null,
+                    "outbox": {
+                        "outbox_id": outbox_id,
+                        "workspace_id": workspace_id,
+                        "sequence": sequence,
+                        "event_type": event_type,
+                        "payload": serde_json::from_str::<Value>(&payload_json)?,
+                        "sync_status": outbox_status,
+                        "attempts": 0,
+                        "last_error": null,
+                    },
+                },
+            })))),
             occurred_at: "1970-01-01T00:00:00Z".into(),
             metadata: metadata(&workspace_id, "unknown", None, None, None, None, contexts),
         });

@@ -8,7 +8,7 @@ use stateful_core::{
     V2Error, WriteIntentStart, WriteTarget, authorize_action, evaluate_thin_safety,
     normalize_relative_path,
 };
-use stateful_store::{PresenceRegistration, Store, StoreError};
+use stateful_store::{NotificationAcknowledgement, PresenceRegistration, Store, StoreError};
 use std::{convert::Infallible, time::Duration};
 use tokio_stream::StreamExt;
 
@@ -62,10 +62,21 @@ pub(crate) async fn presence_update(
     State(config): State<ServerConfig>,
     protocol::V2Json(body): protocol::V2Json,
 ) -> Response {
-    let kind = body.pointer("/payload/kind").and_then(Value::as_str).unwrap_or("update");
-    match kind {
+    let kind = body
+        .pointer("/payload/kind")
+        .and_then(Value::as_str)
+        .unwrap_or("update")
+        .to_owned();
+    let mut body = body;
+    if let Some(payload) = body.pointer_mut("/payload").and_then(Value::as_object_mut) {
+        payload.remove("kind");
+    }
+    match kind.as_str() {
         "resume" => command(config, body, |store, request| store.resume_presence(request)),
-        "heartbeat" => command(config, body, |store, request| store.heartbeat_presence(request)),
+        "heartbeat" => {
+            body["payload"] = Value::Null;
+            command(config, body, |store, request| store.heartbeat_presence(request))
+        }
         "resource" => command(config, body, |store, request| store.update_presence_resource(request)),
         "tool_start" => command(config, body, |store, request| store.start_presence_tool(request)),
         "tool_result" => command(config, body, |store, request| store.complete_presence_tool(request)),
@@ -167,7 +178,8 @@ pub(crate) async fn human_save_check(
         Err(response) => return response,
     };
     let request_id = request.request_id.to_string();
-    let response = lock_store(&config.store).and_then(|store| {
+    let response = lock_store(&config.store).and_then(|mut store| {
+        store.run_maintenance()?;
         store.unreconciled_human_observations(&request.workspace.workspace_id, &request.payload.paths)
     });
     match response {
@@ -201,6 +213,12 @@ pub(crate) async fn context_ack(State(config): State<ServerConfig>, protocol::V2
 }
 
 pub(crate) async fn notifications_poll(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
+    if body.pointer("/payload/notification_id").is_some() {
+        return command(config, body, |store, request| store.record_notification_delivery(request));
+    }
+    if body.pointer("/payload/sequence").is_some() {
+        return command(config, body, |store, request| store.acknowledge_notifications(request));
+    }
     let request = match protocol::parse_request::<Value>(body) {
         Ok(request) => request,
         Err(response) => return response,
@@ -325,6 +343,17 @@ pub(crate) async fn notifications_stream(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or_default();
+    if cursor > 0 {
+        let acknowledgement = retarget(
+            &unit_query_request(&request),
+            NotificationAcknowledgement { sequence: cursor },
+        );
+        if let Err(error) = lock_store(&config.store)
+            .and_then(|store| store.acknowledge_notifications(&acknowledgement))
+        {
+            return protocol::store_error_response(&request.request_id.to_string(), error);
+        }
+    }
     let store = config.store.clone();
     let agent_id = request.agent.agent_id;
     let workspace_id = request.workspace.workspace_id;
