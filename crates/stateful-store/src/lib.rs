@@ -183,6 +183,7 @@ impl Store {
     fn open_persistent_with_clock(path: impl AsRef<Path>, clock: impl Clock + 'static) -> StoreResult<Self> {
         let path = path.as_ref();
         prepare_private_database_path(path)?;
+        let _migration_guard = migration::MigrationGuard::acquire(path)?;
 
         let conn = Connection::open(path)?;
         configure_file_connection(&conn)?;

@@ -17,7 +17,7 @@ serde_json.workspace = true
 stateful-core = { path = "../stateful-core" }
 thiserror.workspace = true
 time = { workspace = true, features = ["formatting", "parsing"] }
-rustix.workspace = true
+fs2.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

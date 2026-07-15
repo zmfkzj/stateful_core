@@ -12,7 +12,7 @@ use std::{collections::BTreeMap, fs::{self, File}, path::{Path, PathBuf}, time::
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
-use rustix::fs::{FlockOperation, flock};
+use fs2::FileExt;
 #[cfg(test)]
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -83,16 +83,16 @@ struct PendingEvent {
     metadata: Metadata,
 }
 
-struct MigrationGuard(File);
+pub(crate) struct MigrationGuard(File);
 
 impl MigrationGuard {
-    fn acquire(database_path: &Path) -> StoreResult<Self> {
+    pub(crate) fn acquire(database_path: &Path) -> StoreResult<Self> {
         let file = File::options()
             .create(true)
             .read(true)
             .write(true)
             .open(database_path.with_extension("v2.migration.lock"))?;
-        flock(&file, FlockOperation::LockExclusive)
+        file.lock_exclusive()
             .map_err(|error| StoreError::MigrationValidation(format!("could not acquire migration guard: {error}")))?;
         Ok(Self(file))
     }
@@ -100,7 +100,7 @@ impl MigrationGuard {
 
 impl Drop for MigrationGuard {
     fn drop(&mut self) {
-        let _ = flock(&self.0, FlockOperation::Unlock);
+        let _ = FileExt::unlock(&self.0);
     }
 }
 
@@ -109,7 +109,6 @@ pub(crate) fn migrate_persistent_v1(
     database_path: &Path,
     clock: &dyn Clock,
 ) -> StoreResult<()> {
-    let _guard = MigrationGuard::acquire(database_path)?;
     loop {
         if has_checkpoint(connection)? {
             validate_ready(connection)?;
