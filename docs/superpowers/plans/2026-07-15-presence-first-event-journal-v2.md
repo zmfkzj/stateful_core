@@ -347,6 +347,7 @@ Create these behavioral tests:
 ```rust
 #[test] fn command_appends_projects_versions_receipts_and_commits_atomically();
 #[test] fn duplicate_request_returns_frozen_response_without_new_events();
+#[test] fn request_id_reuse_with_different_route_identity_or_payload_is_rejected();
 #[test] fn projector_failure_rolls_back_journal_projection_version_and_receipt();
 #[test] fn audit_only_event_does_not_advance_workspace_version();
 #[test] fn replay_into_empty_projection_tables_is_byte_equivalent();
@@ -412,7 +413,7 @@ impl Store {
 }
 ```
 
-`execute_command` uses one `TransactionBehavior::Immediate`, checks receipt first, assigns deterministic event IDs, inserts each journal row, deserializes the stored row, invokes `Projector::apply`, updates `workspace_version` for context events, inserts the frozen receipt, and commits. No caller receives a committed response before commit succeeds.
+`execute_command` uses one `TransactionBehavior::Immediate`, checks the receipt first, rejects any UUID reuse whose route kind, actor/workspace identity, or normalized request SHA-256 differs with `idempotency_key_reused`, assigns deterministic event IDs, inserts each journal row, deserializes the stored row, invokes `Projector::apply`, updates `workspace_version` for context events, inserts the frozen receipt, and commits. An exact duplicate returns the frozen receipt without rerunning policy or projectors. No caller receives a committed response before commit succeeds.
 
 - [ ] **Step 4: Implement deterministic replay and clocks**
 
@@ -1123,9 +1124,9 @@ args:
   - --purpose
   - Run qualified StatefulBench requests trial
   - --write-dir
-  - $HOME/.cache/statefulbench-realworld-presence-v2
+  - /Users/arthur/.cache/statefulbench-realworld-presence-v2
   - --connect-socket
-  - $HOME/.colima/default/docker.sock
+  - /Users/arthur/.colima/default/docker.sock
   - --network
   - enabled
   - --command

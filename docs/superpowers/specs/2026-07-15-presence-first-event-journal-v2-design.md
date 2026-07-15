@@ -150,7 +150,7 @@ A command executes in one SQLite transaction:
 
 Any failure rolls back the entire command. A successful retry with the same idempotency key returns the prior result and does not append duplicate events.
 
-Mutation `request_id` values are globally unique client-generated UUIDs. A transactional command receipt stores the route kind, HTTP status, typed response, and committed event-sequence range. Receipts are idempotency bookkeeping rather than canonical coordination projections, but they commit or roll back in the same transaction as the journal and projections. A duplicate mutation returns the frozen receipt without rerunning policy or projectors.
+Mutation `request_id` values are globally unique client-generated UUIDs. A transactional command receipt stores the route kind, normalized request SHA-256, actor/workspace identity, HTTP status, typed response, and committed event-sequence range. Receipts are idempotency bookkeeping rather than canonical coordination projections, but they commit or roll back in the same transaction as the journal and projections. An exact duplicate mutation returns the frozen receipt without rerunning policy or projectors; reuse of a UUID with different route, identity, or normalized payload fails with `idempotency_key_reused`.
 
 ### 6.3 Projections
 
