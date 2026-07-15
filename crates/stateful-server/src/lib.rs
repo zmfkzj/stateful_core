@@ -3,6 +3,7 @@ mod protocol;
 mod routes_v2;
 
 use axum::{Router, extract::{Request, State}, http::{HeaderMap, StatusCode}, middleware::{self, Next}, response::{IntoResponse, Response}, routing::get};
+use stateful_core::V2Error;
 use stateful_store::Store;
 use std::{net::SocketAddr, str::FromStr, sync::{Arc, Mutex}, time::Duration};
 
@@ -143,7 +144,12 @@ async fn require_bearer(
     next: Next,
 ) -> Response {
     if !has_valid_bearer_token(request.headers(), &config.bearer_token) {
-        return StatusCode::UNAUTHORIZED.into_response();
+        return protocol::error_response(
+            StatusCode::UNAUTHORIZED,
+            None,
+            V2Error::new("unauthorized", "Bearer authentication is required.")
+                .with_required_next_action("Send a valid Bearer token."),
+        );
     }
     next.run(request).await
 }

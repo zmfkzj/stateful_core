@@ -80,7 +80,7 @@ pub(crate) async fn presence_update(
         "resource" => command(config, body, |store, request| store.update_presence_resource(request)),
         "tool_start" => command(config, body, |store, request| store.start_presence_tool(request)),
         "tool_result" => command(config, body, |store, request| store.complete_presence_tool(request)),
-        "register" => command(config, body, |store, request| store.register_presence(request)),
+        "register" => command(config, body, |store, request| store.register_presence_via_update(request)),
         "update" => command(config, body, |store, request| store.update_presence(request)),
         _ => protocol::error_response(
             StatusCode::BAD_REQUEST,
@@ -209,15 +209,24 @@ pub(crate) async fn context_render(State(config): State<ServerConfig>, protocol:
 }
 
 pub(crate) async fn context_ack(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
-    command(config, body, |store, request| store.acknowledge_context(request))
+    command(config, body, |store, request| {
+        store.run_maintenance()?;
+        store.acknowledge_context(request)
+    })
 }
 
 pub(crate) async fn notifications_poll(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
     if body.pointer("/payload/notification_id").is_some() {
-        return command(config, body, |store, request| store.record_notification_delivery(request));
+        return command(config, body, |store, request| {
+            store.run_maintenance()?;
+            store.record_notification_delivery(request)
+        });
     }
     if body.pointer("/payload/sequence").is_some() {
-        return command(config, body, |store, request| store.acknowledge_notifications(request));
+        return command(config, body, |store, request| {
+            store.run_maintenance()?;
+            store.acknowledge_notifications(request)
+        });
     }
     let request = match protocol::parse_request::<Value>(body) {
         Ok(request) => request,
@@ -226,7 +235,10 @@ pub(crate) async fn notifications_poll(State(config): State<ServerConfig>, proto
     let request_id = request.request_id.to_string();
     protocol::command_response(
         &request_id,
-        lock_store(&config.store).and_then(|store| store.poll_notifications(&request)),
+        lock_store(&config.store).and_then(|mut store| {
+            store.run_maintenance()?;
+            store.poll_notifications(&request)
+        }),
     )
 }
 
@@ -238,6 +250,7 @@ pub(crate) async fn resume_next(State(config): State<ServerConfig>, protocol::V2
     let request_id = request.request_id.to_string();
     let unit = unit_request(&request);
     let result = lock_store(&config.store).and_then(|mut store| {
+        store.run_maintenance()?;
         let presence = store.presence_for_request(&unit, &request.agent.agent_id)?;
         let handoff = store.handoff_for_request(&unit, &request.agent.agent_id)?;
         let deliveries = store.pending_context_deliveries(&request.agent.agent_id, &request.workspace.workspace_id)?;
@@ -343,16 +356,26 @@ pub(crate) async fn notifications_stream(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or_default();
-    if cursor > 0 {
-        let acknowledgement = retarget(
-            &unit_query_request(&request),
-            NotificationAcknowledgement { sequence: cursor },
-        );
-        if let Err(error) = lock_store(&config.store)
-            .and_then(|store| store.acknowledge_notifications(&acknowledgement))
+    let acknowledgement = retarget(
+        &unit_query_request(&request),
+        NotificationAcknowledgement { sequence: cursor },
+    );
+    if let Err(error) = lock_store(&config.store).and_then(|mut store| {
+        store.run_maintenance()?;
+        if cursor > 0
+            && store.notification_sequence_belongs_to_target(
+                &request.agent.agent_id,
+                &request.workspace.workspace_id,
+                cursor,
+            )?
         {
-            return protocol::store_error_response(&request.request_id.to_string(), error);
+            store.acknowledge_notifications(&acknowledgement)?;
+        } else {
+            cursor = 0;
         }
+        Ok(())
+    }) {
+        return protocol::store_error_response(&request.request_id.to_string(), error);
     }
     let store = config.store.clone();
     let agent_id = request.agent.agent_id;
@@ -360,7 +383,10 @@ pub(crate) async fn notifications_stream(
     let stream = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(Duration::from_millis(100)))
         .filter_map(move |_| {
             let notification = lock_store(&store)
-                .and_then(|store| store.pending_notifications(&agent_id, &workspace_id))
+                .and_then(|mut store| {
+                    store.run_maintenance()?;
+                    store.pending_notifications(&agent_id, &workspace_id)
+                })
                 .ok()
                 .and_then(|notifications| {
                     notifications

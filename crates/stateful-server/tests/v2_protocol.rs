@@ -1,10 +1,18 @@
 use axum::{Router, body::Body, http::{Request, StatusCode}};
 use serde_json::{Value, json};
 use stateful_server::{ServerConfig, build_router};
-use stateful_store::Store;
+use stateful_store::{MutableClock, PresenceRegistration, Store};
 use std::time::Duration;
 use tokio_stream::StreamExt;
 use tower::ServiceExt;
+
+fn app_with_clock(clock: MutableClock) -> Router {
+    app_with_store(Store::open_in_memory_with_clock(clock).expect("store opens"))
+}
+
+fn clock() -> MutableClock {
+    MutableClock::from_system_now()
+}
 
 fn app() -> Router {
     build_router(ServerConfig::new("test-token"))
@@ -706,4 +714,233 @@ async fn event_reads_are_scoped_to_the_requested_workspace() {
             .iter()
             .all(|event| event["workspace_id"] == "workspace-1"),
     );
+}
+
+#[tokio::test]
+async fn request_id_reused_between_register_routes_is_rejected() {
+    let app = app();
+    let request_id = "00000000-0000-4000-8000-00000000d301";
+    assert_eq!(
+        app.clone()
+            .oneshot(post(
+                "/v2/session/register",
+                envelope_for("agent-1", request_id, json!({"first_prompt": "work"})),
+            ))
+            .await
+            .expect("registration response")
+            .status(),
+        StatusCode::OK,
+    );
+    let response = app
+        .oneshot(post(
+            "/v2/presence/update",
+            envelope_for("agent-1", request_id, json!({"kind": "register", "first_prompt": "work"})),
+        ))
+        .await
+        .expect("duplicate route response");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(response_json(response).await["error"]["code"], "idempotency_key_reused");
+}
+
+#[tokio::test]
+async fn notifications_polled_once_do_not_replay_to_sse() {
+    let app = app();
+    let wait = successful_post(
+        &app,
+        "/v2/reservation/request",
+        envelope_for("agent-2", "00000000-0000-4000-8000-00000000d314", json!({
+            "relative_path": "src/lib.rs", "action": "write_file", "purpose": "Need the file."
+        })),
+    )
+    .await;
+    successful_post(
+        &app,
+        "/v2/reservation/claim",
+        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d315", json!({
+            "relative_path": "src/lib.rs"
+        })),
+    )
+    .await;
+    let polled = successful_post(
+        &app,
+        "/v2/notifications/poll",
+        envelope_for("agent-2", "00000000-0000-4000-8000-00000000d316", json!({})),
+    )
+    .await;
+    assert_eq!(polled.as_array().map(Vec::len), Some(1));
+    assert_eq!(polled[0]["notification_id"], wait["wait_id"]);
+    let response = app.oneshot(stream_get(None)).await.expect("stream response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.into_body().into_data_stream();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), stream.next()).await.is_err(),
+        "a poll-delivered notification must not replay to SSE",
+    );
+}
+
+#[tokio::test]
+async fn expired_notifications_are_not_polled_or_streamed() {
+    let clock = clock();
+    let app = app_with_clock(clock.clone());
+    let wait = successful_post(
+        &app,
+        "/v2/reservation/request",
+        envelope_for("agent-2", "00000000-0000-4000-8000-00000000d302", json!({
+            "relative_path": "src/lib.rs", "action": "write_file", "purpose": "Need the file."
+        })),
+    )
+    .await;
+    successful_post(
+        &app,
+        "/v2/reservation/claim",
+        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d303", json!({
+            "relative_path": "src/lib.rs"
+        })),
+    )
+    .await;
+    clock.advance(Duration::from_secs(3 * 60));
+    let callback = successful_post(
+        &app,
+        "/v2/notifications/poll",
+        envelope_for("agent-2", "00000000-0000-4000-8000-00000000d317", json!({
+            "notification_id": wait["wait_id"], "sequence": 1, "outcome": "delivered"
+        })),
+    )
+    .await;
+    assert_eq!(callback["status"], "queued", "expired notification must not be marked delivered");
+    let polled = successful_post(
+        &app,
+        "/v2/notifications/poll",
+        envelope_for("agent-2", "00000000-0000-4000-8000-00000000d304", json!({})),
+    )
+    .await;
+    assert_eq!(polled, json!([]), "expired notification {} must not poll", wait["wait_id"]);
+    let response = app.oneshot(stream_get(None)).await.expect("stream response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.into_body().into_data_stream();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), stream.next()).await.is_err(),
+        "expired notification must not be emitted by SSE",
+    );
+}
+
+#[tokio::test]
+async fn expired_context_acknowledgement_does_not_advance_the_cursor() {
+    let clock = clock();
+    let app = app_with_clock(clock.clone());
+    successful_post(
+        &app,
+        "/v2/session/register",
+        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d305", json!({"first_prompt": "work"})),
+    )
+    .await;
+    let delivery = successful_post(
+        &app,
+        "/v2/context/render",
+        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d306", json!({"mode": "brief"})),
+    )
+    .await;
+    clock.advance(Duration::from_secs(25 * 60 * 60));
+    let acknowledgement = successful_post(
+        &app,
+        "/v2/context/ack",
+        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d307", json!({
+            "delivery_id": delivery["delivery_id"],
+            "sequence": delivery["sequence"],
+            "workspace_version": delivery["workspace_version"],
+        })),
+    )
+    .await;
+    assert_eq!(acknowledgement["cursor"], 0, "expired delivery must be dead-lettered before acknowledgement");
+}
+
+#[tokio::test]
+async fn resume_next_excludes_context_deliveries_expired_before_the_ticker() {
+    let clock = clock();
+    let app = app_with_clock(clock.clone());
+    successful_post(
+        &app,
+        "/v2/session/register",
+        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d308", json!({"first_prompt": "work"})),
+    )
+    .await;
+    successful_post(
+        &app,
+        "/v2/context/render",
+        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d309", json!({"mode": "brief"})),
+    )
+    .await;
+    clock.advance(Duration::from_secs(25 * 60 * 60));
+    let response = app
+        .oneshot(post(
+            "/v2/resume/next",
+            envelope_for("agent-1", "00000000-0000-4000-8000-00000000d310", json!({})),
+        ))
+        .await
+        .expect("resume response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response_json(response).await["deliveries"], json!([]));
+}
+
+#[tokio::test]
+async fn forged_last_event_id_does_not_hide_a_new_notification() {
+    let app = app();
+    let response = app
+        .clone()
+        .oneshot(stream_get(Some(999)))
+        .await
+        .expect("stream response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.into_body().into_data_stream();
+    successful_post(
+        &app,
+        "/v2/reservation/request",
+        envelope_for("agent-2", "00000000-0000-4000-8000-00000000d311", json!({
+            "relative_path": "src/lib.rs", "action": "write_file", "purpose": "Need the file."
+        })),
+    )
+    .await;
+    successful_post(
+        &app,
+        "/v2/reservation/claim",
+        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d312", json!({
+            "relative_path": "src/lib.rs"
+        })),
+    )
+    .await;
+    let event = tokio::time::timeout(Duration::from_secs(1), stream.next())
+        .await
+        .expect("notification must arrive after forged cursor")
+        .expect("stream remains open")
+        .expect("SSE data is valid");
+    assert!(String::from_utf8(event.to_vec()).expect("SSE is UTF-8").contains("id: 1"));
+}
+
+#[tokio::test]
+async fn bearer_failures_use_the_v2_error_envelope_with_an_action() {
+    let response = app()
+        .oneshot(Request::builder().uri("/v2/current").body(Body::empty()).expect("request"))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body = response_json(response).await;
+    assert_eq!(body["protocol_version"], "stateful.v2");
+    assert_eq!(body["error"]["code"], "unauthorized");
+    assert!(body["error"]["required_next_action"].is_string());
+}
+
+#[tokio::test]
+async fn health_reports_replay_validation_failure_then_a_healthy_store() {
+    let mut failed_store = Store::open_in_memory().expect("store opens");
+    let request = stateful_core::RequestEnvelope::<PresenceRegistration>::from_json(
+        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d313", json!({"first_prompt": "work"})).to_string(),
+    )
+    .expect("request parses");
+    failed_store.register_presence(&request).expect("presence registers");
+    failed_store.corrupt_journal_metadata_for_tests("actor_type", "").expect("journal corruption injects");
+    assert_eq!(
+        app_with_store(failed_store).oneshot(get("/health")).await.expect("failure health response").status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+    );
+    assert_eq!(app().oneshot(get("/health")).await.expect("healthy health response").status(), StatusCode::OK);
 }

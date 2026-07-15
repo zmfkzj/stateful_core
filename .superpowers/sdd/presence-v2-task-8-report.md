@@ -14,7 +14,7 @@ Complete. The server exposes only the locked `stateful.v2` surface: 21 POST rout
 
 ## Verification
 
-- `cargo test -p stateful-server` — 38 route/protocol tests passed.
+- `cargo test -p stateful-server` — 46 route/protocol tests passed.
 - `cargo test -p stateful-core` — 46 tests passed.
 - `cargo test -p stateful-store` — 107 tests passed.
 - Active server source has no V1 or legacy symbols; route wiring contains exactly 21 POST and 4 GET V2 registrations; server source contains no direct projection writes.
@@ -31,6 +31,8 @@ Complete. The server exposes only the locked `stateful.v2` surface: 21 POST rout
 - Complete: structured POST/GET V2 extraction; phase/action/claim/per-target/fingerprint/Store-clock authorization checks; workspace-scoped event SQL; structured caller 4xx and sanitized internal 5xx mapping; live SSE polling with `Last-Event-ID`; atomic receipted notification polling; authorization receipts bound to the full original authorization envelope.
 - Complete: maintenance expires every workspace's stale presence/handoff, reservations, claims, claimable waits, fences, observations, started write intents, human observations, notifications, and context deliveries without no-op receipts; each transition is journaled, replayable, and idempotent.
 - Complete: notification delivery callbacks require the target identity and exact live sequence; acknowledged reconnects do not replay.
+- Complete: `/v2/presence/update` register has a distinct command receipt route; poll-delivered notifications cannot replay through SSE; poll, callback, and each SSE interval journal expiry before delivery.
+- Complete: expired context acknowledgements cannot advance a cursor; resume runs maintenance; `Last-Event-ID` must belong to the target workspace; bearer failures use the V2 error envelope; corrupt journal metadata makes readiness return `503`.
 
 ## Concerns
 

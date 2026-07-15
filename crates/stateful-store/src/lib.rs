@@ -17,7 +17,7 @@ mod write_fences;
 mod write_intents;
 pub use activity::{ActivityFinalization, ActivityStart};
 pub use claims::{ClaimAcquire, ClaimBatchAcquireResult, ClaimObservation, ClaimPath, ClaimRelease, ClaimRecord};
-pub use clock::{Clock, FixedClock, SystemClock};
+pub use clock::{Clock, FixedClock, MutableClock, SystemClock};
 pub use context_delivery::{
     ContextAcknowledgement, ContextAcknowledgementResult, ContextDeliveryRecord, ContextRender,
 };

@@ -338,14 +338,40 @@ impl Store {
     }
 
     pub fn pending_notifications(&self, target_agent_id: &str, workspace_id: &str) -> StoreResult<Vec<NotificationRecord>> {
+        let delivered = self.current_records(CurrentAggregate::Delivery, workspace_id)?.into_iter()
+            .map(record_from_current::<DeliveryRecord>)
+            .collect::<StoreResult<Vec<_>>>()?
+            .into_iter()
+            .filter(|delivery| delivery.status == "delivered")
+            .map(|delivery| delivery.notification_id)
+            .collect::<std::collections::BTreeSet<_>>();
         let mut notifications = self.current_records(CurrentAggregate::Notification, workspace_id)?.into_iter()
             .map(record_from_current::<NotificationRecord>)
             .collect::<StoreResult<Vec<_>>>()?
             .into_iter()
-            .filter(|notification| notification.target_agent_id == target_agent_id && notification.status == "queued")
+            .filter(|notification| {
+                notification.target_agent_id == target_agent_id
+                    && notification.status == "queued"
+                    && !delivered.contains(&notification.notification_id)
+            })
             .collect::<Vec<_>>();
         notifications.sort_by_key(|notification| notification.sequence);
         Ok(notifications)
+    }
+
+    pub fn notification_sequence_belongs_to_target(
+        &self,
+        target_agent_id: &str,
+        workspace_id: &str,
+        sequence: u64,
+    ) -> StoreResult<bool> {
+        Ok(self.current_records(CurrentAggregate::Notification, workspace_id)?.into_iter()
+            .map(record_from_current::<NotificationRecord>)
+            .collect::<StoreResult<Vec<_>>>()?
+            .into_iter()
+            .any(|notification| {
+                notification.target_agent_id == target_agent_id && notification.sequence == sequence
+            }))
     }
 
     pub fn delivery(&self, workspace_id: &str, notification_id: &str) -> StoreResult<Option<DeliveryRecord>> {

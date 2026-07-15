@@ -54,6 +54,13 @@ impl Store {
         self.register_or_resume_presence(request, "presence.register", false)
     }
 
+    pub fn register_presence_via_update(
+        &mut self,
+        request: &RequestEnvelope<PresenceRegistration>,
+    ) -> StoreResult<CommandOutcome<PresenceRecord>> {
+        self.register_or_resume_presence(request, "presence.update.register", false)
+    }
+
     pub fn resume_presence(
         &mut self,
         request: &RequestEnvelope<PresenceRegistration>,
