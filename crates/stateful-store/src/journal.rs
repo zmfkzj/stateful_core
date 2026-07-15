@@ -17,6 +17,12 @@ use uuid::Uuid;
 
 pub trait ProjectionReader {
     fn workspace_version(&self, workspace_id: &str) -> StoreResult<u64>;
+    fn context_cursor(&self, workspace_id: &str, agent_id: &str) -> StoreResult<u64>;
+    fn context_changes(
+        &self,
+        workspace_id: &str,
+        after_version: u64,
+    ) -> StoreResult<Vec<(String, String)>>;
     fn presence(&self, workspace_id: &str, agent_id: &str) -> StoreResult<Option<PresenceRecord>>;
     fn presence_resource(&self, workspace_id: &str, agent_id: &str, path: &str, relation: PresenceResourceRelation) -> StoreResult<Option<PresenceResource>>;
     fn presence_resources(&self, workspace_id: &str, agent_id: &str) -> StoreResult<Vec<PresenceResource>>;
@@ -66,6 +72,7 @@ pub enum CurrentAggregate {
     HumanAcknowledgement,
     Notification,
     Delivery,
+    ContextDelivery,
 }
 
 
@@ -162,6 +169,40 @@ impl ProjectionReader for SqlProjectionReader<'_> {
             )
             .optional()
             .map(|value: Option<u64>| value.unwrap_or(0))
+            .map_err(StoreError::from)
+    }
+
+    fn context_cursor(&self, workspace_id: &str, agent_id: &str) -> StoreResult<u64> {
+        self.transaction
+            .query_row(
+                "SELECT version FROM agent_context_cursor WHERE workspace_id = ?1 AND agent_id = ?2",
+                params![workspace_id, agent_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(|value: Option<u64>| value.unwrap_or(0))
+            .map_err(StoreError::from)
+    }
+
+    fn context_changes(
+        &self,
+        workspace_id: &str,
+        after_version: u64,
+    ) -> StoreResult<Vec<(String, String)>> {
+        let mut statement = self.transaction.prepare(
+            "SELECT DISTINCT aggregate_kind, aggregate_id FROM (
+                SELECT aggregate_kind, aggregate_id
+                FROM journal_events
+                WHERE workspace_id = ?1 AND affects_context = 1
+                ORDER BY event_seq
+                LIMIT -1 OFFSET ?2
+            )",
+        )?;
+        statement
+            .query_map(params![workspace_id, after_version], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()
             .map_err(StoreError::from)
     }
 
@@ -268,6 +309,7 @@ impl ProjectionReader for SqlProjectionReader<'_> {
             CurrentAggregate::HumanAcknowledgement => ("human_acknowledgement_current", "aggregate_id"),
             CurrentAggregate::Notification => ("notification_current", "aggregate_id"),
             CurrentAggregate::Delivery => ("delivery_current", "aggregate_id"),
+            CurrentAggregate::ContextDelivery => ("context_delivery_current", "aggregate_id"),
         };
         let mut statement = self.transaction.prepare(&format!(
             "SELECT {id_column}, payload_json, origin_event_seq FROM {table}
@@ -508,12 +550,27 @@ pub(crate) fn load_journal_events(connection: &Connection) -> StoreResult<Vec<Jo
     let mut statement = connection.prepare(&format!(
         "SELECT {JOURNAL_EVENT_COLUMNS} FROM journal_events ORDER BY event_seq"
     ))?;
-    statement
+    let events = statement
         .query_map([], persisted_journal_event_from_row)?
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .map(|event| event.validate(None))
-        .collect()
+        .collect::<StoreResult<Vec<_>>>()?;
+    for event in &events {
+        let receipt = connection
+            .query_row(
+                "SELECT agent_id, actor_id, workspace_id FROM command_receipts WHERE request_id = ?1",
+                [event.stored.request_id().to_string()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+            )
+            .optional()?;
+        if let Some((agent_id, actor_id, workspace_id)) = receipt
+            && (agent_id != event.agent_id || actor_id != event.actor_id || workspace_id != event.workspace_id)
+        {
+            return Err(StoreError::InvalidJournalEvent);
+        }
+    }
+    Ok(events)
 }
 
 fn load_journal_event(

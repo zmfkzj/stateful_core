@@ -11,7 +11,7 @@ mod types;
 
 pub use context::{
     AGENT_CONTEXT_SCOPE_SOURCE_REF, BRIEF_CONTEXT_MAX_ITEMS, BRIEF_CONTEXT_MAX_SCALARS,
-    ContextPackage, CurrentEvidenceKind, CurrentFreshness, CurrentItem, CurrentItemKind,
+    ContextDelta, ContextPackage, CurrentEvidenceKind, CurrentFreshness, CurrentItem, CurrentItemKind,
     CurrentSeverity, RenderMode, render_prompt_text,
 };
 pub use path::{

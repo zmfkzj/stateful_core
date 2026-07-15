@@ -17,6 +17,7 @@ pub(crate) const PROJECTION_TABLES: &[&str] = &[
     "handoff_resource_current",
     "notification_current",
     "delivery_current",
+    "context_delivery_current",
     "workspace_version",
     "agent_context_cursor",
     "resource_write_current",
@@ -199,6 +200,16 @@ pub(crate) fn create_v2_schema(connection: &Connection) -> StoreResult<()> {
             origin_event_seq INTEGER NOT NULL,
             PRIMARY KEY (workspace_id, aggregate_id)
         );
+        CREATE TABLE IF NOT EXISTS context_delivery_current (
+            workspace_id TEXT NOT NULL,
+            aggregate_id TEXT NOT NULL,
+            target_agent_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            sequence INTEGER NOT NULL,
+            payload_json TEXT NOT NULL,
+            origin_event_seq INTEGER NOT NULL,
+            PRIMARY KEY (workspace_id, aggregate_id)
+        );
         CREATE TABLE IF NOT EXISTS workspace_version (
             workspace_id TEXT PRIMARY KEY,
             version INTEGER NOT NULL,
@@ -240,6 +251,8 @@ pub(crate) fn create_v2_schema(connection: &Connection) -> StoreResult<()> {
             ON resource_write_current(workspace_id, path);
         CREATE INDEX IF NOT EXISTS idx_notification_current_target_version
             ON notification_current(target_agent_id, version);
+        CREATE INDEX IF NOT EXISTS idx_context_delivery_current_target_version
+            ON context_delivery_current(workspace_id, target_agent_id, version, sequence);
         ",
     )?;
     ensure_presence_resource_columns(connection)?;

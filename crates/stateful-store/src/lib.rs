@@ -1,6 +1,7 @@
 mod activity;
 mod claims;
 mod clock;
+mod context_delivery;
 mod handoff;
 mod human;
 mod journal;
@@ -17,6 +18,9 @@ mod write_intents;
 pub use activity::{ActivityFinalization, ActivityStart};
 pub use claims::{ClaimAcquire, ClaimBatchAcquireResult, ClaimObservation, ClaimPath, ClaimRelease, ClaimRecord};
 pub use clock::{Clock, FixedClock, SystemClock};
+pub use context_delivery::{
+    ContextAcknowledgement, ContextAcknowledgementResult, ContextDeliveryRecord, ContextRender,
+};
 pub use human::{
     HumanObservationConfidence, HumanObservationInput, HumanObservationKind,
     HumanObservationRecord, ReconciliationAckInput,
@@ -197,6 +201,7 @@ impl Store {
             CurrentAggregate::HumanAcknowledgement => ("human_acknowledgement_current", "aggregate_id"),
             CurrentAggregate::Notification => ("notification_current", "aggregate_id"),
             CurrentAggregate::Delivery => ("delivery_current", "aggregate_id"),
+            CurrentAggregate::ContextDelivery => ("context_delivery_current", "aggregate_id"),
         };
         let mut statement = self.conn.prepare(&format!(
             "SELECT {id_column}, payload_json, origin_event_seq FROM {table}

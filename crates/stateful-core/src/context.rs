@@ -4,7 +4,8 @@ pub const AGENT_CONTEXT_SCOPE_SOURCE_REF: &str = "AgentContextScope";
 pub const BRIEF_CONTEXT_MAX_ITEMS: usize = 8;
 pub const BRIEF_CONTEXT_MAX_SCALARS: usize = 1_200;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum RenderMode {
     Brief,
     Detailed,
@@ -267,6 +268,55 @@ impl ContextPackage {
         ));
         self.status = package_status(&self.items);
         self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextDelta {
+    pub from_version: u64,
+    pub workspace_version: u64,
+    pub changed: bool,
+    pub reset_required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u64>,
+    pub items: Vec<CurrentItem>,
+    pub prompt_text: String,
+}
+
+impl ContextDelta {
+    pub fn unchanged(from_version: u64, workspace_version: u64) -> Self {
+        Self {
+            from_version,
+            workspace_version,
+            changed: false,
+            reset_required: false,
+            delivery_id: None,
+            sequence: None,
+            items: Vec::new(),
+            prompt_text: String::new(),
+        }
+    }
+
+    pub fn changed(
+        from_version: u64,
+        workspace_version: u64,
+        delivery_id: impl Into<String>,
+        package: ContextPackage,
+        mode: RenderMode,
+    ) -> Self {
+        let prompt_text = render_prompt_text(&package, mode);
+        Self {
+            from_version,
+            workspace_version,
+            changed: true,
+            reset_required: false,
+            delivery_id: Some(delivery_id.into()),
+            sequence: None,
+            items: package.items,
+            prompt_text,
+        }
     }
 }
 

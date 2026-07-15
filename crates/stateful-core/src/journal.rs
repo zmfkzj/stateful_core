@@ -512,6 +512,18 @@ fn affects_context(family: &str, variant: &str, data: &EventData) -> bool {
             | ("context", "delivery_acknowledged")
             | ("context", "delivery_superseded")
             | ("notification", "delivered")
+    ) && !(
+        matches!((family, variant), ("notification", "created") | ("notification", "coalesced"))
+            && data
+                .data
+                .get("notification")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|notification| notification.get("kind"))
+                .and_then(serde_json::Value::as_str)
+                == Some("context_invalidated")
+    ) && !(
+        matches!((family, variant), ("recovery", "failed"))
+            && data.data.get("context_delivery").is_some()
     ) && !(data.repeated
         && matches!(
             (family, variant),

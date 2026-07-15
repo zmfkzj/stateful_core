@@ -66,6 +66,9 @@ impl<'a> Projector<'a> {
             }
             return Ok(());
         }
+        if self.apply_context_delivery(event)? {
+            return Ok(());
+        }
 
         let table = migration_seed_projection_table(event).or_else(|| match event.stored.aggregate_kind() {
             "presence" => Some("presence_current"),
@@ -90,6 +93,53 @@ impl<'a> Projector<'a> {
             self.apply_workspace_version(event)?;
         }
         Ok(())
+    }
+
+    fn apply_context_delivery(&self, event: &JournalEvent) -> StoreResult<bool> {
+        let Some(delivery) = event_data(event)
+            .and_then(|data| data.get("context_delivery")) else {
+            return Ok(false);
+        };
+        let target_agent_id = delivery
+            .get("target_agent_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(StoreError::InvalidJournalEvent)?;
+        let version = delivery
+            .get("workspace_version")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or(StoreError::InvalidJournalEvent)?;
+        let sequence = delivery
+            .get("sequence")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or(StoreError::InvalidJournalEvent)?;
+        let table = format!("{}context_delivery_current", self.prefix);
+        self.connection.execute(
+            &format!(
+                "INSERT INTO {table} (workspace_id, aggregate_id, target_agent_id, version, sequence, payload_json, origin_event_seq)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(workspace_id, aggregate_id) DO UPDATE SET target_agent_id=excluded.target_agent_id, version=excluded.version, sequence=excluded.sequence, payload_json=excluded.payload_json, origin_event_seq=excluded.origin_event_seq"
+            ),
+            params![
+                event.workspace_id,
+                event.stored.aggregate_id(),
+                target_agent_id,
+                version,
+                sequence,
+                serde_json::to_string(delivery)?,
+                event.stored.event_seq(),
+            ],
+        )?;
+        if matches!(event.stored.payload(), EventPayload::Context(ContextEvent::DeliveryAcknowledged(_))) {
+            let cursor = format!("{}agent_context_cursor", self.prefix);
+            self.connection.execute(
+                &format!(
+                    "INSERT INTO {cursor} (workspace_id, agent_id, version, origin_event_seq) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(workspace_id, agent_id) DO UPDATE SET version=MAX(version, excluded.version), origin_event_seq=excluded.origin_event_seq"
+                ),
+                params![event.workspace_id, target_agent_id, version, event.stored.event_seq()],
+            )?;
+        }
+        Ok(true)
     }
 
     fn apply_typed_migration_seed(&self, event: &JournalEvent) -> StoreResult<bool> {
@@ -518,8 +568,8 @@ impl<'a> Projector<'a> {
         let cursor = format!("{}agent_context_cursor", self.prefix);
         self.connection.execute(
             &format!(
-                "INSERT INTO {cursor} (workspace_id, agent_id, version, origin_event_seq) VALUES (?1, ?2, 1, ?3)
-                 ON CONFLICT(workspace_id, agent_id) DO UPDATE SET version=version+1, origin_event_seq=excluded.origin_event_seq"
+                "INSERT INTO {cursor} (workspace_id, agent_id, version, origin_event_seq) VALUES (?1, ?2, 0, ?3)
+                 ON CONFLICT(workspace_id, agent_id) DO NOTHING"
             ),
             params![event.workspace_id, event.agent_id, event.stored.event_seq()],
         )?;
