@@ -30,7 +30,8 @@ pub use presence::{
     BUSY_UNTIL_MAXIMUM, EXPLICIT_HANDOFF_RELEVANCE, FALLBACK_HANDOFF_RELEVANCE,
     HANDOFF_LIST_MAX_ENTRIES, HANDOFF_SUMMARY_MAX_SCALARS, LAST_RESULT_MAX_SCALARS,
     PRESENCE_GOAL_EXCERPT_MAX_SCALARS, PRESENCE_TTL, READ_OBSERVATION_TTL, ExplicitHandoff,
-    HandoffStatus, PresenceRecord, PresenceResource, PresenceResourceRelation, PresenceUpdate,
+    HandoffRecord, HandoffStatus, PresenceRecord, PresenceResource, PresenceResourceRelation,
+    PresenceUpdate,
 };
 pub use reconcile::ReconciliationDecision;
 pub use protocol::{QueryEnvelope, RequestEnvelope, V2Error, V2ErrorEnvelope};

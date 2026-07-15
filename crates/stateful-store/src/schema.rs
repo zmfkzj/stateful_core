@@ -86,6 +86,10 @@ pub(crate) fn create_v2_schema(connection: &Connection) -> StoreResult<()> {
         CREATE TABLE IF NOT EXISTS presence_resource_current (
             workspace_id TEXT NOT NULL,
             aggregate_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            relative_path TEXT NOT NULL,
+            relation TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
             payload_json TEXT NOT NULL,
             origin_event_seq INTEGER NOT NULL,
             PRIMARY KEY (workspace_id, aggregate_id)
@@ -210,6 +214,27 @@ pub(crate) fn create_v2_schema(connection: &Connection) -> StoreResult<()> {
             ON notification_current(target_agent_id, version);
         ",
     )?;
+    ensure_presence_resource_columns(connection)?;
+    Ok(())
+}
+
+fn ensure_presence_resource_columns(connection: &Connection) -> StoreResult<()> {
+    let mut statement = connection.prepare("PRAGMA table_info(presence_resource_current)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (column, definition) in [
+        ("agent_id", "TEXT NOT NULL DEFAULT ''"),
+        ("relative_path", "TEXT NOT NULL DEFAULT ''"),
+        ("relation", "TEXT NOT NULL DEFAULT ''"),
+        ("observed_at", "TEXT NOT NULL DEFAULT ''"),
+    ] {
+        if !columns.iter().any(|current| current == column) {
+            connection.execute_batch(&format!(
+                "ALTER TABLE presence_resource_current ADD COLUMN {column} {definition};"
+            ))?;
+        }
+    }
     Ok(())
 }
 

@@ -9,6 +9,8 @@ mod journal;
 mod projector;
 mod schema;
 mod migration;
+mod presence;
+mod handoff;
 pub use human::{
     HumanObservationConfidence, HumanObservationInput, HumanObservationKind,
     HumanObservationRecord, ReconciliationAckInput,
@@ -17,6 +19,9 @@ pub use clock::{Clock, FixedClock, SystemClock};
 pub use journal::{
     ClaimRecord, CommandOutcome, CommandPlan, ProjectionReader, ReadObservationRecord,
     ReplayReport, WriteFenceRecord,
+};
+pub use presence::{
+    PresenceRegistration, PresenceResourceUpdate, PresenceToolResult, PresenceToolStart,
 };
 pub use stateful_core::PresenceRecord;
 

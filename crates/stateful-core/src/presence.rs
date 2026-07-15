@@ -218,6 +218,38 @@ impl ExplicitHandoff {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffRecord {
+    pub workspace_id: String,
+    pub agent_id: String,
+    pub actor_id: String,
+    pub actor_type: ActorType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_actor_id: Option<String>,
+    pub status: HandoffStatus,
+    pub summary: String,
+    #[serde(default)]
+    pub files_changed: Vec<String>,
+    #[serde(default)]
+    pub tests_run: Vec<String>,
+    #[serde(default)]
+    pub remaining_work: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_plan: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_result: Option<String>,
+    pub explicit: bool,
+    #[serde(with = "time::serde::rfc3339")]
+    pub finalized_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    pub expires_at: OffsetDateTime,
+    pub origin_event_seq: u64,
+}
+
 fn normalize_whitespace(value: &str) -> String {
     let mut normalized = String::new();
     for part in value.split_whitespace() {

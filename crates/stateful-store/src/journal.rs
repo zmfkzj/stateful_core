@@ -7,8 +7,9 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use stateful_core::{
-    ActorType, AgentIdentity, EventPayload, NewEvent, PresenceRecord, RequestEnvelope,
-    SourceKind, SourceRef, StoredEvent, WorkspaceIdentity,
+    ActorType, AgentIdentity, EventPayload, HandoffRecord, NewEvent, PresenceRecord,
+    PresenceResource, PresenceResourceRelation, RequestEnvelope, SourceKind, SourceRef,
+    StoredEvent, WorkspaceIdentity,
 };
 use std::collections::BTreeMap;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -17,6 +18,11 @@ use uuid::Uuid;
 pub trait ProjectionReader {
     fn workspace_version(&self, workspace_id: &str) -> StoreResult<u64>;
     fn presence(&self, workspace_id: &str, agent_id: &str) -> StoreResult<Option<PresenceRecord>>;
+    fn presence_resource(&self, workspace_id: &str, agent_id: &str, path: &str, relation: PresenceResourceRelation) -> StoreResult<Option<PresenceResource>>;
+    fn presence_resources(&self, workspace_id: &str, agent_id: &str) -> StoreResult<Vec<PresenceResource>>;
+    fn live_presences(&self, workspace_id: &str) -> StoreResult<Vec<PresenceRecord>>;
+    fn handoff(&self, workspace_id: &str, agent_id: &str) -> StoreResult<Option<HandoffRecord>>;
+    fn handoffs(&self, workspace_id: &str) -> StoreResult<Vec<HandoffRecord>>;
     fn active_claims_for_path(&self, workspace_id: &str, path: &str) -> StoreResult<Vec<ClaimRecord>>;
     fn active_fence_for_path(&self, workspace_id: &str, path: &str) -> StoreResult<Option<WriteFenceRecord>>;
     fn stable_observation(&self, workspace_id: &str, agent_id: &str, path: &str) -> StoreResult<Option<ReadObservationRecord>>;
@@ -138,24 +144,60 @@ impl ProjectionReader for SqlProjectionReader<'_> {
     }
 
     fn presence(&self, workspace_id: &str, agent_id: &str) -> StoreResult<Option<PresenceRecord>> {
-        self.transaction
-            .query_row(
-                "SELECT actor_id, actor_type, occurred_at, origin_event_seq FROM presence_current WHERE workspace_id = ?1 AND agent_id = ?2",
-                params![workspace_id, agent_id],
-                |row| {
-                    let actor_type: String = row.get(1)?;
-                    let occurred_at: String = row.get(2)?;
-                    let timestamp = OffsetDateTime::parse(&occurred_at, &Rfc3339).map_err(|error| rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(error)))?;
-                    let actor_type = serde_json::from_value(serde_json::Value::String(actor_type)).map_err(|error| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(error)))?;
-                    Ok(PresenceRecord {
-                        workspace_id: workspace_id.into(), agent_id: agent_id.into(), actor_id: row.get(0)?, actor_type,
-                        owner_id: None, parent_agent_id: None, parent_actor_id: None, goal_excerpt: None, phase: None,
-                        next_plan: None, last_result: None, registered_at: timestamp, updated_at: timestamp,
-                        expires_at: timestamp, busy_until: None, origin_event_seq: row.get(3)?,
-                    })
-                },
-            )
-            .optional()
+        self.transaction.query_row(
+            "SELECT payload_json, origin_event_seq FROM presence_current WHERE workspace_id = ?1 AND agent_id = ?2",
+            params![workspace_id, agent_id],
+            |row| presence_from_row(row),
+        ).optional().map_err(StoreError::from)
+    }
+
+    fn presence_resource(
+        &self,
+        workspace_id: &str,
+        agent_id: &str,
+        path: &str,
+        relation: PresenceResourceRelation,
+    ) -> StoreResult<Option<PresenceResource>> {
+        let relation = relation_name(relation);
+        self.transaction.query_row(
+            "SELECT payload_json, origin_event_seq FROM presence_resource_current WHERE workspace_id = ?1 AND agent_id = ?2 AND relative_path = ?3 AND relation = ?4",
+            params![workspace_id, agent_id, path, relation],
+            |row| presence_resource_from_row(row),
+        ).optional().map_err(StoreError::from)
+    }
+
+    fn presence_resources(&self, workspace_id: &str, agent_id: &str) -> StoreResult<Vec<PresenceResource>> {
+        let mut statement = self.transaction.prepare(
+            "SELECT payload_json, origin_event_seq FROM presence_resource_current WHERE workspace_id = ?1 AND agent_id = ?2 ORDER BY relative_path, relation",
+        )?;
+        statement.query_map(params![workspace_id, agent_id], presence_resource_from_row)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    fn live_presences(&self, workspace_id: &str) -> StoreResult<Vec<PresenceRecord>> {
+        let mut statement = self.transaction.prepare(
+            "SELECT payload_json, origin_event_seq FROM presence_current WHERE workspace_id = ?1 ORDER BY agent_id",
+        )?;
+        statement.query_map([workspace_id], presence_from_row)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    fn handoff(&self, workspace_id: &str, agent_id: &str) -> StoreResult<Option<HandoffRecord>> {
+        self.transaction.query_row(
+            "SELECT payload_json, origin_event_seq FROM handoff_current WHERE workspace_id = ?1 AND aggregate_id = ?2",
+            params![workspace_id, agent_id],
+            |row| handoff_from_row(row),
+        ).optional().map_err(StoreError::from)
+    }
+
+    fn handoffs(&self, workspace_id: &str) -> StoreResult<Vec<HandoffRecord>> {
+        let mut statement = self.transaction.prepare(
+            "SELECT payload_json, origin_event_seq FROM handoff_current WHERE workspace_id = ?1 ORDER BY aggregate_id",
+        )?;
+        statement.query_map([workspace_id], handoff_from_row)?
+            .collect::<Result<Vec<_>, _>>()
             .map_err(StoreError::from)
     }
 
@@ -182,6 +224,42 @@ impl ProjectionReader for SqlProjectionReader<'_> {
             params![workspace_id, agent_id, path],
             |row| Ok(ReadObservationRecord { workspace_id: workspace_id.into(), agent_id: agent_id.into(), path: path.into(), origin_event_seq: row.get(0)? }),
         ).optional().map_err(StoreError::from)
+    }
+}
+
+fn presence_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PresenceRecord> {
+    let payload: String = row.get(0)?;
+    let origin_event_seq = row.get(1)?;
+    let mut record: PresenceRecord = serde_json::from_str(&payload)
+        .map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))?;
+    record.origin_event_seq = origin_event_seq;
+    Ok(record)
+}
+
+fn presence_resource_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PresenceResource> {
+    let payload: String = row.get(0)?;
+    let origin_event_seq = row.get(1)?;
+    let mut resource: PresenceResource = serde_json::from_str(&payload)
+        .map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))?;
+    resource.origin_event_seq = origin_event_seq;
+    Ok(resource)
+}
+
+fn handoff_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HandoffRecord> {
+    let payload: String = row.get(0)?;
+    let origin_event_seq = row.get(1)?;
+    let mut handoff: HandoffRecord = serde_json::from_str(&payload)
+        .map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))?;
+    handoff.origin_event_seq = origin_event_seq;
+    Ok(handoff)
+}
+
+fn relation_name(relation: PresenceResourceRelation) -> &'static str {
+    match relation {
+        PresenceResourceRelation::Read => "read",
+        PresenceResourceRelation::Planned => "planned",
+        PresenceResourceRelation::Touched => "touched",
+        PresenceResourceRelation::Changed => "changed",
     }
 }
 
@@ -265,6 +343,15 @@ impl Store {
         statement.query_map([], |row| row.get(0))?.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
     }
 
+    pub fn journal_event_types_for_request(&self, request_id: Uuid) -> StoreResult<Vec<String>> {
+        let mut statement = self.conn.prepare(
+            "SELECT event_type FROM journal_events WHERE request_id = ?1 ORDER BY event_seq",
+        )?;
+        statement.query_map([request_id.to_string()], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
     pub fn projection_row_count(&self) -> StoreResult<u64> {
         Ok(projection_snapshot(&self.conn, "")?.values().map(|rows| rows.len() as u64).sum())
     }
@@ -331,8 +418,8 @@ fn load_receipt(transaction: &Transaction<'_>, request_id: Uuid) -> StoreResult<
 fn insert_journal_event(transaction: &Transaction<'_>, event: &NewEvent, request: &RequestEnvelope<impl Serialize>, occurred_at: &str) -> StoreResult<u64> {
     let payload_json = serde_json::to_string(&event.payload)?;
     transaction.query_row(
-        "INSERT INTO journal_events (event_id, request_id, event_ordinal, agent_id, turn_id, workspace_id, repo_id, worktree_id, root, branch, aggregate_kind, aggregate_id, event_type, event_schema_version, actor_id, actor_type, owner_id, parent_agent_id, parent_actor_id, source_kind, source_ref, causation_id, correlation_id, occurred_at, affects_context, payload_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 1, ?14, ?15, ?16, ?17, ?18, ?19, ?20, NULL, NULL, ?21, ?22, ?23) RETURNING event_seq",
-        params![event.event_id.to_string(), request.request_id.to_string(), event.event_ordinal, request.agent.agent_id, request.agent.turn_id, request.workspace.workspace_id, request.workspace.repo_id, request.workspace.worktree_id, request.workspace.root, request.workspace.branch, event.aggregate_kind, event.aggregate_id, event.event_type, request.agent.actor_id, actor_type_name(&request.agent.actor_type), request.agent.owner_id.as_deref(), request.agent.parent_agent_id.as_deref(), request.agent.parent_actor_id.as_deref(), source_kind_name(&request.source.kind), request.source.source_ref, occurred_at, event.affects_context as i64, payload_json],
+        "INSERT INTO journal_events (event_id, request_id, event_ordinal, agent_id, turn_id, workspace_id, repo_id, worktree_id, root, branch, aggregate_kind, aggregate_id, event_type, event_schema_version, actor_id, actor_type, owner_id, parent_agent_id, parent_actor_id, source_kind, source_ref, causation_id, correlation_id, occurred_at, affects_context, payload_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 1, ?14, ?15, ?16, ?17, ?18, ?19, ?20, NULL, ?21, ?22, ?23, ?24) RETURNING event_seq",
+        params![event.event_id.to_string(), request.request_id.to_string(), event.event_ordinal, request.agent.agent_id, request.agent.turn_id, request.workspace.workspace_id, request.workspace.repo_id, request.workspace.worktree_id, request.workspace.root, request.workspace.branch, event.aggregate_kind, event.aggregate_id, event.event_type, request.agent.actor_id, actor_type_name(&request.agent.actor_type), request.agent.owner_id.as_deref(), request.agent.parent_agent_id.as_deref(), request.agent.parent_actor_id.as_deref(), source_kind_name(&request.source.kind), request.source.source_ref, request.request_id.to_string(), occurred_at, event.affects_context as i64, payload_json],
         |row| row.get(0),
     ).map_err(StoreError::from)
 }
@@ -516,7 +603,7 @@ impl PersistedJournalEvent {
                 || source_kind_name(&source_kind) != source_kind_name(&expected.source.kind)
                 || self.source_ref != expected.source.source_ref
                 || self.causation_id.is_some()
-                || self.correlation_id.is_some()
+                || self.correlation_id.as_deref() != Some(expected.request_id.as_str())
             {
                 return Err(StoreError::InvalidJournalEvent);
             }

@@ -1,6 +1,10 @@
 use crate::{StoreError, StoreResult, journal::JournalEvent, schema};
 use rusqlite::{Connection, params};
-use stateful_core::{EventPayload, MigrationEvent};
+use stateful_core::{
+    ClaimEvent, EventData, EventPayload, HandoffEvent, HandoffRecord, MigrationEvent,
+    PresenceEvent, PresenceRecord, PresenceResource, ReservationEvent, WaitEvent,
+    WriteFenceEvent,
+};
 
 pub(crate) struct Projector<'a> {
     connection: &'a Connection,
@@ -35,6 +39,19 @@ impl<'a> Projector<'a> {
             return Ok(());
         }
 
+        if self.apply_presence_or_handoff(event)? {
+            if event.stored.affects_context() {
+                self.apply_workspace_version(event)?;
+            }
+            return Ok(());
+        }
+        if let Some(agent_id) = cleanup_agent_id(event) {
+            self.apply_coordination_cleanup(event, agent_id)?;
+            if event.stored.affects_context() {
+                self.apply_workspace_version(event)?;
+            }
+            return Ok(());
+        }
 
         let table = migration_seed_projection_table(event).or_else(|| match event.stored.aggregate_kind() {
             "presence" => Some("presence_current"),
@@ -55,6 +72,149 @@ impl<'a> Projector<'a> {
         }
         if event.stored.affects_context() {
             self.apply_workspace_version(event)?;
+        }
+        Ok(())
+    }
+
+    fn apply_presence_or_handoff(&self, event: &JournalEvent) -> StoreResult<bool> {
+        match event.stored.payload() {
+            EventPayload::Presence(PresenceEvent::Finalized(_) | PresenceEvent::Expired(_)) => {
+                let presence = format!("{}presence_current", self.prefix);
+                let resources = format!("{}presence_resource_current", self.prefix);
+                self.connection.execute(
+                    &format!("DELETE FROM {presence} WHERE workspace_id = ?1 AND agent_id = ?2"),
+                    params![event.workspace_id, event.stored.aggregate_id()],
+                )?;
+                self.connection.execute(
+                    &format!("DELETE FROM {resources} WHERE workspace_id = ?1 AND agent_id = ?2"),
+                    params![event.workspace_id, event.stored.aggregate_id()],
+                )?;
+                Ok(true)
+            }
+            EventPayload::Presence(presence_event) => {
+                let Some(data) = presence_event_data(presence_event) else {
+                    return Ok(false);
+                };
+                let Some(value) = data.data.get("presence") else {
+                    return Ok(false);
+                };
+                let presence: PresenceRecord = serde_json::from_value(value.clone())?;
+                let table = format!("{}presence_current", self.prefix);
+                self.connection.execute(
+                    &format!(
+                        "INSERT INTO {table} (workspace_id, agent_id, actor_id, actor_type, payload_json, occurred_at, origin_event_seq)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                         ON CONFLICT(workspace_id, agent_id) DO UPDATE SET actor_id=excluded.actor_id, actor_type=excluded.actor_type, payload_json=excluded.payload_json, occurred_at=excluded.occurred_at, origin_event_seq=excluded.origin_event_seq"
+                    ),
+                    params![
+                        &presence.workspace_id,
+                        &presence.agent_id,
+                        &presence.actor_id,
+                        serde_json::to_value(&presence.actor_type)?.as_str().unwrap_or("unknown"),
+                        serde_json::to_string(&presence)?,
+                        &event.occurred_at,
+                        event.stored.event_seq(),
+                    ],
+                )?;
+                if let Some(value) = data.data.get("resource") {
+                    let resource: PresenceResource = serde_json::from_value(value.clone())?;
+                    let table = format!("{}presence_resource_current", self.prefix);
+                    let aggregate_id = presence_resource_key(&resource);
+                    self.connection.execute(
+                        &format!(
+                            "INSERT INTO {table} (workspace_id, aggregate_id, agent_id, relative_path, relation, observed_at, payload_json, origin_event_seq)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                             ON CONFLICT(workspace_id, aggregate_id) DO UPDATE SET agent_id=excluded.agent_id, relative_path=excluded.relative_path, relation=excluded.relation, observed_at=excluded.observed_at, payload_json=excluded.payload_json, origin_event_seq=excluded.origin_event_seq"
+                        ),
+                        params![
+                            &resource.workspace_id,
+                            aggregate_id,
+                            &resource.agent_id,
+                            &resource.relative_path,
+                            serde_json::to_value(&resource.relation)?.as_str().unwrap_or(""),
+                            resource.observed_at.format(&time::format_description::well_known::Rfc3339)
+                                .map_err(|error| StoreError::InvalidTimestamp(error.to_string()))?,
+                            serde_json::to_string(&resource)?,
+                            event.stored.event_seq(),
+                        ],
+                    )?;
+                }
+                Ok(true)
+            }
+            EventPayload::Handoff(HandoffEvent::Finalized(data)) => {
+                let Some(value) = data.data.get("handoff") else {
+                    return Ok(false);
+                };
+                let handoff: HandoffRecord = serde_json::from_value(value.clone())?;
+                let table = format!("{}handoff_current", self.prefix);
+                self.connection.execute(
+                    &format!(
+                        "INSERT INTO {table} (workspace_id, aggregate_id, payload_json, origin_event_seq)
+                         VALUES (?1, ?2, ?3, ?4)
+                         ON CONFLICT(workspace_id, aggregate_id) DO UPDATE SET payload_json=excluded.payload_json, origin_event_seq=excluded.origin_event_seq"
+                    ),
+                    params![&handoff.workspace_id, &handoff.agent_id, serde_json::to_string(&handoff)?, event.stored.event_seq()],
+                )?;
+                let resources = format!("{}handoff_resource_current", self.prefix);
+                self.connection.execute(
+                    &format!("DELETE FROM {resources} WHERE workspace_id = ?1 AND json_extract(payload_json, '$.agent_id') = ?2"),
+                    params![&handoff.workspace_id, &handoff.agent_id],
+                )?;
+                for path in &handoff.files_changed {
+                    let payload = serde_json::to_string(&serde_json::json!({
+                        "agent_id": handoff.agent_id,
+                        "relative_path": path,
+                    }))?;
+                    self.connection.execute(
+                        &format!(
+                            "INSERT INTO {resources} (workspace_id, aggregate_id, payload_json, origin_event_seq)
+                             VALUES (?1, ?2, ?3, ?4)
+                             ON CONFLICT(workspace_id, aggregate_id) DO UPDATE SET payload_json=excluded.payload_json, origin_event_seq=excluded.origin_event_seq"
+                        ),
+                        params![&handoff.workspace_id, handoff_resource_key(&handoff.agent_id, path), payload, event.stored.event_seq()],
+                    )?;
+                }
+                Ok(true)
+            }
+            EventPayload::Handoff(HandoffEvent::Expired(data)) => {
+                let agent_id = data.data.get("handoff")
+                    .and_then(|value| value.get("agent_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(event.stored.aggregate_id());
+                let handoffs = format!("{}handoff_current", self.prefix);
+                let resources = format!("{}handoff_resource_current", self.prefix);
+                self.connection.execute(
+                    &format!("DELETE FROM {handoffs} WHERE workspace_id = ?1 AND aggregate_id = ?2"),
+                    params![event.workspace_id, agent_id],
+                )?;
+                self.connection.execute(
+                    &format!("DELETE FROM {resources} WHERE workspace_id = ?1 AND json_extract(payload_json, '$.agent_id') = ?2"),
+                    params![event.workspace_id, agent_id],
+                )?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn apply_coordination_cleanup(&self, event: &JournalEvent, agent_id: &str) -> StoreResult<()> {
+        for table in [
+            "reservation_current",
+            "claim_current",
+            "wait_current",
+            "write_fence_current",
+        ] {
+            let table = format!("{}{}", self.prefix, table);
+            self.connection.execute(
+                &format!(
+                    "DELETE FROM {table}
+                     WHERE workspace_id = ?1
+                       AND (aggregate_id = ?2
+                            OR json_extract(payload_json, '$.event.data.data.agent_id') = ?2
+                            OR json_extract(payload_json, '$.agent_id') = ?2)"
+                ),
+                params![event.workspace_id, agent_id],
+            )?;
         }
         Ok(())
     }
@@ -179,6 +339,47 @@ impl<'a> Projector<'a> {
         }
         schema::create_v2_schema(connection)
     }
+}
+
+fn presence_event_data(event: &PresenceEvent) -> Option<&EventData> {
+    match event {
+        PresenceEvent::Registered(data)
+        | PresenceEvent::Heartbeat(data)
+        | PresenceEvent::GoalUpdated(data)
+        | PresenceEvent::PhaseUpdated(data)
+        | PresenceEvent::PlanUpdated(data)
+        | PresenceEvent::ResourcesUpdated(data)
+        | PresenceEvent::ToolStarted(data)
+        | PresenceEvent::ToolCompleted(data)
+        | PresenceEvent::Finalized(data)
+        | PresenceEvent::Expired(data) => Some(data),
+    }
+}
+
+fn presence_resource_key(resource: &PresenceResource) -> String {
+    let relation = serde_json::to_value(resource.relation)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    format!("{}\u{1}{}\u{1}{relation}", resource.agent_id, resource.relative_path)
+}
+
+fn handoff_resource_key(agent_id: &str, relative_path: &str) -> String {
+    format!("{agent_id}\u{1}{relative_path}")
+}
+
+fn cleanup_agent_id(event: &JournalEvent) -> Option<&str> {
+    let data = match event.stored.payload() {
+        EventPayload::Reservation(ReservationEvent::Released(data))
+        | EventPayload::Claim(ClaimEvent::Released(data))
+        | EventPayload::Wait(WaitEvent::Cancelled(data))
+        | EventPayload::WriteFence(WriteFenceEvent::Released(data)) => data,
+        _ => return None,
+    };
+    data.data.get("cleanup")
+        .and_then(serde_json::Value::as_bool)
+        .filter(|cleanup| *cleanup)
+        .map(|_| data.aggregate_id.as_str())
 }
 
 fn migration_seed_projection_table(event: &JournalEvent) -> Option<&'static str> {
