@@ -90,11 +90,52 @@ impl Store {
     }
 
     pub(crate) fn expire_current_state(&mut self, request: &RequestEnvelope<()>) -> StoreResult<()> {
-        self.expire_stale_presences(request)?;
-        let mut handoff_request = request.clone();
-        handoff_request.request_id = Uuid::new_v4();
-        self.expire_stale_handoffs(&handoff_request)?;
+        let now = self.clock.now();
+        if !self.has_stale_current_state(&request.workspace.workspace_id, now)? {
+            return Ok(());
+        }
+        self.execute_command(request, "presence.expire", |reader| {
+            let mut events = Vec::new();
+            for handoff in reader.handoffs(&request.workspace.workspace_id)? {
+                if handoff.expires_at > now {
+                    continue;
+                }
+                let mut data = EventData::new(&handoff.agent_id);
+                data.data = json!({"handoff": handoff});
+                events.push(NewEvent::new(
+                    request.request_id,
+                    events.len() as u32,
+                    now,
+                    EventPayload::Handoff(HandoffEvent::Expired(data)),
+                )?);
+            }
+            for presence in reader.live_presences(&request.workspace.workspace_id)? {
+                if presence.expires_at > now || presence.busy_until.is_some_and(|busy_until| busy_until > now) {
+                    continue;
+                }
+                let fallback_request = request_for_agent(request, &presence);
+                let plan = fallback_plan(&fallback_request, reader, now, events.len() as u32)?;
+                events.extend(plan.events);
+            }
+            Ok(CommandPlan { events, response: (), http_status: 200 })
+        })?;
         Ok(())
+    }
+
+    fn has_stale_current_state(&self, workspace_id: &str, now: OffsetDateTime) -> StoreResult<bool> {
+        let now = crate::format_timestamp(now);
+        self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM presence_current
+                WHERE workspace_id = ?1 AND json_extract(payload_json, '$.expires_at') <= ?2
+                  AND (json_extract(payload_json, '$.busy_until') IS NULL OR json_extract(payload_json, '$.busy_until') <= ?2)
+                UNION ALL
+                SELECT 1 FROM handoff_current
+                WHERE workspace_id = ?1 AND json_extract(payload_json, '$.expires_at') <= ?2
+            )",
+            params![workspace_id, now],
+            |row| row.get::<_, bool>(0),
+        ).map_err(crate::StoreError::from)
     }
 
     pub(crate) fn startup_housekeeping(&mut self) -> StoreResult<()> {
@@ -182,7 +223,9 @@ fn fallback_plan(
     now: OffsetDateTime,
     ordinal: u32,
 ) -> StoreResult<CommandPlan<Option<HandoffRecord>>> {
-    if let Some(existing) = reader.handoff(&request.workspace.workspace_id, &request.agent.agent_id)? {
+    if let Some(existing) = reader.handoff(&request.workspace.workspace_id, &request.agent.agent_id)?
+        && existing.expires_at > now
+    {
         return Ok(CommandPlan { events: vec![], response: Some(existing), http_status: 200 });
     }
     let Some(presence) = reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)? else {

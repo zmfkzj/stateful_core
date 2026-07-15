@@ -445,3 +445,45 @@ fn startup_expires_fallback_and_explicit_handoffs_at_their_relevance_windows() {
     assert_eq!(store.journal_event_count().expect("startup journal should load"), 16);
     assert!(store.handoff_for_request(&query, "explicit").expect("explicit query should succeed").is_none());
 }
+
+#[test]
+fn startup_coalesces_an_expired_handoff_and_presence_into_one_fallback() {
+    let temp = TempDir::new().expect("temporary directory should exist");
+    let path = temp.path().join("coalesced-expiry.sqlite");
+    let clock = MutableClock::new(NOW);
+    {
+        let mut store = Store::open_with_clock(&path, clock.clone()).expect("store should open");
+        store.register_presence(&register_request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, None))
+            .expect("registration should succeed");
+        store.stop_presence(&request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, ()))
+            .expect("fallback should succeed");
+        store.register_presence(&register_request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, None))
+            .expect("replacement presence should succeed");
+    }
+    clock.advance(Duration::hours(25));
+    let mut store = Store::open_with_clock(&path, clock.clone()).expect("reopened store should coalesce expiry");
+
+    assert!(presence(&mut store, "agent-1").is_none());
+    let fallback = handoff(&mut store, "agent-1").expect("replacement fallback should exist");
+    assert!(!fallback.explicit);
+    assert!(fallback.summary.contains("no explicit handoff"));
+    assert_eq!(store.journal_event_count().expect("journal count should load"), 15);
+}
+
+#[test]
+fn non_stale_reads_and_reopens_do_not_create_expiry_receipts() {
+    let temp = TempDir::new().expect("temporary directory should exist");
+    let path = temp.path().join("no-op-expiry.sqlite");
+    let clock = MutableClock::new(NOW);
+    {
+        let mut store = Store::open_with_clock(&path, clock.clone()).expect("store should open");
+        store.register_presence(&register_request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, None))
+            .expect("registration should succeed");
+        let before = store.command_receipt_count().expect("receipt count should load");
+        assert!(presence(&mut store, "agent-1").is_some());
+        assert_eq!(store.command_receipt_count().expect("receipt count should load"), before);
+    }
+    let store = Store::open_with_clock(&path, clock).expect("unchanged reopen should succeed");
+    assert_eq!(store.journal_event_count().expect("journal count should load"), 1);
+    assert_eq!(store.command_receipt_count().expect("receipt count should load"), 1);
+}
