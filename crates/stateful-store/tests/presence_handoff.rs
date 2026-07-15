@@ -112,7 +112,7 @@ fn registration_preserves_root_subagent_human_system_and_unknown_attribution() {
     let mut store = store();
     for (agent_id, actor_id, actor_type) in [
         ("root", "root-actor", ActorType::Agent),
-        ("subagent", "subagent-actor", ActorType::Agent),
+        ("subagent", "subagent-actor", ActorType::Subagent),
         ("human", "human-actor", ActorType::Human),
         ("system", "system-actor", ActorType::System),
         ("unknown", "unknown-actor", ActorType::Unknown),
