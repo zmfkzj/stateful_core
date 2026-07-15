@@ -19,9 +19,10 @@ pub use path::{
 pub use fingerprint::{ContentFingerprint, fingerprint_path, fingerprint_reader};
 pub use journal::{
     AuthorizationEvent, ClaimEvent, ContextEvent, EventData, EventPayload, HandoffEvent,
-    HumanObservationEvent, LEGACY_MIGRATION_NAMESPACE, MigrationEvent, NewEvent,
-    NotificationEvent, PresenceEvent, ReadObservationEvent, RecoveryEvent, ReservationEvent,
-    StoredEvent, WaitEvent, WriteFenceEvent, WriteIntentEvent, migration_seed_event_id,
+    HumanAcknowledgementEvent, HumanObservationEvent, LEGACY_MIGRATION_NAMESPACE, MigrationEvent,
+    NewEvent, NotificationEvent, PresenceEvent, ReadObservationEvent, RecoveryEvent,
+    ReservationEvent, StoredEvent, WaitEvent, WriteFenceEvent, WriteIntentEvent,
+    migration_seed_event_id,
 };
 pub use policy::{
     AuthorizationInput, PolicyState, PresencePhase, ReservationScope, ScopeSet, authorize_action,

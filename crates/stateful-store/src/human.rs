@@ -5,7 +5,10 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use stateful_core::{EventData, EventPayload, HumanObservationEvent, ReconciliationDecision, RequestEnvelope};
+use stateful_core::{
+    EventData, EventPayload, HumanAcknowledgementEvent, HumanObservationEvent,
+    ReconciliationDecision, RequestEnvelope,
+};
 use std::str::FromStr;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
@@ -90,6 +93,19 @@ pub struct HumanObservationRecord {
     pub origin_event_seq: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HumanReconciliationAcknowledgementRecord {
+    pub acknowledgement_id: String,
+    pub workspace_id: String,
+    pub decision: ReconciliationDecision,
+    pub files_reread: Vec<String>,
+    pub human_change_summary: String,
+    pub acknowledged_by_agent_id: String,
+    pub acknowledged_at: String,
+    #[serde(default)]
+    pub origin_event_seq: u64,
+}
+
 impl Store {
     pub fn record_human_observation(
         &self,
@@ -136,21 +152,65 @@ impl Store {
         let now = self.clock.now();
         let payload = request.payload.clone();
         self.execute_command(request, "human.reconcile", |reader| {
-            let paths = payload.files_reread.iter().map(|path| normalized_scope(path)).collect::<StoreResult<Vec<_>>>()?;
-            let mut events = Vec::new();
+            let paths = payload.files_reread.iter()
+                .map(|path| normalized_scope(path))
+                .collect::<StoreResult<Vec<_>>>()?;
+            let acknowledgement = HumanReconciliationAcknowledgementRecord {
+                acknowledgement_id: request.request_id.to_string(),
+                workspace_id: request.workspace.workspace_id.clone(),
+                decision: payload.decision,
+                files_reread: paths.clone(),
+                human_change_summary: payload.human_change_summary.clone(),
+                acknowledged_by_agent_id: request.agent.agent_id.clone(),
+                acknowledged_at: timestamp(now)?,
+                origin_event_seq: 0,
+            };
+            let mut events = vec![acknowledgement_event(request, 0, now, &acknowledgement)?];
             let mut count = 0;
-            for mut observation in typed_records::<HumanObservationRecord>(reader, CurrentAggregate::HumanObservation, &request.workspace.workspace_id)? {
-                if observation.status != "pending" || (!paths.is_empty() && !paths.iter().any(|path| *path == observation.relative_path)) {
-                    continue;
-                }
-                if payload.decision.clears_human_write_block() {
+            if payload.decision.clears_human_write_block() && !paths.is_empty() {
+                for mut observation in typed_records::<HumanObservationRecord>(
+                    reader,
+                    CurrentAggregate::HumanObservation,
+                    &request.workspace.workspace_id,
+                )? {
+                    if observation.status != "pending"
+                        || !paths.iter().any(|path| *path == observation.relative_path)
+                    {
+                        continue;
+                    }
                     observation.status = "reconciled".into();
                     observation.reconciled_at = Some(timestamp(now)?);
                     observation.reconciled_by_agent_id = Some(request.agent.agent_id.clone());
+                    observation.decision = Some(payload.decision);
                     count += 1;
+                    events.push(observation_event(
+                        request,
+                        events.len() as u32,
+                        now,
+                        HumanObservationEvent::Reconciled,
+                        &observation,
+                    )?);
                 }
-                observation.decision = Some(payload.decision);
-                events.push(observation_event(request, events.len() as u32, now, HumanObservationEvent::Reconciled, &observation)?);
+            } else if !paths.is_empty() {
+                for mut observation in typed_records::<HumanObservationRecord>(
+                    reader,
+                    CurrentAggregate::HumanObservation,
+                    &request.workspace.workspace_id,
+                )? {
+                    if observation.status != "pending"
+                        || !paths.iter().any(|path| *path == observation.relative_path)
+                    {
+                        continue;
+                    }
+                    observation.decision = Some(payload.decision);
+                    events.push(observation_event(
+                        request,
+                        events.len() as u32,
+                        now,
+                        HumanObservationEvent::Reconciled,
+                        &observation,
+                    )?);
+                }
             }
             Ok(CommandPlan { events, response: count, http_status: 200 })
         })
@@ -188,6 +248,16 @@ impl Store {
             .filter(|observation| observation.status == "pending" && observation.kind.is_write() && observation.confidence == HumanObservationConfidence::High && paths.contains(&observation.relative_path))
             .collect())
     }
+
+    pub fn human_reconciliation_acknowledgements(
+        &self,
+        workspace_id: &str,
+    ) -> StoreResult<Vec<HumanReconciliationAcknowledgementRecord>> {
+        self.current_records(CurrentAggregate::HumanAcknowledgement, workspace_id)?
+            .into_iter()
+            .map(record_from_current::<HumanReconciliationAcknowledgementRecord>)
+            .collect()
+    }
 }
 
 fn observation_event<T>(
@@ -201,3 +271,20 @@ fn observation_event<T>(
     data.data = json!({"observation": observation});
     stateful_core::NewEvent::new(request.request_id, ordinal, now, EventPayload::HumanObservation(variant(data))).map_err(StoreError::from)
 }
+fn acknowledgement_event<T>(
+    request: &RequestEnvelope<T>,
+    ordinal: u32,
+    now: OffsetDateTime,
+    acknowledgement: &HumanReconciliationAcknowledgementRecord,
+) -> StoreResult<stateful_core::NewEvent> {
+    let mut data = EventData::new(&acknowledgement.acknowledgement_id);
+    data.data = json!({"acknowledgement": acknowledgement});
+    stateful_core::NewEvent::new(
+        request.request_id,
+        ordinal,
+        now,
+        EventPayload::HumanAcknowledgement(HumanAcknowledgementEvent::Recorded(data)),
+    )
+    .map_err(StoreError::from)
+}
+

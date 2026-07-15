@@ -11,6 +11,7 @@ pub(crate) const PROJECTION_TABLES: &[&str] = &[
     "read_observation_current",
     "write_intent_current",
     "human_observation_current",
+    "human_acknowledgement_current",
     "handoff_current",
     "handoff_resource_current",
     "notification_current",
@@ -145,6 +146,13 @@ pub(crate) fn create_v2_schema(connection: &Connection) -> StoreResult<()> {
             PRIMARY KEY (workspace_id, aggregate_id)
         );
         CREATE TABLE IF NOT EXISTS human_observation_current (
+            workspace_id TEXT NOT NULL,
+            aggregate_id TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            origin_event_seq INTEGER NOT NULL,
+            PRIMARY KEY (workspace_id, aggregate_id)
+        );
+        CREATE TABLE IF NOT EXISTS human_acknowledgement_current (
             workspace_id TEXT NOT NULL,
             aggregate_id TEXT NOT NULL,
             payload_json TEXT NOT NULL,

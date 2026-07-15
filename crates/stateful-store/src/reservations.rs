@@ -386,15 +386,20 @@ pub(crate) fn append_grant_for_path<T>(
     events: &mut Vec<NewEvent>,
 ) -> StoreResult<Option<WaitRecord>> {
     let active_reservations = typed_records::<ReservationRecord>(reader, CurrentAggregate::Reservation, workspace_id)?;
-    if active_reservations.iter().any(|reservation| {
-        reservation.status == "active"
-            && !ignored_reservation_ids.contains(&reservation.reservation_id)
-            && !expired(&reservation.expires_at, now)
-            && scopes_conflict(&reservation.relative_path, relative_path)
-    }) {
-        return Ok(None);
-    }
     let active_claims = typed_records::<ClaimRecord>(reader, CurrentAggregate::Claim, workspace_id)?;
+    let candidate_is_blocked = |candidate_path: &str| {
+        active_reservations.iter().any(|reservation| {
+            reservation.status == "active"
+                && !ignored_reservation_ids.contains(&reservation.reservation_id)
+                && !expired(&reservation.expires_at, now)
+                && scopes_conflict(&reservation.relative_path, candidate_path)
+        }) || active_claims.iter().any(|claim| {
+            claim.status == "active"
+                && !ignored_reservation_ids.contains(&claim.reservation_id)
+                && !expired(&claim.expires_at, now)
+                && scopes_conflict(&claim.relative_path, candidate_path)
+        })
+    };
 
     let mut waits = typed_records::<WaitRecord>(reader, CurrentAggregate::Wait, workspace_id)?;
     waits.sort_by(|left, right| left.requested_at.cmp(&right.requested_at).then_with(|| left.wait_id.cmp(&right.wait_id)));
@@ -409,12 +414,7 @@ pub(crate) fn append_grant_for_path<T>(
     for mut wait in waits {
         if wait.status != "queued"
             || !scopes_conflict(&wait.relative_path, relative_path)
-            || active_claims.iter().any(|claim| {
-                claim.status == "active"
-                    && !ignored_reservation_ids.contains(&claim.reservation_id)
-                    && !expired(&claim.expires_at, now)
-                    && scopes_conflict(&claim.relative_path, &wait.relative_path)
-            })
+            || candidate_is_blocked(&wait.relative_path)
             || granted.iter().any(|scope| scopes_conflict(scope, &wait.relative_path))
         {
             continue;

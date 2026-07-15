@@ -2,9 +2,10 @@ use crate::{StoreError, StoreResult, journal::JournalEvent, schema};
 use rusqlite::{Connection, params};
 use stateful_core::{
     ActorType, AuthorizationEvent, ClaimEvent, ContextEvent, EventData, EventPayload, HandoffEvent,
-    HandoffRecord, HandoffStatus, HumanObservationEvent, MigrationEvent, NotificationEvent,
-    PresenceEvent, PresenceRecord, PresenceResource, ReadObservationEvent, RecoveryEvent,
-    ReservationEvent, WaitEvent, WriteFenceEvent, WriteIntentEvent, FALLBACK_HANDOFF_RELEVANCE,
+    HandoffRecord, HandoffStatus, HumanAcknowledgementEvent, HumanObservationEvent, MigrationEvent,
+    NotificationEvent, PresenceEvent, PresenceRecord, PresenceResource, ReadObservationEvent,
+    RecoveryEvent, ReservationEvent, WaitEvent, WriteFenceEvent, WriteIntentEvent,
+    FALLBACK_HANDOFF_RELEVANCE,
 };
 
 pub(crate) struct Projector<'a> {
@@ -69,6 +70,7 @@ impl<'a> Projector<'a> {
             "read_observation" => Some("read_observation_current"),
             "write_intent" => Some("write_intent_current"),
             "human_observation" => Some("human_observation_current"),
+            "human_acknowledgement" => Some("human_acknowledgement_current"),
             "handoff" => Some("handoff_current"),
             "notification" => Some("notification_current"),
             "recovery" => Some("delivery_current"),
@@ -442,6 +444,7 @@ fn projection_data<'a>(table: &str, data: &'a serde_json::Value) -> &'a serde_js
         "wait_current" => "wait",
         "write_fence_current" => "write_fence",
         "human_observation_current" => "observation",
+        "human_acknowledgement_current" => "acknowledgement",
         "notification_current" => "notification",
         "delivery_current" => "delivery",
         _ => return data,
@@ -521,6 +524,9 @@ fn event_data(event: &JournalEvent) -> Option<&serde_json::Value> {
             HumanObservationEvent::Observed(data)
             | HumanObservationEvent::Reconciled(data)
             | HumanObservationEvent::Expired(data) => data,
+        },
+        EventPayload::HumanAcknowledgement(event) => match event {
+            HumanAcknowledgementEvent::Recorded(data) => data,
         },
         EventPayload::Handoff(event) => match event {
             HandoffEvent::Finalized(data) | HandoffEvent::Expired(data) => data,

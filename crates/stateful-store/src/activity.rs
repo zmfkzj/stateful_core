@@ -65,6 +65,9 @@ impl Store {
                     events.push(reservation_event(request, events.len() as u32, now, ReservationEvent::Released, &reservation)?);
                 }
             }
+            let released_reservation_ids = released_reservations.iter()
+                .map(|reservation| reservation.reservation_id.clone())
+                .collect::<Vec<_>>();
             for mut claim in typed_records::<ClaimRecord>(reader, CurrentAggregate::Claim, workspace_id)? {
                 if claim.agent_id == request.agent.agent_id && claim.status == "active" {
                     claim.status = "released".into();
@@ -87,8 +90,14 @@ impl Store {
             }
             for reservation in released_reservations {
                 append_grant_for_path(
-                    request, reader, now, workspace_id, &reservation.relative_path,
-                    std::slice::from_ref(&reservation.reservation_id), true, &mut events,
+                    request,
+                    reader,
+                    now,
+                    workspace_id,
+                    &reservation.relative_path,
+                    &released_reservation_ids,
+                    true,
+                    &mut events,
                 )?;
             }
             Ok(CommandPlan {

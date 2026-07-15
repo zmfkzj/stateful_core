@@ -18,6 +18,7 @@ pub use clock::{Clock, FixedClock, SystemClock};
 pub use human::{
     HumanObservationConfidence, HumanObservationInput, HumanObservationKind,
     HumanObservationRecord, ReconciliationAckInput,
+    HumanReconciliationAcknowledgementRecord,
 };
 pub use journal::{
     CommandOutcome, CommandPlan, CurrentAggregate, CurrentRecord, ProjectionReader,
@@ -176,6 +177,7 @@ impl Store {
             CurrentAggregate::Wait => "wait_current",
             CurrentAggregate::WriteFence => "write_fence_current",
             CurrentAggregate::HumanObservation => "human_observation_current",
+            CurrentAggregate::HumanAcknowledgement => "human_acknowledgement_current",
             CurrentAggregate::Notification => "notification_current",
             CurrentAggregate::Delivery => "delivery_current",
         };

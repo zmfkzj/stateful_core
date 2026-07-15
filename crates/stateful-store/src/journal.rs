@@ -66,6 +66,7 @@ pub enum CurrentAggregate {
     Wait,
     WriteFence,
     HumanObservation,
+    HumanAcknowledgement,
     Notification,
     Delivery,
 }
@@ -260,6 +261,7 @@ impl ProjectionReader for SqlProjectionReader<'_> {
             CurrentAggregate::Wait => "wait_current",
             CurrentAggregate::WriteFence => "write_fence_current",
             CurrentAggregate::HumanObservation => "human_observation_current",
+            CurrentAggregate::HumanAcknowledgement => "human_acknowledgement_current",
             CurrentAggregate::Notification => "notification_current",
             CurrentAggregate::Delivery => "delivery_current",
         };

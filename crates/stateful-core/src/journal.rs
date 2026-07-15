@@ -154,6 +154,10 @@ event_family!(HumanObservationEvent {
     Expired,
 });
 
+event_family!(HumanAcknowledgementEvent {
+    Recorded,
+});
+
 event_family!(HandoffEvent {
     Finalized,
     Expired,
@@ -199,6 +203,7 @@ pub enum EventPayload {
     ReadObservation(ReadObservationEvent),
     WriteIntent(WriteIntentEvent),
     HumanObservation(HumanObservationEvent),
+    HumanAcknowledgement(HumanAcknowledgementEvent),
     Handoff(HandoffEvent),
     Authorization(AuthorizationEvent),
     Context(ContextEvent),
@@ -218,6 +223,7 @@ impl EventPayload {
             Self::ReadObservation(event) => ("read_observation", event.parts()),
             Self::WriteIntent(event) => ("write_intent", event.parts()),
             Self::HumanObservation(event) => ("human_observation", event.parts()),
+            Self::HumanAcknowledgement(event) => ("human_acknowledgement", event.parts()),
             Self::Handoff(event) => ("handoff", event.parts()),
             Self::Authorization(event) => ("authorization", event.parts()),
             Self::Context(event) => ("context", event.parts()),

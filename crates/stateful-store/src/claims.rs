@@ -84,6 +84,13 @@ impl Store {
             if normalized.iter().any(|path| !scope_covers(&reservation.relative_path, path)) {
                 return Err(StoreError::MissingReservation);
             }
+            if normalized.iter().enumerate().any(|(index, path)| {
+                normalized[..index]
+                    .iter()
+                    .any(|other| scopes_conflict(other, path))
+            }) {
+                return Err(StoreError::ClaimConflict);
+            }
             let existing = typed_records::<ClaimRecord>(reader, CurrentAggregate::Claim, &request.workspace.workspace_id)?;
             for path in &normalized {
                 if path == "tmp" || path == "tmp/" {
@@ -102,12 +109,7 @@ impl Store {
             let mut claims = Vec::new();
             let mut acquired = 0;
             let mut already_held = 0;
-            let mut planned_paths: Vec<String> = Vec::new();
             for (input, relative_path) in payload.paths.iter().zip(normalized) {
-                if planned_paths.iter().any(|planned| scopes_conflict(planned, &relative_path)) {
-                    continue;
-                }
-                planned_paths.push(relative_path.clone());
                 if let Some(mut claim) = existing.iter().find(|claim| {
                     claim.status == "active"
                         && !expired(&claim.expires_at, now)
@@ -176,20 +178,48 @@ impl Store {
             }
             claim.status = "released".into();
             let mut events = vec![claim_event(request, 0, now, ClaimEvent::Released, &claim)?];
+            let has_active_sibling = typed_records::<ClaimRecord>(
+                reader,
+                CurrentAggregate::Claim,
+                &request.workspace.workspace_id,
+            )?
+            .into_iter()
+            .any(|other| {
+                other.claim_id != claim.claim_id
+                    && other.reservation_id == claim.reservation_id
+                    && other.status == "active"
+                    && !expired(&other.expires_at, now)
+            });
+            if has_active_sibling {
+                return Ok(CommandPlan { events, response: claim, http_status: 200 });
+            }
             if let Some(mut reservation) = typed_records::<ReservationRecord>(
-                reader, CurrentAggregate::Reservation, &request.workspace.workspace_id,
-            )?.into_iter().find(|reservation| reservation.reservation_id == claim.reservation_id && reservation.status == "active") {
+                reader,
+                CurrentAggregate::Reservation,
+                &request.workspace.workspace_id,
+            )?
+            .into_iter()
+            .find(|reservation| {
+                reservation.reservation_id == claim.reservation_id
+                    && reservation.status == "active"
+            }) {
                 reservation.status = "released".into();
-                events.push(reservation_event(request, events.len() as u32, now, ReservationEvent::Released, &reservation)?);
-                for mut related in typed_records::<ClaimRecord>(reader, CurrentAggregate::Claim, &request.workspace.workspace_id)? {
-                    if related.claim_id != claim.claim_id && related.reservation_id == reservation.reservation_id && related.status == "active" {
-                        related.status = "released".into();
-                        events.push(claim_event(request, events.len() as u32, now, ClaimEvent::Released, &related)?);
-                    }
-                }
+                events.push(reservation_event(
+                    request,
+                    events.len() as u32,
+                    now,
+                    ReservationEvent::Released,
+                    &reservation,
+                )?);
                 append_grant_for_path(
-                    request, reader, now, &reservation.workspace_id, &reservation.relative_path,
-                    std::slice::from_ref(&reservation.reservation_id), true, &mut events,
+                    request,
+                    reader,
+                    now,
+                    &reservation.workspace_id,
+                    &reservation.relative_path,
+                    std::slice::from_ref(&reservation.reservation_id),
+                    true,
+                    &mut events,
                 )?;
             }
             Ok(CommandPlan { events, response: claim, http_status: 200 })
