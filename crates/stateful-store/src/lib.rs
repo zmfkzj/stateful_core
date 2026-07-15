@@ -4,10 +4,20 @@ mod human;
 mod notifications;
 mod reservations;
 mod write_fences;
+mod clock;
+mod journal;
+mod projector;
+mod schema;
 pub use human::{
     HumanObservationConfidence, HumanObservationInput, HumanObservationKind,
     HumanObservationRecord, ReconciliationAckInput,
 };
+pub use clock::{Clock, FixedClock, SystemClock};
+pub use journal::{
+    ClaimRecord, CommandOutcome, CommandPlan, ProjectionReader, ReadObservationRecord,
+    ReplayReport, WriteFenceRecord,
+};
+pub use stateful_core::PresenceRecord;
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -18,6 +28,7 @@ use stateful_core::{
 };
 use std::time::Duration as StdDuration;
 use std::{fs, path::Path};
+use std::sync::Arc;
 use thiserror::Error;
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime, UtcOffset};
@@ -42,6 +53,18 @@ pub enum StoreError {
     Io(#[from] std::io::Error),
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    #[error("serialization error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("v2 protocol error: {0}")]
+    V2(#[from] stateful_core::V2Error),
+    #[error("idempotency key was reused with a different command")]
+    IdempotencyKeyReused,
+    #[error("command contains an invalid event")]
+    InvalidCommandEvent,
+    #[error("projector failure injected for test")]
+    ProjectorFailure,
+    #[error("replayed projection differs from canonical projection")]
+    ReplayMismatch,
     #[error("reservation owner mismatch")]
     ReservationOwnerMismatch,
     #[error("reservation request not found")]
@@ -78,6 +101,15 @@ pub enum StoreError {
 }
 
 pub type StoreResult<T> = Result<T, StoreError>;
+impl StoreError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::IdempotencyKeyReused => "idempotency_key_reused",
+            _ => "store_error",
+        }
+    }
+}
+
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CurrentStateIdentityFilter<'a> {
@@ -122,21 +154,27 @@ impl WorkspaceIdentity<'_> {
     }
 }
 
-#[derive(Debug)]
 pub struct Store {
     conn: Connection,
+    clock: clock::SharedClock,
+    projector_fail_on_event: Option<u32>,
 }
 
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> StoreResult<Self> {
+        Self::open_with_clock(path, SystemClock)
+    }
+
+    pub fn open_with_clock(path: impl AsRef<Path>, clock: impl Clock + 'static) -> StoreResult<Self> {
         let path = path.as_ref();
         prepare_private_database_path(path)?;
 
         let conn = Connection::open(path)?;
         configure_file_connection(&conn)?;
         restrict_database_file_permissions(path)?;
-        let store = Self { conn };
+        let store = Self { conn, clock: Arc::new(clock), projector_fail_on_event: None };
         store.migrate()?;
+        schema::create_v2_schema(&store.conn)?;
         Ok(store)
     }
 
@@ -176,10 +214,15 @@ impl Store {
     }
 
     pub fn open_in_memory() -> StoreResult<Self> {
+        Self::open_in_memory_with_clock(SystemClock)
+    }
+
+    pub fn open_in_memory_with_clock(clock: impl Clock + 'static) -> StoreResult<Self> {
         let conn = Connection::open_in_memory()?;
         configure_connection(&conn)?;
-        let store = Self { conn };
+        let store = Self { conn, clock: Arc::new(clock), projector_fail_on_event: None };
         store.migrate()?;
+        schema::create_v2_schema(&store.conn)?;
         Ok(store)
     }
 

@@ -1,0 +1,210 @@
+use serde_json::json;
+use stateful_core::{
+    ActorType, AgentIdentity, AuthorizationEvent, EventData, EventPayload, NewEvent, RequestEnvelope,
+    SourceKind, SourceRef, WorkspaceIdentity,
+};
+use stateful_store::{CommandPlan, FixedClock, Store};
+use time::{macros::datetime, OffsetDateTime};
+use uuid::Uuid;
+
+const NOW: OffsetDateTime = datetime!(2026-07-15 12:00 UTC);
+
+fn request(request_id: Uuid, payload: serde_json::Value) -> RequestEnvelope<serde_json::Value> {
+    RequestEnvelope::new(
+        request_id,
+        NOW,
+        AgentIdentity {
+            agent_id: "agent-1".into(),
+            turn_id: Some("turn-1".into()),
+            actor_id: "actor-1".into(),
+            actor_type: ActorType::Agent,
+            owner_id: None,
+            parent_agent_id: None,
+            parent_actor_id: None,
+        },
+        WorkspaceIdentity {
+            root: "/repo".into(),
+            workspace_id: "workspace-1".into(),
+            repo_id: "repo-1".into(),
+            worktree_id: "worktree-1".into(),
+            branch: "main".into(),
+        },
+        SourceRef {
+            kind: SourceKind::Cli,
+            event: "test".into(),
+            tool_name: None,
+            source_ref: "journal-v2-test".into(),
+        },
+        payload,
+    )
+    .expect("test request should be valid")
+}
+
+fn event(request_id: Uuid, ordinal: u32, event_type: &str) -> NewEvent {
+    let payload = match event_type {
+        "authorization.allowed" => EventPayload::Authorization(AuthorizationEvent::Allowed(EventData::new("audit-1"))),
+        _ => EventPayload::Authorization(AuthorizationEvent::Denied(EventData::new("decision-1"))),
+    };
+    NewEvent::new(request_id, ordinal, NOW, payload).expect("test event should be valid")
+}
+
+fn command_plan(request_id: Uuid, events: Vec<NewEvent>) -> CommandPlan<serde_json::Value> {
+    CommandPlan {
+        events,
+        response: json!({"request_id": request_id}),
+        http_status: 201,
+    }
+}
+
+fn store() -> Store {
+    Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store should open")
+}
+
+#[test]
+fn command_appends_projects_versions_receipts_and_commits_atomically() {
+    let mut store = store();
+    let request = request(Uuid::new_v4(), json!({"intent":"deny"}));
+
+    let outcome = store
+        .execute_command(&request, "test.command", |_| Ok(command_plan(request.request_id, vec![event(request.request_id, 0, "authorization.denied")])))
+        .expect("command should commit");
+
+    assert_eq!(outcome.first_event_seq, Some(1));
+    assert_eq!(outcome.last_event_seq, Some(1));
+    assert!(!outcome.duplicate);
+    assert_eq!(store.journal_event_count().expect("journal count should load"), 1);
+    assert_eq!(store.command_receipt_count().expect("receipt count should load"), 1);
+    assert_eq!(store.workspace_version("workspace-1").expect("version should load"), 1);
+    assert_eq!(store.projection_row_count().expect("projections should load"), 2);
+    for table in [
+        "journal_events", "command_receipts", "presence_current", "presence_resource_current",
+        "reservation_current", "claim_current", "wait_current", "write_fence_current",
+        "read_observation_current", "write_intent_current", "human_observation_current",
+        "handoff_current", "handoff_resource_current", "notification_current",
+        "workspace_version", "agent_context_cursor", "resource_write_current", "migration_current",
+    ] {
+        assert!(store.has_table(table).expect("schema lookup should work"), "{table} must exist");
+    }
+    for index in [
+        "idx_journal_events_workspace_sequence", "idx_journal_events_workspace_type",
+        "idx_journal_events_aggregate", "idx_claim_current_active_expiry",
+        "idx_write_fence_current_active_expiry", "idx_wait_current_operation",
+        "idx_write_intent_current_operation", "idx_resource_write_current_path",
+        "idx_notification_current_target_version",
+    ] {
+        assert!(store.has_index(index).expect("schema lookup should work"), "{index} must exist");
+    }
+}
+
+#[test]
+fn duplicate_request_returns_frozen_response_without_new_events() {
+    let mut store = store();
+    let request = request(Uuid::new_v4(), json!({"intent":"deny"}));
+    let first = store
+        .execute_command(&request, "test.command", |_| Ok(command_plan(request.request_id, vec![event(request.request_id, 0, "authorization.denied")])))
+        .expect("first command should commit");
+    let duplicate = store
+        .execute_command(&request, "test.command", |_| -> stateful_store::StoreResult<CommandPlan<serde_json::Value>> { panic!("duplicates must not rerun policy") })
+        .expect("exact duplicate should succeed");
+
+    assert!(!first.duplicate);
+    assert!(duplicate.duplicate);
+    assert_eq!(duplicate.response, first.response);
+    assert_eq!(duplicate.http_status, first.http_status);
+    assert_eq!(store.journal_event_count().expect("journal count should load"), 1);
+}
+
+#[test]
+fn request_id_reuse_with_different_route_identity_or_payload_is_rejected() {
+    let mut store = store();
+    let request_id = Uuid::new_v4();
+    let original = request(request_id, json!({"intent":"deny"}));
+    store
+        .execute_command(&original, "test.command", |_| Ok(command_plan(request_id, vec![event(request_id, 0, "authorization.denied")])))
+        .expect("first command should commit");
+
+    let changed_payload = request(request_id, json!({"intent":"allow"}));
+    let error = store
+        .execute_command(&changed_payload, "test.command", |_| Ok(command_plan(request_id, vec![])))
+        .expect_err("payload reuse must fail");
+    assert_eq!(error.code(), "idempotency_key_reused");
+    let route_error = store
+        .execute_command(&original, "other.command", |_| Ok(command_plan(request_id, vec![])))
+        .expect_err("route reuse must fail");
+    assert_eq!(route_error.code(), "idempotency_key_reused");
+    let mut changed_identity = original.clone();
+    changed_identity.agent.actor_id = "other-actor".into();
+    let identity_error = store
+        .execute_command(&changed_identity, "test.command", |_| Ok(command_plan(request_id, vec![])))
+        .expect_err("identity reuse must fail");
+    assert_eq!(identity_error.code(), "idempotency_key_reused");
+}
+
+#[test]
+fn projector_failure_rolls_back_journal_projection_version_and_receipt() {
+    let mut store = store();
+    let request = request(Uuid::new_v4(), json!({"intent":"deny"}));
+    store.fail_projector_on_event_for_tests(2);
+
+    assert!(store
+        .execute_command(&request, "test.command", |_| Ok(command_plan(request.request_id, vec![
+            event(request.request_id, 0, "authorization.denied"),
+            event(request.request_id, 1, "authorization.denied"),
+        ])))
+        .is_err());
+    assert_eq!(store.journal_event_count().expect("journal count should load"), 0);
+    assert_eq!(store.projection_row_count().expect("projections should load"), 0);
+    assert_eq!(store.workspace_version("workspace-1").expect("version should load"), 0);
+    assert_eq!(store.command_receipt_count().expect("receipt count should load"), 0);
+}
+
+#[test]
+fn audit_only_event_does_not_advance_workspace_version() {
+    let mut store = store();
+    let request = request(Uuid::new_v4(), json!({"intent":"audit"}));
+    store
+        .execute_command(&request, "test.command", |_| Ok(command_plan(request.request_id, vec![event(request.request_id, 0, "authorization.allowed")])))
+        .expect("audit command should commit");
+
+    assert_eq!(store.workspace_version("workspace-1").expect("version should load"), 0);
+}
+
+#[test]
+fn replay_into_empty_projection_tables_is_byte_equivalent() {
+    let mut store = store();
+    let request = request(Uuid::new_v4(), json!({"intent":"deny"}));
+    store
+        .execute_command(&request, "test.command", |_| Ok(command_plan(request.request_id, vec![event(request.request_id, 0, "authorization.denied")])))
+        .expect("command should commit");
+    let before = store.projection_snapshot().expect("snapshot should load");
+    let journal_count = store.journal_event_count().expect("journal count should load");
+    let receipt_count = store.command_receipt_count().expect("receipt count should load");
+
+    let report = store.rebuild_projections().expect("replay should succeed");
+
+    assert_eq!(store.projection_snapshot().expect("snapshot should load"), before);
+    assert_eq!(store.journal_event_count().expect("journal count should load"), journal_count);
+    assert_eq!(store.command_receipt_count().expect("receipt count should load"), receipt_count);
+    assert_eq!(report.projectable_events, 1);
+    assert_ne!(report.canonical_sha256, "");
+    store.rebuild_projections().expect("replay should remain repeatable");
+    assert_eq!(store.projection_snapshot().expect("snapshot should load"), before);
+}
+
+#[test]
+fn event_sequence_and_id_are_stable_and_unique() {
+    let mut store = store();
+    let request = request(Uuid::new_v4(), json!({"intent":"deny"}));
+    let events = vec![
+        event(request.request_id, 0, "authorization.denied"),
+        event(request.request_id, 1, "authorization.denied"),
+    ];
+    let expected_ids = events.iter().map(|event| event.event_id.to_string()).collect::<Vec<_>>();
+    let outcome = store
+        .execute_command(&request, "test.command", |_| Ok(command_plan(request.request_id, events)))
+        .expect("command should commit");
+
+    assert_eq!(outcome.first_event_seq, Some(1));
+    assert_eq!(outcome.last_event_seq, Some(2));
+    assert_eq!(store.journal_event_ids().expect("journal IDs should load"), expected_ids);
+}
