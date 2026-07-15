@@ -295,7 +295,12 @@ fn fallback_plan(
     if let Some(existing) = reader.handoff(&request.workspace.workspace_id, &request.agent.agent_id)?
         && existing.expires_at > now
     {
-        return Ok(CommandPlan { events: vec![], response: Some(existing), http_status: 200 });
+        let events = if reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?.is_some() {
+            presence_finalization_events(request, &existing.agent_id, now, ordinal)?
+        } else {
+            Vec::new()
+        };
+        return Ok(CommandPlan { events, response: Some(existing), http_status: 200 });
     }
     let Some(presence) = reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)? else {
         return Ok(CommandPlan { events: vec![], response: None, http_status: 200 });
@@ -398,20 +403,39 @@ fn finalization_events<T>(
     let now = handoff.finalized_at;
     let mut handoff_data = EventData::new(&handoff.agent_id);
     handoff_data.data = json!({"handoff": handoff});
-    let mut presence_data = EventData::new(&handoff.agent_id);
-    presence_data.data = json!({"agent_id": handoff.agent_id});
-    let mut cleanup_data = EventData::new(&handoff.agent_id);
-    cleanup_data.data = json!({"agent_id": handoff.agent_id, "cleanup": true});
-    [
+    let mut events = vec![NewEvent::new(
+        request.request_id,
+        ordinal,
+        now,
         EventPayload::Handoff(HandoffEvent::Finalized(handoff_data)),
+    )?];
+    events.extend(presence_finalization_events(request, &handoff.agent_id, now, ordinal + 1)?);
+    Ok(events)
+}
+
+fn presence_finalization_events<T>(
+    request: &RequestEnvelope<T>,
+    agent_id: &str,
+    now: OffsetDateTime,
+    ordinal: u32,
+) -> StoreResult<Vec<NewEvent>> {
+    let mut presence_data = EventData::new(agent_id);
+    presence_data.data = json!({"agent_id": agent_id});
+    let mut cleanup_data = EventData::new(agent_id);
+    cleanup_data.data = json!({"agent_id": agent_id, "cleanup": true});
+    [
         EventPayload::Presence(PresenceEvent::Finalized(presence_data)),
         EventPayload::Reservation(ReservationEvent::Released(cleanup_data.clone())),
         EventPayload::Claim(ClaimEvent::Released(cleanup_data.clone())),
         EventPayload::Wait(WaitEvent::Cancelled(cleanup_data.clone())),
         EventPayload::WriteFence(WriteFenceEvent::Released(cleanup_data)),
-    ].into_iter().enumerate().map(|(index, payload)| {
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, payload)| {
         NewEvent::new(request.request_id, ordinal + index as u32, now, payload).map_err(crate::StoreError::from)
-    }).collect()
+    })
+    .collect()
 }
 
 fn request_for_agent(

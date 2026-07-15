@@ -255,6 +255,30 @@ fn stale_heartbeat_finalizes_before_returning_missing_presence_without_reusing_r
 }
 
 #[test]
+fn stale_heartbeat_cannot_revive_presence_when_a_live_handoff_already_exists() {
+    let clock = MutableClock::new(NOW);
+    let mut store = Store::open_in_memory_with_clock(clock.clone()).expect("store should open");
+    store
+        .register_presence(&register_request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, None))
+        .expect("registration should succeed");
+    store
+        .stop_presence(&request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, ()))
+        .expect("fallback handoff succeeds");
+    store
+        .register_presence(&register_request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, None))
+        .expect("registration resumes beside the live handoff");
+    clock.advance(Duration::minutes(16));
+
+    let error = store
+        .heartbeat_presence(&request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, ()))
+        .expect_err("stale heartbeat must not revive beside an existing handoff");
+
+    assert!(matches!(error, stateful_store::StoreError::V2(error) if error.code == "presence_not_found"));
+    assert!(presence(&mut store, "agent-1").is_none());
+    assert!(handoff(&mut store, "agent-1").is_some());
+}
+
+#[test]
 fn maintenance_leaves_started_write_intents_unclassified_without_post_fingerprints() {
     let clock = MutableClock::new(NOW);
     let mut store = Store::open_in_memory_with_clock(clock.clone()).expect("store should open");

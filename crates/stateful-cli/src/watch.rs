@@ -334,3 +334,217 @@ mod tests {
         assert_eq!(body["agent"]["actor_type"], "human");
         assert_eq!(body["payload"]["relative_path"], "src/lib.rs");
     }
+
+    #[test]
+    fn watcher_observation_blocks_writes_until_reread_and_reconciliation() {
+        let temp = tempfile::tempdir().expect("temp dir should create");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).expect("git marker should write");
+        let file = repo.join("src").join("lib.rs");
+        std::fs::create_dir_all(file.parent().expect("file parent")).expect("source dir should write");
+        std::fs::write(&file, "pub fn example() {}\n").expect("source file should write");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        listener
+            .set_nonblocking(true)
+            .expect("listener should become nonblocking");
+        let addr = listener.local_addr().expect("listener address should load");
+        let server = stateful_server::ServerConfig::with_store(
+            "token",
+            stateful_store::Store::open_in_memory().expect("server store should open"),
+        )
+        .with_coordination_mode(stateful_server::CoordinationMode::Enforcement);
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("server runtime should build");
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener)
+                    .expect("tokio listener should convert");
+                stateful_server::serve_listener(listener, server)
+                    .await
+                    .expect("server should run");
+            });
+        });
+
+        let runtime = crate::ServerRuntime::new(format!("http://{addr}"), "token", "w1", 0);
+        let mut pending = HashMap::new();
+        pending.insert(file.clone(), Instant::now());
+        flush_pending(&repo, &runtime, None, "human-1", "w1", &mut pending)
+            .expect("watcher should submit the human observation");
+        assert!(pending.is_empty(), "watcher should flush the observed path");
+
+        let fingerprint = stateful_core::fingerprint_path(&file).expect("file should fingerprint");
+        let declare = crate::v2_request_envelope(
+            uuid::Uuid::new_v4(),
+            "agent-1".to_string(),
+            "w1".to_string(),
+            None,
+            ActorType::Agent,
+            SourceKind::Cli,
+            "reservation_declare",
+            "watcher-reconciliation-test",
+            None,
+            serde_json::json!({
+                "relative_path": "src/lib.rs",
+                "action": "write_file",
+                "purpose": "Reconcile the watcher-observed file."
+            }),
+        )
+        .expect("reservation envelope should build");
+        let declared = crate::post_v2(&runtime, "/v2/reservation/declare", &declare)
+            .expect("reservation should declare");
+        let reservation_id = serde_json::from_str::<serde_json::Value>(&declared.body)
+            .expect("reservation response should parse")["reservation_id"]
+            .as_str()
+            .expect("reservation response should include id")
+            .to_string();
+
+        let claim = crate::v2_request_envelope(
+            uuid::Uuid::new_v4(),
+            "agent-1".to_string(),
+            "w1".to_string(),
+            None,
+            ActorType::Agent,
+            SourceKind::Cli,
+            "claim_acquire",
+            "watcher-reconciliation-test",
+            None,
+            serde_json::json!({
+                "reservation_id": reservation_id,
+                "paths": [{
+                    "relative_path": "src/lib.rs",
+                    "observation": fingerprint
+                }]
+            }),
+        )
+        .expect("claim envelope should build");
+        crate::post_v2(&runtime, "/v2/claim/acquire", &claim).expect("reservation should claim");
+
+        let denied = crate::v2_request_envelope(
+            uuid::Uuid::new_v4(),
+            "agent-1".to_string(),
+            "w1".to_string(),
+            None,
+            ActorType::Agent,
+            SourceKind::Cli,
+            "authorize",
+            "watcher-reconciliation-test",
+            None,
+            serde_json::json!({
+                "reservation_id": reservation_id,
+                "operation_id": "write-before-reconciliation",
+                "action": "write_file",
+                "targets": [{"path": "src/lib.rs", "before": fingerprint}]
+            }),
+        )
+        .expect("authorization envelope should build");
+        let denied = crate::post_json(
+            &runtime,
+            "/v2/authorize",
+            &serde_json::to_value(denied).expect("authorization should serialize"),
+        )
+        .expect("authorization response should arrive");
+        assert_eq!(denied.status_code, 403);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&denied.body)
+                .expect("denial should parse")["reason_code"],
+            "unreconciled_human_write",
+            "watcher observations must not auto-acknowledge"
+        );
+
+        let read_start = crate::v2_request_envelope(
+            uuid::Uuid::new_v4(),
+            "agent-1".to_string(),
+            "w1".to_string(),
+            None,
+            ActorType::Agent,
+            SourceKind::Cli,
+            "read_start",
+            "watcher-reconciliation-test",
+            None,
+            serde_json::json!({
+                "operation_id": "watcher-reconciliation-read",
+                "path": "src/lib.rs",
+                "before": fingerprint
+            }),
+        )
+        .expect("read start envelope should build");
+        crate::post_v2(&runtime, "/v2/read/start", &read_start).expect("exact reread should start");
+        let read_complete = crate::v2_request_envelope(
+            uuid::Uuid::new_v4(),
+            "agent-1".to_string(),
+            "w1".to_string(),
+            None,
+            ActorType::Agent,
+            SourceKind::Cli,
+            "read_complete",
+            "watcher-reconciliation-test",
+            None,
+            serde_json::json!({
+                "operation_id": "watcher-reconciliation-read",
+                "path": "src/lib.rs",
+                "classification": "exact",
+                "after": fingerprint
+            }),
+        )
+        .expect("read completion envelope should build");
+        crate::post_v2(&runtime, "/v2/read/complete", &read_complete)
+            .expect("exact reread should complete");
+
+        let acknowledgement = crate::v2_request_envelope(
+            uuid::Uuid::new_v4(),
+            "agent-1".to_string(),
+            "w1".to_string(),
+            None,
+            ActorType::Agent,
+            SourceKind::Cli,
+            "reconcile_ack",
+            "watcher-reconciliation-test",
+            None,
+            serde_json::json!({
+                "decision": "adopt",
+                "files_reread": ["src/lib.rs"],
+                "human_change_summary": "Adopted the watcher-observed change.",
+                "resources": ["src/lib.rs"],
+                "reservation_id": reservation_id,
+                "conflict_with_plan": false
+            }),
+        )
+        .expect("reconciliation envelope should build");
+        crate::post_v2(&runtime, "/v2/reconcile/ack", &acknowledgement)
+            .expect("reservation-covered reconciliation should acknowledge");
+
+        let authorized = crate::v2_request_envelope(
+            uuid::Uuid::new_v4(),
+            "agent-1".to_string(),
+            "w1".to_string(),
+            None,
+            ActorType::Agent,
+            SourceKind::Cli,
+            "authorize",
+            "watcher-reconciliation-test",
+            None,
+            serde_json::json!({
+                "reservation_id": reservation_id,
+                "operation_id": "write-after-reconciliation",
+                "action": "write_file",
+                "targets": [{"path": "src/lib.rs", "before": fingerprint}]
+            }),
+        )
+        .expect("authorization envelope should build");
+        let authorized = crate::post_json(
+            &runtime,
+            "/v2/authorize",
+            &serde_json::to_value(authorized).expect("authorization should serialize"),
+        )
+        .expect("authorization response should arrive");
+        assert_eq!(authorized.status_code, 200);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&authorized.body)
+                .expect("authorization should parse")["decision"]["decision"],
+            "allow",
+            "the reconciliation should clear only the watcher safety block"
+        );
+    }
