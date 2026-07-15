@@ -325,7 +325,7 @@ fn collect_pending_events(connection: &Connection, now: &str) -> StoreResult<Vec
     append_audits(connection, &contexts, &mut pending)?;
     append_presence_seeds(connection, now, &contexts, &mut pending)?;
     append_reservation_seeds(connection, &contexts, &mut pending)?;
-    append_claim_seeds(connection, &contexts, &mut pending)?;
+    append_claim_seeds(connection, now, &contexts, &mut pending)?;
     append_wait_seeds(connection, &contexts, &mut pending)?;
     append_fence_seeds(connection, now, &contexts, &mut pending)?;
     append_human_seeds(connection, &contexts, &mut pending)?;
@@ -413,11 +413,18 @@ fn append_reservation_seeds(connection: &Connection, contexts: &BTreeMap<String,
     Ok(())
 }
 
-fn append_claim_seeds(connection: &Connection, contexts: &BTreeMap<String, Metadata>, pending: &mut Vec<PendingEvent>) -> StoreResult<()> {
+fn append_claim_seeds(connection: &Connection, now: &str, contexts: &BTreeMap<String, Metadata>, pending: &mut Vec<PendingEvent>) -> StoreResult<()> {
     let mut statement = connection.prepare("SELECT claim_id, reservation_id, agent_id, workspace_id, repo_id, relative_path, absolute_path, purpose, action, status, expires_at, observed_exists, observed_content_hash FROM claims ORDER BY workspace_id, claim_id")?;
     for row in statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, Option<String>>(5)?, row.get::<_, Option<String>>(6)?, row.get::<_, Option<String>>(7)?, row.get::<_, String>(8)?, row.get::<_, String>(9)?, row.get::<_, Option<String>>(10)?, row.get::<_, Option<i64>>(11)?, row.get::<_, Option<String>>(12)?)))? {
         let (claim_id, reservation_id, agent_id, workspace_id, repo_id, relative_path, absolute_path, purpose, action, status, expires_at, observed_exists, observed_content_hash) = row?;
         let agent_id = agent_id.unwrap_or_else(|| "unknown".into());
+        let status = if status == "active"
+            && expires_at.as_deref().map(parse_timestamp).transpose()?.is_some_and(|expires_at| expires_at <= parse_timestamp(now).expect("preflight validated migration clock"))
+        {
+            "expired"
+        } else {
+            status.as_str()
+        };
         let legacy_base_observation = json!({"exists": observed_exists, "content_hash": observed_content_hash});
         pending.push(PendingEvent {
             payload: EventPayload::Migration(MigrationEvent::ClaimSnapshotSeeded(seed_data("claim", &claim_id, json!({"reservation_id": reservation_id, "relative_path": relative_path, "absolute_path": absolute_path, "purpose": purpose, "action": action, "status": status, "expires_at": expires_at, "legacy_base_observation": legacy_base_observation})))),
