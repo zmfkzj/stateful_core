@@ -13,8 +13,12 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use crate::global_paths::GlobalPaths;
 use crate::repo_registry::RepoIdentity;
 use serde::{Deserialize, Serialize};
+use stateful_core::{
+    ActorType, AgentIdentity, ProtocolVersion, QueryEnvelope, RequestEnvelope, SourceKind,
+    SourceRef, V2ErrorEnvelope, WorkspaceIdentity,
+};
 
-const REQUIRED_RUNTIME_CAPABILITIES: &[&str] = &["authorize.write_directory"];
+const REQUIRED_RUNTIME_CAPABILITIES: &[&str] = &["presence"];
 static SECRET_JSON_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,7 +96,7 @@ impl ServerRuntime {
             token: token.into(),
             pid,
             workspace_id: workspace_id.into(),
-            protocol_version: "stateful.v1".to_string(),
+            protocol_version: "stateful.v2".to_string(),
             started_at: "2026-05-31T00:00:00Z".to_string(),
         }
     }
@@ -102,6 +106,14 @@ impl ServerRuntime {
 pub struct HttpResponse {
     pub status_code: u16,
     pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RuntimeStatus {
+    pub protocol_version: String,
+    pub journal_schema_version: u64,
+    pub coordination_mode: String,
+    pub capabilities: Vec<String>,
 }
 
 pub fn write_runtime_file(
@@ -260,8 +272,15 @@ pub fn post_json(
     path: &str,
     body: &serde_json::Value,
 ) -> anyhow::Result<HttpResponse> {
+    post_serialized_json(runtime, path, &body.to_string())
+}
+
+fn post_serialized_json(
+    runtime: &ServerRuntime,
+    path: &str,
+    body: &str,
+) -> anyhow::Result<HttpResponse> {
     let endpoint = parse_http_base_url(&runtime.base_url)?;
-    let body = body.to_string();
     let request = format!(
         "POST {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         endpoint.host_header,
@@ -293,41 +312,291 @@ pub fn get_json(runtime: &ServerRuntime, path: &str) -> anyhow::Result<HttpRespo
     parse_http_response(&response)
 }
 
+pub fn get_v2<Q: Serialize>(
+    runtime: &ServerRuntime,
+    path: &str,
+    request: &QueryEnvelope<Q>,
+) -> anyhow::Result<HttpResponse> {
+    ensure_v2_path(path)?;
+    request.validate().map_err(anyhow::Error::msg)?;
+    let query = flattened_query(request)?;
+    let response = get_json(runtime, &format!("{path}?{query}"))?;
+    decode_v2_response(response, request.request_id)
+}
+
+pub fn post_v2<T: Serialize>(
+    runtime: &ServerRuntime,
+    path: &str,
+    request: &RequestEnvelope<T>,
+) -> anyhow::Result<HttpResponse> {
+    ensure_v2_path(path)?;
+    request.validate().map_err(anyhow::Error::msg)?;
+    ensure_runtime_protocol(runtime, &request.agent, &request.workspace, &request.source)?;
+    let response = post_json(runtime, path, &serde_json::to_value(request)?)?;
+    decode_v2_response(response, request.request_id)
+}
+
+pub fn replay_v2_request(
+    runtime: &ServerRuntime,
+    path: &str,
+    serialized_request: &str,
+) -> anyhow::Result<HttpResponse> {
+    ensure_v2_path(path)?;
+    let request = RequestEnvelope::<serde_json::Value>::from_json(serialized_request)
+        .map_err(anyhow::Error::msg)?;
+    ensure_runtime_protocol(runtime, &request.agent, &request.workspace, &request.source)?;
+    let response = post_serialized_json(runtime, path, serialized_request)?;
+    decode_v2_response(response, request.request_id)
+}
+
+pub fn v2_request_envelope<T>(
+    request_id: uuid::Uuid,
+    agent_id: String,
+    workspace_id: String,
+    identity: Option<RepoIdentity>,
+    actor_type: ActorType,
+    source_kind: SourceKind,
+    event: impl Into<String>,
+    source_ref: impl Into<String>,
+    tool_name: Option<String>,
+    payload: T,
+) -> anyhow::Result<RequestEnvelope<T>> {
+    let (repo_id, worktree_id, root, branch) = identity
+        .map(|identity| {
+            (
+                identity.repo_id,
+                identity.worktree_id,
+                identity.root,
+                identity.branch,
+            )
+        })
+        .unwrap_or_else(|| {
+            (
+                "unknown".to_string(),
+                "unknown".to_string(),
+                "unknown".to_string(),
+                "unknown".to_string(),
+            )
+        });
+    RequestEnvelope::new(
+        request_id,
+        time::OffsetDateTime::now_utc(),
+        AgentIdentity {
+            actor_id: agent_id.clone(),
+            agent_id,
+            actor_type,
+            turn_id: None,
+            owner_id: None,
+            parent_agent_id: None,
+            parent_actor_id: None,
+        },
+        WorkspaceIdentity {
+            root,
+            workspace_id,
+            repo_id,
+            worktree_id,
+            branch,
+        },
+        SourceRef {
+            kind: source_kind,
+            event: event.into(),
+            tool_name,
+            source_ref: source_ref.into(),
+        },
+        payload,
+    )
+    .map_err(anyhow::Error::msg)
+}
+
+pub fn v2_query_envelope<Q>(
+    request_id: uuid::Uuid,
+    agent: AgentIdentity,
+    workspace: WorkspaceIdentity,
+    source: SourceRef,
+    query: Q,
+) -> anyhow::Result<QueryEnvelope<Q>> {
+    QueryEnvelope::new(
+        request_id,
+        time::OffsetDateTime::now_utc(),
+        agent,
+        workspace,
+        source,
+        query,
+    )
+    .map_err(anyhow::Error::msg)
+}
+
+
+pub fn v2_query_for_runtime<Q>(
+    request_id: uuid::Uuid,
+    agent_id: String,
+    workspace_id: String,
+    identity: Option<RepoIdentity>,
+    source_kind: SourceKind,
+    event: impl Into<String>,
+    source_ref: impl Into<String>,
+    tool_name: Option<String>,
+    query: Q,
+) -> anyhow::Result<QueryEnvelope<Q>> {
+    let request = v2_request_envelope(
+        request_id,
+        agent_id,
+        workspace_id,
+        identity,
+        ActorType::Agent,
+        source_kind,
+        event,
+        source_ref,
+        tool_name,
+        (),
+    )?;
+    v2_query_envelope(
+        request.request_id,
+        request.agent,
+        request.workspace,
+        request.source,
+        query,
+    )
+}
+fn ensure_runtime_protocol(
+    runtime: &ServerRuntime,
+    agent: &AgentIdentity,
+    workspace: &WorkspaceIdentity,
+    source: &SourceRef,
+) -> anyhow::Result<()> {
+    let identity = fetch_runtime_identity_for(runtime, agent.clone(), workspace.clone(), source.clone())?
+        .ok_or_else(|| anyhow::anyhow!("runtime handshake did not return a successful response"))?;
+    if identity.protocol_version != "stateful.v2" {
+        anyhow::bail!(
+            "runtime protocol {} is unsupported; stateful.v2 is required before mutation",
+            identity.protocol_version
+        );
+    }
+    if identity.journal_schema_version != 2 {
+        anyhow::bail!(
+            "runtime journal schema {} is unsupported; schema 2 is required before mutation",
+            identity.journal_schema_version
+        );
+    }
+    Ok(())
+}
+
+fn ensure_v2_path(path: &str) -> anyhow::Result<()> {
+    if path.starts_with("/v2/") {
+        Ok(())
+    } else {
+        anyhow::bail!("stateful.v2 clients require a /v2/ route, got {path}")
+    }
+}
+
+fn flattened_query<Q: Serialize>(request: &QueryEnvelope<Q>) -> anyhow::Result<String> {
+    let serde_json::Value::Object(values) = serde_json::to_value(request)? else {
+        anyhow::bail!("query envelope did not serialize as an object");
+    };
+    let mut pairs = values
+        .into_iter()
+        .filter_map(|(key, value)| match value {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(value) => Some(Ok((key, value))),
+            serde_json::Value::Bool(value) => Some(Ok((key, value.to_string()))),
+            serde_json::Value::Number(value) => Some(Ok((key, value.to_string()))),
+            _ => Some(Err(anyhow::anyhow!(
+                "query envelope field {key} must be scalar"
+            ))),
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    pairs.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(pairs
+        .into_iter()
+        .map(|(key, value)| format!("{}={}", percent_encode(&key), percent_encode(&value)))
+        .collect::<Vec<_>>()
+        .join("&"))
+}
+
+fn percent_encode(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            byte => {
+                encoded.push('%');
+                encoded.push(HEX[(byte >> 4) as usize] as char);
+                encoded.push(HEX[(byte & 0x0f) as usize] as char);
+            }
+        }
+    }
+    encoded
+}
+
+fn decode_v2_response(response: HttpResponse, request_id: uuid::Uuid) -> anyhow::Result<HttpResponse> {
+    if (200..300).contains(&response.status_code) {
+        return Ok(response);
+    }
+    if let Ok(error) = serde_json::from_str::<V2ErrorEnvelope>(&response.body) {
+        if error.protocol_version == ProtocolVersion::V2 && error.request_id == request_id {
+            anyhow::bail!("{}: {}", error.error.code, error.error.message);
+        }
+    }
+    anyhow::bail!(
+        "stateful.v2 request {request_id} failed with HTTP {}",
+        response.status_code
+    )
+}
+
 pub fn declare_reservation_via_http(
     runtime: &ServerRuntime,
     args: ReservationDeclareArgs,
 ) -> anyhow::Result<HttpResponse> {
-    let body = reservation_declare_protocol_body(runtime, args, "cli", "stateful-cli");
-
-    let response = post_json(runtime, "/v1/reservation/declare", &body)?;
-
-    if !(200..300).contains(&response.status_code) {
-        anyhow::bail!(
-            "reservation declaration failed with HTTP {}: {}",
-            response.status_code,
-            response.body
-        );
+    let ReservationDeclareArgs {
+        agent_id,
+        workspace_id,
+        purpose,
+        files_planned,
+        identity,
+    } = args;
+    let mut response = None;
+    for relative_path in files_planned {
+        let request = v2_request_envelope(
+            uuid::Uuid::new_v4(),
+            agent_id.clone(),
+            workspace_id.clone(),
+            identity.clone(),
+            ActorType::Agent,
+            SourceKind::Cli,
+            "reservation_declare",
+            "stateful-cli",
+            None,
+            serde_json::json!({
+                "relative_path": relative_path,
+                "action": "write",
+                "purpose": purpose,
+            }),
+        )?;
+        response = Some(post_v2(runtime, "/v2/reservation/declare", &request)?);
     }
-
-    Ok(response)
+    response.ok_or_else(|| anyhow::anyhow!("at least one planned file is required"))
 }
 
 pub fn claim_reservation_via_http(
     runtime: &ServerRuntime,
     args: ReservationClaimArgs,
 ) -> anyhow::Result<()> {
-    let body = reservation_claim_protocol_body(runtime, args, "cli", "stateful-cli");
-
-    let response = post_json(runtime, "/v1/reservation/claim", &body)?;
-
-    if !(200..300).contains(&response.status_code) {
-        anyhow::bail!(
-            "reservation claim failed with HTTP {}: {}",
-            response.status_code,
-            response.body
-        );
-    }
-
+    let request = v2_request_envelope(
+        uuid::Uuid::new_v4(),
+        args.agent_id,
+        args.workspace_id,
+        args.identity,
+        ActorType::Agent,
+        SourceKind::Cli,
+        "reservation_claim",
+        "stateful-cli",
+        None,
+        serde_json::json!({ "relative_path": args.wait_id }),
+    )?;
+    post_v2(runtime, "/v2/reservation/claim", &request)?;
     Ok(())
 }
 
@@ -335,37 +604,43 @@ pub fn request_reservation_via_http(
     runtime: &ServerRuntime,
     args: ReservationRequestArgs,
 ) -> anyhow::Result<HttpResponse> {
-    let body = reservation_request_protocol_body(runtime, args, "cli", "stateful-cli");
-
-    let response = post_json(runtime, "/v1/reservation/request", &body)?;
-
-    if !(200..300).contains(&response.status_code) {
-        anyhow::bail!(
-            "reservation request failed with HTTP {}: {}",
-            response.status_code,
-            response.body
-        );
-    }
-
-    Ok(response)
+    let request = v2_request_envelope(
+        uuid::Uuid::new_v4(),
+        args.agent_id,
+        args.workspace_id,
+        args.identity,
+        ActorType::Agent,
+        SourceKind::Cli,
+        "reservation_request",
+        "stateful-cli",
+        None,
+        serde_json::json!({
+            "relative_path": args.path,
+            "action": args.action,
+            "purpose": args.purpose,
+            "blocking_agent_id": args.reservation_id,
+        }),
+    )?;
+    post_v2(runtime, "/v2/reservation/request", &request)
 }
 
 pub fn cancel_reservation_via_http(
     runtime: &ServerRuntime,
     args: ReservationCancelArgs,
 ) -> anyhow::Result<()> {
-    let body = reservation_cancel_protocol_body(runtime, args, "cli", "stateful-cli");
-
-    let response = post_json(runtime, "/v1/reservation/cancel", &body)?;
-
-    if !(200..300).contains(&response.status_code) {
-        anyhow::bail!(
-            "reservation cancel failed with HTTP {}: {}",
-            response.status_code,
-            response.body
-        );
-    }
-
+    let request = v2_request_envelope(
+        uuid::Uuid::new_v4(),
+        args.agent_id,
+        args.workspace_id,
+        args.identity,
+        ActorType::Agent,
+        SourceKind::Cli,
+        "reservation_cancel",
+        "stateful-cli",
+        None,
+        serde_json::json!({ "wait_id": args.request_id }),
+    )?;
+    post_v2(runtime, "/v2/reservation/cancel", &request)?;
     Ok(())
 }
 
@@ -514,7 +789,7 @@ pub struct ProtocolEnvelopeArgs<'a> {
 
 pub fn protocol_envelope(args: ProtocolEnvelopeArgs<'_>) -> serde_json::Value {
     let ProtocolEnvelopeArgs {
-        runtime,
+        runtime: _,
         request_id,
         agent_id,
         workspace_id,
@@ -525,51 +800,30 @@ pub fn protocol_envelope(args: ProtocolEnvelopeArgs<'_>) -> serde_json::Value {
         source_tool_name,
         payload,
     } = args;
-    let (repo_id, worktree_id, root, branch) = match identity {
-        Some(identity) => (
-            identity.repo_id,
-            identity.worktree_id,
-            identity.root,
-            identity.branch,
-        ),
-        None => (String::new(), String::new(), String::new(), String::new()),
+    let source_kind = match source_kind {
+        "hook" => SourceKind::Hook,
+        "watcher" => SourceKind::Watcher,
+        "ide" => SourceKind::Ide,
+        "server" => SourceKind::Server,
+        _ => SourceKind::Cli,
     };
 
-    let mut source = serde_json::json!({
-        "kind": source_kind,
-        "event": event,
-        "source_ref": source_ref
-    });
-    if let Some(tool_name) = source_tool_name {
-        source["tool_name"] = serde_json::json!(tool_name);
-    }
-
-    serde_json::json!({
-        "protocol_version": runtime.protocol_version.as_str(),
-        "request_id": request_id,
-        "observed_at": now_rfc3339_timestamp(),
-        "agent": {
-            "agent_id": agent_id,
-            "actor_id": agent_id,
-            "actor_type": "agent"
-        },
-        "workspace": {
-            "root": root,
-            "workspace_id": workspace_id,
-            "repo_id": repo_id,
-            "worktree_id": worktree_id,
-            "branch": branch
-        },
-        "source": source,
-        "payload": payload
-    })
+    let request = v2_request_envelope(
+        uuid::Uuid::parse_str(&request_id).unwrap_or_else(|_| uuid::Uuid::new_v4()),
+        agent_id,
+        workspace_id,
+        identity,
+        ActorType::Agent,
+        source_kind,
+        event,
+        source_ref,
+        source_tool_name.map(str::to_owned),
+        payload,
+    )
+    .expect("protocol envelope arguments must form a valid stateful.v2 envelope");
+    serde_json::to_value(request).expect("protocol envelope must serialize")
 }
 
-fn now_rfc3339_timestamp() -> String {
-    time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .expect("UTC timestamp should format as RFC3339")
-}
 
 fn runtime_file_path(repo_root: impl AsRef<Path>) -> std::path::PathBuf {
     repo_root
@@ -601,13 +855,22 @@ pub fn runtime_has_required_identity(runtime: &ServerRuntime) -> bool {
         && runtime_identity_has_required_capabilities(runtime, &identity)
 }
 
+pub fn runtime_status(runtime: &ServerRuntime) -> anyhow::Result<RuntimeStatus> {
+    let identity = fetch_runtime_identity(runtime)?
+        .ok_or_else(|| anyhow::anyhow!("runtime identity request failed"))?;
+    Ok(RuntimeStatus {
+        protocol_version: identity.protocol_version,
+        journal_schema_version: identity.journal_schema_version,
+        coordination_mode: identity.coordination_mode,
+        capabilities: identity.capabilities,
+    })
+}
+
 pub fn runtime_identity_matches_pid(runtime: &ServerRuntime) -> anyhow::Result<bool> {
     let Some(identity) = fetch_runtime_identity(runtime)? else {
         return Ok(false);
     };
-    Ok(identity.status == "ok"
-        && identity.protocol_version == runtime.protocol_version
-        && identity.pid == runtime.pid)
+    Ok(runtime.pid != 0 && runtime_identity_matches_runtime(runtime, &identity))
 }
 
 fn runtime_from_env() -> anyhow::Result<Option<ServerRuntime>> {
@@ -617,11 +880,10 @@ fn runtime_from_env() -> anyhow::Result<Option<ServerRuntime>> {
     ) else {
         return Ok(None);
     };
-
-    let mut runtime = ServerRuntime::new(base_url, token, "unknown", 0);
+    let runtime = ServerRuntime::new(base_url, token, "unknown", 0);
     let Some(identity) = fetch_runtime_identity(&runtime)? else {
         anyhow::bail!(
-            "STATEFUL_SERVER_URL points to a server that did not return a valid stateful runtime identity"
+            "STATEFUL_SERVER_URL points to a server that did not return a valid stateful.v2 runtime identity"
         );
     };
     if !runtime_identity_has_required_capabilities(&runtime, &identity) {
@@ -630,7 +892,6 @@ fn runtime_from_env() -> anyhow::Result<Option<ServerRuntime>> {
             REQUIRED_RUNTIME_CAPABILITIES.join(", ")
         );
     }
-    runtime.pid = identity.pid;
     Ok(Some(runtime))
 }
 
@@ -687,26 +948,54 @@ fn runtime_base_url_host(base_url: &str) -> Option<&str> {
 }
 
 fn fetch_runtime_identity(runtime: &ServerRuntime) -> anyhow::Result<Option<RuntimeIdentity>> {
-    let response = get_json(runtime, "/v1/runtime/identity")?;
+    let agent = AgentIdentity {
+        agent_id: "stateful-cli".to_string(),
+        actor_id: "stateful-cli".to_string(),
+        actor_type: ActorType::Agent,
+        turn_id: None,
+        owner_id: None,
+        parent_agent_id: None,
+        parent_actor_id: None,
+    };
+    let workspace = WorkspaceIdentity {
+        root: "unknown".to_string(),
+        workspace_id: runtime.workspace_id.clone(),
+        repo_id: "unknown".to_string(),
+        worktree_id: "unknown".to_string(),
+        branch: "unknown".to_string(),
+    };
+    let source = SourceRef {
+        kind: SourceKind::Cli,
+        event: "runtime_identity".to_string(),
+        tool_name: None,
+        source_ref: "stateful-cli".to_string(),
+    };
+    fetch_runtime_identity_for(runtime, agent, workspace, source)
+}
+
+fn fetch_runtime_identity_for(
+    runtime: &ServerRuntime,
+    agent: AgentIdentity,
+    workspace: WorkspaceIdentity,
+    source: SourceRef,
+) -> anyhow::Result<Option<RuntimeIdentity>> {
+    let query = v2_query_envelope(uuid::Uuid::new_v4(), agent, workspace, source, ())?;
+    let response = get_v2(runtime, "/v2/runtime/identity", &query)?;
     if response.status_code != 200 {
         return Ok(None);
     }
-
     Ok(Some(serde_json::from_str(&response.body)?))
 }
 
 fn runtime_identity_matches_runtime(runtime: &ServerRuntime, identity: &RuntimeIdentity) -> bool {
-    identity.status == "ok"
-        && identity.protocol_version == runtime.protocol_version
-        && (runtime.pid == 0 || identity.pid == runtime.pid)
+    identity.protocol_version == runtime.protocol_version && identity.journal_schema_version == 2
 }
 
 fn runtime_identity_has_required_capabilities(
     runtime: &ServerRuntime,
     identity: &RuntimeIdentity,
 ) -> bool {
-    identity.status == "ok"
-        && identity.protocol_version == runtime.protocol_version
+    runtime_identity_matches_runtime(runtime, identity)
         && REQUIRED_RUNTIME_CAPABILITIES.iter().all(|required| {
             identity
                 .capabilities
@@ -717,9 +1006,9 @@ fn runtime_identity_has_required_capabilities(
 
 #[derive(Debug, serde::Deserialize)]
 struct RuntimeIdentity {
-    status: String,
-    pid: u32,
     protocol_version: String,
+    journal_schema_version: u64,
+    coordination_mode: String,
     #[serde(default)]
     capabilities: Vec<String>,
 }

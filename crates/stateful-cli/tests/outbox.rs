@@ -30,8 +30,7 @@ fn sync_outbox_posts_pending_events_in_sequence_order_and_removes_file() {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         for _ in 0..2 {
-            let (mut stream, _) = listener.accept().expect("connection should arrive");
-            let request = read_http_request(&mut stream);
+            let (mut stream, request) = accept_v2_request(&listener);
             tx.send(request).expect("request should send to test");
             write_json_response(&mut stream, r#"{"status":"ok","sync_status":"synced"}"#);
         }
@@ -39,14 +38,10 @@ fn sync_outbox_posts_pending_events_in_sequence_order_and_removes_file() {
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
     let outbox_file = paths.outbox_dir.join("s1.jsonl");
-    fs::write(
+    write_pending_records(
         &outbox_file,
-        r#"{"outbox_id":"outbox-2","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":2,"created_at":"2026-05-31T00:00:02Z","payload":{"n":2},"sync_status":"pending"}
-{"outbox_id":"outbox-1","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
-"#,
-    )
-    .expect("outbox file should write");
-
+        &[("outbox-2", "s1", "w1", 2), ("outbox-1", "s1", "w1", 1)],
+    );
     let synced = sync_outbox_with_runtime(&paths, &runtime).expect("outbox should sync");
 
     assert_eq!(synced, 2);
@@ -58,11 +53,82 @@ fn sync_outbox_posts_pending_events_in_sequence_order_and_removes_file() {
     let second = rx
         .recv_timeout(Duration::from_secs(2))
         .expect("second request should arrive");
-    assert!(first.contains("POST /v1/outbox/sync HTTP/1.1"));
-    assert!(first.contains("\"outbox_id\":\"outbox-1\""));
+    assert!(first.contains("POST /v2/outbox/sync HTTP/1.1"));
     assert!(first.contains("\"sequence\":1"));
     assert!(second.contains("\"outbox_id\":\"outbox-2\""));
     assert!(second.contains("\"sequence\":2"));
+}
+
+#[test]
+fn recovery_outbox_preserves_original_request_id_and_retries_idempotently() {
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let paths = paths_for_temp_root(temp.path());
+    fs::create_dir_all(&paths.outbox_dir).expect("outbox dir should be creatable");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener address should load");
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let (mut stream, request) = accept_v2_request(&listener);
+        tx.send(request).expect("request should send to test");
+        write_json_response(&mut stream, r#"{"outbox_id":"outbox-1"}"#);
+    });
+
+    let original = serde_json::json!({
+        "protocol_version": "stateful.v2",
+        "request_id": "018f1a33-e3c1-7000-b2a6-d16cc4f05a52",
+        "observed_at": "2026-05-31T00:00:01Z",
+        "agent": {
+            "agent_id": "s1",
+            "actor_id": "s1",
+            "actor_type": "agent"
+        },
+        "workspace": {
+            "root": "unknown",
+            "workspace_id": "w1",
+            "repo_id": "unknown",
+            "worktree_id": "unknown",
+            "branch": "unknown"
+        },
+        "source": {
+            "kind": "cli",
+            "event": "outbox_sync",
+            "source_ref": "stateful-cli"
+        },
+        "payload": {
+            "event_type": "AgentHeartbeatQueued",
+            "outbox_id": "outbox-1",
+            "sequence": 1,
+            "payload": {"reason": "offline"}
+        }
+    });
+    fs::write(
+        paths.outbox_dir.join("s1.jsonl"),
+        serde_json::json!({
+            "outbox_id": "outbox-1",
+            "agent_id": "s1",
+            "workspace_id": "w1",
+            "sequence": 1,
+            "route": "/v2/outbox/sync",
+            "request_id": "018f1a33-e3c1-7000-b2a6-d16cc4f05a52",
+            "request_envelope": serde_json::to_string(&original).expect("request should serialize"),
+            "sync_status": "pending"
+        })
+        .to_string(),
+    )
+    .expect("outbox fixture should write");
+
+    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
+    assert_eq!(
+        sync_outbox_with_runtime(&paths, &runtime).expect("outbox should sync"),
+        1
+    );
+    let request = rx.recv_timeout(Duration::from_secs(2)).expect("request should arrive");
+    assert!(request.contains("POST /v2/outbox/sync HTTP/1.1"));
+    let body = request.split_once("\r\n\r\n").expect("body separator").1;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(body).expect("request body should parse"),
+        original
+    );
 }
 
 #[cfg(unix)]
@@ -193,21 +259,16 @@ fn sync_outbox_skips_malformed_lines_and_posts_valid_pending_records() {
     let addr = listener.local_addr().expect("listener addr should load");
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("connection should arrive");
-        let request = read_http_request(&mut stream);
+        let (mut stream, request) = accept_v2_request(&listener);
         tx.send(request).expect("request should send to test");
         write_json_response(&mut stream, r#"{"status":"ok","sync_status":"synced"}"#);
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
     let outbox_file = paths.outbox_dir.join("s1.jsonl");
-    fs::write(
-        &outbox_file,
-        r#"not-json
-{"outbox_id":"outbox-valid","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
-"#,
-    )
-    .expect("outbox file should write");
+    write_pending_records(&outbox_file, &[("outbox-valid", "s1", "w1", 1)]);
+    let valid = fs::read_to_string(&outbox_file).expect("valid outbox record should read");
+    fs::write(&outbox_file, format!("not-json\n{valid}")).expect("malformed fixture should write");
 
     let synced = sync_outbox_with_runtime(&paths, &runtime).expect("outbox should sync");
 
@@ -235,18 +296,15 @@ fn sync_outbox_recovers_stale_lock_before_wait_timeout() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
     thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("connection should arrive");
-        let _request = read_http_request(&mut stream);
+        let (mut stream, _request) = accept_v2_request(&listener);
         write_json_response(&mut stream, r#"{"status":"ok","sync_status":"synced"}"#);
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
-    fs::write(
-        paths.outbox_dir.join("s1.jsonl"),
-        r#"{"outbox_id":"outbox-lock","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
-"#,
-    )
-    .expect("outbox file should write");
+    write_pending_records(
+        &paths.outbox_dir.join("s1.jsonl"),
+        &[("outbox-lock", "s1", "w1", 1)],
+    );
 
     let synced = sync_outbox_with_runtime(&paths, &runtime).expect("outbox should sync");
 
@@ -266,8 +324,7 @@ fn sync_outbox_command_discovers_global_runtime_file() {
     let addr = listener.local_addr().expect("listener addr should load");
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("connection should arrive");
-        let request = read_http_request(&mut stream);
+        let (mut stream, request) = accept_v2_request(&listener);
         tx.send(request).expect("request should send to test");
         write_json_response(&mut stream, r#"{"status":"ok","sync_status":"synced"}"#);
     });
@@ -275,12 +332,7 @@ fn sync_outbox_command_discovers_global_runtime_file() {
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "global-w", 42);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
     let outbox_file = paths.outbox_dir.join("s1.jsonl");
-    fs::write(
-        &outbox_file,
-        r#"{"outbox_id":"outbox-global","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"global-w","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
-"#,
-    )
-    .expect("outbox file should write");
+    write_pending_records(&outbox_file, &[("outbox-global", "s1", "global-w", 1)]);
 
     let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
         .arg("sync-outbox")
@@ -301,7 +353,7 @@ fn sync_outbox_command_discovers_global_runtime_file() {
     let request = rx
         .recv_timeout(Duration::from_secs(2))
         .expect("captured request should arrive");
-    assert!(request.contains("POST /v1/outbox/sync HTTP/1.1"));
+    assert!(request.contains("POST /v2/outbox/sync HTTP/1.1"));
     assert!(request.contains("Authorization: Bearer secret-token"));
     assert!(request.contains("\"outbox_id\":\"outbox-global\""));
 }
@@ -318,24 +370,16 @@ fn sync_outbox_preserves_records_queued_while_file_is_in_flight() {
     let outbox_file = paths.outbox_dir.join("s1.jsonl");
     let outbox_file_for_server = outbox_file.clone();
     thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("connection should arrive");
-        let _request = read_http_request(&mut stream);
-        fs::write(
+        let (mut stream, _request) = accept_v2_request(&listener);
+        write_pending_records(
             &outbox_file_for_server,
-            r#"{"outbox_id":"outbox-late","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":2,"created_at":"2026-05-31T00:00:02Z","payload":{"n":2},"sync_status":"pending"}
-"#,
-        )
-        .expect("late queued record should write");
+            &[("outbox-late", "s1", "w1", 2)],
+        );
         write_json_response(&mut stream, r#"{"status":"ok","sync_status":"synced"}"#);
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
-    fs::write(
-        &outbox_file,
-        r#"{"outbox_id":"outbox-1","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
-"#,
-    )
-    .expect("outbox file should write");
+    write_pending_records(&outbox_file, &[("outbox-1", "s1", "w1", 1)]);
 
     let synced = sync_outbox_with_runtime(&paths, &runtime).expect("outbox should sync");
 
@@ -354,12 +398,10 @@ fn sync_outbox_requeues_only_unsent_records_after_failure() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
     thread::spawn(move || {
-        let (mut first, _) = listener.accept().expect("first connection should arrive");
-        let _first_request = read_http_request(&mut first);
+        let (mut first, _first_request) = accept_v2_request(&listener);
         write_json_response(&mut first, r#"{"status":"ok","sync_status":"synced"}"#);
 
-        let (mut second, _) = listener.accept().expect("second connection should arrive");
-        let _second_request = read_http_request(&mut second);
+        let (mut second, _second_request) = accept_v2_request(&listener);
         let body = r#"{"status":"error","message":"boom"}"#;
         let response = format!(
             "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\n\r\n{}",
@@ -373,18 +415,15 @@ fn sync_outbox_requeues_only_unsent_records_after_failure() {
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
     let outbox_file = paths.outbox_dir.join("s1.jsonl");
-    fs::write(
+    write_pending_records(
         &outbox_file,
-        r#"{"outbox_id":"outbox-1","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
-{"outbox_id":"outbox-2","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":2,"created_at":"2026-05-31T00:00:02Z","payload":{"n":2},"sync_status":"pending"}
-"#,
-    )
-    .expect("outbox file should write");
+        &[("outbox-1", "s1", "w1", 1), ("outbox-2", "s1", "w1", 2)],
+    );
 
     let error = sync_outbox_with_runtime(&paths, &runtime)
         .expect_err("outbox sync should fail on server error");
 
-    assert!(error.to_string().contains("outbox sync failed"));
+    assert!(error.to_string().contains("stateful.v2 request"));
     let remaining = fs::read_to_string(&outbox_file).expect("failed record should remain pending");
     assert!(!remaining.contains("\"outbox_id\":\"outbox-1\""));
     assert!(remaining.contains("\"outbox_id\":\"outbox-2\""));
@@ -402,8 +441,7 @@ fn sync_outbox_recovers_stranded_claimed_files() {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         for _ in 0..2 {
-            let (mut stream, _) = listener.accept().expect("connection should arrive");
-            let request = read_http_request(&mut stream);
+            let (mut stream, request) = accept_v2_request(&listener);
             tx.send(request).expect("request should send to test");
             write_json_response(&mut stream, r#"{"status":"ok","sync_status":"synced"}"#);
         }
@@ -412,18 +450,8 @@ fn sync_outbox_recovers_stranded_claimed_files() {
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
     let outbox_file = paths.outbox_dir.join("s1.jsonl");
     let claimed_file = paths.outbox_dir.join("s1.jsonl.syncing-old");
-    fs::write(
-        &outbox_file,
-        r#"{"outbox_id":"outbox-base","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":2,"created_at":"2026-05-31T00:00:02Z","payload":{"n":2},"sync_status":"pending"}
-"#,
-    )
-    .expect("base outbox file should write");
-    fs::write(
-        &claimed_file,
-        r#"{"outbox_id":"outbox-claimed","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
-"#,
-    )
-    .expect("claimed outbox file should write");
+    write_pending_records(&outbox_file, &[("outbox-base", "s1", "w1", 2)]);
+    write_pending_records(&claimed_file, &[("outbox-claimed", "s1", "w1", 1)]);
 
     let synced = sync_outbox_with_runtime(&paths, &runtime).expect("outbox should sync");
 
@@ -453,8 +481,7 @@ fn sync_outbox_does_not_trust_symlinked_active_claim_marker() {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         for _ in 0..2 {
-            let (mut stream, _) = listener.accept().expect("connection should arrive");
-            let request = read_http_request(&mut stream);
+            let (mut stream, request) = accept_v2_request(&listener);
             tx.send(request).expect("request should send to test");
             write_json_response(&mut stream, r#"{"status":"ok","sync_status":"synced"}"#);
         }
@@ -464,18 +491,8 @@ fn sync_outbox_does_not_trust_symlinked_active_claim_marker() {
     let outbox_file = paths.outbox_dir.join("s1.jsonl");
     let claimed_file = paths.outbox_dir.join("s1.jsonl.syncing-old");
     let active_marker = paths.outbox_dir.join("s1.jsonl.syncing-old.active");
-    fs::write(
-        &outbox_file,
-        r#"{"outbox_id":"outbox-base","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":2,"created_at":"2026-05-31T00:00:02Z","payload":{"n":2},"sync_status":"pending"}
-"#,
-    )
-    .expect("base outbox file should write");
-    fs::write(
-        &claimed_file,
-        r#"{"outbox_id":"outbox-claimed","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
-"#,
-    )
-    .expect("claimed outbox file should write");
+    write_pending_records(&outbox_file, &[("outbox-base", "s1", "w1", 2)]);
+    write_pending_records(&claimed_file, &[("outbox-claimed", "s1", "w1", 1)]);
     std::os::unix::fs::symlink(&outbox_file, active_marker)
         .expect("active marker symlink should create");
 
@@ -505,8 +522,7 @@ fn sync_outbox_does_not_let_fake_active_claim_block_base_file() {
     let addr = listener.local_addr().expect("listener addr should load");
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("connection should arrive");
-        let request = read_http_request(&mut stream);
+        let (mut stream, request) = accept_v2_request(&listener);
         tx.send(request).expect("request should send to test");
         write_json_response(&mut stream, r#"{"status":"ok","sync_status":"synced"}"#);
     });
@@ -515,12 +531,7 @@ fn sync_outbox_does_not_let_fake_active_claim_block_base_file() {
     let outbox_file = paths.outbox_dir.join("s1.jsonl");
     let claimed_file = paths.outbox_dir.join("s1.jsonl.syncing-spoof");
     let active_marker = paths.outbox_dir.join("s1.jsonl.syncing-spoof.active");
-    fs::write(
-        &outbox_file,
-        r#"{"outbox_id":"outbox-base","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
-"#,
-    )
-    .expect("base outbox file should write");
+    write_pending_records(&outbox_file, &[("outbox-base", "s1", "w1", 1)]);
     fs::write(&claimed_file, "").expect("spoof claimed file should write");
     fs::write(&active_marker, "active\n").expect("spoof active marker should write");
 
@@ -550,20 +561,14 @@ fn sync_outbox_does_not_trust_symlinked_lock_heartbeat() {
     let addr = listener.local_addr().expect("listener addr should load");
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("connection should arrive");
-        let request = read_http_request(&mut stream);
+        let (mut stream, request) = accept_v2_request(&listener);
         tx.send(request).expect("request should send to test");
         write_json_response(&mut stream, r#"{"status":"ok","sync_status":"synced"}"#);
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
     let outbox_file = paths.outbox_dir.join("s1.jsonl");
-    fs::write(
-        &outbox_file,
-        r#"{"outbox_id":"outbox-base","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
-"#,
-    )
-    .expect("outbox file should write");
+    write_pending_records(&outbox_file, &[("outbox-base", "s1", "w1", 1)]);
 
     let synced = sync_outbox_with_runtime(&paths, &runtime).expect("outbox should sync");
 
@@ -592,20 +597,14 @@ fn sync_outbox_does_not_trust_symlinked_lock_directory() {
     let addr = listener.local_addr().expect("listener addr should load");
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("connection should arrive");
-        let request = read_http_request(&mut stream);
+        let (mut stream, request) = accept_v2_request(&listener);
         tx.send(request).expect("request should send to test");
         write_json_response(&mut stream, r#"{"status":"ok","sync_status":"synced"}"#);
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
     let outbox_file = paths.outbox_dir.join("s1.jsonl");
-    fs::write(
-        &outbox_file,
-        r#"{"outbox_id":"outbox-base","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}
-"#,
-    )
-    .expect("outbox file should write");
+    write_pending_records(&outbox_file, &[("outbox-base", "s1", "w1", 1)]);
 
     let synced = sync_outbox_with_runtime(&paths, &runtime).expect("outbox should sync");
 
@@ -629,8 +628,7 @@ fn sync_outbox_deduplicates_claimed_records_already_merged_into_base() {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         for _ in 0..2 {
-            let (mut stream, _) = listener.accept().expect("connection should arrive");
-            let request = read_http_request(&mut stream);
+            let (mut stream, request) = accept_v2_request(&listener);
             tx.send(request).expect("request should send to test");
             write_json_response(&mut stream, r#"{"status":"ok","sync_status":"synced"}"#);
         }
@@ -639,16 +637,11 @@ fn sync_outbox_deduplicates_claimed_records_already_merged_into_base() {
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
     let outbox_file = paths.outbox_dir.join("s1.jsonl");
     let claimed_file = paths.outbox_dir.join("s1.jsonl.syncing-old");
-    let claimed_record = r#"{"outbox_id":"outbox-claimed","event_type":"HeartbeatObserved","agent_id":"s1","actor_id":"a1","workspace_id":"w1","sequence":1,"created_at":"2026-05-31T00:00:01Z","payload":{"n":1},"sync_status":"pending"}"#;
-    fs::write(
+    write_pending_records(
         &outbox_file,
-        format!(
-            "{claimed_record}\n{{\"outbox_id\":\"outbox-base\",\"event_type\":\"HeartbeatObserved\",\"agent_id\":\"s1\",\"actor_id\":\"a1\",\"workspace_id\":\"w1\",\"sequence\":2,\"created_at\":\"2026-05-31T00:00:02Z\",\"payload\":{{\"n\":2}},\"sync_status\":\"pending\"}}\n"
-        ),
-    )
-    .expect("base outbox file should write");
-    fs::write(&claimed_file, format!("{claimed_record}\n"))
-        .expect("claimed outbox file should write");
+        &[("outbox-claimed", "s1", "w1", 1), ("outbox-base", "s1", "w1", 2)],
+    );
+    write_pending_records(&claimed_file, &[("outbox-claimed", "s1", "w1", 1)]);
 
     let synced = sync_outbox_with_runtime(&paths, &runtime).expect("outbox should sync");
 
@@ -664,6 +657,63 @@ fn sync_outbox_deduplicates_claimed_records_already_merged_into_base() {
     assert!(first.contains("\"outbox_id\":\"outbox-claimed\""));
     assert!(second.contains("\"outbox_id\":\"outbox-base\""));
     assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+}
+
+fn write_pending_records(path: &Path, records: &[(&str, &str, &str, u64)]) {
+    let contents = records
+        .iter()
+        .map(|(outbox_id, agent_id, workspace_id, sequence)| {
+            let request_id = format!("018f1a33-e3c1-7000-b2a6-{sequence:012x}");
+            let request = serde_json::json!({
+                "protocol_version": "stateful.v2",
+                "request_id": request_id,
+                "observed_at": "2026-05-31T00:00:01Z",
+                "agent": {"agent_id": agent_id, "actor_id": agent_id, "actor_type": "agent"},
+                "workspace": {
+                    "root": "unknown",
+                    "workspace_id": workspace_id,
+                    "repo_id": "unknown",
+                    "worktree_id": "unknown",
+                    "branch": "unknown"
+                },
+                "source": {"kind": "cli", "event": "outbox_sync", "source_ref": "stateful-cli"},
+                "payload": {
+                    "outbox_id": outbox_id,
+                    "sequence": sequence,
+                    "event_type": "HeartbeatObserved",
+                    "payload": {"n": sequence}
+                }
+            });
+            serde_json::json!({
+                "outbox_id": outbox_id,
+                "agent_id": agent_id,
+                "workspace_id": workspace_id,
+                "sequence": sequence,
+                "route": "/v2/outbox/sync",
+                "request_id": request_id,
+                "request_envelope": serde_json::to_string(&request).expect("request should serialize"),
+                "sync_status": "pending"
+            })
+            .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(path, format!("{contents}\n")).expect("outbox file should write");
+}
+
+fn accept_v2_request(listener: &TcpListener) -> (std::net::TcpStream, String) {
+    loop {
+        let (mut stream, _) = listener.accept().expect("connection should arrive");
+        let request = read_http_request(&mut stream);
+        if request.starts_with("GET /v2/runtime/identity?") {
+            write_json_response(
+                &mut stream,
+                r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":["presence"]}"#,
+            );
+            continue;
+        }
+        return (stream, request);
+    }
 }
 
 fn temp_root(label: &str) -> tempfile::TempDir {
@@ -684,13 +734,13 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> String {
     }
 
     let headers = String::from_utf8(buffer.clone()).expect("headers should be utf8");
-    let content_length = headers
+    let Some(content_length) = headers
         .lines()
         .find_map(|line| line.strip_prefix("Content-Length: "))
-        .expect("content length should exist")
-        .parse::<usize>()
-        .expect("content length should parse");
-
+        .map(|value| value.parse::<usize>().expect("content length should parse"))
+    else {
+        return headers;
+    };
     let mut body = vec![0_u8; content_length];
     stream
         .read_exact(&mut body)

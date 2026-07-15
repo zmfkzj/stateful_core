@@ -14,8 +14,8 @@ use stateful_cli::{
     GlobalPaths, ReservationCancelArgs, ReservationClaimArgs, ReservationDeclareArgs,
     ReservationRequestArgs, ServerRuntime, cancel_reservation_via_http, claim_reservation_via_http,
     declare_reservation_via_http, discover_runtime, discover_runtime_with_global, get_json,
-    global_state_db_path, post_json, request_reservation_via_http, state_db_path,
-    validate_agent_id, write_global_runtime_file, write_runtime_file,
+    global_state_db_path, post_json, request_reservation_via_http, runtime_has_required_identity,
+    state_db_path, validate_agent_id, write_global_runtime_file, write_runtime_file,
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
@@ -107,10 +107,9 @@ fn cli_current_uses_local_runtime_when_global_paths_are_unavailable() {
     let addr = listener.local_addr().expect("listener addr should load");
     thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("connection should arrive");
-        let _request = read_http_request_without_body(&mut stream);
-        stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}")
-            .expect("response should write");
+        let request = read_http_request_without_body(&mut stream);
+        assert!(request.contains("GET /v2/current?"));
+        write_http_response(&mut stream, r#"{"presence":null,"resources":[]}"#);
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
@@ -128,7 +127,7 @@ fn cli_current_uses_local_runtime_when_global_paths_are_unavailable() {
         "stateful current failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("\"status\":\"ok\""));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"resources\":[]"));
 }
 
 #[cfg(unix)]
@@ -163,10 +162,10 @@ fn remote_runtime_with_pid_zero_accepts_matching_identity_capabilities() {
     thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("connection should arrive");
         let request = read_http_request_without_body(&mut stream);
-        assert!(request.contains("GET /v1/runtime/identity HTTP/1.1"));
+        assert!(request.contains("GET /v2/runtime/identity?"));
         write_http_response(
             &mut stream,
-            r#"{"status":"ok","pid":9876,"protocol_version":"stateful.v1","capabilities":["authorize.write_directory"]}"#,
+            r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":["presence"]}"#,
         );
     });
 
@@ -182,10 +181,10 @@ fn runtime_identity_matches_pid_requires_exact_pid_for_pid_zero_runtime() {
     thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("connection should arrive");
         let request = read_http_request_without_body(&mut stream);
-        assert!(request.contains("GET /v1/runtime/identity HTTP/1.1"));
+        assert!(request.contains("GET /v2/runtime/identity?"));
         write_http_response(
             &mut stream,
-            r#"{"status":"ok","pid":9876,"protocol_version":"stateful.v1","capabilities":["authorize.write_directory"]}"#,
+            r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":["presence"]}"#,
         );
     });
 
@@ -198,22 +197,22 @@ fn runtime_identity_matches_pid_requires_exact_pid_for_pid_zero_runtime() {
 }
 
 #[test]
-fn runtime_has_required_identity_rejects_mismatched_nonzero_pid() {
+fn runtime_has_required_identity_accepts_nonzero_pid_without_legacy_pid_field() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
     thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("connection should arrive");
         let request = read_http_request_without_body(&mut stream);
-        assert!(request.contains("GET /v1/runtime/identity HTTP/1.1"));
+        assert!(request.contains("GET /v2/runtime/identity?"));
         write_http_response(
             &mut stream,
-            r#"{"status":"ok","pid":9876,"protocol_version":"stateful.v1","capabilities":["authorize.write_directory"]}"#,
+            r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":["presence"]}"#,
         );
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "shared", 42);
 
-    assert!(!stateful_cli::runtime_has_required_identity(&runtime));
+    assert!(stateful_cli::runtime_has_required_identity(&runtime));
 }
 
 #[test]
@@ -226,10 +225,10 @@ fn cli_current_rejects_env_runtime_without_required_capabilities() {
     thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("connection should arrive");
         let request = read_http_request_without_body(&mut stream);
-        assert!(request.contains("GET /v1/runtime/identity HTTP/1.1"));
+        assert!(request.contains("GET /v2/runtime/identity?"));
         write_http_response(
             &mut stream,
-            r#"{"status":"ok","pid":77,"protocol_version":"stateful.v1"}"#,
+            r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":[]}"#,
         );
     });
 
@@ -266,16 +265,16 @@ fn cli_current_accepts_env_runtime_with_required_capabilities() {
             .accept()
             .expect("identity connection should arrive");
         let request = read_http_request_without_body(&mut stream);
-        assert!(request.contains("GET /v1/runtime/identity HTTP/1.1"));
+        assert!(request.contains("GET /v2/runtime/identity?"));
         write_http_response(
             &mut stream,
-            r#"{"status":"ok","pid":77,"protocol_version":"stateful.v1","capabilities":["authorize.write_directory"]}"#,
+            r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":["presence"]}"#,
         );
 
         let (mut stream, _) = listener.accept().expect("current connection should arrive");
         let request = read_http_request_without_body(&mut stream);
-        assert!(request.contains("GET /v1/current HTTP/1.1"));
-        write_http_response(&mut stream, r#"{"status":"ok","current":{}}"#);
+        assert!(request.contains("GET /v2/current?"));
+        write_http_response(&mut stream, r#"{"presence":null,"resources":[]}"#);
     });
 
     let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
@@ -292,7 +291,7 @@ fn cli_current_accepts_env_runtime_with_required_capabilities() {
         "capable env runtime should work: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("\"status\":\"ok\""));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"resources\":[]"));
 }
 
 #[test]
@@ -384,13 +383,14 @@ fn declare_reservation_via_http_posts_expected_payload() {
     let (tx, rx) = mpsc::channel();
 
     thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("handshake connection should arrive");
+        let handshake = read_http_request_without_body(&mut stream);
+        assert!(handshake.contains("GET /v2/runtime/identity?"));
+        write_v2_runtime_identity(&mut stream);
         let (mut stream, _) = listener.accept().expect("connection should arrive");
         let request = read_http_request(&mut stream);
         tx.send(request).expect("request should send to test");
-        write_http_response(
-            &mut stream,
-            r#"{"status":"ok","reservation_id":"reservation-123"}"#,
-        );
+        write_http_response(&mut stream, r#"{"reservation_id":"reservation-123"}"#);
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
@@ -407,20 +407,13 @@ fn declare_reservation_via_http_posts_expected_payload() {
         },
     )
     .expect("reservation declaration should post");
-    assert_eq!(
-        response.body,
-        r#"{"status":"ok","reservation_id":"reservation-123"}"#
-    );
+    assert_eq!(response.body, r#"{"reservation_id":"reservation-123"}"#);
 
     let request = rx.recv().expect("captured request should arrive");
-    assert!(request.contains("POST /v1/reservation/declare HTTP/1.1"));
+    assert!(request.contains("POST /v2/reservation/declare HTTP/1.1"));
     let body = request_json_body(&request);
-    assert_eq!(body["protocol_version"], "stateful.v1");
-    assert!(
-        body["request_id"]
-            .as_str()
-            .is_some_and(|value| !value.is_empty())
-    );
+    assert_eq!(body["protocol_version"], "stateful.v2");
+    assert!(uuid::Uuid::parse_str(body["request_id"].as_str().expect("request id")).is_ok());
     let observed_at = body["observed_at"]
         .as_str()
         .expect("observed_at should be a string");
@@ -437,21 +430,21 @@ fn declare_reservation_via_http_posts_expected_payload() {
     assert_eq!(body["agent"]["actor_id"], "s1");
     assert_eq!(body["agent"]["actor_type"], "agent");
     assert_eq!(body["workspace"]["workspace_id"], "w1");
-    assert_eq!(body["workspace"]["repo_id"], "");
-    assert_eq!(body["workspace"]["worktree_id"], "");
-    assert_eq!(body["workspace"]["root"], "");
-    assert_eq!(body["workspace"]["branch"], "");
+    assert_eq!(body["workspace"]["repo_id"], "unknown");
+    assert_eq!(body["workspace"]["worktree_id"], "unknown");
+    assert_eq!(body["workspace"]["root"], "unknown");
+    assert_eq!(body["workspace"]["branch"], "unknown");
     assert_eq!(body["source"]["kind"], "cli");
     assert_eq!(body["source"]["event"], "reservation_declare");
     assert_eq!(body["source"]["source_ref"], "stateful-cli");
     assert_eq!(
         body["payload"],
         serde_json::json!({
-            "purpose": "Fix auth validation behavior.",
-            "files_planned": ["src/auth.ts"]
+            "relative_path": "src/auth.ts",
+            "action": "write",
+            "purpose": "Fix auth validation behavior."
         })
     );
-    assert!(body.get("files_planned").is_none());
 }
 
 #[test]
@@ -461,12 +454,14 @@ fn claim_reservation_via_http_posts_expected_payload() {
     let (tx, rx) = mpsc::channel();
 
     thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("handshake connection should arrive");
+        let handshake = read_http_request_without_body(&mut stream);
+        assert!(handshake.contains("GET /v2/runtime/identity?"));
+        write_v2_runtime_identity(&mut stream);
         let (mut stream, _) = listener.accept().expect("connection should arrive");
         let request = read_http_request(&mut stream);
         tx.send(request).expect("request should send to test");
-        stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}")
-            .expect("response should write");
+        write_http_response(&mut stream, r#"{}"#);
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
@@ -482,11 +477,11 @@ fn claim_reservation_via_http_posts_expected_payload() {
         },
     )
     .expect("reservation claim should post");
-
     let request = rx.recv().expect("captured request should arrive");
-    assert!(request.contains("POST /v1/reservation/claim HTTP/1.1"));
+
+    assert!(request.contains("POST /v2/reservation/claim HTTP/1.1"));
     let body = request_json_body(&request);
-    assert_eq!(body["protocol_version"], "stateful.v1");
+    assert_eq!(body["protocol_version"], "stateful.v2");
     assert_eq!(body["agent"]["agent_id"], "s1");
     assert_eq!(body["workspace"]["workspace_id"], "w1");
     assert_eq!(body["source"]["kind"], "cli");
@@ -495,10 +490,9 @@ fn claim_reservation_via_http_posts_expected_payload() {
     assert_eq!(
         body["payload"],
         serde_json::json!({
-            "wait_id": "wait-1"
+            "relative_path": "wait-1"
         })
     );
-    assert!(body.get("wait_id").is_none());
 }
 
 #[test]
@@ -508,12 +502,14 @@ fn request_reservation_via_http_posts_expected_payload() {
     let (tx, rx) = mpsc::channel();
 
     thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("handshake connection should arrive");
+        let handshake = read_http_request_without_body(&mut stream);
+        assert!(handshake.contains("GET /v2/runtime/identity?"));
+        write_v2_runtime_identity(&mut stream);
         let (mut stream, _) = listener.accept().expect("connection should arrive");
         let request = read_http_request(&mut stream);
         tx.send(request).expect("request should send to test");
-        stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}")
-            .expect("response should write");
+        write_http_response(&mut stream, r#"{}"#);
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
@@ -533,12 +529,12 @@ fn request_reservation_via_http_posts_expected_payload() {
     )
     .expect("reservation request should post");
     assert_eq!(response.status_code, 200);
-    assert_eq!(response.body, "{\"status\":\"ok\"}");
-
+    assert_eq!(response.body, "{}");
     let request = rx.recv().expect("captured request should arrive");
-    assert!(request.contains("POST /v1/reservation/request HTTP/1.1"));
+
+    assert!(request.contains("POST /v2/reservation/request HTTP/1.1"));
     let body = request_json_body(&request);
-    assert_eq!(body["protocol_version"], "stateful.v1");
+    assert_eq!(body["protocol_version"], "stateful.v2");
     assert_eq!(body["agent"]["agent_id"], "s1");
     assert_eq!(body["workspace"]["workspace_id"], "w1");
     assert_eq!(body["source"]["kind"], "cli");
@@ -547,13 +543,12 @@ fn request_reservation_via_http_posts_expected_payload() {
     assert_eq!(
         body["payload"],
         serde_json::json!({
-            "request_id": "request-1",
+            "relative_path": "src/auth.ts",
             "action": "write_file",
-            "path": "src/auth.ts",
-            "purpose": "Queue auth file changes."
+            "purpose": "Queue auth file changes.",
+            "blocking_agent_id": null
         })
     );
-    assert!(body.get("request_id").is_some());
 }
 
 #[test]
@@ -563,12 +558,14 @@ fn cancel_reservation_via_http_posts_expected_payload() {
     let (tx, rx) = mpsc::channel();
 
     thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("handshake connection should arrive");
+        let handshake = read_http_request_without_body(&mut stream);
+        assert!(handshake.contains("GET /v2/runtime/identity?"));
+        write_v2_runtime_identity(&mut stream);
         let (mut stream, _) = listener.accept().expect("connection should arrive");
         let request = read_http_request(&mut stream);
         tx.send(request).expect("request should send to test");
-        stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}")
-            .expect("response should write");
+        write_http_response(&mut stream, r#"{}"#);
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
@@ -583,11 +580,11 @@ fn cancel_reservation_via_http_posts_expected_payload() {
         },
     )
     .expect("reservation cancel should post");
-
     let request = rx.recv().expect("captured request should arrive");
-    assert!(request.contains("POST /v1/reservation/cancel HTTP/1.1"));
+
+    assert!(request.contains("POST /v2/reservation/cancel HTTP/1.1"));
     let body = request_json_body(&request);
-    assert_eq!(body["protocol_version"], "stateful.v1");
+    assert_eq!(body["protocol_version"], "stateful.v2");
     assert_eq!(body["agent"]["agent_id"], "s1");
     assert_eq!(body["workspace"]["workspace_id"], "w1");
     assert_eq!(body["source"]["kind"], "cli");
@@ -596,11 +593,110 @@ fn cancel_reservation_via_http_posts_expected_payload() {
     assert_eq!(
         body["payload"],
         serde_json::json!({
-            "request_id": "request-1"
+            "wait_id": "request-1"
         })
     );
 }
 
+#[test]
+fn runtime_post_wraps_typed_payload_in_v2_envelope() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener address should load");
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("handshake connection should arrive");
+        let handshake = read_http_request_without_body(&mut stream);
+        assert!(handshake.contains("GET /v2/runtime/identity?"));
+        write_v2_runtime_identity(&mut stream);
+        let (mut stream, _) = listener.accept().expect("connection should arrive");
+        let request = read_http_request(&mut stream);
+        tx.send(request).expect("request should send to test");
+        write_http_response(&mut stream, r#"{"reservation_id":"reservation-123"}"#);
+    });
+
+    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
+    declare_reservation_via_http(
+        &runtime,
+        ReservationDeclareArgs {
+            agent_id: "s1".to_string(),
+            workspace_id: "w1".to_string(),
+            purpose: "Fix auth validation behavior.".to_string(),
+            files_planned: vec!["src/auth.ts".to_string()],
+            identity: None,
+        },
+    )
+    .expect("reservation declaration should post");
+
+    let request = rx.recv().expect("captured request should arrive");
+    assert!(request.contains("POST /v2/reservation/declare HTTP/1.1"));
+    let body = request_json_body(&request);
+    assert_eq!(body["protocol_version"], "stateful.v2");
+    assert!(uuid::Uuid::parse_str(body["request_id"].as_str().expect("request id")).is_ok());
+}
+
+#[test]
+fn runtime_get_serializes_full_query_identity() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener address should load");
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("connection should arrive");
+        let request = read_http_request_without_body(&mut stream);
+        tx.send(request).expect("request should send to test");
+        write_v2_runtime_identity(&mut stream);
+    });
+
+    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 0);
+    assert!(runtime_has_required_identity(&runtime));
+
+    let request = rx.recv().expect("captured request should arrive");
+    assert!(request.contains("GET /v2/runtime/identity?"));
+    for identity_field in [
+        "protocol_version=stateful.v2",
+        "agent_id=stateful-cli",
+        "workspace_id=w1",
+        "repo_id=unknown",
+        "worktree_id=unknown",
+        "root=unknown",
+        "branch=unknown",
+    ] {
+        assert!(request.contains(identity_field), "missing {identity_field}");
+    }
+}
+
+#[test]
+fn unsupported_runtime_protocol_fails_before_mutation() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener address should load");
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("connection should arrive");
+        let request = read_http_request_without_body(&mut stream);
+        tx.send(request).expect("request should send to test");
+        write_http_response(
+            &mut stream,
+            r#"{"protocol_version":"stateful.v1","journal_schema_version":2,"coordination_mode":"awareness","capabilities":["presence"]}"#,
+        );
+    });
+
+    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
+    let error = declare_reservation_via_http(
+        &runtime,
+        ReservationDeclareArgs {
+            agent_id: "s1".to_string(),
+            workspace_id: "w1".to_string(),
+            purpose: "Fix auth validation behavior.".to_string(),
+            files_planned: vec!["src/auth.ts".to_string()],
+            identity: None,
+        },
+    )
+    .expect_err("unsupported runtime protocol must reject the mutation");
+    assert!(error.to_string().contains("stateful.v2"));
+
+    let request = rx.recv().expect("handshake request should arrive");
+    assert!(request.contains("GET /v2/runtime/identity?"));
+    assert!(!request.starts_with("POST "), "mutation must not be posted");
+}
 fn request_json_body(request: &str) -> serde_json::Value {
     let (_, body) = request
         .split_once("\r\n\r\n")
@@ -643,6 +739,13 @@ fn write_http_response(stream: &mut std::net::TcpStream, body: &str) {
     stream
         .write_all(response.as_bytes())
         .expect("response should write");
+}
+
+fn write_v2_runtime_identity(stream: &mut std::net::TcpStream) {
+    write_http_response(
+        stream,
+        r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":["presence"]}"#,
+    );
 }
 
 fn read_http_request_without_body(stream: &mut std::net::TcpStream) -> String {

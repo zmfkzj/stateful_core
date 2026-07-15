@@ -9,8 +9,8 @@ use std::{
 };
 
 use crate::{
-    GlobalPaths, ServerRuntime, get_json, runtime_has_required_identity,
-    runtime_identity_matches_pid, write_global_runtime_file,
+    GlobalPaths, ServerRuntime, runtime_has_required_identity, runtime_identity_matches_pid,
+    write_global_runtime_file,
 };
 
 const START_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
@@ -34,7 +34,7 @@ impl Default for ServerStartOptions {
             port: 43873,
             token: None,
             workspace_id: "local".to_string(),
-            coordination_mode: "enforcement".to_string(),
+            coordination_mode: "awareness".to_string(),
         }
     }
 }
@@ -158,32 +158,11 @@ where
 }
 
 pub fn runtime_is_healthy(runtime: &ServerRuntime) -> bool {
-    runtime_is_basic_healthy(runtime) && runtime_has_required_identity(runtime)
+    runtime_is_basic_healthy(runtime)
 }
 
 fn runtime_is_basic_healthy(runtime: &ServerRuntime) -> bool {
-    let Ok(health) = get_json(runtime, "/health") else {
-        return false;
-    };
-    if health.status_code != 200 {
-        return false;
-    }
-
-    let Ok(current) = get_json(runtime, "/v1/current") else {
-        return false;
-    };
-    if current.status_code != 200 {
-        return false;
-    }
-
-    serde_json::from_str::<serde_json::Value>(&current.body)
-        .ok()
-        .and_then(|body| {
-            let status = body.get("status")?.as_str()?;
-            let current = body.get("current")?;
-            Some(status == "ok" && current.is_object())
-        })
-        .unwrap_or(false)
+    runtime_has_required_identity(runtime)
 }
 
 pub fn stop_server(paths: &GlobalPaths) -> anyhow::Result<()> {
@@ -230,7 +209,7 @@ pub fn server_start_options_from_runtime(
         port,
         token: Some(runtime.token.clone()),
         workspace_id: runtime.workspace_id.clone(),
-        coordination_mode: "enforcement".to_string(),
+        coordination_mode: "awareness".to_string(),
     })
 }
 
@@ -620,17 +599,10 @@ mod tests {
             .arg("5")
             .spawn()
             .expect("sleep child should spawn");
-        let fake = FakeHttpServer::start(vec![
-            fake_response(200, "ok"),
-            fake_response(200, r#"{"status":"ok","current":{}}"#),
-            fake_response(
-                200,
-                format!(
-                    r#"{{"status":"ok","pid":{},"protocol_version":"stateful.v1","capabilities":["authorize.write_directory"]}}"#,
-                    child.id()
-                ),
-            ),
-        ]);
+        let fake = FakeHttpServer::start(vec![fake_response(
+            200,
+            r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":["presence"]}"#,
+        )]);
         let delayed_runtime = ServerRuntime::new(fake.base_url(), "token", "w1", child.id());
         let delayed_paths = paths.clone();
         thread::spawn(move || {

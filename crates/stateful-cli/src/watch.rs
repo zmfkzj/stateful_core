@@ -12,12 +12,12 @@ use std::{
 };
 
 use notify::{RecursiveMode, Watcher};
-use serde_json::json;
+use stateful_core::{ActorType, SourceKind};
+use stateful_store::{HumanObservationConfidence, HumanObservationInput, HumanObservationKind};
 
 use crate::{
-    GlobalPaths, ProtocolEnvelopeArgs, RepoGate, discover_runtime_with_global,
-    effective_workspace_id_for_repo, hook, post_json, protocol_envelope, repo_gate,
-    repo_identity_for_enabled_repo,
+    GlobalPaths, RepoGate, discover_runtime_with_global, effective_workspace_id_for_repo, post_v2,
+    repo_gate, repo_identity_for_enabled_repo, v2_request_envelope,
 };
 
 const FLUSH_INTERVAL: Duration = Duration::from_millis(300);
@@ -117,34 +117,31 @@ fn flush_pending(
             continue;
         }
         let relative_string = relative_path_string(&relative);
-        let Some(mut payload) =
-            hook::base_observation_for_target(Some(repo_root), &relative_string)
-        else {
-            continue;
-        };
-        let kind = if payload["exists"].as_bool().unwrap_or(false) {
-            "change"
+        let kind = if _absolute.exists() {
+            HumanObservationKind::Change
         } else {
-            "delete"
+            HumanObservationKind::Delete
         };
-        payload["kind"] = json!(kind);
-        payload["confidence"] = json!("high");
-        payload["source"] = json!("watcher");
-
-        let mut body = protocol_envelope(ProtocolEnvelopeArgs {
-            runtime,
-            request_id: uuid::Uuid::new_v4().to_string(),
-            agent_id: agent_id.to_string(),
-            workspace_id: workspace_id.to_string(),
-            identity: identity.clone(),
-            source_kind: "watcher",
-            event: "human_observe",
-            source_ref: "stateful.watch.run",
-            source_tool_name: None,
-            payload,
-        });
-        body["agent"]["actor_type"] = json!("human");
-        let response = post_json(runtime, "/v1/human/observe", &body)?;
+        let request = v2_request_envelope(
+            uuid::Uuid::new_v4(),
+            agent_id.to_string(),
+            workspace_id.to_string(),
+            identity.clone(),
+            ActorType::Human,
+            SourceKind::Watcher,
+            "human_observe",
+            "stateful.watch.run",
+            None,
+            HumanObservationInput {
+                relative_path: relative_string,
+                kind,
+                confidence: HumanObservationConfidence::High,
+                source: "watcher".to_string(),
+                summary: "File changed by watcher.".to_string(),
+                observed_at: Some(time::OffsetDateTime::now_utc()),
+            },
+        )?;
+        let response = post_v2(runtime, "/v2/human/observe", &request)?;
         if !(200..300).contains(&response.status_code) {
             anyhow::bail!(
                 "human observe failed with HTTP {}: {}",
@@ -258,3 +255,82 @@ mod tests {
         assert_eq!(relative_path_string(Path::new("src/lib.rs")), "src/lib.rs");
     }
 }
+
+    #[test]
+    fn watcher_emits_v2_human_observation_and_reconciliation() {
+        let temp = tempfile::tempdir().expect("temp dir should create");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).expect("git marker should write");
+        let file = repo.join("src").join("lib.rs");
+        std::fs::create_dir_all(file.parent().expect("file parent")).expect("source dir should write");
+        std::fs::write(&file, "pub fn example() {}\n").expect("source file should write");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let addr = listener.local_addr().expect("listener address should load");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("handshake connection should arrive");
+            let mut handshake = Vec::new();
+            let mut byte = [0_u8; 1];
+            while !handshake.ends_with(b"\r\n\r\n") {
+                std::io::Read::read_exact(&mut stream, &mut byte).expect("handshake header should read");
+                handshake.push(byte[0]);
+            }
+            assert!(String::from_utf8(handshake).expect("handshake should be utf8").contains("GET /v2/runtime/identity?"));
+            let identity = r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":["presence"]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{identity}",
+                identity.len()
+            );
+            std::io::Write::write_all(&mut stream, response.as_bytes())
+                .expect("identity response should write");
+
+            let (mut stream, _) = listener.accept().expect("connection should arrive");
+            let mut request = Vec::new();
+            let mut byte = [0_u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                std::io::Read::read_exact(&mut stream, &mut byte).expect("header byte should read");
+                request.push(byte[0]);
+            }
+            let headers = String::from_utf8(request.clone()).expect("headers should be utf8");
+            let content_length = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("Content-Length: "))
+                .expect("content length should exist")
+                .parse::<usize>()
+                .expect("content length should parse");
+            let mut body = vec![0_u8; content_length];
+            std::io::Read::read_exact(&mut stream, &mut body).expect("body should read");
+            request.extend_from_slice(&body);
+            tx.send(String::from_utf8(request).expect("request should be utf8"))
+                .expect("request should send to test");
+            std::io::Write::write_all(
+                &mut stream,
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}",
+            )
+            .expect("response should write");
+        });
+
+        let mut pending = HashMap::new();
+        pending.insert(file, Instant::now());
+        flush_pending(
+            &repo,
+            &crate::ServerRuntime::new(format!("http://{addr}"), "token", "w1", 0),
+            None,
+            "human-1",
+            "w1",
+            &mut pending,
+        )
+        .expect("watcher should submit observation");
+
+        let request = rx.recv().expect("watcher request should arrive");
+        assert!(request.contains("POST /v2/human/observe HTTP/1.1"));
+        let body = request
+            .split_once("\r\n\r\n")
+            .expect("body separator")
+            .1;
+        let body: serde_json::Value = serde_json::from_str(body).expect("body should parse");
+        assert_eq!(body["protocol_version"], "stateful.v2");
+        assert_eq!(body["agent"]["actor_type"], "human");
+        assert_eq!(body["payload"]["relative_path"], "src/lib.rs");
+    }

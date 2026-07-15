@@ -44,14 +44,10 @@ fn ensure_server_returns_existing_runtime_when_health_is_ok() {
 fn ensure_server_reuses_remote_pid_zero_runtime_when_health_is_ok() {
     let home = temp_home("stateful-server-remote-runtime");
     let paths = GlobalPaths::new(&home);
-    let fake = FakeHttpServer::start(vec![
-        fake_response(200, r#"{"status":"ok"}"#),
-        fake_response(200, r#"{"status":"ok","current":{}}"#),
-        fake_response(
-            200,
-            r#"{"status":"ok","pid":9876,"protocol_version":"stateful.v1","capabilities":["authorize.write_directory"]}"#,
-        ),
-    ]);
+    let fake = FakeHttpServer::start(vec![fake_response(
+        200,
+        r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":["presence"]}"#,
+    )]);
     let runtime = ServerRuntime::new(fake.base_url(), "secret-token", "shared", 0);
     stateful_cli::write_global_runtime_file(&paths, &runtime).expect("runtime should write");
 
@@ -251,37 +247,26 @@ fn ensure_server_rejects_unidentified_http_service_and_overwrites_runtime() {
 }
 
 #[test]
-fn runtime_health_requires_status_ok_authenticated_current_and_capabilities() {
+fn runtime_health_requires_v2_identity_and_capabilities() {
     let health_not_ok = FakeHttpServer::start(vec![fake_response(503, "not ready")]);
     let runtime = ServerRuntime::new(health_not_ok.base_url(), "token", "w1", 1);
     assert!(!runtime_is_healthy(&runtime));
 
-    let current_not_ok = FakeHttpServer::start(vec![
-        fake_response(200, "ok"),
-        fake_response(401, r#"{"error":"unauthorized"}"#),
-    ]);
-    let runtime = ServerRuntime::new(current_not_ok.base_url(), "token", "w1", 1);
+    let identity_not_ok = FakeHttpServer::start(vec![fake_response(401, r#"{"error":"unauthorized"}"#)]);
+    let runtime = ServerRuntime::new(identity_not_ok.base_url(), "token", "w1", 1);
     assert!(!runtime_is_healthy(&runtime));
 
-    let missing_capabilities = FakeHttpServer::start(vec![
-        fake_response(200, "ok"),
-        fake_response(200, r#"{"status":"ok","current":{}}"#),
-        fake_response(
-            200,
-            r#"{"status":"ok","pid":1,"protocol_version":"stateful.v1"}"#,
-        ),
-    ]);
+    let missing_capabilities = FakeHttpServer::start(vec![fake_response(
+        200,
+        r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":[]}"#,
+    )]);
     let runtime = ServerRuntime::new(missing_capabilities.base_url(), "token", "w1", 1);
     assert!(!runtime_is_healthy(&runtime));
 
-    let healthy = FakeHttpServer::start(vec![
-        fake_response(200, "ok"),
-        fake_response(200, r#"{"status":"ok","current":{}}"#),
-        fake_response(
-            200,
-            r#"{"status":"ok","pid":1,"protocol_version":"stateful.v1","capabilities":["authorize.write_directory"]}"#,
-        ),
-    ]);
+    let healthy = FakeHttpServer::start(vec![fake_response(
+        200,
+        r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":["presence"]}"#,
+    )]);
     let runtime = ServerRuntime::new(healthy.base_url(), "token", "w1", 1);
     assert!(runtime_is_healthy(&runtime));
 }
@@ -290,14 +275,10 @@ fn runtime_health_requires_status_ok_authenticated_current_and_capabilities() {
 fn stop_server_refuses_to_kill_unverified_pid() {
     let home = temp_home("stateful-server-stop-unverified");
     let paths = GlobalPaths::new(&home);
-    let fake = FakeHttpServer::start(vec![
-        fake_response(200, "ok"),
-        fake_response(200, r#"{"status":"ok","current":{}}"#),
-        fake_response(
-            200,
-            r#"{"status":"ok","pid":999999,"protocol_version":"stateful.v1"}"#,
-        ),
-    ]);
+    let fake = FakeHttpServer::start(vec![fake_response(
+        200,
+        r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":[]}"#,
+    )]);
     let runtime = ServerRuntime::new(fake.base_url(), "token", "w1", 1);
     stateful_cli::write_global_runtime_file(&paths, &runtime).expect("runtime should write");
 
@@ -316,7 +297,7 @@ fn restart_refuses_remote_pid_zero_runtime_that_cannot_be_killed() {
     let paths = GlobalPaths::new(&home);
     let fake = FakeHttpServer::start(vec![fake_response(
         200,
-        r#"{"status":"ok","pid":9876,"protocol_version":"stateful.v1","capabilities":["authorize.write_directory"]}"#,
+        r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":["presence"]}"#,
     )]);
     let runtime = ServerRuntime::new(fake.base_url(), "token", "w1", 0);
     stateful_cli::write_global_runtime_file(&paths, &runtime).expect("runtime should write");
@@ -338,7 +319,7 @@ fn restart_refuses_joined_pid_zero_runtime_without_identity_probe() {
     let paths = GlobalPaths::new(&home);
     let fake = FakeHttpServer::start(vec![fake_response(
         200,
-        r#"{"status":"ok","pid":9876,"protocol_version":"stateful.v1","capabilities":["authorize.write_directory"]}"#,
+        r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":["presence"]}"#,
     )]);
     let runtime = ServerRuntime::new(fake.base_url(), "token", "w1", 0);
     stateful_cli::write_global_runtime_file(&paths, &runtime).expect("runtime should write");
@@ -359,42 +340,15 @@ fn restart_refuses_joined_pid_zero_runtime_without_identity_probe() {
     assert_eq!(preserved.base_url, runtime.base_url);
 }
 
-#[test]
-fn stop_server_refuses_identity_pid_mismatch() {
-    let home = temp_home("stateful-server-stop-identity-mismatch");
-    let paths = GlobalPaths::new(&home);
-    let fake = FakeHttpServer::start(vec![
-        fake_response(200, "ok"),
-        fake_response(200, r#"{"status":"ok","current":{}}"#),
-        fake_response(
-            200,
-            r#"{"status":"ok","pid":999999,"protocol_version":"stateful.v1"}"#,
-        ),
-    ]);
-    let runtime = ServerRuntime::new(fake.base_url(), "token", "w1", std::process::id());
-    stateful_cli::write_global_runtime_file(&paths, &runtime).expect("runtime should write");
-
-    let error = stop_server(&paths).expect_err("identity pid mismatch must not be killed");
-
-    assert!(
-        error.to_string().contains("refusing to stop"),
-        "unexpected error: {error}"
-    );
-    assert!(paths.server_json.is_file());
-}
 
 #[test]
 fn ensure_server_with_options_rejects_healthy_runtime_on_different_port() {
     let home = temp_home("stateful-server-option-mismatch");
     let paths = GlobalPaths::new(&home);
-    let fake = FakeHttpServer::start(vec![
-        fake_response(200, "ok"),
-        fake_response(200, r#"{"status":"ok","current":{}}"#),
-        fake_response(
-            200,
-            r#"{"status":"ok","pid":123,"protocol_version":"stateful.v1","capabilities":["authorize.write_directory"]}"#,
-        ),
-    ]);
+    let fake = FakeHttpServer::start(vec![fake_response(
+        200,
+        r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":["presence"]}"#,
+    )]);
     let runtime = ServerRuntime::new(fake.base_url(), "token", "w1", 123);
     stateful_cli::write_global_runtime_file(&paths, &runtime).expect("runtime should write");
 
@@ -436,7 +390,7 @@ fn server_start_options_from_runtime_preserves_previous_start_options() {
             port: 43874,
             token: Some("secret-token".to_string()),
             workspace_id: "shared".to_string(),
-            coordination_mode: "enforcement".to_string(),
+            coordination_mode: "awareness".to_string(),
         }
     );
 }
@@ -481,6 +435,36 @@ fn detached_server_args_include_start_options() {
             "--coordination-mode",
             "awareness"
         ]
+    );
+}
+
+#[test]
+fn server_start_and_install_default_to_awareness() {
+    assert_eq!(
+        ServerStartOptions::default().coordination_mode,
+        "awareness",
+        "new server installations must default to awareness"
+    );
+    let runtime = ServerRuntime::new("http://127.0.0.1:43873", "token", "w1", 0);
+    assert_eq!(
+        server_start_options_from_runtime(&runtime)
+            .expect("runtime options should parse")
+            .coordination_mode,
+        "awareness"
+    );
+}
+
+#[test]
+fn explicit_enforcement_flag_is_preserved() {
+    let args = detached_server_args(&ServerStartOptions {
+        coordination_mode: "enforcement".to_string(),
+        ..ServerStartOptions::default()
+    });
+    assert_eq!(
+        args.windows(2)
+            .find(|pair| pair[0] == "--coordination-mode")
+            .expect("coordination mode argument"),
+        ["--coordination-mode", "enforcement"]
     );
 }
 

@@ -16,17 +16,24 @@ use std::os::unix::fs::MetadataExt;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
+use stateful_core::{ActorType, RequestEnvelope, SourceKind};
 
-use crate::{GlobalPaths, ServerRuntime, discover_runtime_with_global, post_json};
+use crate::{
+    GlobalPaths, ServerRuntime, discover_runtime_with_global, replay_v2_request,
+    v2_request_envelope,
+};
 
 #[derive(Debug, Clone, Deserialize)]
 struct LocalOutboxRecord {
     outbox_id: String,
-    event_type: String,
     agent_id: String,
     workspace_id: String,
     sequence: u64,
-    payload: Value,
+    route: String,
+    request_id: String,
+    request_envelope: String,
+    #[serde(default)]
+    attempts: u32,
     sync_status: String,
 }
 
@@ -91,22 +98,16 @@ pub fn sync_outbox_with_runtime(
 
         for index in 0..records.len() {
             let record = &records[index].record;
-            let response = match post_json(
+            let response = match replay_v2_request(
                 runtime,
-                "/v1/outbox/sync",
-                &json!({
-                    "outbox_id": record.outbox_id,
-                    "agent_id": record.agent_id,
-                    "workspace_id": record.workspace_id,
-                    "sequence": record.sequence,
-                    "event_type": record.event_type,
-                    "payload": record.payload,
-                }),
+                &record.route,
+                &record.request_envelope,
             ) {
                 Ok(response) => response,
                 Err(error) => {
                     let _lock = acquire_outbox_lock(&outbox_dir)?;
-                    requeue_pending_records(&path, &records[index..])?;
+                    let pending = increment_attempts(&records[index..]);
+                    requeue_pending_records(&path, &pending)?;
                     fs::remove_file(&claimed_path)?;
                     active_claim.finish();
                     return Err(error);
@@ -115,7 +116,8 @@ pub fn sync_outbox_with_runtime(
 
             if !(200..300).contains(&response.status_code) {
                 let _lock = acquire_outbox_lock(&outbox_dir)?;
-                requeue_pending_records(&path, &records[index..])?;
+                let pending = increment_attempts(&records[index..]);
+                requeue_pending_records(&path, &pending)?;
                 fs::remove_file(&claimed_path)?;
                 active_claim.finish();
                 anyhow::bail!(
@@ -147,17 +149,35 @@ pub(crate) fn queue_session_heartbeat_outbox(
     let stem = safe_file_stem(agent_id);
     let path = outbox_dir.join(format!("{stem}.jsonl"));
     let sequence = next_sequence(&outbox_dir, &stem)?;
+    let outbox_id = uuid::Uuid::new_v4().to_string();
+    let request = v2_request_envelope(
+        uuid::Uuid::new_v4(),
+        agent_id.to_string(),
+        runtime_workspace_id.to_string(),
+        None,
+        ActorType::Agent,
+        SourceKind::Cli,
+        "outbox_sync",
+        "stateful-cli",
+        None,
+        json!({
+            "outbox_id": outbox_id,
+            "sequence": sequence,
+            "event_type": "AgentHeartbeatQueued",
+            "payload": { "reason": reason }
+        }),
+    )?;
+    let request_id = request.request_id.to_string();
+    let request_envelope = serde_json::to_string(&request)?;
     let record = json!({
-        "outbox_id": uuid::Uuid::new_v4().to_string(),
-        "event_type": "AgentHeartbeatQueued",
+        "outbox_id": outbox_id,
         "agent_id": agent_id,
-        "actor_id": "unknown",
         "workspace_id": runtime_workspace_id,
         "sequence": sequence,
-        "created_at": now_rfc3339_timestamp(),
-        "payload": {
-            "reason": reason
-        },
+        "route": "/v2/outbox/sync",
+        "request_id": request_id,
+        "request_envelope": request_envelope,
+        "attempts": 0,
         "sync_status": "pending"
     });
 
@@ -166,11 +186,6 @@ pub(crate) fn queue_session_heartbeat_outbox(
     Ok(())
 }
 
-fn now_rfc3339_timestamp() -> String {
-    time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .expect("UTC timestamp should format as RFC3339")
-}
 
 fn safe_file_stem(value: &str) -> String {
     value.replace(['/', '\\'], "_")
@@ -615,7 +630,15 @@ fn read_pending_records(path: &Path) -> anyhow::Result<Vec<PendingOutboxRecord>>
         let Ok(record) = serde_json::from_value::<LocalOutboxRecord>(raw.clone()) else {
             continue;
         };
-        if record.sync_status == "pending" {
+        let Ok(request) = RequestEnvelope::<Value>::from_json(&record.request_envelope) else {
+            continue;
+        };
+        if record.sync_status == "pending"
+            && request.request_id.to_string() == record.request_id
+            && request.agent.agent_id == record.agent_id
+            && request.workspace.workspace_id == record.workspace_id
+            && request.payload.get("outbox_id").and_then(Value::as_str) == Some(&record.outbox_id)
+        {
             records.push(PendingOutboxRecord { record, raw });
         }
     }
@@ -672,6 +695,18 @@ fn outbox_record_dedupe_key(line: &str) -> String {
                 .map(|id| format!("outbox_id:{id}"))
         })
         .unwrap_or_else(|| format!("raw:{line}"))
+}
+
+fn increment_attempts(records: &[PendingOutboxRecord]) -> Vec<PendingOutboxRecord> {
+    records
+        .iter()
+        .cloned()
+        .map(|mut pending| {
+            pending.record.attempts += 1;
+            pending.raw["attempts"] = json!(pending.record.attempts);
+            pending
+        })
+        .collect()
 }
 
 fn requeue_pending_records(path: &Path, records: &[PendingOutboxRecord]) -> anyhow::Result<()> {

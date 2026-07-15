@@ -3,7 +3,10 @@ use crate::{
     projector::Projector,
     schema::PROJECTION_TABLES,
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params, types::ValueRef};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+    types::ValueRef,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use stateful_core::{
@@ -11,7 +14,7 @@ use stateful_core::{
     PresenceResource, PresenceResourceRelation, ReadObservationRecord, RequestEnvelope,
     SourceKind, SourceRef, StoredEvent, WorkspaceIdentity,
 };
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
@@ -99,6 +102,35 @@ pub struct CommandOutcome<R> {
     pub duplicate: bool,
 }
 
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournalDiagnostics {
+    pub rows: u64,
+    pub event_types: Vec<String>,
+    pub earliest: Option<String>,
+    pub latest: Option<String>,
+}
+
+pub fn inspect_journal(path: impl AsRef<Path>) -> StoreResult<JournalDiagnostics> {
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let rows = connection.query_row("SELECT COUNT(*) FROM journal_events", [], |row| row.get(0))?;
+    let mut statement =
+        connection.prepare("SELECT DISTINCT event_type FROM journal_events ORDER BY event_type")?;
+    let event_types = statement
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let (earliest, latest) = connection.query_row(
+        "SELECT MIN(occurred_at), MAX(occurred_at) FROM journal_events",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(JournalDiagnostics {
+        rows,
+        event_types,
+        earliest,
+        latest,
+    })
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayReport {
     pub projectable_events: u64,

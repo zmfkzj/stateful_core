@@ -100,7 +100,7 @@ fn install_yes_creates_global_files_and_database() {
     assert_eq!(registry, RepoRegistry::default());
 
     let store = stateful_store::Store::open(&fixture.paths.state_db).expect("store should open");
-    assert_eq!(store.event_count().expect("event count should load"), 0);
+    assert_eq!(store.journal_event_count().expect("event count should load"), 0);
 }
 
 #[test]
@@ -137,7 +137,7 @@ fn install_codex_yes_creates_global_files_and_merges_codex_config() {
     assert_eq!(registry, RepoRegistry::default());
 
     let store = stateful_store::Store::open(&fixture.paths.state_db).expect("store should open");
-    assert_eq!(store.event_count().expect("event count should load"), 0);
+    assert_eq!(store.journal_event_count().expect("event count should load"), 0);
 
     let first_config = fs::read_to_string(&fixture.codex_config).expect("codex config should read");
     assert!(first_config.contains("# stateful-core-global-install"));

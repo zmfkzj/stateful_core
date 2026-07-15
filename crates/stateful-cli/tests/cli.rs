@@ -164,6 +164,74 @@ fn doctor_labels_legacy_hooks_json_without_counting_it_as_installed() {
 }
 
 #[test]
+fn doctor_reports_journal_size_rows_types_time_range_growth_and_threshold() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should create");
+    let repo = temp_dir.path().join("repo");
+    fs::create_dir_all(repo.join(".git")).expect("git marker should write");
+    let paths = GlobalPaths::new(temp_dir.path().join("home"));
+    stateful_store::Store::open(&paths.state_db).expect("journal should initialize");
+
+    let report = serde_json::to_value(doctor_report_with_global(&repo, &paths))
+        .expect("doctor report should serialize");
+    let journal = report
+        .get("journal")
+        .expect("doctor should include sanitized journal diagnostics");
+    for field in [
+        "size_bytes",
+        "rows",
+        "event_types",
+        "time_range",
+        "growth_bytes",
+        "threshold_bytes",
+    ] {
+        assert!(journal.get(field).is_some(), "journal diagnostic missing {field}");
+    }
+    assert!(report.get("runtime").is_some());
+    assert!(report.get("capabilities").is_some());
+}
+
+#[test]
+fn doctor_warns_at_default_five_hundred_twelve_mib_without_pruning() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should create");
+    let repo = temp_dir.path().join("repo");
+    fs::create_dir_all(repo.join(".git")).expect("git marker should write");
+    let paths = GlobalPaths::new(temp_dir.path().join("home"));
+    stateful_store::Store::open(&paths.state_db).expect("journal should initialize");
+    let before = fs::metadata(&paths.state_db)
+        .expect("journal metadata should load")
+        .len();
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(&paths.state_db)
+        .expect("journal should open");
+    file.set_len(512 * 1024 * 1024)
+        .expect("journal should extend to threshold");
+
+    let report = serde_json::to_value(doctor_report_with_global(&repo, &paths))
+        .expect("doctor report should serialize");
+    assert_eq!(
+        report
+            .pointer("/journal/threshold_bytes")
+            .and_then(serde_json::Value::as_u64),
+        Some(512 * 1024 * 1024)
+    );
+    assert_eq!(
+        report
+            .pointer("/journal/warning")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        fs::metadata(&paths.state_db)
+            .expect("journal metadata should load after doctor")
+            .len(),
+        512 * 1024 * 1024,
+        "doctor must not prune or vacuum the journal"
+    );
+    assert!(before < 512 * 1024 * 1024);
+}
+
+#[test]
 fn parses_sandbox_run_write_targets_network_enabled() {
     let cli = Cli::try_parse_from([
         "stateful",

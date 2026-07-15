@@ -27,7 +27,8 @@ pub use human::{
     HumanReconciliationAcknowledgementRecord,
 };
 pub use journal::{
-    CommandOutcome, CommandPlan, CurrentAggregate, CurrentRecord, ProjectionReader, ReplayReport,
+    CommandOutcome, CommandPlan, CurrentAggregate, CurrentRecord, JournalDiagnostics,
+    ProjectionReader, ReplayReport, inspect_journal,
 };
 pub use notifications::{
     DeliveryAttempt, DeliveryRecord, NotificationAcknowledgement, NotificationCreate,
