@@ -1,11 +1,11 @@
 use crate::{
     CommandOutcome, CommandPlan, CurrentAggregate, Store, StoreError, StoreResult,
     ReservationRecord, WaitRecord,
-    reservations::{expired, normalized_scope, record_from_current, scopes_conflict, timestamp, typed_records, wait_event},
+    reservations::{append_grant_for_path, expired, normalized_scope, record_from_current, reservation_event, scopes_conflict, timestamp, typed_records, wait_event},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use stateful_core::{ClaimEvent, EventData, EventPayload, NewEvent, RequestEnvelope, WaitEvent};
+use stateful_core::{ClaimEvent, EventData, EventPayload, NewEvent, RequestEnvelope, ReservationEvent, WaitEvent};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -102,7 +102,12 @@ impl Store {
             let mut claims = Vec::new();
             let mut acquired = 0;
             let mut already_held = 0;
+            let mut planned_paths = Vec::new();
             for (input, relative_path) in payload.paths.iter().zip(normalized) {
+                if planned_paths.contains(&relative_path) {
+                    continue;
+                }
+                planned_paths.push(relative_path.clone());
                 if let Some(mut claim) = existing.iter().find(|claim| {
                     claim.status == "active"
                         && !expired(&claim.expires_at, now)
@@ -170,11 +175,24 @@ impl Store {
                 return Ok(CommandPlan { events: Vec::new(), response: claim, http_status: 200 });
             }
             claim.status = "released".into();
-            Ok(CommandPlan {
-                events: vec![claim_event(request, 0, now, ClaimEvent::Released, &claim)?],
-                response: claim,
-                http_status: 200,
-            })
+            let mut events = vec![claim_event(request, 0, now, ClaimEvent::Released, &claim)?];
+            if let Some(mut reservation) = typed_records::<ReservationRecord>(
+                reader, CurrentAggregate::Reservation, &request.workspace.workspace_id,
+            )?.into_iter().find(|reservation| reservation.reservation_id == claim.reservation_id && reservation.status == "active") {
+                reservation.status = "released".into();
+                events.push(reservation_event(request, events.len() as u32, now, ReservationEvent::Released, &reservation)?);
+                for mut related in typed_records::<ClaimRecord>(reader, CurrentAggregate::Claim, &request.workspace.workspace_id)? {
+                    if related.claim_id != claim.claim_id && related.reservation_id == reservation.reservation_id && related.status == "active" {
+                        related.status = "released".into();
+                        events.push(claim_event(request, events.len() as u32, now, ClaimEvent::Released, &related)?);
+                    }
+                }
+                append_grant_for_path(
+                    request, reader, now, &reservation.workspace_id, &reservation.relative_path,
+                    std::slice::from_ref(&reservation.reservation_id), true, &mut events,
+                )?;
+            }
+            Ok(CommandPlan { events, response: claim, http_status: 200 })
         })
     }
 

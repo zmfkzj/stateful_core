@@ -9,6 +9,7 @@ use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 const WRITE_FENCE_TTL: Duration = Duration::minutes(5);
+const FENCE_ATTRIBUTION_GRACE: Duration = Duration::seconds(2);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WriteFenceAcquire {
@@ -59,7 +60,9 @@ impl Store {
         let payload = request.payload.clone();
         self.execute_command(request, "write_fence.acquire", |reader| {
             if payload.paths.is_empty() { return Err(StoreError::MissingScope); }
-            let paths = payload.paths.iter().map(|path| normalized_scope(path)).collect::<StoreResult<Vec<_>>>()?;
+            let mut paths = payload.paths.iter().map(|path| normalized_scope(path)).collect::<StoreResult<Vec<_>>>()?;
+            paths.sort();
+            paths.dedup();
             let existing = typed_records::<WriteFenceRecord>(reader, CurrentAggregate::WriteFence, &request.workspace.workspace_id)?;
             if let Some(conflict) = existing.iter().find(|fence| {
                 fence.status == "active"
@@ -82,8 +85,8 @@ impl Store {
                         && !expired(&fence.expires_at, now)
                         && fence.agent_id == request.agent.agent_id
                         && fence.relative_path == path
-                        && fence.action == payload.action
                 }).cloned() {
+                    fence.action = payload.action.clone();
                     fence.expires_at = timestamp(now + WRITE_FENCE_TTL)?;
                     events.push(fence_event(request, events.len() as u32, now, WriteFenceEvent::Acquired, &fence)?);
                     fences.push(fence);
@@ -173,9 +176,12 @@ pub(crate) fn active_fence_owner(
     Ok(typed_records::<WriteFenceRecord>(reader, CurrentAggregate::WriteFence, workspace_id)?
         .into_iter()
         .find(|fence| {
-            fence.status == "active"
+            (fence.status == "active"
                 && parse_before_or_at(&fence.acquired_at, observed_at)
                 && parse_after_or_at(&fence.expires_at, observed_at)
+                || fence.status == "released"
+                    && fence.released_at.as_deref().and_then(|released| crate::reservations::parse_time(released).ok())
+                        .is_some_and(|released| observed_at >= released && observed_at <= released + FENCE_ATTRIBUTION_GRACE))
                 && scopes_conflict(&fence.relative_path, path)
         })
         .map(|fence| fence.agent_id))

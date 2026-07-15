@@ -1,9 +1,13 @@
 use crate::{
-    CommandOutcome, CommandPlan, Store, StoreResult,
+    ClaimRecord, CommandOutcome, CommandPlan, CurrentAggregate, ReservationRecord, Store, StoreResult,
+    WaitRecord, WriteFenceRecord,
+    claims::claim_event,
     presence::{presence_event, register_record},
+    reservations::{append_grant_for_path, reservation_event, typed_records, wait_event},
+    write_fences::fence_event,
 };
 use serde::{Deserialize, Serialize};
-use stateful_core::{EventData, EventPayload, PresenceEvent, PresencePhase, RequestEnvelope};
+use stateful_core::{ClaimEvent, EventData, EventPayload, PresenceEvent, PresencePhase, RequestEnvelope, ReservationEvent, WaitEvent, WriteFenceEvent};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActivityStart {
@@ -49,14 +53,46 @@ impl Store {
             }
             let mut data = EventData::new(&request.agent.agent_id);
             data.data = serde_json::json!({"agent_id": request.agent.agent_id, "status": "finalized"});
-            let event = stateful_core::NewEvent::new(
-                request.request_id,
-                0,
-                now,
-                EventPayload::Presence(PresenceEvent::Finalized(data)),
-            )?;
+            let mut events = vec![stateful_core::NewEvent::new(
+                request.request_id, 0, now, EventPayload::Presence(PresenceEvent::Finalized(data)),
+            )?];
+            let workspace_id = &request.workspace.workspace_id;
+            let mut released_reservations = Vec::new();
+            for mut reservation in typed_records::<ReservationRecord>(reader, CurrentAggregate::Reservation, workspace_id)? {
+                if reservation.agent_id == request.agent.agent_id && reservation.status == "active" {
+                    reservation.status = "released".into();
+                    released_reservations.push(reservation.clone());
+                    events.push(reservation_event(request, events.len() as u32, now, ReservationEvent::Released, &reservation)?);
+                }
+            }
+            for mut claim in typed_records::<ClaimRecord>(reader, CurrentAggregate::Claim, workspace_id)? {
+                if claim.agent_id == request.agent.agent_id && claim.status == "active" {
+                    claim.status = "released".into();
+                    events.push(claim_event(request, events.len() as u32, now, ClaimEvent::Released, &claim)?);
+                }
+            }
+            for mut wait in typed_records::<WaitRecord>(reader, CurrentAggregate::Wait, workspace_id)? {
+                if wait.agent_id == request.agent.agent_id && matches!(wait.status.as_str(), "queued" | "claimable") {
+                    wait.status = "canceled".into();
+                    wait.reservation_expires_at = None;
+                    events.push(wait_event(request, events.len() as u32, now, WaitEvent::Cancelled, &wait)?);
+                }
+            }
+            for mut fence in typed_records::<WriteFenceRecord>(reader, CurrentAggregate::WriteFence, workspace_id)? {
+                if fence.agent_id == request.agent.agent_id && fence.status == "active" {
+                    fence.status = "released".into();
+                    fence.released_at = Some(crate::reservations::timestamp(now)?);
+                    events.push(fence_event(request, events.len() as u32, now, WriteFenceEvent::Released, &fence)?);
+                }
+            }
+            for reservation in released_reservations {
+                append_grant_for_path(
+                    request, reader, now, workspace_id, &reservation.relative_path,
+                    std::slice::from_ref(&reservation.reservation_id), true, &mut events,
+                )?;
+            }
             Ok(CommandPlan {
-                events: vec![event],
+                events,
                 response: ActivityOutcome { finalized: true },
                 http_status: 200,
             })

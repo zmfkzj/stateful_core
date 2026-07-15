@@ -100,9 +100,11 @@ impl Store {
         self.execute_command(request, "human.observe", |reader| {
             let relative_path = normalized_scope(&payload.relative_path)?;
             let observed_at = payload.observed_at.unwrap_or(now);
-            let attributed = payload.kind.is_write()
-                && payload.confidence == HumanObservationConfidence::High
-                && active_fence_owner(reader, &request.workspace.workspace_id, &relative_path, observed_at)?.is_some();
+            let attributed_owner = (payload.kind.is_write() && payload.confidence == HumanObservationConfidence::High)
+                .then(|| active_fence_owner(reader, &request.workspace.workspace_id, &relative_path, observed_at))
+                .transpose()?
+                .flatten();
+            let attributed = attributed_owner.is_some();
             let observation = HumanObservationRecord {
                 observation_id: Uuid::new_v4().to_string(),
                 workspace_id: request.workspace.workspace_id.clone(),
@@ -116,7 +118,7 @@ impl Store {
                 expires_at: payload.kind.is_ephemeral().then(|| timestamp(observed_at + EPHEMERAL_OBSERVATION_TTL)).transpose()?,
                 reconciled_at: attributed.then(|| timestamp(observed_at)).transpose()?,
                 decision: None,
-                reconciled_by_agent_id: attributed.then(|| request.agent.agent_id.clone()),
+                reconciled_by_agent_id: attributed_owner,
                 origin_event_seq: 0,
             };
             Ok(CommandPlan {

@@ -1,12 +1,14 @@
 use crate::{
-    CommandOutcome, CommandPlan, CurrentAggregate, CurrentRecord, ProjectionReader, Store,
+    ClaimRecord, CommandOutcome, CommandPlan, CurrentAggregate, CurrentRecord, ProjectionReader, Store,
     StoreError, StoreResult,
+    claims::claim_event,
+    notifications::{DeliveryRecord, delivery_event},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
 use stateful_core::{
-    EventData, EventPayload, NewEvent, NotificationEvent, RequestEnvelope, ReservationEvent,
-    WaitEvent, normalize_relative_path,
+    ClaimEvent, EventData, EventPayload, NewEvent, NotificationEvent, RecoveryEvent, RequestEnvelope,
+    ReservationEvent, WaitEvent, normalize_relative_path,
 };
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
@@ -168,6 +170,12 @@ impl Store {
             }
             reservation.status = "released".into();
             let mut events = vec![reservation_event(request, 0, now, ReservationEvent::Released, &reservation)?];
+            for mut claim in typed_records::<ClaimRecord>(reader, CurrentAggregate::Claim, &reservation.workspace_id)? {
+                if claim.reservation_id == reservation.reservation_id && claim.status == "active" {
+                    claim.status = "released".into();
+                    events.push(claim_event(request, events.len() as u32, now, ClaimEvent::Released, &claim)?);
+                }
+            }
             append_grant_for_path(
                 request, reader, now, &reservation.workspace_id, &reservation.relative_path,
                 std::slice::from_ref(&reservation.reservation_id), true, &mut events,
@@ -234,13 +242,23 @@ impl Store {
             if !matches!(wait.status.as_str(), "queued" | "claimable") {
                 return Ok(CommandPlan { events: Vec::new(), response: wait, http_status: 200 });
             }
+            let claimable_reservation = wait.reservation_id.clone();
             wait.status = "canceled".into();
             wait.reservation_expires_at = None;
-            Ok(CommandPlan {
-                events: vec![wait_event(request, 0, now, WaitEvent::Cancelled, &wait)?],
-                response: wait,
-                http_status: 200,
-            })
+            let mut events = vec![wait_event(request, 0, now, WaitEvent::Cancelled, &wait)?];
+            if let Some(reservation_id) = claimable_reservation {
+                if let Some(mut reservation) = typed_records::<ReservationRecord>(
+                    reader, CurrentAggregate::Reservation, &request.workspace.workspace_id,
+                )?.into_iter().find(|reservation| reservation.reservation_id == reservation_id && reservation.status == "active") {
+                    reservation.status = "released".into();
+                    events.push(reservation_event(request, events.len() as u32, now, ReservationEvent::Released, &reservation)?);
+                    append_grant_for_path(
+                        request, reader, now, &reservation.workspace_id, &reservation.relative_path,
+                        std::slice::from_ref(&reservation.reservation_id), true, &mut events,
+                    )?;
+                }
+            }
+            Ok(CommandPlan { events, response: wait, http_status: 200 })
         })
     }
 
@@ -376,6 +394,7 @@ pub(crate) fn append_grant_for_path<T>(
     }) {
         return Ok(None);
     }
+    let active_claims = typed_records::<ClaimRecord>(reader, CurrentAggregate::Claim, workspace_id)?;
 
     let mut waits = typed_records::<WaitRecord>(reader, CurrentAggregate::Wait, workspace_id)?;
     waits.sort_by(|left, right| left.requested_at.cmp(&right.requested_at).then_with(|| left.wait_id.cmp(&right.wait_id)));
@@ -390,6 +409,12 @@ pub(crate) fn append_grant_for_path<T>(
     for mut wait in waits {
         if wait.status != "queued"
             || !scopes_conflict(&wait.relative_path, relative_path)
+            || active_claims.iter().any(|claim| {
+                claim.status == "active"
+                    && !ignored_reservation_ids.contains(&claim.reservation_id)
+                    && !expired(&claim.expires_at, now)
+                    && scopes_conflict(&claim.relative_path, &wait.relative_path)
+            })
             || granted.iter().any(|scope| scopes_conflict(scope, &wait.relative_path))
         {
             continue;
@@ -423,6 +448,18 @@ pub(crate) fn append_grant_for_path<T>(
             "expires_at": reservation.expires_at,
         }});
         events.push(NewEvent::new(request.request_id, events.len() as u32, now, EventPayload::Notification(NotificationEvent::Created(data)))?);
+        let delivery = DeliveryRecord {
+            delivery_id: wait.wait_id.clone(),
+            notification_id: wait.wait_id.clone(),
+            workspace_id: workspace_id.into(),
+            status: "queued".into(),
+            attempts: 0,
+            last_error: None,
+            retry_at: None,
+            delivered_at: None,
+            origin_event_seq: 0,
+        };
+        events.push(delivery_event(request, events.len() as u32, now, RecoveryEvent::Queued, &delivery)?);
         sequence += 1;
         granted.push(wait.relative_path.clone());
         if first.is_none() {

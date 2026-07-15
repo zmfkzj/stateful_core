@@ -153,7 +153,7 @@ impl Store {
                     workspace_id: request.workspace.workspace_id.clone(), status: "queued".into(), attempts: 0,
                     last_error: None, retry_at: None, delivered_at: None, origin_event_seq: 0,
                 });
-            if delivery.status == "delivered" {
+            if delivery.status == "delivered" || notification.status == "expired" {
                 return Ok(CommandPlan { events: Vec::new(), response: delivery, http_status: 200 });
             }
             let (variant, status): (fn(EventData) -> RecoveryEvent, &str) = match payload.outcome {
@@ -232,7 +232,7 @@ fn notification_event<T>(
     NewEvent::new(request.request_id, ordinal, now, EventPayload::Notification(variant(data))).map_err(StoreError::from)
 }
 
-fn delivery_event<T>(
+pub(crate) fn delivery_event<T>(
     request: &RequestEnvelope<T>, ordinal: u32, now: OffsetDateTime,
     variant: fn(EventData) -> RecoveryEvent, delivery: &DeliveryRecord,
 ) -> StoreResult<NewEvent> {

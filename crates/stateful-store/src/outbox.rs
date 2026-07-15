@@ -51,7 +51,7 @@ impl Store {
         self.execute_command(request, "outbox.enqueue", |reader| {
             if let Some(current) = reader.aggregate_records(CurrentAggregate::Delivery, &request.workspace.workspace_id)?
                 .into_iter()
-                .find(|record| record.aggregate_id == entry.outbox_id)
+                .find(|record| record.aggregate_id == outbox_delivery_id(&entry.outbox_id))
             {
                 let existing = current.payload.get("outbox").cloned()
                     .ok_or(crate::StoreError::ReservationRequestNotFound)?;
@@ -72,7 +72,7 @@ impl Store {
                 last_error: None,
             };
             let delivery = DeliveryRecord {
-                delivery_id: entry.outbox_id.clone(),
+                delivery_id: outbox_delivery_id(&entry.outbox_id),
                 notification_id: entry.outbox_id.clone(),
                 workspace_id: request.workspace.workspace_id.clone(),
                 status: "queued".into(),
@@ -99,7 +99,7 @@ impl Store {
         self.execute_command(request, "outbox.delivery", |reader| {
             let current = reader.aggregate_records(CurrentAggregate::Delivery, &request.workspace.workspace_id)?
                 .into_iter()
-                .find(|record| record.aggregate_id == input.outbox_id)
+                .find(|record| record.aggregate_id == outbox_delivery_id(&input.outbox_id))
                 .ok_or(crate::StoreError::ReservationRequestNotFound)?;
             let outbox = current.payload.get("outbox").cloned()
                 .ok_or(crate::StoreError::ReservationRequestNotFound)?;
@@ -136,7 +136,7 @@ impl Store {
     pub fn outbox(&self, workspace_id: &str, outbox_id: &str) -> StoreResult<Option<OutboxRecord>> {
         let Some(record) = self.current_records(CurrentAggregate::Delivery, workspace_id)?
             .into_iter()
-            .find(|record| record.aggregate_id == outbox_id) else {
+            .find(|record| record.aggregate_id == outbox_delivery_id(outbox_id)) else {
             return Ok(None);
         };
         record.payload.get("outbox").cloned()
@@ -160,4 +160,8 @@ fn outbox_event<T>(
         "last_error": delivery.last_error, "retry_at": delivery.retry_at, "delivered_at": delivery.delivered_at,
         "origin_event_seq": delivery.origin_event_seq, "outbox": outbox}});
     NewEvent::new(request.request_id, ordinal, now, EventPayload::Recovery(variant(data))).map_err(crate::StoreError::from)
+}
+
+fn outbox_delivery_id(outbox_id: &str) -> String {
+    format!("outbox:{outbox_id}")
 }

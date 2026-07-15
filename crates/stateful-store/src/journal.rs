@@ -336,7 +336,7 @@ impl Store {
     {
         request.validate().map_err(StoreError::V2)?;
         let request_sha256 = normalized_request_sha256(request)?;
-        let transaction = self.conn.unchecked_transaction()?;
+        let transaction = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         if let Some(receipt) = load_receipt(&transaction, request.request_id)? {
             if receipt.route_kind != route_kind || receipt.request_sha256 != request_sha256 || receipt.agent_id != request.agent.agent_id || receipt.workspace_id != request.workspace.workspace_id || receipt.actor_id != request.agent.actor_id {
                 return Err(StoreError::IdempotencyKeyReused);
