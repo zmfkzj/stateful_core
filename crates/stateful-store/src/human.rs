@@ -136,22 +136,21 @@ impl Store {
         let now = self.clock.now();
         let payload = request.payload.clone();
         self.execute_command(request, "human.reconcile", |reader| {
-            if !payload.decision.clears_human_write_block() {
-                return Ok(CommandPlan { events: Vec::new(), response: 0, http_status: 200 });
-            }
             let paths = payload.files_reread.iter().map(|path| normalized_scope(path)).collect::<StoreResult<Vec<_>>>()?;
             let mut events = Vec::new();
             let mut count = 0;
             for mut observation in typed_records::<HumanObservationRecord>(reader, CurrentAggregate::HumanObservation, &request.workspace.workspace_id)? {
-                if observation.status != "pending" || !paths.iter().any(|path| *path == observation.relative_path) {
+                if observation.status != "pending" || (!paths.is_empty() && !paths.iter().any(|path| *path == observation.relative_path)) {
                     continue;
                 }
-                observation.status = "reconciled".into();
-                observation.reconciled_at = Some(timestamp(now)?);
+                if payload.decision.clears_human_write_block() {
+                    observation.status = "reconciled".into();
+                    observation.reconciled_at = Some(timestamp(now)?);
+                    observation.reconciled_by_agent_id = Some(request.agent.agent_id.clone());
+                    count += 1;
+                }
                 observation.decision = Some(payload.decision);
-                observation.reconciled_by_agent_id = Some(request.agent.agent_id.clone());
                 events.push(observation_event(request, events.len() as u32, now, HumanObservationEvent::Reconciled, &observation)?);
-                count += 1;
             }
             Ok(CommandPlan { events, response: count, http_status: 200 })
         })

@@ -102,9 +102,9 @@ impl Store {
             let mut claims = Vec::new();
             let mut acquired = 0;
             let mut already_held = 0;
-            let mut planned_paths = Vec::new();
+            let mut planned_paths: Vec<String> = Vec::new();
             for (input, relative_path) in payload.paths.iter().zip(normalized) {
-                if planned_paths.contains(&relative_path) {
+                if planned_paths.iter().any(|planned| scopes_conflict(planned, &relative_path)) {
                     continue;
                 }
                 planned_paths.push(relative_path.clone());
