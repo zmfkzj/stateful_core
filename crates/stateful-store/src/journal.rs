@@ -157,11 +157,12 @@ impl Store {
         request.validate().map_err(StoreError::V2)?;
         let request_sha256 = normalized_request_sha256(request)?;
         let transaction = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some(receipt) = load_receipt::<R>(&transaction, request.request_id)? {
+        if let Some(receipt) = load_receipt(&transaction, request.request_id)? {
             if receipt.route_kind != route_kind || receipt.request_sha256 != request_sha256 || receipt.agent_id != request.agent.agent_id || receipt.workspace_id != request.workspace.workspace_id || receipt.actor_id != request.agent.actor_id {
                 return Err(StoreError::IdempotencyKeyReused);
             }
-            return Ok(CommandOutcome { response: receipt.response, http_status: receipt.http_status, first_event_seq: receipt.first_event_seq, last_event_seq: receipt.last_event_seq, duplicate: true });
+            let response = serde_json::from_str(&receipt.response_json)?;
+            return Ok(CommandOutcome { response, http_status: receipt.http_status, first_event_seq: receipt.first_event_seq, last_event_seq: receipt.last_event_seq, duplicate: true });
         }
 
         let plan = build(&SqlProjectionReader { transaction: &transaction })?;
@@ -176,11 +177,7 @@ impl Store {
             let normalized = NewEvent::new(request.request_id, event.event_ordinal, self.clock.now(), event.payload)
                 .map_err(StoreError::V2)?;
             let event_seq = insert_journal_event(&transaction, &normalized, request, &occurred_at)?;
-            let stored = normalized.into_stored(event_seq).map_err(StoreError::V2)?;
-            let journal_event = JournalEvent {
-                stored, agent_id: request.agent.agent_id.clone(), workspace_id: request.workspace.workspace_id.clone(),
-                actor_id: request.agent.actor_id.clone(), actor_type: actor_type_name(&request.agent.actor_type).into(), occurred_at: occurred_at.clone(),
-            };
+            let journal_event = load_journal_event(&transaction, event_seq)?;
             projector.apply(&journal_event)?;
             first_event_seq.get_or_insert(event_seq);
             last_event_seq = Some(event_seq);
@@ -231,6 +228,20 @@ impl Store {
         projection_snapshot(&self.conn, "")
     }
 
+    #[doc(hidden)]
+    pub fn projection_schema_snapshot(&self) -> StoreResult<BTreeMap<String, Vec<Vec<String>>>> {
+        projection_schema_snapshot(&self.conn)
+    }
+
+    #[doc(hidden)]
+    pub fn corrupt_journal_metadata_for_tests(&mut self, column: &str, value: &str) -> StoreResult<()> {
+        if column != "event_type" {
+            return Err(StoreError::InvalidJournalEvent);
+        }
+        self.conn.execute("UPDATE journal_events SET event_type = ?1", [value])?;
+        Ok(())
+    }
+
     pub fn workspace_version(&self, workspace_id: &str) -> StoreResult<u64> {
         self.conn.query_row("SELECT version FROM workspace_version WHERE workspace_id = ?1", [workspace_id], |row| row.get(0)).optional().map(|value: Option<u64>| value.unwrap_or(0)).map_err(StoreError::from)
     }
@@ -241,16 +252,33 @@ impl Store {
     }
 }
 
-struct Receipt<R> { route_kind: String, request_sha256: String, agent_id: String, actor_id: String, workspace_id: String, response: R, http_status: u16, first_event_seq: Option<u64>, last_event_seq: Option<u64> }
+struct Receipt {
+    route_kind: String,
+    request_sha256: String,
+    agent_id: String,
+    actor_id: String,
+    workspace_id: String,
+    response_json: String,
+    http_status: u16,
+    first_event_seq: Option<u64>,
+    last_event_seq: Option<u64>,
+}
 
-fn load_receipt<R: DeserializeOwned>(transaction: &Transaction<'_>, request_id: Uuid) -> StoreResult<Option<Receipt<R>>> {
+fn load_receipt(transaction: &Transaction<'_>, request_id: Uuid) -> StoreResult<Option<Receipt>> {
     transaction.query_row(
         "SELECT route_kind, request_sha256, agent_id, actor_id, workspace_id, response_json, http_status, first_event_seq, last_event_seq FROM command_receipts WHERE request_id = ?1",
         [request_id.to_string()],
-        |row| {
-            let response_json: String = row.get(5)?;
-            Ok(Receipt { route_kind: row.get(0)?, request_sha256: row.get(1)?, agent_id: row.get(2)?, actor_id: row.get(3)?, workspace_id: row.get(4)?, response: serde_json::from_str(&response_json).map_err(|error| rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(error)))?, http_status: row.get(6)?, first_event_seq: row.get(7)?, last_event_seq: row.get(8)? })
-        },
+        |row| Ok(Receipt {
+            route_kind: row.get(0)?,
+            request_sha256: row.get(1)?,
+            agent_id: row.get(2)?,
+            actor_id: row.get(3)?,
+            workspace_id: row.get(4)?,
+            response_json: row.get(5)?,
+            http_status: row.get(6)?,
+            first_event_seq: row.get(7)?,
+            last_event_seq: row.get(8)?,
+        }),
     ).optional().map_err(StoreError::from)
 }
 
@@ -264,21 +292,95 @@ fn insert_journal_event(transaction: &Transaction<'_>, event: &NewEvent, request
 }
 
 fn load_journal_events(connection: &Connection) -> StoreResult<Vec<JournalEvent>> {
-    let mut statement = connection.prepare("SELECT event_seq, event_id, request_id, event_ordinal, agent_id, workspace_id, actor_id, actor_type, occurred_at, payload_json FROM journal_events ORDER BY event_seq")?;
-    statement.query_map([], |row| {
-        let event_seq: u64 = row.get(0)?;
-        let event_id: String = row.get(1)?;
-        let request_id: String = row.get(2)?;
-        let event_ordinal: u32 = row.get(3)?;
-        let occurred_at: String = row.get(8)?;
-        let payload_json: String = row.get(9)?;
-        let payload: EventPayload = serde_json::from_str(&payload_json).map_err(|error| rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, Box::new(error)))?;
-        let event = NewEvent::new(Uuid::parse_str(&request_id).map_err(|error| rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(error)))?, event_ordinal, OffsetDateTime::parse(&occurred_at, &Rfc3339).map_err(|error| rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(error)))?, payload).map_err(|error| rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, Box::new(error)))?;
-        let mut event = event;
-        event.event_id = Uuid::parse_str(&event_id).map_err(|error| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(error)))?;
-        let stored = event.into_stored(event_seq).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Integer, Box::new(error)))?;
-        Ok(JournalEvent { stored, agent_id: row.get(4)?, workspace_id: row.get(5)?, actor_id: row.get(6)?, actor_type: row.get(7)?, occurred_at })
-    })?.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+    let mut statement = connection.prepare(
+        "SELECT event_seq, event_id, request_id, event_ordinal, agent_id, workspace_id, actor_id, actor_type, aggregate_kind, aggregate_id, event_type, event_schema_version, occurred_at, affects_context, payload_json FROM journal_events ORDER BY event_seq",
+    )?;
+    statement
+        .query_map([], persisted_journal_event_from_row)?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(PersistedJournalEvent::validate)
+        .collect()
+}
+
+fn load_journal_event(connection: &Connection, event_seq: u64) -> StoreResult<JournalEvent> {
+    connection
+        .query_row(
+            "SELECT event_seq, event_id, request_id, event_ordinal, agent_id, workspace_id, actor_id, actor_type, aggregate_kind, aggregate_id, event_type, event_schema_version, occurred_at, affects_context, payload_json FROM journal_events WHERE event_seq = ?1",
+            [event_seq],
+            persisted_journal_event_from_row,
+        )?
+        .validate()
+}
+
+fn persisted_journal_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersistedJournalEvent> {
+    Ok(PersistedJournalEvent {
+        event_seq: row.get(0)?,
+        event_id: row.get(1)?,
+        request_id: row.get(2)?,
+        event_ordinal: row.get(3)?,
+        agent_id: row.get(4)?,
+        workspace_id: row.get(5)?,
+        actor_id: row.get(6)?,
+        actor_type: row.get(7)?,
+        aggregate_kind: row.get(8)?,
+        aggregate_id: row.get(9)?,
+        event_type: row.get(10)?,
+        event_schema_version: row.get(11)?,
+        occurred_at: row.get(12)?,
+        affects_context: row.get::<_, i64>(13)? != 0,
+        payload_json: row.get(14)?,
+    })
+}
+
+struct PersistedJournalEvent {
+    event_seq: u64,
+    event_id: String,
+    request_id: String,
+    event_ordinal: u32,
+    agent_id: String,
+    workspace_id: String,
+    actor_id: String,
+    actor_type: String,
+    aggregate_kind: String,
+    aggregate_id: String,
+    event_type: String,
+    event_schema_version: u64,
+    occurred_at: String,
+    affects_context: bool,
+    payload_json: String,
+}
+
+impl PersistedJournalEvent {
+    fn validate(self) -> StoreResult<JournalEvent> {
+        if self.event_schema_version != 1 {
+            return Err(StoreError::InvalidJournalEvent);
+        }
+        let payload: EventPayload = serde_json::from_str(&self.payload_json)?;
+        let mut event = NewEvent::new(
+            Uuid::parse_str(&self.request_id).map_err(|_| StoreError::InvalidJournalEvent)?,
+            self.event_ordinal,
+            OffsetDateTime::parse(&self.occurred_at, &Rfc3339).map_err(|_| StoreError::InvalidJournalEvent)?,
+            payload,
+        ).map_err(StoreError::V2)?;
+        event.event_id = Uuid::parse_str(&self.event_id).map_err(|_| StoreError::InvalidJournalEvent)?;
+        let stored = event.into_stored(self.event_seq).map_err(StoreError::V2)?;
+        if stored.aggregate_kind() != self.aggregate_kind
+            || stored.aggregate_id() != self.aggregate_id
+            || stored.event_type() != self.event_type
+            || stored.affects_context() != self.affects_context
+        {
+            return Err(StoreError::InvalidJournalEvent);
+        }
+        Ok(JournalEvent {
+            stored,
+            agent_id: self.agent_id,
+            workspace_id: self.workspace_id,
+            actor_id: self.actor_id,
+            actor_type: self.actor_type,
+            occurred_at: self.occurred_at,
+        })
+    }
 }
 
 fn projection_snapshot(connection: &Connection, prefix: &str) -> StoreResult<BTreeMap<String, Vec<Vec<String>>>> {
@@ -292,6 +394,24 @@ fn projection_snapshot(connection: &Connection, prefix: &str) -> StoreResult<BTr
             }).collect::<Result<Vec<_>, rusqlite::Error>>()
         })?.collect::<Result<Vec<_>, _>>()?;
         snapshots.insert((*table).into(), rows);
+    }
+    Ok(snapshots)
+}
+
+fn projection_schema_snapshot(connection: &Connection) -> StoreResult<BTreeMap<String, Vec<Vec<String>>>> {
+    let mut snapshots = BTreeMap::new();
+    for table in PROJECTION_TABLES {
+        let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+        let columns = statement.query_map([], |row| {
+            Ok(vec![
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?.to_string(),
+                row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                row.get::<_, i64>(5)?.to_string(),
+            ])
+        })?.collect::<Result<Vec<_>, _>>()?;
+        snapshots.insert((*table).into(), columns);
     }
     Ok(snapshots)
 }

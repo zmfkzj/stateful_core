@@ -112,13 +112,13 @@ impl<'a> Projector<'a> {
     pub(crate) fn create_replay_tables(connection: &Connection) -> StoreResult<()> {
         for table in schema::PROJECTION_TABLES {
             let replay = format!("replay_{table}");
-            connection.execute_batch(&format!(
-                "DROP TABLE IF EXISTS {replay}; CREATE TABLE {replay} AS SELECT * FROM {table} WHERE 0;"
-            ))?;
-            connection.execute_batch(&format!(
-                "CREATE UNIQUE INDEX replay_{table}_key ON {replay}({});",
-                replay_key_columns(table),
-            ))?;
+            let ddl: String = connection.query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [*table],
+                |row| row.get(0),
+            )?;
+            let replay_ddl = ddl.replacen(table, &replay, 1);
+            connection.execute_batch(&format!("DROP TABLE IF EXISTS {replay}; {replay_ddl};"))?;
         }
         Ok(())
     }
@@ -126,26 +126,10 @@ impl<'a> Projector<'a> {
     pub(crate) fn swap_replay_tables(connection: &Connection) -> StoreResult<()> {
         for table in schema::PROJECTION_TABLES {
             let replay = format!("replay_{table}");
-            let key_columns = replay_key_columns(table);
             connection.execute_batch(&format!(
-                "DROP INDEX IF EXISTS idx_v2_{table}_key;
-                 CREATE UNIQUE INDEX idx_v2_{table}_key ON {replay}({key_columns});
-                 DROP INDEX replay_{table}_key;
-                 DROP TABLE {table};
-                 ALTER TABLE {replay} RENAME TO {table};"
+                "DROP TABLE {table}; ALTER TABLE {replay} RENAME TO {table};"
             ))?;
         }
         schema::create_v2_schema(connection)
-    }
-}
-
-fn replay_key_columns(table: &str) -> &'static str {
-    match table {
-        "presence_current" => "workspace_id, agent_id",
-        "read_observation_current" => "workspace_id, agent_id, path",
-        "workspace_version" => "workspace_id",
-        "agent_context_cursor" => "workspace_id, agent_id",
-        "resource_write_current" => "workspace_id, path",
-        _ => "workspace_id, aggregate_id",
     }
 }

@@ -61,6 +61,8 @@ pub enum StoreError {
     IdempotencyKeyReused,
     #[error("command contains an invalid event")]
     InvalidCommandEvent,
+    #[error("persisted journal event metadata is invalid")]
+    InvalidJournalEvent,
     #[error("projector failure injected for test")]
     ProjectorFailure,
     #[error("replayed projection differs from canonical projection")]

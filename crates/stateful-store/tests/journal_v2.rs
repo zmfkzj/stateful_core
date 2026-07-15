@@ -128,6 +128,16 @@ fn request_id_reuse_with_different_route_identity_or_payload_is_rejected() {
         .execute_command(&changed_payload, "test.command", |_| Ok(command_plan(request_id, vec![])))
         .expect_err("payload reuse must fail");
     assert_eq!(error.code(), "idempotency_key_reused");
+    let incompatible_response_error = store
+        .execute_command(&changed_payload, "test.command", |_| {
+            Ok(CommandPlan {
+                events: vec![],
+                response: "wrong response type".to_owned(),
+                http_status: 200,
+            })
+        })
+        .expect_err("mismatched reuse must validate identity before response decoding");
+    assert_eq!(incompatible_response_error.code(), "idempotency_key_reused");
     let route_error = store
         .execute_command(&original, "other.command", |_| Ok(command_plan(request_id, vec![])))
         .expect_err("route reuse must fail");
@@ -171,12 +181,14 @@ fn audit_only_event_does_not_advance_workspace_version() {
 
 #[test]
 fn replay_into_empty_projection_tables_is_byte_equivalent() {
+    {
     let mut store = store();
     let request = request(Uuid::new_v4(), json!({"intent":"deny"}));
     store
         .execute_command(&request, "test.command", |_| Ok(command_plan(request.request_id, vec![event(request.request_id, 0, "authorization.denied")])))
         .expect("command should commit");
     let before = store.projection_snapshot().expect("snapshot should load");
+    let schema_before = store.projection_schema_snapshot().expect("schema should load");
     let journal_count = store.journal_event_count().expect("journal count should load");
     let receipt_count = store.command_receipt_count().expect("receipt count should load");
 
@@ -189,6 +201,17 @@ fn replay_into_empty_projection_tables_is_byte_equivalent() {
     assert_ne!(report.canonical_sha256, "");
     store.rebuild_projections().expect("replay should remain repeatable");
     assert_eq!(store.projection_snapshot().expect("snapshot should load"), before);
+    assert_eq!(store.projection_schema_snapshot().expect("schema should load"), schema_before);
+    }
+    let mut corrupt_store = store();
+    let corrupt_request = request(Uuid::new_v4(), json!({"intent":"deny"}));
+    corrupt_store
+        .execute_command(&corrupt_request, "test.command", |_| Ok(command_plan(corrupt_request.request_id, vec![event(corrupt_request.request_id, 0, "authorization.denied")])))
+        .expect("command should commit");
+    let corrupt_before = corrupt_store.projection_snapshot().expect("snapshot should load");
+    corrupt_store.corrupt_journal_metadata_for_tests("event_type", "presence.registered").expect("corruption should apply");
+    assert!(corrupt_store.rebuild_projections().is_err(), "corrupt persisted metadata must fail replay");
+    assert_eq!(corrupt_store.projection_snapshot().expect("snapshot should load"), corrupt_before);
 }
 
 #[test]
