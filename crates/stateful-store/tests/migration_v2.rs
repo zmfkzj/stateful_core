@@ -1,8 +1,14 @@
 use rusqlite::Connection;
 use serde_json::Value;
+use stateful_core::{
+    ActorType, AgentIdentity, ExplicitHandoff, HandoffStatus, RequestEnvelope, SourceKind,
+    SourceRef, WorkspaceIdentity,
+};
 use stateful_core::migration_seed_event_id;
-use stateful_store::{FixedClock, Store};
+use stateful_store::{FixedClock, PresenceRegistration, Store};
 use std::{fs, path::{Path, PathBuf}};
+use time::macros::datetime;
+use uuid::Uuid;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
@@ -58,6 +64,51 @@ fn journal_payloads(path: &Path, event_type: &str) -> Vec<Value> {
         .collect()
 }
 
+
+fn request<T: serde::Serialize>(agent_id: &str, payload: T) -> RequestEnvelope<T> {
+    RequestEnvelope::new(
+        Uuid::new_v4(),
+        datetime!(2026-07-15 11:30 UTC),
+        AgentIdentity {
+            agent_id: agent_id.into(),
+            turn_id: Some("migration-test".into()),
+            actor_id: format!("{agent_id}-actor"),
+            actor_type: ActorType::Agent,
+            owner_id: None,
+            parent_agent_id: None,
+            parent_actor_id: None,
+        },
+        WorkspaceIdentity {
+            root: "/repo".into(),
+            workspace_id: "workspace-main".into(),
+            repo_id: "repo-main".into(),
+            worktree_id: "worktree-main".into(),
+            branch: "main".into(),
+        },
+        SourceRef {
+            kind: SourceKind::Server,
+            event: "migration-test".into(),
+            tool_name: None,
+            source_ref: "migration-v2-test".into(),
+        },
+        payload,
+    ).expect("request should be valid")
+}
+
+fn owned_projection_rows(path: &Path, table: &str, agent_id: &str) -> i64 {
+    Connection::open(path)
+        .expect("migrated database should open")
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM {table} projection
+                 JOIN journal_events event ON event.event_seq = projection.origin_event_seq
+                 WHERE projection.workspace_id = 'workspace-main' AND event.agent_id = ?1"
+            ),
+            [agent_id],
+            |row| row.get(0),
+        )
+        .expect("owned projection count should load")
+}
 
 #[test]
 fn persistent_v1_db_is_backed_up_seeded_replayed_and_cut_over() {
@@ -257,4 +308,67 @@ fn new_and_in_memory_databases_skip_legacy_migration() {
     let memory = Store::open_in_memory().expect("in-memory database should initialize v2 directly");
     assert_eq!(memory.journal_event_count().expect("journal count should load"), 0);
     assert!(!memory.has_table("agents").expect("schema lookup should work"));
+}
+
+#[test]
+fn migrated_presence_and_handoff_project_to_typed_records_before_commands() {
+    let temp = TempDir::new().expect("temporary directory should exist");
+    let path = legacy_database(&temp, "typed-current.sqlite");
+    let mut store = open_legacy(&path).expect("legacy database should migrate");
+
+    let presence = store
+        .presence_record("workspace-main", "agent-alpha")
+        .expect("typed migrated presence should load")
+        .expect("migrated agent should remain present");
+    assert_eq!(presence.agent_id, "agent-alpha");
+    assert_eq!(presence.actor_type, ActorType::Unknown);
+    store
+        .resume_presence(&request("agent-alpha", PresenceRegistration { first_prompt: None }))
+        .expect("commands must accept a migrated presence projection");
+    let handoff = store
+        .handoff_record("workspace-main", "agent-alpha")
+        .expect("typed migrated handoff should load")
+        .expect("legacy finalized activity should project a handoff");
+    assert_eq!(handoff.status, HandoffStatus::Unknown);
+    assert!(!handoff.explicit);
+}
+
+#[test]
+fn finalization_cleans_migrated_coordination_rows_by_journal_owner() {
+    let temp = TempDir::new().expect("temporary directory should exist");
+    let path = legacy_database(&temp, "owned-cleanup.sqlite");
+    Connection::open(&path)
+        .expect("legacy database should open")
+        .execute_batch(
+            "
+            INSERT INTO reservations (reservation_id, agent_id, workspace_id, purpose, scopes_json, status, declared_at, expires_at)
+            VALUES ('reservation-beta-active', 'agent-beta', 'workspace-main', 'beta work', '[{\"kind\":\"file\",\"path\":\"src/beta.rs\"}]', 'active', '2026-07-15T11:00:00Z', '2026-07-15T12:30:00Z');
+            INSERT INTO claims (claim_id, reservation_id, agent_id, workspace_id, repo_id, relative_path, absolute_path, purpose, action, status, expires_at, observed_exists, observed_content_hash)
+            VALUES ('claim-beta-active', 'reservation-beta-active', 'agent-beta', 'workspace-main', 'repo-main', 'src/beta.rs', '/repo/src/beta.rs', 'beta work', 'write_file', 'active', '2026-07-15T12:30:00Z', 1, NULL);
+            INSERT INTO write_fences (fence_id, agent_id, workspace_id, relative_path, action, acquired_at, expires_at, released_at)
+            VALUES ('fence-beta-active', 'agent-beta', 'workspace-main', 'src/beta.rs', 'write_file', '2026-07-15T11:00:00Z', '2026-07-15T12:30:00Z', NULL);
+            INSERT INTO wait_queue (wait_id, request_id, agent_id, workspace_id, repo_id, worktree_id, root, branch, relative_path, action, status, requested_at, reservation_expires_at, blocking_agent_id, purpose)
+            VALUES ('wait-alpha-active', 'request-alpha-active', 'agent-alpha', 'workspace-main', 'repo-main', 'worktree-main', '/repo', 'main', 'src/beta.rs', 'write_file', 'waiting', '2026-07-15T11:00:00Z', '2026-07-15T12:30:00Z', 'agent-beta', 'alpha wait');
+            ",
+        )
+        .expect("fixture should gain active rows for both agents");
+    let mut store = open_legacy(&path).expect("legacy database should migrate");
+    for table in ["reservation_current", "claim_current", "wait_current", "write_fence_current"] {
+        assert!(owned_projection_rows(&path, table, "agent-alpha") > 0, "alpha must own a {table} row");
+        assert!(owned_projection_rows(&path, table, "agent-beta") > 0, "beta must own a {table} row");
+    }
+
+    store.finalize_handoff(&request("agent-alpha", ExplicitHandoff {
+        status: HandoffStatus::Done,
+        summary: "finished".into(),
+        files_changed: vec![],
+        tests_run: vec![],
+        remaining_work: vec![],
+        next_plan: None,
+    })).expect("alpha finalization should succeed");
+
+    for table in ["reservation_current", "claim_current", "wait_current", "write_fence_current"] {
+        assert_eq!(owned_projection_rows(&path, table, "agent-alpha"), 0, "alpha {table} rows must be cleaned");
+        assert!(owned_projection_rows(&path, table, "agent-beta") > 0, "beta {table} rows must remain");
+    }
 }

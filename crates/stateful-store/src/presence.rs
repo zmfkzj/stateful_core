@@ -114,14 +114,18 @@ impl Store {
     ) -> StoreResult<CommandOutcome<PresenceRecord>> {
         let now = self.clock.now();
         let update = request.payload.clone().normalized()?;
+        if update.last_result.is_some() || update.busy_until.is_some() {
+            return Err(StoreError::V2(V2Error::new(
+                "tool_fields_require_tool_command",
+                "last_result and busy_until may only be changed by typed tool commands.",
+            )));
+        }
         self.execute_command(request, "presence.update", |reader| {
             let mut presence = reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?
                 .ok_or_else(missing_presence)?;
             if let Some(goal) = &update.goal_excerpt { presence.goal_excerpt = Some(goal.clone()); }
             if let Some(phase) = update.phase { presence.phase = Some(phase); }
             if let Some(plan) = &update.next_plan { presence.next_plan = Some(plan.clone()); }
-            if let Some(result) = &update.last_result { presence.last_result = Some(result.clone()); }
-            if let Some(busy_until) = update.busy_until { presence.busy_until = Some(busy_until.min(now + BUSY_UNTIL_MAXIMUM)); }
             refresh_presence(&mut presence, now);
             let variant = if update.goal_excerpt.is_some() {
                 PresenceEvent::GoalUpdated
@@ -173,7 +177,12 @@ impl Store {
             let mut presence = reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?
                 .ok_or_else(missing_presence)?;
             let maximum = now + BUSY_UNTIL_MAXIMUM;
-            presence.busy_until = request.payload.deadline.map(|deadline| deadline.min(maximum));
+            let requested = request.payload.deadline.map(|deadline| deadline.min(maximum));
+            presence.busy_until = match (presence.busy_until, requested) {
+                (Some(active), Some(requested)) => Some(active.min(requested)),
+                (Some(active), None) => Some(active),
+                (None, requested) => requested,
+            };
             if recognized_test_command(&request.payload.tool_name) {
                 presence.phase = Some(PresencePhase::Testing);
             }
@@ -227,6 +236,15 @@ impl Store {
                 Ok(record)
             },
         ).optional().map_err(StoreError::from)
+    }
+
+    pub fn presence_for_request(
+        &mut self,
+        request: &RequestEnvelope<()>,
+        agent_id: &str,
+    ) -> StoreResult<Option<PresenceRecord>> {
+        self.expire_stale_presences(request)?;
+        self.presence_record(&request.workspace.workspace_id, agent_id)
     }
 
     pub fn presence_resources(&self, workspace_id: &str, agent_id: &str) -> StoreResult<Vec<PresenceResource>> {

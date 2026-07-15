@@ -1,9 +1,9 @@
 use crate::{StoreError, StoreResult, journal::JournalEvent, schema};
 use rusqlite::{Connection, params};
 use stateful_core::{
-    ClaimEvent, EventData, EventPayload, HandoffEvent, HandoffRecord, MigrationEvent,
-    PresenceEvent, PresenceRecord, PresenceResource, ReservationEvent, WaitEvent,
-    WriteFenceEvent,
+    ActorType, ClaimEvent, EventData, EventPayload, HandoffEvent, HandoffRecord, HandoffStatus,
+    MigrationEvent, PresenceEvent, PresenceRecord, PresenceResource, ReservationEvent, WaitEvent,
+    WriteFenceEvent, FALLBACK_HANDOFF_RELEVANCE,
 };
 
 pub(crate) struct Projector<'a> {
@@ -36,6 +36,12 @@ impl<'a> Projector<'a> {
             event.stored.payload(),
             EventPayload::Migration(MigrationEvent::LegacyAuditImported(_))
         ) || migration_snapshot_is_terminal(event) {
+            return Ok(());
+        }
+        if self.apply_typed_migration_seed(event)? {
+            if event.stored.affects_context() {
+                self.apply_workspace_version(event)?;
+            }
             return Ok(());
         }
 
@@ -74,6 +80,91 @@ impl<'a> Projector<'a> {
             self.apply_workspace_version(event)?;
         }
         Ok(())
+    }
+
+    fn apply_typed_migration_seed(&self, event: &JournalEvent) -> StoreResult<bool> {
+        match event.stored.payload() {
+            EventPayload::Migration(MigrationEvent::PresenceSnapshotSeeded(data)) => {
+                let now = event.stored.observed_at();
+                let phase = data.data.get("phase")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|phase| serde_json::from_value(serde_json::Value::String(phase.into())).ok());
+                let expires_at = data.data.get("expires_at")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|value| time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339).ok())
+                    .unwrap_or(now);
+                let presence = PresenceRecord {
+                    workspace_id: event.workspace_id.clone(),
+                    agent_id: event.agent_id.clone(),
+                    actor_id: "unknown".into(),
+                    actor_type: ActorType::Unknown,
+                    owner_id: None,
+                    parent_agent_id: None,
+                    parent_actor_id: None,
+                    goal_excerpt: None,
+                    phase,
+                    next_plan: None,
+                    last_result: None,
+                    registered_at: now,
+                    updated_at: now,
+                    expires_at,
+                    busy_until: None,
+                    origin_event_seq: event.stored.event_seq(),
+                };
+                let table = format!("{}presence_current", self.prefix);
+                self.connection.execute(
+                    &format!(
+                        "INSERT INTO {table} (workspace_id, agent_id, actor_id, actor_type, payload_json, occurred_at, origin_event_seq)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                         ON CONFLICT(workspace_id, agent_id) DO UPDATE SET actor_id=excluded.actor_id, actor_type=excluded.actor_type, payload_json=excluded.payload_json, occurred_at=excluded.occurred_at, origin_event_seq=excluded.origin_event_seq"
+                    ),
+                    params![
+                        &presence.workspace_id,
+                        &presence.agent_id,
+                        &presence.actor_id,
+                        "unknown",
+                        serde_json::to_string(&presence)?,
+                        &event.occurred_at,
+                        event.stored.event_seq(),
+                    ],
+                )?;
+                Ok(true)
+            }
+            EventPayload::Migration(MigrationEvent::LegacyHandoffSnapshotSeeded(_)) => {
+                let now = event.stored.observed_at();
+                let handoff = HandoffRecord {
+                    workspace_id: event.workspace_id.clone(),
+                    agent_id: event.agent_id.clone(),
+                    actor_id: "unknown".into(),
+                    actor_type: ActorType::Unknown,
+                    owner_id: None,
+                    parent_agent_id: None,
+                    parent_actor_id: None,
+                    status: HandoffStatus::Unknown,
+                    summary: "Migrated legacy session ended with no explicit handoff supplied.".into(),
+                    files_changed: Vec::new(),
+                    tests_run: Vec::new(),
+                    remaining_work: Vec::new(),
+                    next_plan: None,
+                    last_result: None,
+                    explicit: false,
+                    finalized_at: now,
+                    expires_at: now + FALLBACK_HANDOFF_RELEVANCE,
+                    origin_event_seq: event.stored.event_seq(),
+                };
+                let table = format!("{}handoff_current", self.prefix);
+                self.connection.execute(
+                    &format!(
+                        "INSERT INTO {table} (workspace_id, aggregate_id, payload_json, origin_event_seq)
+                         VALUES (?1, ?2, ?3, ?4)
+                         ON CONFLICT(workspace_id, aggregate_id) DO UPDATE SET payload_json=excluded.payload_json, origin_event_seq=excluded.origin_event_seq"
+                    ),
+                    params![&handoff.workspace_id, &handoff.agent_id, serde_json::to_string(&handoff)?, event.stored.event_seq()],
+                )?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 
     fn apply_presence_or_handoff(&self, event: &JournalEvent) -> StoreResult<bool> {
@@ -209,9 +300,10 @@ impl<'a> Projector<'a> {
                 &format!(
                     "DELETE FROM {table}
                      WHERE workspace_id = ?1
-                       AND (aggregate_id = ?2
-                            OR json_extract(payload_json, '$.event.data.data.agent_id') = ?2
-                            OR json_extract(payload_json, '$.agent_id') = ?2)"
+                       AND origin_event_seq IN (
+                           SELECT event_seq FROM journal_events
+                           WHERE workspace_id = ?1 AND agent_id = ?2
+                       )"
                 ),
                 params![event.workspace_id, agent_id],
             )?;

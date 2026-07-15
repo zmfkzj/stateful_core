@@ -325,3 +325,54 @@ fn explicit_and_fallback_handoffs_expire_after_their_distinct_windows() {
     store.expire_stale_handoffs(&request(Uuid::new_v4(), "explicit", "explicit-actor", ActorType::Agent, ())).expect("maintenance should succeed");
     assert!(store.handoff_record("workspace-1", "explicit").expect("handoff should load").is_none());
 }
+
+#[test]
+fn generic_presence_update_rejects_tool_only_fields_without_mutation() {
+    let clock = MutableClock::new(NOW);
+    let mut store = Store::open_in_memory_with_clock(clock.clone()).expect("store should open");
+    store.register_presence(&register_request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, None))
+        .expect("registration should succeed");
+    let before = store.presence_record("workspace-1", "agent-1").expect("presence should load").expect("presence should exist");
+
+    assert!(store.update_presence(&request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, PresenceUpdate {
+        last_result: Some("unbounded tool stdout must not be accepted".into()),
+        ..Default::default()
+    })).is_err());
+    assert!(store.update_presence(&request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, PresenceUpdate {
+        busy_until: Some(NOW + Duration::minutes(60)),
+        ..Default::default()
+    })).is_err());
+    assert_eq!(
+        store.presence_record("workspace-1", "agent-1").expect("presence should load").expect("presence should exist"),
+        before,
+    );
+
+    store.start_presence_tool(&request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, PresenceToolStart {
+        tool_name: "cargo test".into(), deadline: Some(NOW + Duration::minutes(30)),
+    })).expect("first tool start should succeed");
+    clock.advance(Duration::minutes(20));
+    store.start_presence_tool(&request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, PresenceToolStart {
+        tool_name: "cargo test".into(), deadline: Some(NOW + Duration::minutes(80)),
+    })).expect("repeated tool start should refresh without extending its cap");
+    assert_eq!(
+        store.presence_record("workspace-1", "agent-1").expect("presence should load").expect("presence should exist").busy_until,
+        Some(NOW + Duration::minutes(30)),
+    );
+}
+
+#[test]
+fn relevant_presence_query_lazily_finalizes_expired_presence_once() {
+    let clock = MutableClock::new(NOW);
+    let mut store = Store::open_in_memory_with_clock(clock.clone()).expect("store should open");
+    store.register_presence(&register_request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, None))
+        .expect("registration should succeed");
+    clock.advance(Duration::minutes(16));
+    let query = request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, ());
+    assert!(store.presence_for_request(&query, "agent-1").expect("lazy query should succeed").is_none());
+    let event_count = store.journal_event_count().expect("journal count should load");
+    assert!(store.handoff_record("workspace-1", "agent-1").expect("handoff should load").is_some());
+    assert!(store.presence_for_request(&request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, ()), "agent-1")
+        .expect("repeat lazy query should succeed")
+        .is_none());
+    assert_eq!(store.journal_event_count().expect("journal count should load"), event_count);
+}
