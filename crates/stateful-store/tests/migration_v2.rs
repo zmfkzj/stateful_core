@@ -1,8 +1,8 @@
 use rusqlite::Connection;
 use serde_json::Value;
 use stateful_core::migration_seed_event_id;
-use stateful_store::Store;
-use std::{fs, path::{Path, PathBuf}};
+use stateful_store::{FixedClock, Store};
+use std::{fs, os::unix::fs::PermissionsExt, path::{Path, PathBuf}, sync::{Arc, Barrier}, thread};
 use tempfile::TempDir;
 
 const FIXTURE: &str = include_str!("fixtures/v1_persistent_state.sql");
@@ -13,6 +13,20 @@ fn legacy_database(temp: &TempDir, name: &str) -> PathBuf {
     let connection = Connection::open(&path).expect("fixture database should open");
     connection.execute_batch(FIXTURE).expect("fixture SQL should apply");
     path
+}
+
+fn migration_clock() -> FixedClock {
+    FixedClock::new(
+        time::OffsetDateTime::parse(
+            "2026-07-15T11:30:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .expect("fixed migration clock should parse"),
+    )
+}
+
+fn open_legacy(path: &Path) -> stateful_store::StoreResult<Store> {
+    Store::open_with_clock(path, migration_clock())
 }
 
 fn backup_path(path: &Path) -> PathBuf {
@@ -47,12 +61,12 @@ fn persistent_v1_db_is_backed_up_seeded_replayed_and_cut_over() {
     let temp = TempDir::new().expect("temporary directory should exist");
     let path = legacy_database(&temp, "legacy.sqlite");
 
-    let mut store = Store::open(&path).expect("persistent v1 database should migrate");
+    let mut store = open_legacy(&path).expect("persistent v1 database should migrate");
     let backup = backup_path(&path);
     assert!(backup.exists(), "migration must retain a versioned SQLite backup");
     assert!(table_exists(&backup, "agents"), "backup must open as shipped v1");
     assert!(!table_exists(&backup, "journal_events"), "backup must not be a raw post-cutover copy");
-    assert_eq!(fs::metadata(&path).expect("source metadata").permissions().readonly(), fs::metadata(&backup).expect("backup metadata").permissions().readonly(), "backup must preserve source permissions");
+    assert_eq!(fs::metadata(&path).expect("source metadata").permissions().mode(), fs::metadata(&backup).expect("backup metadata").permissions().mode(), "backup must preserve exact source permission bits");
     assert!(!store.has_table("agents").expect("schema lookup should work"), "legacy authority must be removed only after validation");
     assert!(store.journal_event_count().expect("journal should load") > 0);
     let before_replay = store.projection_snapshot().expect("projection snapshot should load");
@@ -74,7 +88,7 @@ fn persistent_v1_db_is_backed_up_seeded_replayed_and_cut_over() {
 fn tied_activities_choose_latest_expiry_then_activity_id() {
     let temp = TempDir::new().expect("temporary directory should exist");
     let path = legacy_database(&temp, "tied.sqlite");
-    Store::open(&path).expect("legacy database should migrate");
+    open_legacy(&path).expect("legacy database should migrate");
 
     let payloads = journal_payloads(&path, "migration.presence_snapshot_seeded");
     let alpha = payloads
@@ -103,7 +117,7 @@ fn tied_activities_choose_latest_expiry_then_activity_id() {
 fn legacy_claim_hash_is_not_read_provenance() {
     let temp = TempDir::new().expect("temporary directory should exist");
     let path = legacy_database(&temp, "claims.sqlite");
-    Store::open(&path).expect("legacy database should migrate");
+    open_legacy(&path).expect("legacy database should migrate");
 
     let payloads = journal_payloads(&path, "migration.claim_snapshot_seeded");
     let active = payloads
@@ -118,7 +132,7 @@ fn legacy_claim_hash_is_not_read_provenance() {
 fn unavailable_actor_and_handoff_fields_remain_unknown_or_empty() {
     let temp = TempDir::new().expect("temporary directory should exist");
     let path = legacy_database(&temp, "handoff.sqlite");
-    Store::open(&path).expect("legacy database should migrate");
+    open_legacy(&path).expect("legacy database should migrate");
 
     let payload = journal_payloads(&path, "migration.legacy_handoff_snapshot_seeded")
         .into_iter()
@@ -140,7 +154,7 @@ fn malformed_legacy_json_rolls_back_and_preserves_original_schema() {
         .execute("UPDATE notifications SET payload_json = '{' WHERE notification_id = 'notification-pending'", [])
         .expect("fixture should accept malformed legacy JSON");
 
-    let error = match Store::open(&path) {
+    let error = match open_legacy(&path) {
         Ok(_) => panic!("malformed legacy JSON must reject migration"),
         Err(error) => error,
     };
@@ -154,13 +168,13 @@ fn malformed_legacy_json_rolls_back_and_preserves_original_schema() {
 fn migration_rerun_after_checkpoint_is_a_no_op() {
     let temp = TempDir::new().expect("temporary directory should exist");
     let path = legacy_database(&temp, "rerun.sqlite");
-    let first = Store::open(&path).expect("first open should migrate");
+    let first = open_legacy(&path).expect("first open should migrate");
     let event_count = first.journal_event_count().expect("journal count should load");
     drop(first);
     let backup = backup_path(&path);
     let backup_count = fs::read_dir(temp.path()).expect("temporary directory should open").filter_map(Result::ok).filter(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("sqlite")).count();
 
-    let second = Store::open(&path).expect("second open should validate checkpoint");
+    let second = open_legacy(&path).expect("second open should validate checkpoint");
     assert_eq!(second.journal_event_count().expect("journal count should load"), event_count);
     assert!(backup.exists());
     assert_eq!(fs::read_dir(temp.path()).expect("temporary directory should open").filter_map(Result::ok).filter(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("sqlite")).count(), backup_count, "second open must not create another backup");
@@ -168,6 +182,26 @@ fn migration_rerun_after_checkpoint_is_a_no_op() {
         .expect("migrated database should open")
         .query_row("SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)", [CHECKPOINT], |row| row.get::<_, bool>(0))
         .expect("checkpoint query should work"));
+}
+
+#[test]
+fn simultaneous_openers_create_one_backup_and_one_seed_stream() {
+    let temp = TempDir::new().expect("temporary directory should exist");
+    let path = legacy_database(&temp, "concurrent.sqlite");
+    let barrier = Arc::new(Barrier::new(2));
+    let open = |barrier: Arc<Barrier>, path: PathBuf| {
+        thread::spawn(move || {
+            barrier.wait();
+            open_legacy(&path)
+                .map(|store| store.journal_event_count().expect("journal count should load"))
+                .map_err(|error| error.to_string())
+        })
+    };
+    let first = open(Arc::clone(&barrier), path.clone());
+    let second = open(barrier, path.clone());
+    assert_eq!(first.join().expect("first opener should join").expect("first opener should migrate"), second.join().expect("second opener should join").expect("second opener should reopen"));
+    assert!(backup_path(&path).exists());
+    assert!(!path.with_extension("v1.backup.1.sqlite").exists());
 }
 
 #[test]
