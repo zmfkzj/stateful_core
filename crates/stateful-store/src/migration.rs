@@ -51,6 +51,9 @@ type MigrationTestHook = Arc<dyn Fn() + Send + Sync>;
 #[cfg(test)]
 static MIGRATION_TEST_HOOK: LazyLock<Mutex<Option<MigrationTestHook>>> =
     LazyLock::new(|| Mutex::new(None));
+#[cfg(test)]
+static MIGRATION_GUARD_TEST_HOOK: LazyLock<Mutex<Option<MigrationTestHook>>> =
+    LazyLock::new(|| Mutex::new(None));
 
 
 
@@ -92,6 +95,24 @@ impl MigrationGuard {
             .read(true)
             .write(true)
             .open(database_path.with_extension("v2.migration.lock"))?;
+        #[cfg(test)]
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(Self(file)),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if let Some(hook) = MIGRATION_GUARD_TEST_HOOK
+                    .lock()
+                    .expect("migration guard hook lock should not poison")
+                    .clone()
+                {
+                    hook();
+                }
+            }
+            Err(error) => {
+                return Err(StoreError::MigrationValidation(format!(
+                    "could not acquire migration guard: {error}"
+                )));
+            }
+        }
         file.lock_exclusive()
             .map_err(|error| StoreError::MigrationValidation(format!("could not acquire migration guard: {error}")))?;
         Ok(Self(file))
@@ -625,8 +646,11 @@ fn invalid(message: impl Into<String>) -> StoreResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::FixedClock;
+    use crate::{FixedClock, Store};
     use std::{
+        env,
+        io::{self, BufRead, BufReader, Write},
+        process::{Child, ChildStdout, Command, Stdio},
         sync::{
             Arc, Barrier, Mutex,
             atomic::{AtomicBool, Ordering},
@@ -634,6 +658,199 @@ mod tests {
         thread,
     };
     use tempfile::TempDir;
+
+    const MIGRATION_GUARD_SUBPROCESS_PATH: &str = "STATEFUL_MIGRATION_GUARD_SUBPROCESS_PATH";
+    const BLOCKED: &str = "STATEFUL_MIGRATION_GUARD_BLOCKED";
+    const COUNT_PREFIX: &str = "STATEFUL_MIGRATION_GUARD_COUNT=";
+
+    fn spawn_migration_guard_opener(path: &Path) -> (Child, BufReader<ChildStdout>) {
+        let mut child = Command::new(
+            env::current_exe().expect("migration test executable should resolve"),
+        )
+        .args([
+            "--exact",
+            "migration::tests::migration_guard_subprocess_helper",
+            "--nocapture",
+        ])
+        .env(MIGRATION_GUARD_SUBPROCESS_PATH, path)
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("migration opener subprocess should start");
+        let stdout = child
+            .stdout
+            .take()
+            .expect("migration opener subprocess stdout should pipe");
+        (child, BufReader::new(stdout))
+    }
+
+    fn read_subprocess_message(output: &mut BufReader<ChildStdout>, marker: &str) -> String {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            assert!(
+                output
+                    .read_line(&mut line)
+                    .expect("subprocess output should be readable")
+                    > 0,
+                "subprocess exited before reporting {marker}",
+            );
+            if let Some(index) = line.find(marker) {
+                return line[index + marker.len()..].trim().into();
+            }
+        }
+    }
+
+    #[test]
+    fn migration_guard_subprocess_helper() {
+        let Some(path) = env::var_os(MIGRATION_GUARD_SUBPROCESS_PATH) else {
+            return;
+        };
+        *MIGRATION_GUARD_TEST_HOOK
+            .lock()
+            .expect("migration guard hook lock should not poison") = Some(Arc::new(|| {
+            let mut output = io::stdout().lock();
+            writeln!(output, "{BLOCKED}")
+                .expect("subprocess should report in-path migration guard contention");
+            output
+                .flush()
+                .expect("migration guard contention marker should flush through the pipe");
+        }));
+        let count = Store::open_with_clock(
+            Path::new(&path),
+            FixedClock::new(
+                OffsetDateTime::parse("2026-07-15T11:30:00Z", &Rfc3339)
+                    .expect("clock should parse"),
+            ),
+        )
+        .expect("subprocess opener should migrate or reopen successfully")
+        .journal_event_count()
+        .expect("subprocess opener should load the journal count");
+        let mut output = io::stdout().lock();
+        writeln!(output, "{COUNT_PREFIX}{count}")
+            .expect("subprocess should report its journal count");
+        output
+            .flush()
+            .expect("subprocess result should flush through the pipe");
+    }
+
+    #[test]
+    fn migration_guard_blocks_independent_openers_before_sqlite_configuration() {
+        let temp = TempDir::new().expect("temporary directory should exist");
+        let path = temp.path().join("concurrent.sqlite");
+        let fixture = Connection::open(&path).expect("fixture should open");
+        fixture
+            .execute_batch(include_str!("../tests/fixtures/v1_persistent_state.sql"))
+            .expect("fixture should apply");
+        drop(fixture);
+
+        let held_migration_lock = File::options()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(path.with_extension("v2.migration.lock"))
+            .expect("parent should create the migration lock file");
+        held_migration_lock
+            .lock_exclusive()
+            .expect("parent should hold the migration lock");
+        let migration_owner = Connection::open(&path).expect("parent migration connection should open");
+        migration_owner
+            .execute_batch("BEGIN EXCLUSIVE")
+            .expect("parent should hold SQLite exclusive while the guard is held");
+        let (mut first, mut first_output) = spawn_migration_guard_opener(&path);
+        let (mut second, mut second_output) = spawn_migration_guard_opener(&path);
+
+        assert_eq!(
+            read_subprocess_message(&mut first_output, BLOCKED),
+            "",
+            "first opener must observe the production migration guard before SQLite setup",
+        );
+        assert_eq!(
+            read_subprocess_message(&mut second_output, BLOCKED),
+            "",
+            "second opener must observe the production migration guard before SQLite setup",
+        );
+        migration_owner
+            .execute_batch("ROLLBACK")
+            .expect("parent should release its SQLite exclusive transaction");
+        drop(migration_owner);
+        drop(held_migration_lock);
+
+        let first_count: u64 = read_subprocess_message(&mut first_output, COUNT_PREFIX)
+            .parse()
+            .expect("first subprocess journal count should be numeric");
+        let second_count: u64 = read_subprocess_message(&mut second_output, COUNT_PREFIX)
+            .parse()
+            .expect("second subprocess journal count should be numeric");
+        assert!(
+            first
+                .wait()
+                .expect("first subprocess should join")
+                .success(),
+            "first subprocess should migrate successfully",
+        );
+        assert!(
+            second
+                .wait()
+                .expect("second subprocess should join")
+                .success(),
+            "second subprocess should reopen successfully",
+        );
+        assert_eq!(
+            first_count, second_count,
+            "both independent openers must observe the same journal",
+        );
+
+        let migrated = Connection::open(&path).expect("migrated database should open");
+        let checkpoint_count: u64 = migrated
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
+                [CHECKPOINT],
+                |row| row.get(0),
+            )
+            .expect("checkpoint count should load");
+        let seed_count: u64 = migrated
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM journal_events
+                 WHERE event_type LIKE 'migration.%_snapshot_seeded'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("seed count should load");
+        let distinct_seed_count: u64 = migrated
+            .query_row(
+                "SELECT COUNT(DISTINCT event_id)
+                 FROM journal_events
+                 WHERE event_type LIKE 'migration.%_snapshot_seeded'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("distinct seed count should load");
+        assert_eq!(checkpoint_count, 1, "only one migration checkpoint may commit");
+        assert!(
+            path.with_extension("v1.backup.sqlite").exists(),
+            "one migration backup must be retained",
+        );
+        assert!(
+            !path.with_extension("v1.backup.1.sqlite").exists(),
+            "a second opener must not retain another migration backup",
+        );
+        assert!(seed_count > 0, "the legacy fixture must produce snapshot seeds");
+        assert_eq!(
+            seed_count, distinct_seed_count,
+            "each deterministic snapshot seed must appear in one stream only",
+        );
+        for event_type in ["migration.started", "migration.completed"] {
+            let count: u64 = migrated
+                .query_row(
+                    "SELECT COUNT(*) FROM journal_events WHERE event_type = ?1",
+                    [event_type],
+                    |row| row.get(0),
+                )
+                .expect("migration lifecycle count should load");
+            assert_eq!(count, 1, "{event_type} must be appended once");
+        }
+    }
 
     #[test]
     fn writer_after_backup_retries_without_retaining_a_stale_rollback_backup() {
