@@ -272,10 +272,12 @@ impl NewEvent {
         }
         let metadata = payload.metadata();
         metadata.data.validate()?;
-        let event_id = Uuid::new_v5(
-            &request_id,
-            format!("{event_ordinal}:{}", metadata.event_type).as_bytes(),
-        );
+        let event_id = migration_snapshot_event_id(&payload)?.unwrap_or_else(|| {
+            Uuid::new_v5(
+                &request_id,
+                format!("{event_ordinal}:{}", metadata.event_type).as_bytes(),
+            )
+        });
         Ok(Self {
             event_id,
             request_id,
@@ -292,6 +294,47 @@ impl NewEvent {
     pub fn into_stored(self, event_seq: u64) -> Result<StoredEvent, V2Error> {
         StoredEvent::new(event_seq, self)
     }
+}
+
+fn migration_snapshot_event_id(payload: &EventPayload) -> Result<Option<Uuid>, V2Error> {
+    let (expected_kind, data) = match payload {
+        EventPayload::Migration(MigrationEvent::PresenceSnapshotSeeded(data)) => ("presence", data),
+        EventPayload::Migration(MigrationEvent::ReservationSnapshotSeeded(data)) => ("reservation", data),
+        EventPayload::Migration(MigrationEvent::ClaimSnapshotSeeded(data)) => ("claim", data),
+        EventPayload::Migration(MigrationEvent::WaitSnapshotSeeded(data)) => ("wait", data),
+        EventPayload::Migration(MigrationEvent::WriteFenceSnapshotSeeded(data)) => ("write_fence", data),
+        EventPayload::Migration(MigrationEvent::HumanObservationSnapshotSeeded(data)) => ("human_observation", data),
+        EventPayload::Migration(MigrationEvent::LegacyHandoffSnapshotSeeded(data)) => ("handoff", data),
+        EventPayload::Migration(MigrationEvent::DeliverySnapshotSeeded(data)) => ("delivery", data),
+        _ => return Ok(None),
+    };
+    let object = data.data.as_object().ok_or_else(|| V2Error::new(
+        "invalid_migration_seed",
+        "migration snapshot seed data must include its legacy entity identity.",
+    ))?;
+    let entity_kind = object
+        .get("legacy_entity_kind")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| V2Error::new(
+            "invalid_migration_seed",
+            "migration snapshot seed data must include legacy_entity_kind.",
+        ))?;
+    if entity_kind != expected_kind {
+        return Err(V2Error::new(
+            "invalid_migration_seed",
+            "migration snapshot seed kind must match its event variant.",
+        ));
+    }
+    let primary_key = object
+        .get("legacy_primary_key")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| V2Error::new(
+            "invalid_migration_seed",
+            "migration snapshot seed data must include legacy_primary_key.",
+        ))?;
+    migration_seed_event_id(entity_kind, primary_key).map(Some)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

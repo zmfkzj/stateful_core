@@ -1,5 +1,6 @@
 use crate::{StoreError, StoreResult, journal::JournalEvent, schema};
 use rusqlite::{Connection, params};
+use stateful_core::{EventPayload, MigrationEvent};
 
 pub(crate) struct Projector<'a> {
     connection: &'a Connection,
@@ -28,7 +29,7 @@ impl<'a> Projector<'a> {
             return Err(StoreError::ProjectorFailure);
         }
 
-        let table = match event.stored.aggregate_kind() {
+        let table = migration_seed_projection_table(event).or_else(|| match event.stored.aggregate_kind() {
             "presence" => Some("presence_current"),
             "reservation" => Some("reservation_current"),
             "claim" => Some("claim_current"),
@@ -41,7 +42,7 @@ impl<'a> Projector<'a> {
             "notification" => Some("notification_current"),
             "migration" => Some("migration_current"),
             _ => None,
-        };
+        });
         if let Some(table) = table {
             self.apply_aggregate(table, event)?;
         }
@@ -73,6 +74,45 @@ impl<'a> Projector<'a> {
                          ON CONFLICT(workspace_id, agent_id, path) DO UPDATE SET payload_json=excluded.payload_json, origin_event_seq=excluded.origin_event_seq"
                     ),
                     params![event.workspace_id, event.agent_id, event.stored.aggregate_id(), payload_json, event.stored.event_seq()],
+                )?;
+            }
+            "claim_current" | "write_fence_current" => {
+                let data = migration_seed_data(event);
+                let path = data.and_then(|data| data.get("relative_path")).and_then(serde_json::Value::as_str);
+                let expires_at = data.and_then(|data| data.get("expires_at")).and_then(serde_json::Value::as_str);
+                self.connection.execute(
+                    &format!(
+                        "INSERT INTO {table} (workspace_id, aggregate_id, path, expires_at, payload_json, origin_event_seq)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                         ON CONFLICT(workspace_id, aggregate_id) DO UPDATE SET path=excluded.path, expires_at=excluded.expires_at, payload_json=excluded.payload_json, origin_event_seq=excluded.origin_event_seq"
+                    ),
+                    params![event.workspace_id, event.stored.aggregate_id(), path, expires_at, payload_json, event.stored.event_seq()],
+                )?;
+            }
+            "wait_current" | "write_intent_current" => {
+                let operation_id = migration_seed_data(event)
+                    .and_then(|data| data.get("request_id"))
+                    .and_then(serde_json::Value::as_str);
+                self.connection.execute(
+                    &format!(
+                        "INSERT INTO {table} (workspace_id, aggregate_id, operation_id, payload_json, origin_event_seq)
+                         VALUES (?1, ?2, ?3, ?4, ?5)
+                         ON CONFLICT(workspace_id, aggregate_id) DO UPDATE SET operation_id=excluded.operation_id, payload_json=excluded.payload_json, origin_event_seq=excluded.origin_event_seq"
+                    ),
+                    params![event.workspace_id, event.stored.aggregate_id(), operation_id, payload_json, event.stored.event_seq()],
+                )?;
+            }
+            "notification_current" => {
+                let data = migration_seed_data(event);
+                let target_agent_id = data.and_then(|data| data.get("target_agent_id")).and_then(serde_json::Value::as_str);
+                let version = data.and_then(|data| data.get("sequence")).and_then(serde_json::Value::as_i64).unwrap_or(0);
+                self.connection.execute(
+                    &format!(
+                        "INSERT INTO {table} (workspace_id, aggregate_id, target_agent_id, version, payload_json, origin_event_seq)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                         ON CONFLICT(workspace_id, aggregate_id) DO UPDATE SET target_agent_id=excluded.target_agent_id, version=excluded.version, payload_json=excluded.payload_json, origin_event_seq=excluded.origin_event_seq"
+                    ),
+                    params![event.workspace_id, event.stored.aggregate_id(), target_agent_id, version, payload_json, event.stored.event_seq()],
                 )?;
             }
             _ => {
@@ -131,5 +171,33 @@ impl<'a> Projector<'a> {
             ))?;
         }
         schema::create_v2_schema(connection)
+    }
+}
+
+fn migration_seed_projection_table(event: &JournalEvent) -> Option<&'static str> {
+    match event.stored.payload() {
+        EventPayload::Migration(MigrationEvent::PresenceSnapshotSeeded(_)) => Some("presence_current"),
+        EventPayload::Migration(MigrationEvent::ReservationSnapshotSeeded(_)) => Some("reservation_current"),
+        EventPayload::Migration(MigrationEvent::ClaimSnapshotSeeded(_)) => Some("claim_current"),
+        EventPayload::Migration(MigrationEvent::WaitSnapshotSeeded(_)) => Some("wait_current"),
+        EventPayload::Migration(MigrationEvent::WriteFenceSnapshotSeeded(_)) => Some("write_fence_current"),
+        EventPayload::Migration(MigrationEvent::HumanObservationSnapshotSeeded(_)) => Some("human_observation_current"),
+        EventPayload::Migration(MigrationEvent::LegacyHandoffSnapshotSeeded(_)) => Some("handoff_current"),
+        EventPayload::Migration(MigrationEvent::DeliverySnapshotSeeded(_)) => Some("notification_current"),
+        _ => None,
+    }
+}
+
+fn migration_seed_data(event: &JournalEvent) -> Option<&serde_json::Value> {
+    match event.stored.payload() {
+        EventPayload::Migration(MigrationEvent::PresenceSnapshotSeeded(data))
+        | EventPayload::Migration(MigrationEvent::ReservationSnapshotSeeded(data))
+        | EventPayload::Migration(MigrationEvent::ClaimSnapshotSeeded(data))
+        | EventPayload::Migration(MigrationEvent::WaitSnapshotSeeded(data))
+        | EventPayload::Migration(MigrationEvent::WriteFenceSnapshotSeeded(data))
+        | EventPayload::Migration(MigrationEvent::HumanObservationSnapshotSeeded(data))
+        | EventPayload::Migration(MigrationEvent::LegacyHandoffSnapshotSeeded(data))
+        | EventPayload::Migration(MigrationEvent::DeliverySnapshotSeeded(data)) => Some(&data.data),
+        _ => None,
     }
 }

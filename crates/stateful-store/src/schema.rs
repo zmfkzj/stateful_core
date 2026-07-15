@@ -212,3 +212,46 @@ pub(crate) fn create_v2_schema(connection: &Connection) -> StoreResult<()> {
     )?;
     Ok(())
 }
+
+pub(crate) fn create_projection_tables_with_prefix(
+    connection: &Connection,
+    prefix: &str,
+) -> StoreResult<()> {
+    for table in PROJECTION_TABLES {
+        let prefixed = format!("{prefix}{table}");
+        let ddl: String = connection.query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [*table],
+            |row| row.get(0),
+        )?;
+        let prefixed_ddl = ddl.replacen(table, &prefixed, 1);
+        connection.execute_batch(&format!(
+            "DROP TABLE IF EXISTS {prefixed}; {prefixed_ddl};"
+        ))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn replace_projections_from_prefix(
+    connection: &Connection,
+    prefix: &str,
+) -> StoreResult<()> {
+    for table in PROJECTION_TABLES {
+        let prefixed = format!("{prefix}{table}");
+        connection.execute_batch(&format!(
+            "DROP TABLE {table}; ALTER TABLE {prefixed} RENAME TO {table};"
+        ))?;
+    }
+    create_v2_schema(connection)
+}
+
+pub(crate) fn drop_projection_tables_with_prefix(
+    connection: &Connection,
+    prefix: &str,
+) -> StoreResult<()> {
+    for table in PROJECTION_TABLES {
+        let prefixed = format!("{prefix}{table}");
+        connection.execute_batch(&format!("DROP TABLE IF EXISTS {prefixed};"))?;
+    }
+    Ok(())
+}

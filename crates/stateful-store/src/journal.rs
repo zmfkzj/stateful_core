@@ -84,6 +84,46 @@ struct SqlProjectionReader<'a> {
     transaction: &'a Transaction<'a>,
 }
 
+
+pub(crate) struct MigrationJournalMetadata<'a> {
+    pub(crate) agent_id: &'a str,
+    pub(crate) workspace_id: &'a str,
+    pub(crate) repo_id: &'a str,
+    pub(crate) worktree_id: &'a str,
+    pub(crate) root: &'a str,
+    pub(crate) branch: &'a str,
+}
+
+pub(crate) fn append_migration_event(
+    connection: &Connection,
+    event: &NewEvent,
+    metadata: MigrationJournalMetadata<'_>,
+) -> StoreResult<JournalEvent> {
+    let payload_json = serde_json::to_string(&event.payload)?;
+    let occurred_at = format_timestamp(event.observed_at);
+    let event_seq = connection.query_row(
+        "INSERT INTO journal_events (event_id, request_id, event_ordinal, agent_id, turn_id, workspace_id, repo_id, worktree_id, root, branch, aggregate_kind, aggregate_id, event_type, event_schema_version, actor_id, actor_type, owner_id, parent_agent_id, parent_actor_id, source_kind, source_ref, causation_id, correlation_id, occurred_at, affects_context, payload_json) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 1, 'unknown', 'unknown', NULL, NULL, NULL, 'server', 'stateful.v1-migration', NULL, NULL, ?13, ?14, ?15) RETURNING event_seq",
+        params![
+            event.event_id.to_string(),
+            event.request_id.to_string(),
+            event.event_ordinal,
+            metadata.agent_id,
+            metadata.workspace_id,
+            metadata.repo_id,
+            metadata.worktree_id,
+            metadata.root,
+            metadata.branch,
+            event.aggregate_kind,
+            event.aggregate_id,
+            event.event_type,
+            occurred_at,
+            event.affects_context as i64,
+            payload_json,
+        ],
+        |row| row.get(0),
+    )?;
+    load_journal_event(connection, event_seq, None)
+}
 impl ProjectionReader for SqlProjectionReader<'_> {
     fn workspace_version(&self, workspace_id: &str) -> StoreResult<u64> {
         self.transaction
@@ -299,7 +339,7 @@ fn insert_journal_event(transaction: &Transaction<'_>, event: &NewEvent, request
 
 const JOURNAL_EVENT_COLUMNS: &str = "event_seq, event_id, request_id, event_ordinal, agent_id, turn_id, workspace_id, repo_id, worktree_id, root, branch, aggregate_kind, aggregate_id, event_type, event_schema_version, actor_id, actor_type, owner_id, parent_agent_id, parent_actor_id, source_kind, source_ref, causation_id, correlation_id, occurred_at, affects_context, payload_json";
 
-fn load_journal_events(connection: &Connection) -> StoreResult<Vec<JournalEvent>> {
+pub(crate) fn load_journal_events(connection: &Connection) -> StoreResult<Vec<JournalEvent>> {
     let mut statement = connection.prepare(&format!(
         "SELECT {JOURNAL_EVENT_COLUMNS} FROM journal_events ORDER BY event_seq"
     ))?;
@@ -521,7 +561,7 @@ fn corrupt_journal_field(
     Ok(())
 }
 
-fn projection_snapshot(connection: &Connection, prefix: &str) -> StoreResult<BTreeMap<String, Vec<Vec<String>>>> {
+pub(crate) fn projection_snapshot(connection: &Connection, prefix: &str) -> StoreResult<BTreeMap<String, Vec<Vec<String>>>> {
     let mut snapshots = BTreeMap::new();
     for table in PROJECTION_TABLES {
         let name = format!("{prefix}{table}");

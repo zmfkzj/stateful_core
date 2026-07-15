@@ -1,0 +1,532 @@
+use crate::{
+    StoreError, StoreResult,
+    clock::Clock,
+    journal::{MigrationJournalMetadata, append_migration_event, load_journal_events, projection_snapshot},
+    projector::Projector,
+    schema,
+};
+use rusqlite::{Connection, OptionalExtension, backup::Backup, params};
+use serde_json::{Map, Value, json};
+use stateful_core::{EventData, EventPayload, MigrationEvent, NewEvent, LEGACY_MIGRATION_NAMESPACE};
+use std::{collections::BTreeMap, fs, path::{Path, PathBuf}, time::Duration};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use uuid::Uuid;
+
+const CHECKPOINT: &str = "stateful.v2.event-journal";
+const SHADOW_PREFIX: &str = "_v2_shadow_";
+const REPLAY_PREFIX: &str = "_v2_replay_";
+const LEGACY_TABLES: &[&str] = &[
+    "events",
+    "agents",
+    "activities",
+    "reservations",
+    "claims",
+    "write_fences",
+    "human_observations",
+    "wait_queue",
+    "notifications",
+    "outbox",
+];
+const REQUIRED_LEGACY_COLUMNS: &[(&str, &[&str])] = &[
+    ("schema_migrations", &["version", "applied_at"]),
+    ("events", &["event_id", "event_type", "agent_id", "workspace_id", "payload_json", "created_at"]),
+    ("agents", &["agent_id", "workspace_id", "updated_at"]),
+    ("activities", &["activity_id", "agent_id", "workspace_id", "phase", "expires_at"]),
+    ("reservations", &["reservation_id", "agent_id", "workspace_id", "purpose", "scopes_json", "status", "declared_at", "expires_at"]),
+    ("claims", &["claim_id", "reservation_id", "agent_id", "workspace_id", "relative_path", "action", "status", "expires_at", "observed_exists", "observed_content_hash"]),
+    ("write_fences", &["fence_id", "agent_id", "workspace_id", "relative_path", "action", "acquired_at", "expires_at", "released_at"]),
+    ("human_observations", &["observation_id", "workspace_id", "relative_path", "kind", "source", "confidence", "observed_exists", "observed_content_hash", "observed_at", "summary", "expires_at", "reconciled_at", "reconcile_decision", "reconciled_by_agent_id"]),
+    ("wait_queue", &["wait_id", "request_id", "agent_id", "workspace_id", "relative_path", "action", "status", "requested_at", "reservation_expires_at", "blocking_agent_id", "purpose"]),
+    ("notifications", &["notification_id", "sequence", "target_agent_id", "workspace_id", "kind", "payload_json", "status", "created_at", "expires_at"]),
+    ("outbox", &["outbox_id", "agent_id", "workspace_id", "sequence", "event_type", "payload_json", "sync_status"]),
+];
+
+#[derive(Clone)]
+struct Metadata {
+    agent_id: String,
+    workspace_id: String,
+    repo_id: String,
+    worktree_id: String,
+    root: String,
+    branch: String,
+}
+
+impl Metadata {
+    fn journal(&self) -> MigrationJournalMetadata<'_> {
+        MigrationJournalMetadata {
+            agent_id: &self.agent_id,
+            workspace_id: &self.workspace_id,
+            repo_id: &self.repo_id,
+            worktree_id: &self.worktree_id,
+            root: &self.root,
+            branch: &self.branch,
+        }
+    }
+}
+
+struct PendingEvent {
+    payload: EventPayload,
+    occurred_at: String,
+    metadata: Metadata,
+}
+
+pub(crate) fn migrate_persistent_v1(
+    connection: &Connection,
+    database_path: &Path,
+    clock: &dyn Clock,
+) -> StoreResult<()> {
+    if has_checkpoint(connection)? {
+        validate_ready(connection)?;
+        return Ok(());
+    }
+    if !has_legacy_tables(connection)? {
+        return Ok(());
+    }
+
+    preflight(connection)?;
+    let backup = create_backup(connection, database_path)?;
+    connection.execute_batch("BEGIN EXCLUSIVE")?;
+    let result = (|| {
+        preflight(connection)?;
+        let now = format_timestamp(clock.now())?;
+        let pending = collect_pending_events(connection, &now)?;
+
+        schema::create_v2_schema(connection)?;
+        schema::create_projection_tables_with_prefix(connection, SHADOW_PREFIX)?;
+        let mut projector = Projector::new(connection, SHADOW_PREFIX, None);
+        let request_id = Uuid::new_v5(&LEGACY_MIGRATION_NAMESPACE, b"stateful.v1-to-v2-migration");
+        for (ordinal, pending) in pending.into_iter().enumerate() {
+            let event = NewEvent::new(request_id, ordinal as u32, parse_timestamp(&pending.occurred_at)?, pending.payload)?;
+            let event = append_migration_event(connection, &event, pending.metadata.journal())?;
+            projector.apply(&event)?;
+        }
+
+        replay_and_compare(connection)?;
+        append_lifecycle_event(connection, &mut projector, request_id, "validated", &now)?;
+        append_lifecycle_event(connection, &mut projector, request_id, "completed", &now)?;
+        replay_and_compare(connection)?;
+
+        schema::replace_projections_from_prefix(connection, SHADOW_PREFIX)?;
+        schema::drop_projection_tables_with_prefix(connection, REPLAY_PREFIX)?;
+        connection.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+            params![CHECKPOINT, now],
+        )?;
+        for table in LEGACY_TABLES {
+            connection.execute_batch(&format!("DROP TABLE {table};"))?;
+        }
+        if !backup.exists() {
+            return Err(StoreError::MigrationValidation("SQLite backup disappeared before cutover".into()));
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = connection.execute_batch("ROLLBACK");
+        return Err(error);
+    }
+    connection.execute_batch("COMMIT")?;
+    validate_ready(connection)
+}
+
+fn has_checkpoint(connection: &Connection) -> StoreResult<bool> {
+    if !has_table(connection, "schema_migrations")? {
+        return Ok(false);
+    }
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
+            [CHECKPOINT],
+            |row| row.get(0),
+        )
+        .map_err(StoreError::from)
+}
+
+fn has_legacy_tables(connection: &Connection) -> StoreResult<bool> {
+    LEGACY_TABLES.iter().try_fold(false, |found, table| {
+        has_table(connection, table).map(|exists| found || exists)
+    })
+}
+
+fn has_table(connection: &Connection, table: &str) -> StoreResult<bool> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            [table],
+            |row| row.get(0),
+        )
+        .map_err(StoreError::from)
+}
+
+fn preflight(connection: &Connection) -> StoreResult<()> {
+    let quick_check: String = connection.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+    if quick_check != "ok" {
+        return invalid(format!("SQLite quick_check failed: {quick_check}"));
+    }
+    if connection.query_row("PRAGMA foreign_key_check", [], |_| Ok(())).optional()?.is_some() {
+        return invalid("SQLite foreign_key_check reported a violation");
+    }
+    for (table, columns) in REQUIRED_LEGACY_COLUMNS {
+        let available = table_columns(connection, table)?;
+        for column in *columns {
+            if !available.iter().any(|available| available == column) {
+                return invalid(format!("unsupported v1 schema: {table}.{column} is missing"));
+            }
+        }
+    }
+    let v1_checkpoint: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 'stateful.v1.initial')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !v1_checkpoint {
+        return invalid("unsupported v1 schema checkpoint");
+    }
+    for (table, primary_key) in [
+        ("events", "event_id"), ("agents", "agent_id"), ("activities", "activity_id"),
+        ("reservations", "reservation_id"), ("claims", "claim_id"), ("write_fences", "fence_id"),
+        ("human_observations", "observation_id"), ("wait_queue", "wait_id"),
+        ("notifications", "notification_id"), ("outbox", "outbox_id"),
+    ] {
+        let bad: bool = connection.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE {primary_key} IS NULL OR trim({primary_key}) = '')"),
+            [],
+            |row| row.get(0),
+        )?;
+        if bad {
+            return invalid(format!("legacy {table} has an empty primary key"));
+        }
+    }
+    for (table, column) in [
+        ("events", "payload_json"), ("reservations", "scopes_json"), ("notifications", "payload_json"), ("outbox", "payload_json"),
+    ] {
+        validate_json_column(connection, table, column)?;
+    }
+    for (table, column) in [
+        ("events", "created_at"), ("agents", "updated_at"), ("reservations", "declared_at"),
+        ("activities", "expires_at"), ("reservations", "expires_at"), ("claims", "expires_at"),
+        ("write_fences", "acquired_at"), ("write_fences", "expires_at"), ("write_fences", "released_at"),
+        ("human_observations", "observed_at"), ("human_observations", "expires_at"), ("human_observations", "reconciled_at"),
+        ("wait_queue", "requested_at"), ("wait_queue", "reservation_expires_at"),
+        ("notifications", "created_at"), ("notifications", "expires_at"),
+    ] {
+        validate_timestamp_column(connection, table, column)?;
+    }
+    Ok(())
+}
+
+fn table_columns(connection: &Connection, table: &str) -> StoreResult<Vec<String>> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    statement
+        .query_map([], |row| row.get(1))?
+        .collect::<Result<Vec<String>, _>>()
+        .map_err(StoreError::from)
+}
+
+fn validate_json_column(connection: &Connection, table: &str, column: &str) -> StoreResult<()> {
+    let mut statement = connection.prepare(&format!("SELECT {column} FROM {table}"))?;
+    for value in statement.query_map([], |row| row.get::<_, String>(0))? {
+        serde_json::from_str::<Value>(&value?).map_err(|error| StoreError::MigrationValidation(format!("legacy {table}.{column} is invalid JSON: {error}")))?;
+    }
+    Ok(())
+}
+
+fn validate_timestamp_column(connection: &Connection, table: &str, column: &str) -> StoreResult<()> {
+    let mut statement = connection.prepare(&format!("SELECT {column} FROM {table} WHERE {column} IS NOT NULL"))?;
+    for value in statement.query_map([], |row| row.get::<_, String>(0))? {
+        parse_timestamp(&value?).map_err(|_| StoreError::MigrationValidation(format!("legacy {table}.{column} is not RFC3339")))?;
+    }
+    Ok(())
+}
+
+fn create_backup(connection: &Connection, source: &Path) -> StoreResult<PathBuf> {
+    let backup_path = next_backup_path(source);
+    let mut destination = Connection::open(&backup_path)?;
+    let backup = Backup::new(connection, &mut destination)?;
+    backup.run_to_completion(32, Duration::from_millis(1), None)?;
+    fs::set_permissions(&backup_path, fs::metadata(source)?.permissions())?;
+    Ok(backup_path)
+}
+
+fn next_backup_path(source: &Path) -> PathBuf {
+    let first = source.with_extension("v1.backup.sqlite");
+    if !first.exists() {
+        return first;
+    }
+    for ordinal in 1.. {
+        let candidate = source.with_extension(format!("v1.backup.{ordinal}.sqlite"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("an unused backup path always exists")
+}
+
+fn collect_pending_events(connection: &Connection, now: &str) -> StoreResult<Vec<PendingEvent>> {
+    let contexts = workspace_contexts(connection)?;
+    let mut pending = vec![PendingEvent {
+        payload: EventPayload::Migration(MigrationEvent::Started(EventData {
+            aggregate_id: CHECKPOINT.into(), repeated: false, data: json!({"from": "stateful.v1.initial", "to": CHECKPOINT}),
+        })),
+        occurred_at: now.into(),
+        metadata: default_metadata("unknown", "unknown", &contexts),
+    }];
+
+    append_audits(connection, &contexts, &mut pending)?;
+    append_presence_seeds(connection, now, &contexts, &mut pending)?;
+    append_reservation_seeds(connection, &contexts, &mut pending)?;
+    append_claim_seeds(connection, &contexts, &mut pending)?;
+    append_wait_seeds(connection, &contexts, &mut pending)?;
+    append_fence_seeds(connection, &contexts, &mut pending)?;
+    append_human_seeds(connection, &contexts, &mut pending)?;
+    append_handoff_seeds(connection, &contexts, &mut pending)?;
+    append_delivery_seeds(connection, &contexts, &mut pending)?;
+    Ok(pending)
+}
+
+fn append_audits(connection: &Connection, contexts: &BTreeMap<String, Metadata>, pending: &mut Vec<PendingEvent>) -> StoreResult<()> {
+    let mut statement = connection.prepare("SELECT event_id, event_type, agent_id, workspace_id, repo_id, worktree_id, root, branch, payload_json, created_at FROM events ORDER BY created_at, event_id")?;
+    for row in statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, Option<String>>(5)?, row.get::<_, Option<String>>(6)?, row.get::<_, Option<String>>(7)?, row.get::<_, String>(8)?, row.get::<_, String>(9)?)))? {
+        let (event_id, event_type, agent_id, workspace_id, repo_id, worktree_id, root, branch, payload_json, created_at) = row?;
+        pending.push(PendingEvent {
+            payload: EventPayload::Migration(MigrationEvent::LegacyAuditImported(EventData {
+                aggregate_id: format!("legacy-audit:{event_id}"),
+                repeated: false,
+                data: json!({"legacy_event_id": event_id, "legacy_event_type": event_type, "non_projectable": true, "legacy_payload": serde_json::from_str::<Value>(&payload_json)?}),
+            })),
+            occurred_at: created_at,
+            metadata: metadata(&workspace_id, &agent_id, repo_id, worktree_id, root, branch, contexts),
+        });
+    }
+    Ok(())
+}
+
+fn append_presence_seeds(connection: &Connection, now: &str, contexts: &BTreeMap<String, Metadata>, pending: &mut Vec<PendingEvent>) -> StoreResult<()> {
+    let mut agents = connection.prepare("SELECT agent_id, workspace_id, updated_at FROM agents ORDER BY workspace_id, agent_id")?;
+    for row in agents.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))? {
+        let (agent_id, workspace_id, updated_at) = row?;
+        let mut activities = connection.prepare("SELECT activity_id, phase, expires_at FROM activities WHERE agent_id = ?1 AND workspace_id = ?2 AND (expires_at IS NULL OR expires_at > ?3) ORDER BY expires_at DESC, activity_id DESC")?;
+        let values = activities.query_map(params![agent_id, workspace_id, now], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)))?.collect::<Result<Vec<_>, _>>()?;
+        let mut source_activity_ids = values.iter().map(|(activity_id, _, _)| activity_id.clone()).collect::<Vec<_>>();
+        source_activity_ids.sort();
+        let selected = values.first();
+        let data = json!({
+            "agent_id": agent_id,
+            "selected_activity_id": selected.map(|value| value.0.clone()),
+            "source_activity_ids": source_activity_ids,
+            "phase": selected.map(|value| value.1.clone()).unwrap_or_else(|| "unknown".into()),
+            "expires_at": selected.and_then(|value| value.2.clone()),
+        });
+        pending.push(PendingEvent {
+            payload: EventPayload::Migration(MigrationEvent::PresenceSnapshotSeeded(seed_data("presence", &agent_id, data))),
+            occurred_at: updated_at,
+            metadata: metadata(&workspace_id, &agent_id, None, None, None, None, contexts),
+        });
+    }
+    Ok(())
+}
+
+fn append_reservation_seeds(connection: &Connection, contexts: &BTreeMap<String, Metadata>, pending: &mut Vec<PendingEvent>) -> StoreResult<()> {
+    let mut statement = connection.prepare("SELECT reservation_id, agent_id, workspace_id, purpose, scopes_json, status, declared_at, expires_at FROM reservations ORDER BY workspace_id, reservation_id")?;
+    for row in statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?, row.get::<_, Option<String>>(7)?)))? {
+        let (reservation_id, agent_id, workspace_id, purpose, scopes_json, status, declared_at, expires_at) = row?;
+        pending.push(PendingEvent {
+            payload: EventPayload::Migration(MigrationEvent::ReservationSnapshotSeeded(seed_data("reservation", &reservation_id, json!({"agent_id": agent_id, "purpose": purpose, "scopes": serde_json::from_str::<Value>(&scopes_json)?, "status": status, "declared_at": declared_at, "expires_at": expires_at})))),
+            occurred_at: declared_at,
+            metadata: metadata(&workspace_id, &agent_id, None, None, None, None, contexts),
+        });
+    }
+    Ok(())
+}
+
+fn append_claim_seeds(connection: &Connection, contexts: &BTreeMap<String, Metadata>, pending: &mut Vec<PendingEvent>) -> StoreResult<()> {
+    let mut statement = connection.prepare("SELECT claim_id, reservation_id, agent_id, workspace_id, repo_id, relative_path, absolute_path, purpose, action, status, expires_at, observed_exists, observed_content_hash FROM claims ORDER BY workspace_id, claim_id")?;
+    for row in statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, Option<String>>(5)?, row.get::<_, Option<String>>(6)?, row.get::<_, Option<String>>(7)?, row.get::<_, String>(8)?, row.get::<_, String>(9)?, row.get::<_, Option<String>>(10)?, row.get::<_, Option<i64>>(11)?, row.get::<_, Option<String>>(12)?)))? {
+        let (claim_id, reservation_id, agent_id, workspace_id, repo_id, relative_path, absolute_path, purpose, action, status, expires_at, observed_exists, observed_content_hash) = row?;
+        let agent_id = agent_id.unwrap_or_else(|| "unknown".into());
+        let legacy_base_observation = json!({"exists": observed_exists, "content_hash": observed_content_hash});
+        pending.push(PendingEvent {
+            payload: EventPayload::Migration(MigrationEvent::ClaimSnapshotSeeded(seed_data("claim", &claim_id, json!({"reservation_id": reservation_id, "relative_path": relative_path, "absolute_path": absolute_path, "purpose": purpose, "action": action, "status": status, "expires_at": expires_at, "legacy_base_observation": legacy_base_observation})))),
+            occurred_at: expires_at.clone().unwrap_or_else(|| "1970-01-01T00:00:00Z".into()),
+            metadata: metadata(&workspace_id, &agent_id, repo_id, None, None, None, contexts),
+        });
+    }
+    Ok(())
+}
+
+fn append_wait_seeds(connection: &Connection, contexts: &BTreeMap<String, Metadata>, pending: &mut Vec<PendingEvent>) -> StoreResult<()> {
+    let mut statement = connection.prepare("SELECT wait_id, request_id, agent_id, workspace_id, repo_id, worktree_id, root, branch, relative_path, action, status, requested_at, reservation_expires_at, blocking_agent_id, purpose FROM wait_queue ORDER BY workspace_id, requested_at, wait_id")?;
+    for row in statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, Option<String>>(5)?, row.get::<_, Option<String>>(6)?, row.get::<_, Option<String>>(7)?, row.get::<_, String>(8)?, row.get::<_, String>(9)?, row.get::<_, String>(10)?, row.get::<_, String>(11)?, row.get::<_, Option<String>>(12)?, row.get::<_, Option<String>>(13)?, row.get::<_, String>(14)?)))? {
+        let (wait_id, request_id, agent_id, workspace_id, repo_id, worktree_id, root, branch, relative_path, action, status, requested_at, reservation_expires_at, blocking_agent_id, purpose) = row?;
+        pending.push(PendingEvent {
+            payload: EventPayload::Migration(MigrationEvent::WaitSnapshotSeeded(seed_data("wait", &wait_id, json!({"request_id": request_id, "relative_path": relative_path, "action": action, "status": status, "reservation_expires_at": reservation_expires_at, "blocking_agent_id": blocking_agent_id, "purpose": purpose})))),
+            occurred_at: requested_at,
+            metadata: metadata(&workspace_id, &agent_id, repo_id, worktree_id, root, branch, contexts),
+        });
+    }
+    Ok(())
+}
+
+fn append_fence_seeds(connection: &Connection, contexts: &BTreeMap<String, Metadata>, pending: &mut Vec<PendingEvent>) -> StoreResult<()> {
+    let mut statement = connection.prepare("SELECT fence_id, agent_id, workspace_id, relative_path, action, acquired_at, expires_at, released_at FROM write_fences ORDER BY workspace_id, fence_id")?;
+    for row in statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?, row.get::<_, Option<String>>(7)?)))? {
+        let (fence_id, agent_id, workspace_id, relative_path, action, acquired_at, expires_at, released_at) = row?;
+        pending.push(PendingEvent {
+            payload: EventPayload::Migration(MigrationEvent::WriteFenceSnapshotSeeded(seed_data("write_fence", &fence_id, json!({"relative_path": relative_path, "action": action, "acquired_at": acquired_at, "expires_at": expires_at, "released_at": released_at})))),
+            occurred_at: acquired_at,
+            metadata: metadata(&workspace_id, &agent_id, None, None, None, None, contexts),
+        });
+    }
+    Ok(())
+}
+
+fn append_human_seeds(connection: &Connection, contexts: &BTreeMap<String, Metadata>, pending: &mut Vec<PendingEvent>) -> StoreResult<()> {
+    let mut statement = connection.prepare("SELECT observation_id, workspace_id, relative_path, kind, source, confidence, observed_exists, observed_content_hash, observed_at, summary, expires_at, reconciled_at, reconcile_decision, reconciled_by_agent_id FROM human_observations ORDER BY workspace_id, observation_id")?;
+    for row in statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, i64>(6)?, row.get::<_, Option<String>>(7)?, row.get::<_, String>(8)?, row.get::<_, String>(9)?, row.get::<_, Option<String>>(10)?, row.get::<_, Option<String>>(11)?, row.get::<_, Option<String>>(12)?, row.get::<_, Option<String>>(13)?)))? {
+        let (observation_id, workspace_id, relative_path, kind, source, confidence, observed_exists, observed_content_hash, observed_at, summary, expires_at, reconciled_at, reconcile_decision, reconciled_by_agent_id) = row?;
+        pending.push(PendingEvent {
+            payload: EventPayload::Migration(MigrationEvent::HumanObservationSnapshotSeeded(seed_data("human_observation", &observation_id, json!({"relative_path": relative_path, "kind": kind, "source": source, "confidence": confidence, "observed_exists": observed_exists == 1, "observed_content_hash": observed_content_hash, "summary": summary, "expires_at": expires_at, "reconciled_at": reconciled_at, "reconcile_decision": reconcile_decision, "reconciled_by_agent_id": reconciled_by_agent_id})))),
+            occurred_at: observed_at,
+            metadata: metadata(&workspace_id, "unknown", None, None, None, None, contexts),
+        });
+    }
+    Ok(())
+}
+
+fn append_handoff_seeds(connection: &Connection, contexts: &BTreeMap<String, Metadata>, pending: &mut Vec<PendingEvent>) -> StoreResult<()> {
+    let mut statement = connection.prepare("SELECT event_id, workspace_id, payload_json, created_at FROM events WHERE event_type = 'ActivityFinalized' ORDER BY created_at, event_id")?;
+    for row in statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)))? {
+        let (event_id, workspace_id, payload_json, created_at) = row?;
+        let cleanup_count = serde_json::from_str::<Value>(&payload_json)?.get("cleanup_count").and_then(Value::as_u64).unwrap_or(0);
+        pending.push(PendingEvent {
+            payload: EventPayload::Migration(MigrationEvent::LegacyHandoffSnapshotSeeded(seed_data("handoff", &event_id, json!({"status": "unknown", "actor_id": "unknown", "goal": "", "next_plan": "", "resources": [], "cleanup_count": cleanup_count, "legacy_event_id": event_id})))),
+            occurred_at: created_at,
+            metadata: metadata(&workspace_id, "unknown", None, None, None, None, contexts),
+        });
+    }
+    Ok(())
+}
+
+fn append_delivery_seeds(connection: &Connection, contexts: &BTreeMap<String, Metadata>, pending: &mut Vec<PendingEvent>) -> StoreResult<()> {
+    let mut notifications = connection.prepare("SELECT notification_id, sequence, target_agent_id, workspace_id, kind, payload_json, status, created_at, expires_at FROM notifications ORDER BY workspace_id, sequence, notification_id")?;
+    for row in notifications.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?, row.get::<_, String>(7)?, row.get::<_, Option<String>>(8)?)))? {
+        let (notification_id, sequence, target_agent_id, workspace_id, kind, payload_json, status, created_at, expires_at) = row?;
+        let primary_key = format!("notification:{notification_id}");
+        pending.push(PendingEvent {
+            payload: EventPayload::Migration(MigrationEvent::DeliverySnapshotSeeded(seed_data("delivery", &primary_key, json!({"delivery_kind": "notification", "notification_id": notification_id, "sequence": sequence, "target_agent_id": target_agent_id, "kind": kind, "payload": serde_json::from_str::<Value>(&payload_json)?, "status": status, "expires_at": expires_at})))),
+            occurred_at: created_at,
+            metadata: metadata(&workspace_id, "unknown", None, None, None, None, contexts),
+        });
+    }
+    let mut outbox = connection.prepare("SELECT outbox_id, agent_id, workspace_id, sequence, event_type, payload_json, sync_status FROM outbox ORDER BY workspace_id, sequence, outbox_id")?;
+    for row in outbox.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?)))? {
+        let (outbox_id, agent_id, workspace_id, sequence, event_type, payload_json, sync_status) = row?;
+        let primary_key = format!("outbox:{outbox_id}");
+        pending.push(PendingEvent {
+            payload: EventPayload::Migration(MigrationEvent::DeliverySnapshotSeeded(seed_data("delivery", &primary_key, json!({"delivery_kind": "outbox", "outbox_id": outbox_id, "sequence": sequence, "target_agent_id": agent_id, "event_type": event_type, "payload": serde_json::from_str::<Value>(&payload_json)?, "status": sync_status})))),
+            occurred_at: "1970-01-01T00:00:00Z".into(),
+            metadata: metadata(&workspace_id, "unknown", None, None, None, None, contexts),
+        });
+    }
+    Ok(())
+}
+
+fn append_lifecycle_event(connection: &Connection, projector: &mut Projector<'_>, request_id: Uuid, lifecycle: &str, now: &str) -> StoreResult<()> {
+    let manifest = json!({"normalizations": [
+        "legacy audits are ordered by created_at,event_id and remain non-projectable",
+        "multiple live activities select latest expiry then activity_id while preserving source_activity_ids",
+        "legacy claim content hashes remain legacy_base_observation and never become read provenance",
+        "unavailable actor fields are unknown and unavailable handoff fields are empty",
+    ]});
+    let payload = match lifecycle {
+        "validated" => EventPayload::Migration(MigrationEvent::Validated(EventData { aggregate_id: CHECKPOINT.into(), repeated: false, data: manifest })),
+        "completed" => EventPayload::Migration(MigrationEvent::Completed(EventData { aggregate_id: CHECKPOINT.into(), repeated: false, data: json!({"manifest": manifest}) })),
+        _ => return invalid("unknown migration lifecycle event"),
+    };
+    let ordinal: u32 = connection.query_row("SELECT COUNT(*) FROM journal_events", [], |row| row.get::<_, u64>(0))? as u32;
+    let event = NewEvent::new(request_id, ordinal, parse_timestamp(now)?, payload)?;
+    let metadata = Metadata { agent_id: "unknown".into(), workspace_id: "unknown".into(), repo_id: "unknown".into(), worktree_id: "unknown".into(), root: "unknown".into(), branch: "unknown".into() };
+    let event = append_migration_event(connection, &event, metadata.journal())?;
+    projector.apply(&event)
+}
+
+fn replay_and_compare(connection: &Connection) -> StoreResult<()> {
+    schema::create_projection_tables_with_prefix(connection, REPLAY_PREFIX)?;
+    let events = load_journal_events(connection)?;
+    let mut projector = Projector::new(connection, REPLAY_PREFIX, None);
+    for event in &events {
+        projector.apply(event)?;
+    }
+    if projection_snapshot(connection, SHADOW_PREFIX)? != projection_snapshot(connection, REPLAY_PREFIX)? {
+        return Err(StoreError::MigrationValidation("shadow projection differs from replay".into()));
+    }
+    Ok(())
+}
+
+fn workspace_contexts(connection: &Connection) -> StoreResult<BTreeMap<String, Metadata>> {
+    let mut contexts = BTreeMap::new();
+    let mut statement = connection.prepare("SELECT workspace_id, agent_id, repo_id, worktree_id, root, branch FROM events ORDER BY workspace_id, created_at, event_id")?;
+    for row in statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, Option<String>>(5)?)))? {
+        let (workspace_id, agent_id, repo_id, worktree_id, root, branch) = row?;
+        contexts.entry(workspace_id.clone()).or_insert_with(|| Metadata {
+            agent_id,
+            workspace_id,
+            repo_id: known(repo_id),
+            worktree_id: known(worktree_id),
+            root: known(root),
+            branch: known(branch),
+        });
+    }
+    Ok(contexts)
+}
+
+fn metadata(workspace_id: &str, agent_id: &str, repo_id: Option<String>, worktree_id: Option<String>, root: Option<String>, branch: Option<String>, contexts: &BTreeMap<String, Metadata>) -> Metadata {
+    let fallback = contexts.get(workspace_id);
+    Metadata {
+        agent_id: known(Some(agent_id.into())),
+        workspace_id: known(Some(workspace_id.into())),
+        repo_id: repo_id.map_or_else(|| fallback.map(|value| value.repo_id.clone()).unwrap_or_else(|| "unknown".into()), |value| known(Some(value))),
+        worktree_id: worktree_id.map_or_else(|| fallback.map(|value| value.worktree_id.clone()).unwrap_or_else(|| "unknown".into()), |value| known(Some(value))),
+        root: root.map_or_else(|| fallback.map(|value| value.root.clone()).unwrap_or_else(|| "unknown".into()), |value| known(Some(value))),
+        branch: branch.map_or_else(|| fallback.map(|value| value.branch.clone()).unwrap_or_else(|| "unknown".into()), |value| known(Some(value))),
+    }
+}
+
+fn default_metadata(agent_id: &str, workspace_id: &str, contexts: &BTreeMap<String, Metadata>) -> Metadata {
+    metadata(workspace_id, agent_id, None, None, None, None, contexts)
+}
+
+fn known(value: Option<String>) -> String {
+    value.filter(|value| !value.trim().is_empty()).unwrap_or_else(|| "unknown".into())
+}
+
+fn seed_data(kind: &str, primary_key: &str, value: Value) -> EventData {
+    let mut object = value.as_object().cloned().unwrap_or_else(Map::new);
+    object.insert("legacy_entity_kind".into(), Value::String(kind.into()));
+    object.insert("legacy_primary_key".into(), Value::String(primary_key.into()));
+    EventData { aggregate_id: primary_key.into(), repeated: false, data: Value::Object(object) }
+}
+
+fn validate_ready(connection: &Connection) -> StoreResult<()> {
+    if !has_checkpoint(connection)? || has_legacy_tables(connection)? || !has_table(connection, "journal_events")? {
+        return Err(StoreError::MigrationValidation("v2 migration checkpoint is not ready".into()));
+    }
+    for table in schema::PROJECTION_TABLES {
+        if !has_table(connection, table)? {
+            return Err(StoreError::MigrationValidation(format!("v2 projection {table} is missing")));
+        }
+    }
+    Ok(())
+}
+
+fn parse_timestamp(timestamp: &str) -> StoreResult<OffsetDateTime> {
+    OffsetDateTime::parse(timestamp, &Rfc3339)
+        .map_err(|_| StoreError::MigrationValidation(format!("invalid migration timestamp: {timestamp}")))
+}
+
+fn format_timestamp(timestamp: OffsetDateTime) -> StoreResult<String> {
+    timestamp.format(&Rfc3339).map_err(|error| StoreError::MigrationValidation(format!("could not format migration timestamp: {error}")))
+}
+
+fn invalid(message: impl Into<String>) -> StoreResult<()> {
+    Err(StoreError::MigrationValidation(message.into()))
+}
