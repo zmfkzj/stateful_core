@@ -2,7 +2,7 @@ use crate::{ContentFingerprint, Decision, DecisionKind};
 use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 
-pub const OBSERVATION_TTL: Duration = Duration::minutes(30);
+pub const OBSERVATION_TTL: Duration = Duration::minutes(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -17,7 +17,7 @@ pub enum ReadClassification {
 
 impl ReadClassification {
     pub const fn may_stabilize(self) -> bool {
-        matches!(self, Self::Exact | Self::StructuralSummary)
+        matches!(self, Self::Exact)
     }
 }
 
@@ -85,7 +85,7 @@ pub fn observation_status(
     classification: ReadClassification,
     before: &ContentFingerprint,
     after: Option<&ContentFingerprint>,
-    semantic_marker: Option<&str>,
+    _semantic_marker: Option<&str>,
 ) -> ReadObservationStatus {
     if classification == ReadClassification::Failed {
         return ReadObservationStatus::Aborted;
@@ -93,22 +93,12 @@ pub fn observation_status(
     if !before.is_complete_exact() || after.is_some_and(|after| !after.is_complete_exact()) {
         return ReadObservationStatus::Unstable;
     }
-    match classification {
-        ReadClassification::Exact => match after {
-            Some(after) if before == after => ReadObservationStatus::Stabilized,
-            _ => ReadObservationStatus::Unstable,
-        },
-        ReadClassification::StructuralSummary => {
-            if semantic_marker.is_some_and(|marker| !marker.trim().is_empty()) {
-                ReadObservationStatus::Stabilized
-            } else {
-                ReadObservationStatus::Unstable
-            }
-        }
-        ReadClassification::Partial | ReadClassification::Truncated | ReadClassification::Ambiguous => {
-            ReadObservationStatus::Unstable
-        }
-        ReadClassification::Failed => unreachable!("handled before fingerprint validation"),
+    if !classification.may_stabilize() {
+        return ReadObservationStatus::Unstable;
+    }
+    match after {
+        Some(after) if before == after => ReadObservationStatus::Stabilized,
+        _ => ReadObservationStatus::Unstable,
     }
 }
 

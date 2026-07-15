@@ -104,9 +104,10 @@ fn exact_successful_unchanged_read_stabilizes_observation() {
     assert!(observation.is_stable());
     assert_eq!(observation.operation_id, "read-1");
     assert_eq!(observation.resource_version, 0);
-    assert_eq!(observation.expires_at, Some(NOW + Duration::minutes(30)));
+    assert_eq!(observation.expires_at, Some(NOW + Duration::minutes(60)));
     store.rebuild_projections().expect("read observation must replay");
-    assert!(!observation.is_fresh_at(NOW + Duration::minutes(30)));
+    assert!(observation.is_fresh_at(NOW + Duration::minutes(60) - Duration::seconds(1)));
+    assert!(!observation.is_fresh_at(NOW + Duration::minutes(60)));
 }
 
 #[test]
@@ -230,7 +231,7 @@ fn concurrent_read_operations_pair_by_operation_id_not_latest_path() {
 }
 
 #[test]
-fn complete_structural_summary_requires_a_semantic_marker() {
+fn structural_summary_with_semantic_marker_remains_unstable() {
     let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
     start_read(&store, "agent-1", "structural", "src/lib.rs", fingerprint(b"before"));
     complete_read(
@@ -243,7 +244,7 @@ fn complete_structural_summary_requires_a_semantic_marker() {
         Some("symbols:fn main"),
     );
 
-    assert!(store
+    assert!(!store
         .read_observation("workspace-1", "agent-1", "src/lib.rs")
         .expect("observation reads")
         .expect("observation exists")
