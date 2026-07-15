@@ -14,6 +14,7 @@ pub(crate) const PROJECTION_TABLES: &[&str] = &[
     "handoff_current",
     "handoff_resource_current",
     "notification_current",
+    "delivery_current",
     "workspace_version",
     "agent_context_cursor",
     "resource_write_current",
@@ -169,6 +170,13 @@ pub(crate) fn create_v2_schema(connection: &Connection) -> StoreResult<()> {
             aggregate_id TEXT NOT NULL,
             target_agent_id TEXT,
             version INTEGER NOT NULL DEFAULT 0,
+            payload_json TEXT NOT NULL,
+            origin_event_seq INTEGER NOT NULL,
+            PRIMARY KEY (workspace_id, aggregate_id)
+        );
+        CREATE TABLE IF NOT EXISTS delivery_current (
+            workspace_id TEXT NOT NULL,
+            aggregate_id TEXT NOT NULL,
             payload_json TEXT NOT NULL,
             origin_event_seq INTEGER NOT NULL,
             PRIMARY KEY (workspace_id, aggregate_id)

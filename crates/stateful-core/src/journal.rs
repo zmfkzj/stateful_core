@@ -182,6 +182,7 @@ event_family!(NotificationEvent {
 
 event_family!(RecoveryEvent {
     Queued,
+    Attempted,
     Delivered,
     Failed,
 });

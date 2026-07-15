@@ -26,6 +26,11 @@ pub trait ProjectionReader {
     fn active_claims_for_path(&self, workspace_id: &str, path: &str) -> StoreResult<Vec<ClaimRecord>>;
     fn active_fence_for_path(&self, workspace_id: &str, path: &str) -> StoreResult<Option<WriteFenceRecord>>;
     fn stable_observation(&self, workspace_id: &str, agent_id: &str, path: &str) -> StoreResult<Option<ReadObservationRecord>>;
+    fn aggregate_records(
+        &self,
+        kind: CurrentAggregate,
+        workspace_id: &str,
+    ) -> StoreResult<Vec<CurrentRecord>>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +56,24 @@ pub struct ReadObservationRecord {
     pub workspace_id: String,
     pub agent_id: String,
     pub path: String,
+    pub origin_event_seq: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurrentAggregate {
+    Reservation,
+    Claim,
+    Wait,
+    WriteFence,
+    HumanObservation,
+    Notification,
+    Delivery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrentRecord {
+    pub aggregate_id: String,
+    pub payload: serde_json::Value,
     pub origin_event_seq: u64,
 }
 
@@ -224,6 +247,44 @@ impl ProjectionReader for SqlProjectionReader<'_> {
             params![workspace_id, agent_id, path],
             |row| Ok(ReadObservationRecord { workspace_id: workspace_id.into(), agent_id: agent_id.into(), path: path.into(), origin_event_seq: row.get(0)? }),
         ).optional().map_err(StoreError::from)
+    }
+
+    fn aggregate_records(
+        &self,
+        kind: CurrentAggregate,
+        workspace_id: &str,
+    ) -> StoreResult<Vec<CurrentRecord>> {
+        let table = match kind {
+            CurrentAggregate::Reservation => "reservation_current",
+            CurrentAggregate::Claim => "claim_current",
+            CurrentAggregate::Wait => "wait_current",
+            CurrentAggregate::WriteFence => "write_fence_current",
+            CurrentAggregate::HumanObservation => "human_observation_current",
+            CurrentAggregate::Notification => "notification_current",
+            CurrentAggregate::Delivery => "delivery_current",
+        };
+        let mut statement = self.transaction.prepare(&format!(
+            "SELECT aggregate_id, payload_json, origin_event_seq FROM {table}
+             WHERE workspace_id = ?1 ORDER BY aggregate_id"
+        ))?;
+        statement
+            .query_map([workspace_id], |row| {
+                let payload: String = row.get(1)?;
+                let payload = serde_json::from_str(&payload).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+                Ok(CurrentRecord {
+                    aggregate_id: row.get(0)?,
+                    payload,
+                    origin_event_seq: row.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 }
 

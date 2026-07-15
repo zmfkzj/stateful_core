@@ -71,6 +71,7 @@ impl<'a> Projector<'a> {
             "human_observation" => Some("human_observation_current"),
             "handoff" => Some("handoff_current"),
             "notification" => Some("notification_current"),
+            "recovery" => Some("delivery_current"),
             "migration" => Some("migration_current"),
             _ => None,
         });
@@ -442,6 +443,7 @@ fn projection_data<'a>(table: &str, data: &'a serde_json::Value) -> &'a serde_js
         "write_fence_current" => "write_fence",
         "human_observation_current" => "observation",
         "notification_current" => "notification",
+        "delivery_current" => "delivery",
         _ => return data,
     };
     data.get(key).unwrap_or(data)
@@ -542,7 +544,10 @@ fn event_data(event: &JournalEvent) -> Option<&serde_json::Value> {
             | NotificationEvent::Coalesced(data) => data,
         },
         EventPayload::Recovery(event) => match event {
-            RecoveryEvent::Queued(data) | RecoveryEvent::Delivered(data) | RecoveryEvent::Failed(data) => data,
+            RecoveryEvent::Queued(data)
+            | RecoveryEvent::Attempted(data)
+            | RecoveryEvent::Delivered(data)
+            | RecoveryEvent::Failed(data) => data,
         },
     };
     Some(&data.data)

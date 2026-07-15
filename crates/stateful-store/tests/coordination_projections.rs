@@ -3,10 +3,9 @@ use stateful_core::{
     ActorType, AgentIdentity, EventData, EventPayload, NewEvent, RequestEnvelope, ReservationEvent,
     SourceKind, SourceRef, WorkspaceIdentity,
 };
-use stateful_store::{CommandPlan, FixedClock, Store};
+use stateful_store::{CommandPlan, FixedClock, ReservationDeclaration, Store};
 use time::{macros::datetime, OffsetDateTime};
 use uuid::Uuid;
-
 const NOW: OffsetDateTime = datetime!(2026-07-15 12:00 UTC);
 
 fn request(request_id: Uuid) -> RequestEnvelope<serde_json::Value> {
@@ -280,6 +279,41 @@ fn terminal_activity_does_not_emit_a_warning_event() {
     );
 }
 
+
+#[test]
+fn reservation_command_is_journaled_receipted_and_replayable() {
+    let mut store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store should open");
+    let request = reservation_request(Uuid::new_v4());
+    let first = store
+        .declare_reservation(&request)
+        .expect("reservation command should commit");
+    let duplicate = store
+        .declare_reservation(&request)
+        .expect("duplicate should return frozen receipt");
+
+    assert!(!first.duplicate);
+    assert!(duplicate.duplicate);
+    assert_eq!(store.journal_event_count().expect("journal should load"), 1);
+    assert_eq!(first.response, duplicate.response);
+    store.rebuild_projections().expect("reservation must replay");
+}
+
+fn reservation_request(request_id: Uuid) -> RequestEnvelope<ReservationDeclaration> {
+    let base = request(request_id);
+    RequestEnvelope::new(
+        base.request_id,
+        base.observed_at,
+        base.agent,
+        base.workspace,
+        base.source,
+        ReservationDeclaration {
+            relative_path: "src/lib.rs".into(),
+            action: "write_file".into(),
+            purpose: "Refactor the projector.".into(),
+        },
+    )
+    .expect("reservation request should be valid")
+}
 #[test]
 fn aggregate_failure_rolls_back_a_multi_event_transition() {
     let mut store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store should open");

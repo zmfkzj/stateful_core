@@ -1,113 +1,75 @@
-use super::*;
+use crate::{
+    CommandOutcome, CommandPlan, Store, StoreResult,
+    presence::{presence_event, register_record},
+};
+use serde::{Deserialize, Serialize};
+use stateful_core::{EventData, EventPayload, PresenceEvent, PresencePhase, RequestEnvelope};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityStart {
+    pub phase: PresencePhase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ActivityFinalization {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityOutcome {
+    pub finalized: bool,
+}
 
 impl Store {
-    pub fn append_activity(
-        &self,
-        agent_id: impl AsRef<str>,
-        workspace_id: impl AsRef<str>,
-    ) -> StoreResult<()> {
-        self.append_activity_with_phase(agent_id, workspace_id, PresencePhase::Exploring)
+    pub fn start_activity(
+        &mut self,
+        request: &RequestEnvelope<ActivityStart>,
+    ) -> StoreResult<CommandOutcome<stateful_core::PresenceRecord>> {
+        let now = self.clock.now();
+        let phase = request.payload.phase;
+        self.execute_command(request, "activity.start", |reader| {
+            let existing = reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?;
+            let mut activity = register_record(request, existing, None, now);
+            activity.phase = Some(phase);
+            let event = presence_event(request, 0, now, PresenceEvent::PhaseUpdated, activity.clone(), false)?;
+            Ok(CommandPlan { events: vec![event], response: activity, http_status: 200 })
+        })
     }
 
-    pub fn append_activity_with_phase(
-        &self,
-        agent_id: impl AsRef<str>,
-        workspace_id: impl AsRef<str>,
-        phase: PresencePhase,
-    ) -> StoreResult<()> {
-        self.append_activity_inner(agent_id.as_ref(), workspace_id.as_ref(), phase)
-    }
-
-    pub(crate) fn append_activity_inner(
-        &self,
-        agent_id: &str,
-        workspace_id: &str,
-        phase: PresencePhase,
-    ) -> StoreResult<()> {
-        let now = now_timestamp();
-        let expires_at = timestamp_after(&now, ACTIVITY_TTL_SECONDS)?;
-        self.conn.execute(
-            "INSERT INTO activities (
-                activity_id,
-                agent_id,
-                workspace_id,
-                phase,
-                expires_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                Uuid::new_v4().to_string(),
-                agent_id,
-                workspace_id,
-                phase.as_str(),
-                expires_at,
-            ],
-        )?;
-
-        Ok(())
-    }
-
-    pub fn finalize_session_activity(
-        &self,
-        agent_id: impl AsRef<str>,
-        workspace_id: impl AsRef<str>,
-    ) -> StoreResult<(u64, u64)> {
-        self.finalize_session_activity_with_phase(agent_id, workspace_id, PresencePhase::Done)
-    }
-
-    pub fn finalize_session_activity_with_phase(
-        &self,
-        agent_id: impl AsRef<str>,
-        workspace_id: impl AsRef<str>,
-        _phase: PresencePhase,
-    ) -> StoreResult<(u64, u64)> {
-        let agent_id = agent_id.as_ref().to_string();
-        let workspace_id = workspace_id.as_ref().to_string();
-        self.conn
-            .execute_batch("SAVEPOINT stateful_finalize_activity")?;
-
-        let result = self
-            .finalize_session_activity_inner(&agent_id, &workspace_id)
-            .and_then(|finalized| {
-                self.conn
-                    .execute_batch("RELEASE SAVEPOINT stateful_finalize_activity")?;
-                Ok(finalized)
-            });
-
-        if result.is_err() {
-            let _ = self
-                .conn
-                .execute_batch("ROLLBACK TO SAVEPOINT stateful_finalize_activity");
-            let _ = self
-                .conn
-                .execute_batch("RELEASE SAVEPOINT stateful_finalize_activity");
-        }
-
-        result
-    }
-
-    fn finalize_session_activity_inner(
-        &self,
-        agent_id: &str,
-        workspace_id: &str,
-    ) -> StoreResult<(u64, u64)> {
-        self.cancel_session_waiters_inner(agent_id, workspace_id)?;
-        let released = self.release_session_claims_inner(agent_id, workspace_id)?;
-        self.release_session_write_fences_inner(agent_id, workspace_id)?;
-        let completed = self.complete_session_reservations_inner(agent_id, workspace_id)?;
-        self.append_inner(&Event::activity_finalized(
-            agent_id.to_string(),
-            workspace_id.to_string(),
-            released,
-            completed,
-        ))?;
-        Ok((released, completed))
-    }
-
-    pub fn activity_count(&self) -> StoreResult<u64> {
-        self.conn
-            .query_row("SELECT COUNT(*) FROM activities", [], |row| {
-                row.get::<_, u64>(0)
+    pub fn finalize_activity(
+        &mut self,
+        request: &RequestEnvelope<ActivityFinalization>,
+    ) -> StoreResult<CommandOutcome<ActivityOutcome>> {
+        let now = self.clock.now();
+        self.execute_command(request, "activity.finalize", |reader| {
+            if reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?.is_none() {
+                return Ok(CommandPlan {
+                    events: Vec::new(),
+                    response: ActivityOutcome { finalized: false },
+                    http_status: 200,
+                });
+            }
+            let mut data = EventData::new(&request.agent.agent_id);
+            data.data = serde_json::json!({"agent_id": request.agent.agent_id, "status": "finalized"});
+            let event = stateful_core::NewEvent::new(
+                request.request_id,
+                0,
+                now,
+                EventPayload::Presence(PresenceEvent::Finalized(data)),
+            )?;
+            Ok(CommandPlan {
+                events: vec![event],
+                response: ActivityOutcome { finalized: true },
+                http_status: 200,
             })
-            .map_err(StoreError::from)
+        })
+    }
+
+    pub fn activity_count(&self, workspace_id: &str) -> StoreResult<u64> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM presence_current WHERE workspace_id = ?1",
+                [workspace_id],
+                |row| row.get(0),
+            )
+            .map_err(crate::StoreError::from)
     }
 }
