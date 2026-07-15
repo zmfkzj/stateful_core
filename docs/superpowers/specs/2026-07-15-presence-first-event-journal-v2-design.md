@@ -1,7 +1,7 @@
 # Presence-First Event Journal V2 Design
 
 **Date:** 2026-07-15  
-**Status:** Design sections approved; written-spec review pending  
+**Status:** Written-spec self-review complete; user review pending  
 **Base:** `main` at `7070190`  
 **Benchmark source:** selective port from `dev` at `b5e875e`
 
@@ -94,7 +94,12 @@ Every v2 mutation uses a common envelope:
 ```text
 event_seq           SQLite monotonic sequence
 event_id            globally unique idempotency key
+agent_id
 workspace_id
+repo_id?
+worktree_id?
+root?
+branch?
 aggregate_kind
 aggregate_id
 event_type
@@ -104,6 +109,8 @@ actor_type
 owner_id?
 parent_agent_id?
 parent_actor_id?
+source_kind
+source_ref
 causation_id?
 correlation_id?
 occurred_at
@@ -125,6 +132,7 @@ Event families cover:
 - context render, delivery, and cursor advancement;
 - notification and recovery delivery state;
 - migration start, seed, validation, and completion.
+- tool-operation and write-intent lifecycle.
 
 ### 6.2 Command transaction invariant
 
@@ -151,6 +159,7 @@ Required projections:
 - `wait_current`
 - `write_fence_current`
 - `read_observation_current`
+- `write_intent_current`
 - `human_observation_current`
 - `handoff_current`
 - `handoff_resource_current`
@@ -245,9 +254,11 @@ goal_excerpt
 phase
 next_plan
 last_result
-registered_at / updated_at / expires_at
+registered_at / updated_at / expires_at / busy_until
 origin_event_seq
 ```
+
+`goal_excerpt` is the first prompt after whitespace normalization, capped at 240 Unicode scalar values. `last_result` stores only tool name, outcome, completion time, and an optional 240-scalar summary; it never stores full tool stdout.
 
 `presence_resource_current` contains normalized resource relationships:
 
@@ -261,7 +272,7 @@ origin_event_seq
 Lifecycle:
 
 1. Session start registers or resumes presence.
-2. The first prompt captures a bounded, whitespace-normalized goal excerpt.
+2. The first prompt captures the 240-scalar, whitespace-normalized goal excerpt.
 3. Exact reads and investigations update resource evidence.
 4. Write intent marks planned resources.
 5. Successful writes mark changed resources and last result.
@@ -269,7 +280,7 @@ Lifecycle:
 7. Hooks heartbeat the presence without creating context churn.
 8. Explicit finalization, Stop fallback, or TTL expiry closes presence.
 
-Repeated heartbeat and repeated reads of an already-known path may refresh projection timestamps without advancing visible context version.
+The normal rolling presence TTL is 15 minutes. A started native tool may set `busy_until` for its declared deadline, capped at 60 minutes; maintenance expires presence only when both `expires_at` and `busy_until` are past. Repeated heartbeat and repeated reads of an already-known path may refresh projection timestamps without advancing visible context version.
 
 ## 9. Structured Handoff
 
@@ -283,6 +294,8 @@ tests_run[]
 remaining_work[]
 next_plan?
 ```
+
+The server caps `summary` at 2,000 Unicode scalar values and each list at 100 entries; over-limit v2 requests fail validation rather than truncate silently.
 
 Finalization appends, under one correlation and transaction, the handoff plus presence finalization and cleanup events for claims, reservations, waits, and fences.
 
@@ -302,6 +315,8 @@ Explicit handoffs remain context-relevant for seven days. Unknown fallback hando
 
 Only an exact file read creates a write baseline.
 
+A stable observation is valid only for the same agent session and until the earliest of explicit invalidation, session finalization, or 60 minutes after the completed read. Expired evidence follows the missing-observation warning path.
+
 ```text
 PreToolUse exact read
   -> ReadObservationStarted(before exists/hash/size)
@@ -314,13 +329,15 @@ PostToolUse exact read
 
 Search, glob, directory, and partial LSP results may update presence investigation resources but cannot authorize a write baseline.
 
+Before invoking any file-changing tool, authorization appends `WriteIntentStarted` and acquires its short write fence in one transaction. `write_intent_current` retains the expected path, action, pre-write state, and lease until PostToolUse records the outcome.
+
 Before a write:
 
 - stable observation and equal current hash: freshness passes;
 - stable observation and changed current hash: hard deny in awareness and enforcement, requiring exact reread;
 - missing or expired stable observation: append an authorization warning and allow, subject to other hard stops.
 
-A successful write appends `WriteCommitted`, updates changed resources, invalidates other actors' observations for the same path, and advances the visible workspace version in one transaction.
+A successful write appends `WriteCommitted`, resolves the intent, updates changed resources, invalidates other actors' observations for the same path, and advances the visible workspace version in one transaction. A reported tool failure appends `WriteFailed` and releases the fence. A missing post-hook leaves the intent pending and drives the `WriteOutcomeUnknown` recovery path.
 
 ## 11. Coordination Modes
 
@@ -352,6 +369,8 @@ Awareness overlap does not create a wait queue or lazy replay operation. It reco
 
 The clean cutover removes `/v1/*` routes and the `stateful.v1` envelope. Bundled clients and install assets move together.
 
+Every v2 request uses a `stateful.v2` envelope containing request id, observed time, full agent identity, full workspace identity, and source reference. Route-specific bodies are typed payloads inside that envelope.
+
 Representative routes:
 
 ```text
@@ -375,7 +394,7 @@ GET  /v2/runtime/identity
 
 `/v2/runtime/identity` reports protocol version, journal schema version, coordination mode, workspace identity/version, and capabilities. Unsupported clients receive a structured `unsupported_protocol` failure.
 
-Existing agent-facing native tool names may remain where their meaning remains accurate, but every payload uses the v2 envelope. Internal read-observation, heartbeat, and context-ack operations are not exposed as unnecessary model tools.
+Model-facing tools retain their existing accurate names without `*_v2` aliases: session register/heartbeat, current/events reads, context render, activity observe/finalize, reservation declare/request/claim/cancel, claim acquire/release, reconcile ACK, notifications poll, and resume-next. Their payloads switch atomically to the v2 envelope. Internal exact-read start/complete, write-outcome, heartbeat scheduling, and context ACK operations remain hook/extension protocol rather than additional model tools.
 
 ## 13. State-Version Context Delivery
 
@@ -409,6 +428,8 @@ It renders each changed entity's current final state rather than a raw event str
 
 The first v2 release has no journal compaction, so `reset_required` remains false.
 
+Brief automatic context is capped at eight items and 1,200 Unicode scalar values after priority ordering. The structured detailed query is the route for additional state; automatic delivery never silently exceeds the brief budget.
+
 ## 14. Runtime Delivery
 
 ### 14.1 Codex
@@ -421,7 +442,7 @@ The first v2 release has no journal compaction, so `reset_required` remains fals
 - Post write: record write outcome and changed resources.
 - Stop: create fallback only when explicit handoff is absent.
 
-The current boolean prompt marker becomes a marker containing agent, workspace, and last acknowledged version.
+The server-backed `agent_context_cursor` is authoritative. The old local boolean prompt marker is removed; a client may cache only an unacknowledged delivery id for retry and may never advance beyond the server cursor.
 
 ### 14.2 OMP
 
@@ -453,7 +474,7 @@ Runtime status and `stateful doctor` report:
 - counts by workspace and event type;
 - oldest/newest event timestamps;
 - recent growth;
-- a configured size-threshold warning.
+- a configurable size-threshold warning, defaulting to 512 MiB.
 
 There is no automatic journal deletion, compaction, or VACUUM in this change. Documentation must state that bounded goal excerpts, handoffs, and coordination audit remain in the local journal.
 
@@ -484,6 +505,8 @@ runtime image: identical qualified image id for all rows
 runtime DB: fresh isolated HOME per row
 parallel-on coordination mode: awareness
 ```
+
+Before consuming model credits, qualification must clear the selected `requests` corpus and the runner's global Docker/runtime gates with the exact image id used by all three rows.
 
 This produces three rows, not a full 90-row result. A row is evidence only when it is cleared, task agents and final reviewer complete, post-suite/evaluators/upstream suite pass, cleanup is consistent, and no diagnostic remains unclassified. Parallel-on also requires complete v2 coordination metrics.
 
