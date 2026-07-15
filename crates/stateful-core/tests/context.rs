@@ -1,6 +1,7 @@
 use stateful_core::{
-    ContextPackage, CurrentEvidenceKind, CurrentFreshness, CurrentItem, CurrentItemKind,
-    CurrentSeverity, ReconciliationDecision, RenderMode, render_prompt_text,
+    BRIEF_CONTEXT_MAX_ITEMS, BRIEF_CONTEXT_MAX_SCALARS, ContextPackage, CurrentEvidenceKind,
+    CurrentFreshness, CurrentItem, CurrentItemKind, CurrentSeverity, ReconciliationDecision,
+    RenderMode, render_prompt_text,
 };
 
 #[test]
@@ -240,4 +241,26 @@ fn only_adopt_and_reapply_clear_human_write_blocks() {
     assert!(ReconciliationDecision::Reapply.clears_human_write_block());
     assert!(!ReconciliationDecision::AskUser.clears_human_write_block());
     assert!(!ReconciliationDecision::Abandon.clears_human_write_block());
+}
+
+#[test]
+fn brief_context_enforces_item_and_unicode_scalar_limits() {
+    let package = ContextPackage::from_items(
+        (0..=BRIEF_CONTEXT_MAX_ITEMS)
+            .map(|index| {
+                CurrentItem::new(
+                    CurrentItemKind::Reservation,
+                    CurrentSeverity::Warn,
+                    CurrentFreshness::Live,
+                    format!("src/{index}.rs"),
+                    "🦀".repeat(BRIEF_CONTEXT_MAX_SCALARS),
+                    "🦀".repeat(BRIEF_CONTEXT_MAX_SCALARS),
+                )
+            })
+            .collect(),
+    );
+
+    let text = render_prompt_text(&package, RenderMode::Brief);
+    assert!(text.chars().count() <= BRIEF_CONTEXT_MAX_SCALARS);
+    assert!(text.matches("- [").count() <= BRIEF_CONTEXT_MAX_ITEMS);
 }

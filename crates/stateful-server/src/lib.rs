@@ -21,7 +21,7 @@ use policy_service::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use stateful_core::{
-    ActivityPhase, ContextPackage, ReconciliationDecision, RenderMode,
+    ContextPackage, PresencePhase, ReconciliationDecision, RenderMode,
     normalized_relative_path_is_empty, render_prompt_text,
 };
 use stateful_store::{
@@ -1168,7 +1168,7 @@ async fn activity_finalize(
                 .finalize_session_activity_with_phase(
                     &input.agent_id,
                     &input.workspace_id,
-                    input.phase.unwrap_or(ActivityPhase::Done),
+                    input.phase.unwrap_or(PresencePhase::Done),
                 )
                 .map_err(|error| error.to_string())
         });
@@ -2001,7 +2001,7 @@ struct ActivityRequest {
     agent_id: String,
     workspace_id: String,
     #[serde(default)]
-    phase: Option<ActivityPhase>,
+    phase: Option<PresencePhase>,
 }
 
 #[derive(Debug, Default, Deserialize)]

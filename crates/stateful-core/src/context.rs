@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 pub const AGENT_CONTEXT_SCOPE_SOURCE_REF: &str = "AgentContextScope";
+pub const BRIEF_CONTEXT_MAX_ITEMS: usize = 8;
+pub const BRIEF_CONTEXT_MAX_SCALARS: usize = 1_200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderMode {
@@ -278,7 +280,7 @@ enum ContextStatus {
 pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String {
     let mut output = String::new();
     let max_total = match mode {
-        RenderMode::Brief => 8,
+        RenderMode::Brief => BRIEF_CONTEXT_MAX_ITEMS,
         RenderMode::Detailed => 20,
     };
     let mut rendered = 0usize;
@@ -386,6 +388,9 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
         &mut rendered,
     );
 
+    if matches!(mode, RenderMode::Brief) && output.chars().count() > BRIEF_CONTEXT_MAX_SCALARS {
+        output = output.chars().take(BRIEF_CONTEXT_MAX_SCALARS).collect();
+    }
     output
 }
 

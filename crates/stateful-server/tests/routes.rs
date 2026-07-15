@@ -876,7 +876,7 @@ async fn blocked_activity_phase_denies_authorized_write() {
     assert_eq!(claim.status(), StatusCode::OK);
     let blocker = Store::open(&db_path).expect("file store should reopen");
     blocker
-        .append_activity_with_phase("s1", "w1", stateful_core::ActivityPhase::Blocked)
+        .append_activity_with_phase("s1", "w1", stateful_core::PresencePhase::Blocked)
         .expect("blocked activity should append");
 
     let blocked = app

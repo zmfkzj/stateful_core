@@ -12,8 +12,8 @@ pub use human::{
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use stateful_core::{
-    AGENT_CONTEXT_SCOPE_SOURCE_REF, ActivityPhase, CurrentEvidenceKind, CurrentFreshness,
-    CurrentItem, CurrentItemKind, CurrentSeverity, PolicyState, ReconciliationDecision,
+    AGENT_CONTEXT_SCOPE_SOURCE_REF, CurrentEvidenceKind, CurrentFreshness, CurrentItem,
+    CurrentItemKind, CurrentSeverity, PolicyState, PresencePhase, ReconciliationDecision,
     ReservationScope, normalize_relative_path,
 };
 use std::time::Duration as StdDuration;
@@ -1155,7 +1155,7 @@ impl Store {
         &self,
         agent_id: &str,
         workspace_id: &str,
-    ) -> StoreResult<Option<ActivityPhase>> {
+    ) -> StoreResult<Option<PresencePhase>> {
         let now = now_timestamp();
         self.conn
             .query_row(
@@ -1192,7 +1192,7 @@ impl Store {
 
         let mut state = PolicyState::default().with_active_reservation_scopes(scopes);
         if let Some(phase) = phase {
-            state = state.with_activity_phase(phase);
+            state = state.with_presence_phase(phase);
         }
 
         Ok(state)
@@ -1266,7 +1266,7 @@ impl Store {
 
         let mut state = PolicyState::default().with_active_reservation_scopes(scopes);
         if let Some(phase) = self.active_session_phase(&agent_id, workspace_id)? {
-            state = state.with_activity_phase(phase);
+            state = state.with_presence_phase(phase);
         }
 
         Ok(state)
@@ -2285,7 +2285,7 @@ impl Store {
                 self.append_activity_inner(
                     &event.agent_id,
                     &event.workspace_id,
-                    ActivityPhase::Exploring,
+                    PresencePhase::Exploring,
                 )?;
             }
             EventType::ClaimAcquired
@@ -2766,14 +2766,14 @@ fn now_timestamp() -> String {
     format_timestamp(OffsetDateTime::now_utc())
 }
 
-fn parse_activity_phase(phase: &str) -> Option<ActivityPhase> {
+fn parse_activity_phase(phase: &str) -> Option<PresencePhase> {
     match phase {
-        "exploring" => Some(ActivityPhase::Exploring),
-        "editing" => Some(ActivityPhase::Editing),
-        "testing" => Some(ActivityPhase::Testing),
-        "blocked" => Some(ActivityPhase::Blocked),
-        "done" => Some(ActivityPhase::Done),
-        "failed" => Some(ActivityPhase::Failed),
+        "exploring" => Some(PresencePhase::Exploring),
+        "editing" => Some(PresencePhase::Editing),
+        "testing" => Some(PresencePhase::Testing),
+        "blocked" => Some(PresencePhase::Blocked),
+        "done" => Some(PresencePhase::Done),
+        "failed" => Some(PresencePhase::Failed),
         _ => None,
     }
 }

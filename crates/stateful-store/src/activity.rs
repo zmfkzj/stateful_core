@@ -6,14 +6,14 @@ impl Store {
         agent_id: impl AsRef<str>,
         workspace_id: impl AsRef<str>,
     ) -> StoreResult<()> {
-        self.append_activity_with_phase(agent_id, workspace_id, ActivityPhase::Exploring)
+        self.append_activity_with_phase(agent_id, workspace_id, PresencePhase::Exploring)
     }
 
     pub fn append_activity_with_phase(
         &self,
         agent_id: impl AsRef<str>,
         workspace_id: impl AsRef<str>,
-        phase: ActivityPhase,
+        phase: PresencePhase,
     ) -> StoreResult<()> {
         self.append_activity_inner(agent_id.as_ref(), workspace_id.as_ref(), phase)
     }
@@ -22,7 +22,7 @@ impl Store {
         &self,
         agent_id: &str,
         workspace_id: &str,
-        phase: ActivityPhase,
+        phase: PresencePhase,
     ) -> StoreResult<()> {
         let now = now_timestamp();
         let expires_at = timestamp_after(&now, ACTIVITY_TTL_SECONDS)?;
@@ -51,14 +51,14 @@ impl Store {
         agent_id: impl AsRef<str>,
         workspace_id: impl AsRef<str>,
     ) -> StoreResult<(u64, u64)> {
-        self.finalize_session_activity_with_phase(agent_id, workspace_id, ActivityPhase::Done)
+        self.finalize_session_activity_with_phase(agent_id, workspace_id, PresencePhase::Done)
     }
 
     pub fn finalize_session_activity_with_phase(
         &self,
         agent_id: impl AsRef<str>,
         workspace_id: impl AsRef<str>,
-        _phase: ActivityPhase,
+        _phase: PresencePhase,
     ) -> StoreResult<(u64, u64)> {
         let agent_id = agent_id.as_ref().to_string();
         let workspace_id = workspace_id.as_ref().to_string();
