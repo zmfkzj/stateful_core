@@ -1,7 +1,7 @@
 # Task 5 Report
 
 ## Status
-Implementation and package verification are complete; commit/push remains pending.
+Implementation and package verification are complete in `940f664`, pushed to `origin/presence-first-event-journal-v2`.
 
 ## Verification
 The approved package command below is the current verification evidence.
@@ -10,7 +10,7 @@ The approved package command below is the current verification evidence.
 The aggregate regression suite covers reservation heartbeat/release/expiry, FIFO wait grant/cancel and non-conflicting directory fanout, claim acquire/refresh/release, fences, human attribution, notification coalescing/expiry/delivery, outbox delivery, idempotent callbacks, terminal activity, replay, receipts, and rollback.
 
 ## Concerns
-Commit/push remains pending.
+None.
 
 ## Aggregate lifecycle blocker follow-up
 
