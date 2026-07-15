@@ -240,10 +240,10 @@ fn delivery_callbacks_are_idempotent_and_terminal_activity_emits_no_notification
     let notification = store.create_notification(&request("agent-1", Uuid::new_v4(), NotificationCreate {
         target_agent_id: "agent-2".into(), kind: "context".into(), payload: json!({"v": 1}), coalesce_key: Some("context-agent-2".into()),
     })).expect("notification queues").response;
-    let delivery = request("agent-1", Uuid::new_v4(), NotificationDelivery { notification_id: notification.notification_id.clone(), outcome: DeliveryAttempt::Delivered, error: None, retry_at: None });
+    let delivery = request("agent-1", Uuid::new_v4(), NotificationDelivery { notification_id: notification.notification_id.clone(), sequence: notification.sequence, outcome: DeliveryAttempt::Delivered, error: None, retry_at: None });
     store.record_notification_delivery(&delivery).expect("delivery records");
     let before = store.journal_event_count().expect("journal count");
-    store.record_notification_delivery(&request("agent-1", Uuid::new_v4(), NotificationDelivery { notification_id: notification.notification_id.clone(), outcome: DeliveryAttempt::Delivered, error: None, retry_at: None }))
+    store.record_notification_delivery(&request("agent-1", Uuid::new_v4(), NotificationDelivery { notification_id: notification.notification_id.clone(), sequence: notification.sequence, outcome: DeliveryAttempt::Delivered, error: None, retry_at: None }))
         .expect("repeated callback is inert");
     assert_eq!(store.journal_event_count().expect("journal count"), before);
     store.start_activity(&request("agent-1", Uuid::new_v4(), ActivityStart { phase: stateful_core::PresencePhase::Editing })).expect("activity starts");
@@ -305,7 +305,7 @@ fn notifications_coalesce_and_expire_through_journaled_commands() {
     assert_eq!(
         store.pending_notifications("agent-2", "workspace-1").expect("pending notifications")
             .into_iter().map(|notification| notification.sequence).collect::<Vec<_>>(),
-        vec![1, 2],
+        vec![2, 3],
     );
 
     clock.advance(Duration::minutes(3));
@@ -708,7 +708,7 @@ fn expired_notification_callback_is_inert() {
     let before = store.journal_event_count().expect("journal count");
 
     let callback = store.record_notification_delivery(&request("agent-1", Uuid::new_v4(), NotificationDelivery {
-        notification_id: notification.notification_id.clone(), outcome: DeliveryAttempt::Delivered, error: None, retry_at: None,
+        notification_id: notification.notification_id.clone(), sequence: notification.sequence, outcome: DeliveryAttempt::Delivered, error: None, retry_at: None,
     })).expect("late callback is accepted inertly");
 
     assert_eq!(callback.response.status, "queued");

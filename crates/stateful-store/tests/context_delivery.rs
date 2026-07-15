@@ -1,10 +1,10 @@
 use stateful_core::{
-    ActorType, AgentIdentity, ContextDelta, RenderMode, RequestEnvelope, SourceKind, SourceRef,
-    WorkspaceIdentity,
+    AGENT_CONTEXT_SCOPE_SOURCE_REF, ActorType, AgentIdentity, ContextDelta, CurrentItemKind,
+    RenderMode, RequestEnvelope, SourceKind, SourceRef, WorkspaceIdentity,
 };
 use stateful_store::{
-    Clock, ContextAcknowledgement, ContextRender, FixedClock, ReservationDeclaration, ReservationRelease,
-    Store,
+    Clock, ContextAcknowledgement, ContextRender, DeliveryAttempt, FixedClock, NotificationCreate,
+    NotificationDelivery, ReservationDeclaration, ReservationRelease, Store, WaitRequest,
 };
 use std::sync::{Arc, Mutex};
 use time::{Duration, OffsetDateTime, macros::datetime};
@@ -468,5 +468,192 @@ fn overflow_uses_an_exact_summary_after_twenty_and_dead_letters_after_sixty_four
             .expect("overflow delivery exists")
             .status,
         "dead_letter",
+    );
+    assert_eq!(
+        store
+            .context_delivery("workspace-1", &delivery_ids[64])
+            .expect("overflow summary loads")
+            .expect("overflow summary exists")
+            .prompt_text,
+        "Context delivery queue: 64 unacknowledged deliveries; this is version 65.\n",
+    );
+}
+
+#[test]
+fn dead_letter_acknowledgement_keeps_the_persisted_cursor() {
+    let clock = MutableClock::new(NOW);
+    let store = Store::open_in_memory_with_clock(clock.clone()).expect("store opens");
+    store
+        .declare_reservation(&request(
+            "agent-1",
+            Uuid::new_v4(),
+            ReservationDeclaration {
+                relative_path: "src/dead.rs".into(),
+                action: "write_file".into(),
+                purpose: "Dead letter test.".into(),
+            },
+        ))
+        .expect("state change succeeds");
+    let delta = store
+        .render_context(&request(
+            "agent-2",
+            Uuid::new_v4(),
+            ContextRender { mode: RenderMode::Brief, resource: None },
+        ))
+        .expect("render succeeds")
+        .response;
+    clock.advance(Duration::hours(24) + Duration::seconds(1));
+    store
+        .expire_context_deliveries(&request("agent-2", Uuid::new_v4(), ()))
+        .expect("expiry succeeds");
+
+    let acknowledgement = store
+        .acknowledge_context(&request(
+            "agent-2",
+            Uuid::new_v4(),
+            ContextAcknowledgement {
+                delivery_id: delta.delivery_id.expect("delivery id"),
+                sequence: delta.sequence.expect("sequence"),
+                workspace_version: delta.workspace_version,
+            },
+        ))
+        .expect("dead letter acknowledgement is inert")
+        .response;
+    assert_eq!(acknowledgement.cursor, 0);
+    assert_eq!(store.context_cursor("workspace-1", "agent-2").expect("cursor loads"), 0);
+}
+
+#[test]
+fn claimable_wait_is_actionable_and_own_coordination_is_active_scope() {
+    let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    let reservation = store
+        .declare_reservation(&request(
+            "agent-1",
+            Uuid::new_v4(),
+            ReservationDeclaration {
+                relative_path: "src/granted.rs".into(),
+                action: "write_file".into(),
+                purpose: "Current owner.".into(),
+            },
+        ))
+        .expect("reservation succeeds")
+        .response;
+    store
+        .request_wait(&request(
+            "agent-2",
+            Uuid::new_v4(),
+            WaitRequest {
+                relative_path: "src/granted.rs".into(),
+                action: "write_file".into(),
+                purpose: "Need the file.".into(),
+                blocking_agent_id: Some("agent-1".into()),
+            },
+        ))
+        .expect("wait succeeds");
+    store
+        .release_reservation(&request(
+            "agent-1",
+            Uuid::new_v4(),
+            ReservationRelease { reservation_id: reservation.reservation_id },
+        ))
+        .expect("release grants the wait");
+
+    let delta = store
+        .render_context(&request(
+            "agent-2",
+            Uuid::new_v4(),
+            ContextRender { mode: RenderMode::Brief, resource: None },
+        ))
+        .expect("render succeeds")
+        .response;
+    let grant = delta
+        .items
+        .iter()
+        .find(|item| item.kind == CurrentItemKind::ClaimableReservation)
+        .expect("claimable wait is included");
+    assert_eq!(grant.next_action.as_deref(), Some("Claim the granted reservation before it expires."));
+    assert!(grant.source_refs.iter().any(|source| source == AGENT_CONTEXT_SCOPE_SOURCE_REF));
+    assert!(
+        delta
+            .items
+            .iter()
+            .filter(|item| item.agent_id.as_deref() == Some("agent-2"))
+            .all(|item| item.source_refs.iter().any(|source| source == AGENT_CONTEXT_SCOPE_SOURCE_REF)),
+        "own coordination items are never represented as another agent's blocker",
+    );
+}
+
+#[test]
+fn stale_notification_callback_cannot_deliver_a_coalesced_newer_version() {
+    let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    let first = store
+        .create_notification(&request(
+            "agent-1",
+            Uuid::new_v4(),
+            NotificationCreate {
+                target_agent_id: "agent-2".into(),
+                kind: "context_invalidated".into(),
+                payload: serde_json::json!({"target_version": 1}),
+                coalesce_key: Some("context-agent-2".into()),
+            },
+        ))
+        .expect("first notification queues")
+        .response;
+    let second = store
+        .create_notification(&request(
+            "agent-1",
+            Uuid::new_v4(),
+            NotificationCreate {
+                target_agent_id: "agent-2".into(),
+                kind: "context_invalidated".into(),
+                payload: serde_json::json!({"target_version": 2}),
+                coalesce_key: Some("context-agent-2".into()),
+            },
+        ))
+        .expect("newer notification coalesces")
+        .response;
+    assert_ne!(first.sequence, second.sequence);
+    store
+        .record_notification_delivery(&request(
+            "agent-1",
+            Uuid::new_v4(),
+            NotificationDelivery {
+                notification_id: first.notification_id,
+                sequence: first.sequence,
+                outcome: DeliveryAttempt::Delivered,
+                error: None,
+                retry_at: None,
+            },
+        ))
+        .expect("stale callback is accepted inertly");
+    let notification = store
+        .pending_notifications("agent-2", "workspace-1")
+        .expect("notification loads")
+        .into_iter()
+        .next()
+        .expect("newer notification remains queued");
+    assert_eq!(notification.sequence, second.sequence);
+    assert_eq!(notification.payload["target_version"], 2);
+}
+
+#[test]
+fn context_invalidated_notification_lifecycle_does_not_advance_context_version() {
+    let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    store
+        .create_notification(&request(
+            "agent-1",
+            Uuid::new_v4(),
+            NotificationCreate {
+                target_agent_id: "agent-2".into(),
+                kind: "context_invalidated".into(),
+                payload: serde_json::json!({"target_version": 7}),
+                coalesce_key: Some("context-agent-2".into()),
+            },
+        ))
+        .expect("notification queues");
+    assert_eq!(
+        store.workspace_version("workspace-1").expect("version loads"),
+        0,
+        "delivery transport is not coordination state",
     );
 }

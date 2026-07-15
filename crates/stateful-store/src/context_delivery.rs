@@ -105,6 +105,7 @@ impl Store {
                 input.resource.as_deref(),
             )?;
             let outstanding = deliveries.iter().filter(|delivery| is_unacknowledged(delivery)).count();
+            let dead_letter = outstanding >= CONTEXT_DELIVERY_DEAD_LETTER_THRESHOLD;
             if outstanding >= CONTEXT_DELIVERY_SUMMARY_THRESHOLD {
                 items.clear();
             }
@@ -128,7 +129,7 @@ impl Store {
             if outstanding >= CONTEXT_DELIVERY_SUMMARY_THRESHOLD {
                 delivery.prompt_text = format!(
                     "Context delivery queue: {} unacknowledged deliveries; this is version {}.\n",
-                    outstanding + 1,
+                    outstanding + usize::from(!dead_letter),
                     current_version,
                 );
             }
@@ -152,7 +153,7 @@ impl Store {
                 &delivery,
             )?);
 
-            if outstanding >= CONTEXT_DELIVERY_DEAD_LETTER_THRESHOLD {
+            if dead_letter {
                 delivery.status = DELIVERY_DEAD_LETTER.into();
                 events.push(context_delivery_recovery_event(
                     request,
@@ -208,7 +209,7 @@ impl Store {
                     events: Vec::new(),
                     response: ContextAcknowledgementResult {
                         acknowledged_version,
-                        cursor: cursor.max(acknowledged_version),
+                        cursor,
                     },
                     http_status: 200,
                 });
@@ -407,11 +408,18 @@ fn context_notification<T>(
     now: OffsetDateTime,
     delivery: &ContextDeliveryRecord,
 ) -> StoreResult<(NotificationRecord, fn(EventData) -> NotificationEvent)> {
-    let mut queued = typed_records::<NotificationRecord>(
+    let notifications = typed_records::<NotificationRecord>(
         reader,
         CurrentAggregate::Notification,
         &request.workspace.workspace_id,
-    )?
+    )?;
+    let next_sequence = notifications
+        .iter()
+        .filter(|notification| notification.target_agent_id == request.agent.agent_id)
+        .map(|notification| notification.sequence)
+        .max()
+        .unwrap_or(0) + 1;
+    let mut queued = notifications
     .into_iter()
     .find(|notification| {
         notification.status == "queued"
@@ -419,6 +427,7 @@ fn context_notification<T>(
             && notification.kind == CONTEXT_INVALIDATED_KIND
     });
     let variant = if let Some(notification) = queued.as_mut() {
+        notification.sequence = next_sequence;
         notification.payload = json!({
             "delivery_id": delivery.delivery_id,
             "sequence": delivery.sequence,
@@ -427,17 +436,7 @@ fn context_notification<T>(
         notification.expires_at = Some(timestamp(now + CONTEXT_DELIVERY_TTL)?);
         NotificationEvent::Coalesced
     } else {
-        let sequence = typed_records::<NotificationRecord>(
-            reader,
-            CurrentAggregate::Notification,
-            &request.workspace.workspace_id,
-        )?
-        .into_iter()
-        .filter(|notification| notification.target_agent_id == request.agent.agent_id)
-        .map(|notification| notification.sequence)
-        .max()
-        .unwrap_or(0)
-            + 1;
+        let sequence = next_sequence;
         queued = Some(NotificationRecord {
             notification_id: Uuid::new_v4().to_string(),
             sequence,
@@ -546,7 +545,7 @@ fn changed_current_items(
                     if let Some(record) = reader.aggregate_records(aggregate, workspace_id)?
                         .into_iter()
                         .find(|record| record.aggregate_id == *aggregate_id)
-                        && let Some(item) = item_from_current(kind, record, workspace_id, resource_filter)
+                        && let Some(item) = item_from_current(kind, record, workspace_id, target_agent_id, resource_filter)
                     {
                         items.push(item);
                     }
@@ -575,6 +574,7 @@ fn item_from_current(
     kind: &str,
     record: CurrentRecord,
     workspace_id: &str,
+    target_agent_id: &str,
     resource_filter: Option<&str>,
 ) -> Option<CurrentItem> {
     let value = record.payload;
@@ -589,36 +589,48 @@ fn item_from_current(
     }
     let agent_id = value.get("agent_id").and_then(Value::as_str);
     let purpose = value.get("purpose").and_then(Value::as_str).unwrap_or("Coordinate with related work.");
-    let (item_kind, severity, summary) = match kind {
+    let (item_kind, severity, summary, next_action) = match kind {
         "reservation" if status == "active" => (
             CurrentItemKind::Reservation,
             CurrentSeverity::Warn,
             format!("Agent {} reserved {resource}.", agent_id.unwrap_or("another agent")),
+            "Coordinate with the reservation owner before editing this resource.",
         ),
         "claim" if status == "active" => (
             CurrentItemKind::Claim,
             CurrentSeverity::Block,
             format!("Agent {} holds an active claim on {resource}.", agent_id.unwrap_or("another agent")),
+            "Wait for the active claim to release or coordinate with its owner.",
         ),
         "wait" if matches!(status, "queued" | "waiting") => (
             CurrentItemKind::WaitQueue,
             CurrentSeverity::Warn,
             format!("Agent {} is queued for {resource}.", agent_id.unwrap_or("another agent")),
+            "Wait for the reservation to become claimable.",
+        ),
+        "wait" if status == "claimable" => (
+            CurrentItemKind::ClaimableReservation,
+            CurrentSeverity::Warn,
+            format!("Agent {} has a claimable reservation for {resource}.", agent_id.unwrap_or("another agent")),
+            "Claim the granted reservation before it expires.",
         ),
         "write_fence" if status == "active" => (
             CurrentItemKind::Claim,
             CurrentSeverity::Block,
             format!("Agent {} has a write fence on {resource}.", agent_id.unwrap_or("another agent")),
+            "Wait for the write fence to release or coordinate with its owner.",
         ),
         "human_observation" if status == "unreconciled" => (
             CurrentItemKind::Claim,
             CurrentSeverity::Block,
             format!("{resource} has an unreconciled human write."),
+            "Reread the resource, summarize the human change, then acknowledge reconciliation.",
         ),
         "write_intent" if status == "outcome_unknown" => (
             CurrentItemKind::Claim,
             CurrentSeverity::Block,
             format!("The write outcome for {resource} is unknown."),
+            "Perform a fresh exact read and reconcile the unknown write outcome.",
         ),
         _ => return None,
     };
@@ -630,9 +642,14 @@ fn item_from_current(
         purpose,
         summary,
     )
+    .with_next_action(next_action)
     .with_workspace(workspace_id);
     if let Some(agent_id) = agent_id {
         item = item.with_agent(agent_id);
+        if agent_id == target_agent_id {
+            item.severity = CurrentSeverity::Info;
+            item.source_refs.push(stateful_core::AGENT_CONTEXT_SCOPE_SOURCE_REF.into());
+        }
     }
     Some(item)
 }

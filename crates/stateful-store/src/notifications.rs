@@ -28,6 +28,7 @@ pub enum DeliveryAttempt { Attempted, Delivered, Failed }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationDelivery {
     pub notification_id: String,
+    pub sequence: u64,
     pub outcome: DeliveryAttempt,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -82,6 +83,12 @@ impl Store {
                 return Err(StoreError::MissingScope);
             }
             let notifications = typed_records::<NotificationRecord>(reader, CurrentAggregate::Notification, &request.workspace.workspace_id)?;
+            let next_sequence = notifications
+                .iter()
+                .filter(|notification| notification.target_agent_id == payload.target_agent_id)
+                .map(|notification| notification.sequence)
+                .max()
+                .unwrap_or(0) + 1;
             let mut notification = notifications.into_iter().find(|notification| {
                 notification.status == "queued"
                     && notification.target_agent_id == payload.target_agent_id
@@ -91,16 +98,12 @@ impl Store {
             });
             let created = notification.is_none();
             let variant = if let Some(existing) = notification.as_mut() {
+                existing.sequence = next_sequence;
                 existing.payload = payload.payload.clone();
                 existing.expires_at = Some(timestamp(now + NOTIFICATION_TTL)?);
                 NotificationEvent::Coalesced
             } else {
-                let sequence = typed_records::<NotificationRecord>(reader, CurrentAggregate::Notification, &request.workspace.workspace_id)?
-                    .into_iter()
-                    .filter(|notification| notification.target_agent_id == payload.target_agent_id)
-                    .map(|notification| notification.sequence)
-                    .max()
-                    .unwrap_or(0) + 1;
+                let sequence = next_sequence;
                 notification = Some(NotificationRecord {
                     notification_id: Uuid::new_v4().to_string(),
                     sequence,
@@ -130,7 +133,7 @@ impl Store {
             };
             let mut events = vec![notification_event(request, 0, now, variant, &notification)?];
             if created {
-                events.push(delivery_event(request, 1, now, RecoveryEvent::Queued, &delivery)?);
+                events.push(notification_delivery_event(request, 1, now, RecoveryEvent::Queued, &delivery, &notification)?);
             }
             Ok(CommandPlan { events, response: notification, http_status: 200 })
         })
@@ -153,7 +156,10 @@ impl Store {
                     workspace_id: request.workspace.workspace_id.clone(), status: "queued".into(), attempts: 0,
                     last_error: None, retry_at: None, delivered_at: None, origin_event_seq: 0,
                 });
-            if delivery.status == "delivered" || notification.status == "expired" {
+            if notification.sequence != payload.sequence
+                || delivery.status == "delivered"
+                || notification.status == "expired"
+            {
                 return Ok(CommandPlan { events: Vec::new(), response: delivery, http_status: 200 });
             }
             let (variant, status): (fn(EventData) -> RecoveryEvent, &str) = match payload.outcome {
@@ -172,7 +178,7 @@ impl Store {
             delivery.last_error = payload.error;
             delivery.retry_at = payload.retry_at.map(timestamp).transpose()?;
             if matches!(payload.outcome, DeliveryAttempt::Delivered) { delivery.delivered_at = Some(timestamp(now)?); }
-            let mut events = vec![delivery_event(request, 0, now, variant, &delivery)?];
+            let mut events = vec![notification_delivery_event(request, 0, now, variant, &delivery, &notification)?];
             if matches!(payload.outcome, DeliveryAttempt::Delivered) && notification.status != "delivered" {
                 let mut notification = notification;
                 notification.status = "delivered".into();
@@ -238,5 +244,21 @@ pub(crate) fn delivery_event<T>(
 ) -> StoreResult<NewEvent> {
     let mut data = EventData::new(&delivery.delivery_id);
     data.data = json!({"delivery": delivery});
+    NewEvent::new(request.request_id, ordinal, now, EventPayload::Recovery(variant(data))).map_err(StoreError::from)
+}
+
+fn notification_delivery_event<T>(
+    request: &RequestEnvelope<T>,
+    ordinal: u32,
+    now: OffsetDateTime,
+    variant: fn(EventData) -> RecoveryEvent,
+    delivery: &DeliveryRecord,
+    notification: &NotificationRecord,
+) -> StoreResult<NewEvent> {
+    let mut data = EventData::new(&delivery.delivery_id);
+    data.data = json!({
+        "delivery": delivery,
+        "notification_kind": notification.kind,
+    });
     NewEvent::new(request.request_id, ordinal, now, EventPayload::Recovery(variant(data))).map_err(StoreError::from)
 }
