@@ -324,7 +324,7 @@ fn delivery_callbacks_are_idempotent_and_terminal_activity_emits_no_notification
     store.start_activity(&request("agent-1", Uuid::new_v4(), ActivityStart { phase: stateful_core::PresencePhase::Editing })).expect("activity starts");
     let before_finalize = store.journal_event_count().expect("journal count");
     store.finalize_activity(&request("agent-1", Uuid::new_v4(), ActivityFinalization {})).expect("activity finalizes");
-    assert_eq!(store.journal_event_count().expect("journal count"), before_finalize + 1);
+    assert_eq!(store.journal_event_count().expect("journal count"), before_finalize + 6);
     store.rebuild_projections().expect("all aggregates replay");
 }
 
@@ -862,4 +862,116 @@ fn expired_notification_callback_is_inert() {
     assert_eq!(callback.response.status, "queued");
     assert_eq!(store.journal_event_count().expect("journal count"), before);
     assert_eq!(store.pending_notifications("agent-2", "workspace-1").expect("pending notifications").len(), 0);
+}
+
+#[test]
+fn reservation_expiry_ends_child_claims_before_promoted_successor_acquires() {
+    let clock = MutableClock::new(NOW);
+    let mut store = Store::open_in_memory_with_clock(clock.clone()).expect("store opens");
+    let reservation = store
+        .declare_reservation(&request("agent-1", Uuid::new_v4(), declaration("src/lib.rs")))
+        .expect("owner reservation should declare")
+        .response;
+    let claim = store
+        .acquire_claim(&request(
+            "agent-1",
+            Uuid::new_v4(),
+            ClaimAcquire {
+                reservation_id: reservation.reservation_id.clone(),
+                paths: vec![ClaimPath { relative_path: "src/lib.rs".into(), observation: None }],
+            },
+        ))
+        .expect("owner claim should acquire")
+        .response
+        .claims
+        .remove(0);
+    let wait = store
+        .request_wait(&request(
+            "agent-2",
+            Uuid::new_v4(),
+            WaitRequest {
+                relative_path: "src/lib.rs".into(),
+                action: "write_file".into(),
+                purpose: "Need the file.".into(),
+                blocking_agent_id: Some("agent-1".into()),
+            },
+        ))
+        .expect("successor should queue")
+        .response;
+    clock.advance(Duration::minutes(16));
+
+    store
+        .expire_reservations(&request("agent-1", Uuid::new_v4(), ()))
+        .expect("reservation should expire");
+
+    assert_eq!(
+        store.claim("workspace-1", &claim.claim_id).expect("claim should load").expect("claim should exist").status,
+        "released",
+    );
+    let promoted = store.wait("workspace-1", &wait.wait_id).expect("wait should load").expect("wait should exist");
+    let acquisition = store.acquire_claim(&request(
+        "agent-2",
+        Uuid::new_v4(),
+        ClaimAcquire {
+            reservation_id: promoted.reservation_id.expect("claimable reservation"),
+            paths: vec![ClaimPath { relative_path: "src/lib.rs".into(), observation: None }],
+        },
+    ));
+    assert!(acquisition.is_ok(), "promoted successor should claim immediately");
+    store.rebuild_projections().expect("expiry and successor acquisition should replay");
+}
+
+#[test]
+fn ttl_batch_finalization_releases_all_blockers_before_promoting_directory_waiter() {
+    let clock = MutableClock::new(NOW);
+    let mut store = Store::open_in_memory_with_clock(clock.clone()).expect("store opens");
+    let mut reservation_ids = Vec::new();
+    for (agent_id, path) in [("agent-1", "src/a.rs"), ("agent-2", "src/b.rs")] {
+        store
+            .start_activity(&request(
+                agent_id,
+                Uuid::new_v4(),
+                ActivityStart { phase: stateful_core::PresencePhase::Editing },
+            ))
+            .expect("activity should start");
+        let reservation = store
+            .declare_reservation(&request(agent_id, Uuid::new_v4(), declaration(path)))
+            .expect("blocker reservation should declare")
+            .response;
+        reservation_ids.push((agent_id, reservation.reservation_id));
+    }
+    let wait = store
+        .request_wait(&request(
+            "agent-3",
+            Uuid::new_v4(),
+            WaitRequest {
+                relative_path: "src/".into(),
+                action: "write_directory".into(),
+                purpose: "Need the directory.".into(),
+                blocking_agent_id: None,
+            },
+        ))
+        .expect("directory wait should queue")
+        .response;
+    clock.advance(Duration::minutes(10));
+    for (agent_id, reservation_id) in reservation_ids {
+        store
+            .heartbeat_reservation(&request(
+                agent_id,
+                Uuid::new_v4(),
+                ReservationHeartbeat { reservation_id },
+            ))
+            .expect("blocker reservation should remain live");
+    }
+    clock.advance(Duration::minutes(6));
+
+    store
+        .expire_stale_presences(&request("agent-1", Uuid::new_v4(), ()))
+        .expect("stale presences should finalize");
+
+    assert_eq!(
+        store.wait("workspace-1", &wait.wait_id).expect("wait should load").expect("wait should exist").status,
+        "claimable",
+    );
+    store.rebuild_projections().expect("batched ttl finalization should replay");
 }

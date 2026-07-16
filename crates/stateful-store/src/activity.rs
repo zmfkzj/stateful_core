@@ -1,13 +1,9 @@
 use crate::{
-    ClaimRecord, CommandOutcome, CommandPlan, CurrentAggregate, ReservationRecord, Store, StoreResult,
-    WaitRecord, WriteFenceRecord,
-    claims::claim_event,
+    CommandOutcome, CommandPlan, Store, StoreResult,
     presence::{presence_event, register_record},
-    reservations::{append_grant_for_path, reservation_event, scope_path, typed_records, wait_event},
-    write_fences::fence_event,
 };
 use serde::{Deserialize, Serialize};
-use stateful_core::{ClaimEvent, EventData, EventPayload, PresenceEvent, PresencePhase, RequestEnvelope, ReservationEvent, WaitEvent, WriteFenceEvent};
+use stateful_core::{PresenceEvent, PresencePhase, RequestEnvelope};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActivityStart {
@@ -43,6 +39,15 @@ impl Store {
         request: &RequestEnvelope<ActivityFinalization>,
     ) -> StoreResult<CommandOutcome<ActivityOutcome>> {
         let now = self.clock.now();
+        let finalization_request = RequestEnvelope {
+            protocol_version: request.protocol_version,
+            request_id: request.request_id,
+            observed_at: request.observed_at,
+            agent: request.agent.clone(),
+            workspace: request.workspace.clone(),
+            source: request.source.clone(),
+            payload: (),
+        };
         self.execute_command(request, "activity.finalize", |reader| {
             if reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?.is_none() {
                 return Ok(CommandPlan {
@@ -51,63 +56,10 @@ impl Store {
                     http_status: 200,
                 });
             }
-            let mut data = EventData::new(&request.agent.agent_id);
-            data.data = serde_json::json!({"agent_id": request.agent.agent_id, "status": "finalized"});
-            let mut events = vec![stateful_core::NewEvent::new(
-                request.request_id, 0, now, EventPayload::Presence(PresenceEvent::Finalized(data)),
-            )?];
-            let workspace_id = &request.workspace.workspace_id;
-            let mut released_reservations = Vec::new();
-            for mut reservation in typed_records::<ReservationRecord>(reader, CurrentAggregate::Reservation, workspace_id)? {
-                if reservation.agent_id == request.agent.agent_id && reservation.status == "active" {
-                    reservation.status = "released".into();
-                    released_reservations.push(reservation.clone());
-                    events.push(reservation_event(request, events.len() as u32, now, ReservationEvent::Released, &reservation)?);
-                }
-            }
-            let released_reservation_ids = released_reservations.iter()
-                .map(|reservation| reservation.reservation_id.clone())
-                .collect::<Vec<_>>();
-            for mut claim in typed_records::<ClaimRecord>(reader, CurrentAggregate::Claim, workspace_id)? {
-                if claim.agent_id == request.agent.agent_id && claim.status == "active" {
-                    claim.status = "released".into();
-                    events.push(claim_event(request, events.len() as u32, now, ClaimEvent::Released, &claim)?);
-                }
-            }
-            let mut cancelled_wait_ids = Vec::new();
-            for mut wait in typed_records::<WaitRecord>(reader, CurrentAggregate::Wait, workspace_id)? {
-                if wait.agent_id == request.agent.agent_id && matches!(wait.status.as_str(), "queued" | "claimable") {
-                    wait.status = "canceled".into();
-                    wait.reservation_expires_at = None;
-                    cancelled_wait_ids.push(wait.wait_id.clone());
-                    events.push(wait_event(request, events.len() as u32, now, WaitEvent::Cancelled, &wait)?);
-                }
-            }
-            for mut fence in typed_records::<WriteFenceRecord>(reader, CurrentAggregate::WriteFence, workspace_id)? {
-                if fence.agent_id == request.agent.agent_id && fence.status == "active" {
-                    fence.status = "released".into();
-                    fence.released_at = Some(crate::reservations::timestamp(now)?);
-                    events.push(fence_event(request, events.len() as u32, now, WriteFenceEvent::Released, &fence)?);
-                }
-            }
-            for reservation in released_reservations {
-                for scope in &reservation.scopes {
-                    append_grant_for_path(
-                        request,
-                        reader,
-                        now,
-                        workspace_id,
-                        &scope_path(scope),
-                        &released_reservation_ids,
-                        &cancelled_wait_ids,
-                        true,
-                        &mut events,
-                    )?;
-                }
-            }
+            let plan = crate::handoff::fallback_plan(&finalization_request, reader, now, "stop", 0)?;
             Ok(CommandPlan {
-                events,
-                response: ActivityOutcome { finalized: true },
+                events: plan.events,
+                response: ActivityOutcome { finalized: plan.response.is_some() },
                 http_status: 200,
             })
         })

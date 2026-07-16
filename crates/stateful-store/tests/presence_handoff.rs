@@ -4,8 +4,8 @@ use stateful_core::{
     WriteIntentStatus, WriteTarget,
 };
 use stateful_store::{
-    Clock, FixedClock, PresenceRegistration, PresenceResourceUpdate, PresenceToolResult,
-    PresenceToolStart, Store,
+    ActivityFinalization, Clock, FixedClock, PresenceRegistration, PresenceResourceUpdate,
+    PresenceToolResult, PresenceToolStart, ReservationDeclaration, Store, WaitRequest,
 };
 use tempfile::TempDir;
 use std::sync::{Arc, Mutex};
@@ -744,4 +744,233 @@ fn expiry_preflight_compares_offset_timestamps_as_instants() {
     let receipts = future_store.command_receipt_count().expect("receipt count should load");
     assert!(presence(&mut future_store, "future").is_some());
     assert_eq!(future_store.command_receipt_count().expect("receipt count should load"), receipts);
+}
+
+#[test]
+fn activity_finalization_creates_one_replayable_fallback_handoff() {
+    let mut store = store();
+    store
+        .register_presence(&register_request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, None))
+        .expect("presence should register");
+    let finalization = request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, ActivityFinalization {});
+
+    store.finalize_activity(&finalization).expect("activity should finalize");
+
+    assert_eq!(
+        store.journal_event_types_for_request(finalization.request_id).expect("journal should load"),
+        vec![
+            "handoff.finalized",
+            "presence.finalized",
+            "reservation.released",
+            "claim.released",
+            "wait.cancelled",
+            "write_fence.released",
+        ],
+    );
+    assert!(handoff(&mut store, "agent-1").expect("fallback should exist").explicit == false);
+    assert!(presence(&mut store, "agent-1").is_none());
+    store.rebuild_projections().expect("fallback finalization should replay");
+
+    let before = store.journal_event_count().expect("journal should count");
+    let repeated = store.finalize_activity(&finalization).expect("receipt should replay");
+    assert!(repeated.duplicate);
+    assert_eq!(store.journal_event_count().expect("journal should count"), before);
+}
+
+#[test]
+fn re_registration_rejects_every_changed_immutable_identity_without_journal_mutation() {
+    let mut store = store();
+    store
+        .register_presence(&register_request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, None))
+        .expect("presence should register");
+    let before = store.journal_event_count().expect("journal should count");
+    let base = register_request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, None);
+
+    for mut changed in [
+        {
+            let mut request = base.clone();
+            request.agent.actor_id = "different-actor".into();
+            request
+        },
+        {
+            let mut request = base.clone();
+            request.agent.actor_type = ActorType::System;
+            request
+        },
+        {
+            let mut request = base.clone();
+            request.agent.owner_id = Some("different-owner".into());
+            request
+        },
+        {
+            let mut request = base.clone();
+            request.agent.parent_agent_id = Some("different-parent-agent".into());
+            request
+        },
+        {
+            let mut request = base;
+            request.agent.parent_actor_id = Some("different-parent-actor".into());
+            request
+        },
+    ] {
+        changed.request_id = Uuid::new_v4();
+        assert!(store.register_presence(&changed).is_err(), "changed identity must reject");
+        assert_eq!(store.journal_event_count().expect("journal should count"), before);
+    }
+    assert_eq!(presence(&mut store, "agent-1").expect("presence should remain").actor_id, "actor-1");
+}
+
+#[test]
+fn different_actor_cannot_finalize_or_stop_a_live_same_agent_presence() {
+    let mut store = store();
+    store
+        .register_presence(&register_request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, None))
+        .expect("presence should register");
+    let before = store.journal_event_count().expect("journal should count");
+    let explicit_handoff = ExplicitHandoff {
+        status: HandoffStatus::Done,
+        summary: "done".into(),
+        files_changed: vec![],
+        tests_run: vec![],
+        remaining_work: vec![],
+        next_plan: None,
+    };
+
+    assert!(store.finalize_handoff(&request(
+        Uuid::new_v4(), "agent-1", "different-actor", ActorType::Agent, explicit_handoff,
+    )).is_err());
+    assert!(store.stop_presence(&request(
+        Uuid::new_v4(), "agent-1", "different-actor", ActorType::Agent, (),
+    )).is_err());
+
+    assert_eq!(store.journal_event_count().expect("journal should count"), before);
+    assert!(presence(&mut store, "agent-1").is_some());
+    assert!(handoff(&mut store, "agent-1").is_none());
+}
+
+#[test]
+fn explicit_stop_and_ttl_finalization_promote_queued_successors() {
+    for mode in ["explicit", "stop", "ttl"] {
+        let clock = MutableClock::new(NOW);
+        let mut store = Store::open_in_memory_with_clock(clock.clone()).expect("store should open");
+        store
+            .register_presence(&register_request(Uuid::new_v4(), "owner", "owner-actor", ActorType::Agent, None))
+            .expect("owner should register");
+        store
+            .declare_reservation(&request(
+                Uuid::new_v4(),
+                "owner",
+                "owner-actor",
+                ActorType::Agent,
+                ReservationDeclaration {
+                    scopes: vec![stateful_core::ReservationScope::file("src/lib.rs")],
+                    action: "write_file".into(),
+                    purpose: "Own the file.".into(),
+                },
+            ))
+            .expect("owner reservation should declare");
+        let wait = store
+            .request_wait(&request(
+                Uuid::new_v4(),
+                "successor",
+                "successor-actor",
+                ActorType::Agent,
+                WaitRequest {
+                    relative_path: "src/lib.rs".into(),
+                    action: "write_file".into(),
+                    purpose: "Need the file.".into(),
+                    blocking_agent_id: Some("owner".into()),
+                },
+            ))
+            .expect("successor should queue")
+            .response;
+
+        match mode {
+            "explicit" => {
+                store.finalize_handoff(&request(
+                    Uuid::new_v4(),
+                    "owner",
+                    "owner-actor",
+                    ActorType::Agent,
+                    ExplicitHandoff {
+                        status: HandoffStatus::Done,
+                        summary: "done".into(),
+                        files_changed: vec![],
+                        tests_run: vec![],
+                        remaining_work: vec![],
+                        next_plan: None,
+                    },
+                )).expect("explicit finalization should succeed");
+            }
+            "stop" => {
+                store.stop_presence(&request(
+                    Uuid::new_v4(), "owner", "owner-actor", ActorType::Agent, (),
+                )).expect("stop should succeed");
+            }
+            "ttl" => {
+                clock.advance(Duration::minutes(16));
+                store.expire_stale_presences(&request(
+                    Uuid::new_v4(), "owner", "owner-actor", ActorType::Agent, (),
+                )).expect("ttl expiry should succeed");
+            }
+            _ => unreachable!(),
+        }
+
+        assert_eq!(
+            store.wait("workspace-1", &wait.wait_id).expect("wait should load").expect("wait should exist").status,
+            "claimable",
+            "{mode} finalization should promote the successor",
+        );
+        store.rebuild_projections().expect("finalization should replay");
+    }
+}
+
+#[test]
+fn resumed_presence_replaces_an_older_relevant_fallback_at_its_next_stop() {
+    let mut store = store();
+    store
+        .register_presence(&register_request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, None))
+        .expect("first presence should register");
+    store
+        .stop_presence(&request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, ()))
+        .expect("first stop should finalize");
+    let first = handoff(&mut store, "agent-1").expect("first fallback should exist");
+    store
+        .resume_presence(&register_request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, None))
+        .expect("presence should resume beside the relevant handoff");
+    let second_stop = request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, ());
+
+    store.stop_presence(&second_stop).expect("resumed presence should finalize");
+
+    assert!(store
+        .journal_event_types_for_request(second_stop.request_id)
+        .expect("journal should load")
+        .contains(&"handoff.finalized".into()));
+    assert!(
+        handoff(&mut store, "agent-1").expect("replacement fallback should exist").origin_event_seq > first.origin_event_seq,
+    );
+}
+
+#[test]
+fn re_registration_cannot_change_identity_while_a_relevant_handoff_is_retained() {
+    let mut store = store();
+    store
+        .register_presence(&register_request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, None))
+        .expect("presence should register");
+    store
+        .stop_presence(&request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, ()))
+        .expect("presence should stop");
+    let before = store.journal_event_count().expect("journal should count");
+
+    assert!(store
+        .register_presence(&register_request(
+            Uuid::new_v4(),
+            "agent-1",
+            "different-actor",
+            ActorType::Agent,
+            None,
+        ))
+        .is_err());
+
+    assert_eq!(store.journal_event_count().expect("journal should count"), before);
 }

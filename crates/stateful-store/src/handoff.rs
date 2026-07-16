@@ -1,5 +1,9 @@
 use crate::{
-    CommandOutcome, CommandPlan, CurrentAggregate, ProjectionReader, Store, StoreResult,
+    ClaimRecord, CommandOutcome, CommandPlan, CurrentAggregate, ProjectionReader, ReservationRecord,
+    Store, StoreError, StoreResult, WaitRecord, WriteFenceRecord,
+    claims::claim_event,
+    reservations::{append_grant_for_path, reservation_event, scope_path, typed_records, wait_event},
+    write_fences::fence_event,
 };
 use rusqlite::{OptionalExtension, params};
 use serde_json::json;
@@ -40,14 +44,55 @@ pub(crate) fn lazy_current_state_events<T>(
         source: request.source.clone(),
         payload: (),
     };
-    for presence in reader.live_presences(&request.workspace.workspace_id)? {
-        if presence.expires_at > now || presence.busy_until.is_some_and(|busy_until| busy_until > now) {
-            continue;
-        }
+    let stale_presences = reader
+        .live_presences(&request.workspace.workspace_id)?
+        .into_iter()
+        .filter(|presence| {
+            presence.expires_at <= now
+                && presence.busy_until.is_none_or(|busy_until| busy_until <= now)
+        })
+        .collect::<Vec<_>>();
+    let stale_agent_ids = stale_presences
+        .iter()
+        .map(|presence| presence.agent_id.as_str())
+        .collect::<Vec<_>>();
+    let released_reservations = typed_records::<ReservationRecord>(
+        reader,
+        CurrentAggregate::Reservation,
+        &request.workspace.workspace_id,
+    )?
+    .into_iter()
+    .filter(|reservation| reservation.status == "active" && stale_agent_ids.contains(&reservation.agent_id.as_str()))
+    .collect::<Vec<_>>();
+    let cancelled_wait_ids = typed_records::<WaitRecord>(reader, CurrentAggregate::Wait, &request.workspace.workspace_id)?
+        .into_iter()
+        .filter(|wait| {
+            stale_agent_ids.contains(&wait.agent_id.as_str())
+                && matches!(wait.status.as_str(), "queued" | "claimable")
+        })
+        .map(|wait| wait.wait_id)
+        .collect::<Vec<_>>();
+    for presence in stale_presences {
         let fallback_request = request_for_agent(&unit_request, &presence);
-        let plan = fallback_plan(&fallback_request, reader, now, "ttl", events.len() as u32)?;
+        let plan = fallback_plan_with_promotions(
+            &fallback_request,
+            reader,
+            now,
+            "ttl",
+            events.len() as u32,
+            false,
+        )?;
         events.extend(plan.events);
     }
+    append_waiter_promotions(
+        &unit_request,
+        reader,
+        now,
+        &request.workspace.workspace_id,
+        &released_reservations,
+        &cancelled_wait_ids,
+        &mut events,
+    )?;
     Ok(events)
 }
 
@@ -59,14 +104,20 @@ impl Store {
         request.payload.validate()?;
         let now = self.clock.now();
         self.execute_command(request, "handoff.finalize", |reader| {
-            if let Some(existing) = reader.handoff(&request.workspace.workspace_id, &request.agent.agent_id)?
-                && existing.explicit
-            {
-                return Ok(CommandPlan { events: vec![], response: existing, http_status: 200 });
-            }
             let presence = reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?;
+            if let Some(presence) = &presence {
+                ensure_presence_owner(request, presence)?;
+            }
+            if presence.is_none()
+                && let Some(existing) = reader.handoff(&request.workspace.workspace_id, &request.agent.agent_id)?
+            {
+                ensure_handoff_owner(request, &existing)?;
+                if existing.explicit {
+                    return Ok(CommandPlan { events: vec![], response: existing, http_status: 200 });
+                }
+            }
             let handoff = explicit_handoff_record(request, presence.as_ref(), now);
-            let events = finalization_events(request, &handoff, None, 0)?;
+            let events = finalization_events(request, reader, &handoff, None, 0, true)?;
             Ok(CommandPlan { events, response: handoff, http_status: 200 })
         })
     }
@@ -88,19 +139,63 @@ impl Store {
         let now = self.clock.now();
         self.execute_command(request, "presence.expire", |reader| {
             let mut events = Vec::new();
+            let stale_presences = reader
+                .live_presences(&request.workspace.workspace_id)?
+                .into_iter()
+                .filter(|presence| {
+                    presence.expires_at <= now
+                        && presence.busy_until.is_none_or(|busy_until| busy_until <= now)
+                })
+                .collect::<Vec<_>>();
+            let stale_agent_ids = stale_presences
+                .iter()
+                .map(|presence| presence.agent_id.as_str())
+                .collect::<Vec<_>>();
+            let released_reservations = typed_records::<ReservationRecord>(
+                reader,
+                CurrentAggregate::Reservation,
+                &request.workspace.workspace_id,
+            )?
+            .into_iter()
+            .filter(|reservation| reservation.status == "active" && stale_agent_ids.contains(&reservation.agent_id.as_str()))
+            .collect::<Vec<_>>();
+            let cancelled_wait_ids = typed_records::<WaitRecord>(
+                reader,
+                CurrentAggregate::Wait,
+                &request.workspace.workspace_id,
+            )?
+            .into_iter()
+            .filter(|wait| {
+                stale_agent_ids.contains(&wait.agent_id.as_str())
+                    && matches!(wait.status.as_str(), "queued" | "claimable")
+            })
+            .map(|wait| wait.wait_id)
+            .collect::<Vec<_>>();
             let mut expired = Vec::new();
-            for presence in reader.live_presences(&request.workspace.workspace_id)? {
-                if presence.expires_at > now || presence.busy_until.is_some_and(|busy_until| busy_until > now) {
-                    continue;
-                }
+            for presence in stale_presences {
                 let fallback_request = request_for_agent(request, &presence);
-                let plan =
-                    fallback_plan(&fallback_request, reader, now, "ttl", events.len() as u32)?;
+                let plan = fallback_plan_with_promotions(
+                    &fallback_request,
+                    reader,
+                    now,
+                    "ttl",
+                    events.len() as u32,
+                    false,
+                )?;
                 if plan.response.is_some() {
                     expired.push(presence.agent_id);
                     events.extend(plan.events);
                 }
             }
+            append_waiter_promotions(
+                request,
+                reader,
+                now,
+                &request.workspace.workspace_id,
+                &released_reservations,
+                &cancelled_wait_ids,
+                &mut events,
+            )?;
             Ok(CommandPlan { events, response: expired, http_status: 200 })
         })
     }
@@ -305,29 +400,48 @@ impl Store {
     }
 }
 
-fn fallback_plan(
+pub(crate) fn fallback_plan(
     request: &RequestEnvelope<()>,
     reader: &dyn ProjectionReader,
     now: OffsetDateTime,
     fallback_cause: &'static str,
     ordinal: u32,
 ) -> StoreResult<CommandPlan<Option<HandoffRecord>>> {
-    if let Some(existing) = reader.handoff(&request.workspace.workspace_id, &request.agent.agent_id)?
+    fallback_plan_with_promotions(request, reader, now, fallback_cause, ordinal, true)
+}
+
+fn fallback_plan_with_promotions(
+    request: &RequestEnvelope<()>,
+    reader: &dyn ProjectionReader,
+    now: OffsetDateTime,
+    fallback_cause: &'static str,
+    ordinal: u32,
+    promote_waiters: bool,
+) -> StoreResult<CommandPlan<Option<HandoffRecord>>> {
+    let presence = reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?;
+    if let Some(presence) = &presence {
+        ensure_presence_owner(request, presence)?;
+    }
+    if presence.is_none()
+        && let Some(existing) = reader.handoff(&request.workspace.workspace_id, &request.agent.agent_id)?
         && existing.expires_at > now
     {
-        let events = if reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?.is_some() {
-            presence_finalization_events(request, &existing.agent_id, now, ordinal)?
-        } else {
-            Vec::new()
-        };
-        return Ok(CommandPlan { events, response: Some(existing), http_status: 200 });
+        ensure_handoff_owner(request, &existing)?;
+        return Ok(CommandPlan { events: Vec::new(), response: Some(existing), http_status: 200 });
     }
-    let Some(presence) = reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)? else {
+    let Some(presence) = presence else {
         return Ok(CommandPlan { events: vec![], response: None, http_status: 200 });
     };
     let resources = reader.presence_resources(&request.workspace.workspace_id, &request.agent.agent_id)?;
     let handoff = fallback_handoff_record(request, &presence, resources, now);
-    let events = finalization_events(request, &handoff, Some(fallback_cause), ordinal)?;
+    let events = finalization_events(
+        request,
+        reader,
+        &handoff,
+        Some(fallback_cause),
+        ordinal,
+        promote_waiters,
+    )?;
     Ok(CommandPlan { events, response: Some(handoff), http_status: 200 })
 }
 
@@ -417,9 +531,11 @@ fn fallback_handoff_record(
 
 fn finalization_events<T>(
     request: &RequestEnvelope<T>,
+    reader: &dyn ProjectionReader,
     handoff: &HandoffRecord,
     fallback_cause: Option<&str>,
     ordinal: u32,
+    promote_waiters: bool,
 ) -> StoreResult<Vec<NewEvent>> {
     let now = handoff.finalized_at;
     let mut handoff_data = EventData::new(&handoff.agent_id);
@@ -433,33 +549,184 @@ fn finalization_events<T>(
         now,
         EventPayload::Handoff(HandoffEvent::Finalized(handoff_data)),
     )?];
-    events.extend(presence_finalization_events(request, &handoff.agent_id, now, ordinal + 1)?);
+    events.extend(presence_finalization_events(
+        request,
+        reader,
+        &handoff.agent_id,
+        now,
+        ordinal + 1,
+        promote_waiters,
+    )?);
     Ok(events)
 }
 
-fn presence_finalization_events<T>(
+pub(crate) fn presence_finalization_events<T>(
     request: &RequestEnvelope<T>,
+    reader: &dyn ProjectionReader,
     agent_id: &str,
     now: OffsetDateTime,
     ordinal: u32,
+    promote_waiters: bool,
 ) -> StoreResult<Vec<NewEvent>> {
+    let workspace_id = &request.workspace.workspace_id;
     let mut presence_data = EventData::new(agent_id);
     presence_data.data = json!({"agent_id": agent_id});
-    let mut cleanup_data = EventData::new(agent_id);
-    cleanup_data.data = json!({"agent_id": agent_id, "cleanup": true});
-    [
+    let mut events = vec![NewEvent::new(
+        request.request_id,
+        0,
+        now,
         EventPayload::Presence(PresenceEvent::Finalized(presence_data)),
-        EventPayload::Reservation(ReservationEvent::Released(cleanup_data.clone())),
-        EventPayload::Claim(ClaimEvent::Released(cleanup_data.clone())),
-        EventPayload::Wait(WaitEvent::Cancelled(cleanup_data.clone())),
-        EventPayload::WriteFence(WriteFenceEvent::Released(cleanup_data)),
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(index, payload)| {
-        NewEvent::new(request.request_id, ordinal + index as u32, now, payload).map_err(crate::StoreError::from)
-    })
-    .collect()
+    )?];
+    let mut released_reservations = Vec::new();
+    for mut reservation in typed_records::<ReservationRecord>(reader, CurrentAggregate::Reservation, workspace_id)? {
+        if reservation.agent_id == agent_id && reservation.status == "active" {
+            reservation.status = "released".into();
+            released_reservations.push(reservation.clone());
+            events.push(reservation_event(
+                request,
+                events.len() as u32,
+                now,
+                ReservationEvent::Released,
+                &reservation,
+            )?);
+        }
+    }
+    let released_reservation_ids = released_reservations
+        .iter()
+        .map(|reservation| reservation.reservation_id.clone())
+        .collect::<Vec<_>>();
+    for mut claim in typed_records::<ClaimRecord>(reader, CurrentAggregate::Claim, workspace_id)? {
+        if claim.status == "active"
+            && (claim.agent_id == agent_id || released_reservation_ids.contains(&claim.reservation_id))
+        {
+            claim.status = "released".into();
+            events.push(claim_event(
+                request,
+                events.len() as u32,
+                now,
+                ClaimEvent::Released,
+                &claim,
+            )?);
+        }
+    }
+    let mut cancelled_wait_ids = Vec::new();
+    for mut wait in typed_records::<WaitRecord>(reader, CurrentAggregate::Wait, workspace_id)? {
+        if wait.agent_id == agent_id && matches!(wait.status.as_str(), "queued" | "claimable") {
+            wait.status = "canceled".into();
+            wait.reservation_expires_at = None;
+            cancelled_wait_ids.push(wait.wait_id.clone());
+            events.push(wait_event(
+                request,
+                events.len() as u32,
+                now,
+                WaitEvent::Cancelled,
+                &wait,
+            )?);
+        }
+    }
+    for mut fence in typed_records::<WriteFenceRecord>(reader, CurrentAggregate::WriteFence, workspace_id)? {
+        if fence.agent_id == agent_id && fence.status == "active" {
+            fence.status = "released".into();
+            fence.released_at = Some(crate::reservations::timestamp(now)?);
+            events.push(fence_event(
+                request,
+                events.len() as u32,
+                now,
+                WriteFenceEvent::Released,
+                &fence,
+            )?);
+        }
+    }
+    if events.len() == 1 {
+        let mut cleanup_data = EventData::new(agent_id);
+        cleanup_data.data = json!({"agent_id": agent_id, "cleanup": true});
+        for payload in [
+            EventPayload::Reservation(ReservationEvent::Released(cleanup_data.clone())),
+            EventPayload::Claim(ClaimEvent::Released(cleanup_data.clone())),
+            EventPayload::Wait(WaitEvent::Cancelled(cleanup_data.clone())),
+            EventPayload::WriteFence(WriteFenceEvent::Released(cleanup_data)),
+        ] {
+            events.push(NewEvent::new(request.request_id, events.len() as u32, now, payload)?);
+        }
+    }
+    if promote_waiters {
+        append_waiter_promotions(
+            request,
+            reader,
+            now,
+            workspace_id,
+            &released_reservations,
+            &cancelled_wait_ids,
+            &mut events,
+        )?;
+    }
+    for event in &mut events {
+        event.event_ordinal += ordinal;
+    }
+    Ok(events)
+}
+
+fn append_waiter_promotions<T>(
+    request: &RequestEnvelope<T>,
+    reader: &dyn ProjectionReader,
+    now: OffsetDateTime,
+    workspace_id: &str,
+    released_reservations: &[ReservationRecord],
+    cancelled_wait_ids: &[String],
+    events: &mut Vec<NewEvent>,
+) -> StoreResult<()> {
+    let released_reservation_ids = released_reservations
+        .iter()
+        .map(|reservation| reservation.reservation_id.clone())
+        .collect::<Vec<_>>();
+    for reservation in released_reservations {
+        for scope in &reservation.scopes {
+            append_grant_for_path(
+                request,
+                reader,
+                now,
+                workspace_id,
+                &scope_path(scope),
+                &released_reservation_ids,
+                cancelled_wait_ids,
+                true,
+                events,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_presence_owner<T>(
+    request: &RequestEnvelope<T>,
+    presence: &PresenceRecord,
+) -> StoreResult<()> {
+    if presence.agent_id != request.agent.agent_id
+        || presence.actor_id != request.agent.actor_id
+        || presence.actor_type != request.agent.actor_type
+        || presence.owner_id != request.agent.owner_id
+        || presence.parent_agent_id != request.agent.parent_agent_id
+        || presence.parent_actor_id != request.agent.parent_actor_id
+    {
+        return Err(StoreError::ReservationOwnerMismatch);
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_handoff_owner<T>(
+    request: &RequestEnvelope<T>,
+    handoff: &HandoffRecord,
+) -> StoreResult<()> {
+    if handoff.agent_id != request.agent.agent_id
+        || handoff.actor_id != request.agent.actor_id
+        || handoff.actor_type != request.agent.actor_type
+        || handoff.owner_id != request.agent.owner_id
+        || handoff.parent_agent_id != request.agent.parent_agent_id
+        || handoff.parent_actor_id != request.agent.parent_actor_id
+    {
+        return Err(StoreError::ReservationOwnerMismatch);
+    }
+    Ok(())
 }
 
 fn request_for_agent(
@@ -468,5 +735,10 @@ fn request_for_agent(
 ) -> RequestEnvelope<()> {
     let mut request = request.clone();
     request.agent.agent_id = presence.agent_id.clone();
+    request.agent.actor_id = presence.actor_id.clone();
+    request.agent.actor_type = presence.actor_type.clone();
+    request.agent.owner_id = presence.owner_id.clone();
+    request.agent.parent_agent_id = presence.parent_agent_id.clone();
+    request.agent.parent_actor_id = presence.parent_actor_id.clone();
     request
 }

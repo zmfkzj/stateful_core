@@ -317,6 +317,12 @@ impl Store {
                     events.push(reservation_event(request, events.len() as u32, now, ReservationEvent::Expired, &reservation)?);
                 }
             }
+            for mut claim in typed_records::<ClaimRecord>(reader, CurrentAggregate::Claim, &request.workspace.workspace_id)? {
+                if claim.status == "active" && expired_ids.contains(&claim.reservation_id) {
+                    claim.status = "released".into();
+                    events.push(claim_event(request, events.len() as u32, now, ClaimEvent::Released, &claim)?);
+                }
+            }
             for mut wait in typed_records::<WaitRecord>(reader, CurrentAggregate::Wait, &request.workspace.workspace_id)? {
                 if wait.status == "claimable"
                     && wait.reservation_expires_at.as_deref().is_some_and(|value| expired(value, now))

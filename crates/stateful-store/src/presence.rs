@@ -86,8 +86,17 @@ impl Store {
             .transpose()?
             .and_then(|update| update.goal_excerpt);
         self.execute_command(request, route_kind, |reader| {
-            let mut events = crate::handoff::lazy_current_state_events(request, reader, now)?;
             let existing = reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?;
+            if let Some(presence) = &existing {
+                crate::handoff::ensure_presence_owner(request, presence)?;
+            }
+            if existing.is_none()
+                && let Some(handoff) = reader.handoff(&request.workspace.workspace_id, &request.agent.agent_id)?
+                && handoff.expires_at > now
+            {
+                crate::handoff::ensure_handoff_owner(request, &handoff)?;
+            }
+            let mut events = crate::handoff::lazy_current_state_events(request, reader, now)?;
             let repeated = existing.is_some();
             let presence = register_record(request, existing, first_prompt.clone(), now);
             let event = presence_event(
