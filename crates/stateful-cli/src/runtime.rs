@@ -77,6 +77,14 @@ pub struct ServerRuntime {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RuntimeOrigin {
+    EnvOverride { base_url: String },
+    Global,
+    RepoLocal { repo_root: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentContext {
     pub agent_id: String,
     pub workspace_id: String,
@@ -279,6 +287,72 @@ pub fn discover_runtime_with_optional_global(
         Ok(paths) => discover_runtime_with_global(repo_root, &paths),
         Err(_) => discover_runtime(repo_root),
     }
+}
+
+pub fn runtime_origin_for_authorization(
+    repo_root: impl AsRef<Path>,
+    paths: &GlobalPaths,
+    runtime: &ServerRuntime,
+) -> anyhow::Result<RuntimeOrigin> {
+    if let Some(env_runtime) = runtime_from_env()? {
+        if env_runtime == *runtime {
+            return Ok(RuntimeOrigin::EnvOverride {
+                base_url: env_runtime.base_url,
+            });
+        }
+        anyhow::bail!("runtime does not match the active environment override");
+    }
+
+    let repo_root = repo_root.as_ref().canonicalize()?;
+    match fs::read_to_string(&paths.server_json) {
+        Ok(contents) => {
+            let global_runtime: ServerRuntime = serde_json::from_str(&contents)?;
+            if global_runtime == *runtime {
+                Ok(RuntimeOrigin::Global)
+            } else {
+                anyhow::bail!("runtime does not match the active global runtime file");
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let repo_runtime = read_runtime_at(runtime_file_path(&repo_root))?;
+            if repo_runtime == *runtime {
+                Ok(RuntimeOrigin::RepoLocal {
+                    repo_root: repo_root.to_string_lossy().into_owned(),
+                })
+            } else {
+                anyhow::bail!("runtime does not match the active repository runtime file");
+            }
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub fn resolve_runtime_origin(
+    origin: &RuntimeOrigin,
+    paths: &GlobalPaths,
+) -> anyhow::Result<ServerRuntime> {
+    match origin {
+        RuntimeOrigin::EnvOverride { base_url } => {
+            let runtime = runtime_from_env()?
+                .ok_or_else(|| anyhow::anyhow!("captured environment runtime override is unavailable"))?;
+            if runtime.base_url != *base_url {
+                anyhow::bail!("environment runtime override no longer matches the captured base URL");
+            }
+            Ok(runtime)
+        }
+        RuntimeOrigin::Global => Ok(read_runtime_at(&paths.server_json)?),
+        RuntimeOrigin::RepoLocal { repo_root } => {
+            let canonical_root = Path::new(repo_root).canonicalize()?;
+            if canonical_root.to_string_lossy() != repo_root.as_str() {
+                anyhow::bail!("captured repository root is not canonical");
+            }
+            Ok(read_runtime_at(runtime_file_path(canonical_root))?)
+        }
+    }
+}
+
+fn read_runtime_at(path: impl AsRef<Path>) -> anyhow::Result<ServerRuntime> {
+    Ok(serde_json::from_str(&fs::read_to_string(path)?)?)
 }
 
 pub fn post_json(
@@ -1223,6 +1297,52 @@ mod tests {
         assert!(error.to_string().contains("missing_reservation"));
         assert!(error.to_string().contains("Declare a reservation."));
     }
+    #[test]
+    fn runtime_origin_binds_global_or_canonical_repo_without_fallback() {
+        let temp = tempfile::tempdir().expect("temp directory should create");
+        let paths = GlobalPaths::new(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("repository root should create");
+        let global = ServerRuntime::new("http://127.0.0.1:43873", "global", "w1", 10);
+        write_global_runtime_file(&paths, &global).expect("global runtime should write");
+
+        assert_eq!(
+            runtime_origin_for_authorization(&repo, &paths, &global)
+                .expect("global runtime should bind"),
+            RuntimeOrigin::Global
+        );
+        assert_eq!(
+            resolve_runtime_origin(&RuntimeOrigin::Global, &paths)
+                .expect("global origin should resolve"),
+            global
+        );
+
+        let repo_runtime = ServerRuntime::new("http://127.0.0.1:43874", "repo", "w2", 20);
+        write_runtime_file(&repo, &repo_runtime).expect("repo runtime should write");
+        assert!(
+            runtime_origin_for_authorization(&repo, &paths, &repo_runtime).is_err(),
+            "global precedence must not guess a repository-local origin"
+        );
+
+        fs::remove_file(&paths.server_json).expect("global runtime should remove");
+        let origin = runtime_origin_for_authorization(&repo, &paths, &repo_runtime)
+            .expect("repo runtime should bind");
+        assert_eq!(
+            origin,
+            RuntimeOrigin::RepoLocal {
+                repo_root: repo.canonicalize().expect("repo root should canonicalize").to_string_lossy().into_owned(),
+            }
+        );
+
+        let restarted = ServerRuntime::new("http://127.0.0.1:43900", "new-token", "w2", 21);
+        write_runtime_file(&repo, &restarted).expect("restarted repo runtime should write");
+        assert_eq!(
+            resolve_runtime_origin(&origin, &paths).expect("repo origin should resolve"),
+            restarted,
+            "same-origin restarts may change pid, token, and port"
+        );
+    }
+
     #[test]
     fn claim_validation_rejects_uuid_as_path_or_a_different_queued_wait() {
         let error = validate_claimed_wait(

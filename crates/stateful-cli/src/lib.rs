@@ -63,10 +63,11 @@ pub use runtime::{
     global_state_db_path, post_json, post_v2, post_v2_raw, protocol_envelope, replay_v2_request,
     request_reservation_via_http, reservation_cancel_protocol_body,
     reservation_claim_protocol_body, reservation_declare_protocol_body,
-    reservation_request_protocol_body, runtime_env_override_is_configured, runtime_from_remote,
-    runtime_has_required_identity, runtime_identity_matches_pid, runtime_status, v2_query_envelope,
-    v2_query_for_runtime, v2_request_envelope, validate_agent_id, write_global_runtime_file,
-    write_runtime_file,
+    reservation_request_protocol_body, resolve_runtime_origin, runtime_env_override_is_configured,
+    runtime_from_remote, runtime_has_required_identity, runtime_identity_matches_pid,
+    runtime_origin_for_authorization, runtime_status, v2_query_envelope, v2_query_for_runtime,
+    v2_request_envelope, validate_agent_id, write_global_runtime_file, write_runtime_file,
+    RuntimeOrigin,
 };
 pub use sandbox::{SandboxFsProfile, SandboxNetworkPolicy};
 pub use server_lifecycle::{
