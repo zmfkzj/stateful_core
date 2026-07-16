@@ -197,6 +197,7 @@ impl Store {
                         let writer_observation = ReadObservationRecord {
                             workspace_id: request.workspace.workspace_id.clone(),
                             agent_id: request.agent.agent_id.clone(),
+                            actor_id: request.agent.actor_id.clone(),
                             operation_id: intent.operation_id.clone(),
                             path: target.path.clone(),
                             status: ReadObservationStatus::Stabilized,

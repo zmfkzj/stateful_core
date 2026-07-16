@@ -15,13 +15,17 @@ fn fingerprint(bytes: &[u8]) -> ContentFingerprint {
 }
 
 fn request<T: serde::Serialize>(agent_id: &str, payload: T) -> RequestEnvelope<T> {
+    request_as(agent_id, &format!("actor-{agent_id}"), payload)
+}
+
+fn request_as<T: serde::Serialize>(agent_id: &str, actor_id: &str, payload: T) -> RequestEnvelope<T> {
     RequestEnvelope::new(
         Uuid::new_v4(),
         NOW,
         AgentIdentity {
             agent_id: agent_id.into(),
             turn_id: Some("turn-1".into()),
-            actor_id: format!("actor-{agent_id}"),
+            actor_id: actor_id.into(),
             actor_type: ActorType::Agent,
             owner_id: None,
             parent_agent_id: None,
@@ -162,6 +166,82 @@ fn file_change_during_read_records_unstable_observation() {
         .expect("observation reads")
         .expect("observation exists")
         .is_stable());
+}
+
+#[test]
+fn read_completion_rejects_another_actor_in_the_same_agent_session() {
+    let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    let content = fingerprint(b"same bytes");
+    store
+        .start_read_observation(&request_as(
+            "agent-1",
+            "actor-started",
+            ReadObservationStart {
+                operation_id: "read-1".into(),
+                path: "src/lib.rs".into(),
+                before: content.clone(),
+            },
+        ))
+        .expect("read starts");
+
+    let error = store
+        .complete_read_observation(&request_as(
+            "agent-1",
+            "actor-completing",
+            ReadCompletion {
+                operation_id: "read-1".into(),
+                path: "src/lib.rs".into(),
+                classification: ReadClassification::Exact,
+                after: Some(content),
+                semantic_marker: None,
+            },
+        ))
+        .expect_err("a different actor must not complete the read");
+
+    assert!(matches!(error, stateful_store::StoreError::ReadOperationNotFound));
+}
+
+#[test]
+fn same_content_write_between_read_start_and_completion_keeps_the_read_unstable() {
+    let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    let content = fingerprint(b"same bytes");
+    start_read(&store, "agent-1", "read-1", "src/lib.rs", content.clone());
+    let intent = store
+        .start_write_intent(&request(
+            "agent-2",
+            WriteIntentStart {
+                operation_id: "write-1".into(),
+                action: "write_file".into(),
+                targets: vec![WriteTarget { path: "src/lib.rs".into(), before: content.clone() }],
+            },
+        ))
+        .expect("intervening write starts")
+        .response;
+    store
+        .complete_write_intent(&request(
+            "agent-2",
+            WriteIntentCompletion::committed(
+                intent.intent_id,
+                vec![("src/lib.rs".into(), content.clone())],
+            ),
+        ))
+        .expect("same-content write commits and increments its resource version");
+    complete_read(
+        &store,
+        "agent-1",
+        "read-1",
+        "src/lib.rs",
+        ReadClassification::Exact,
+        Some(content),
+        None,
+    );
+
+    let observation = store
+        .read_observation("workspace-1", "agent-1", "src/lib.rs")
+        .expect("observation reads")
+        .expect("observation exists");
+    assert_eq!(observation.status, stateful_core::ReadObservationStatus::Unstable);
+    assert_eq!(observation.resource_version, 0, "the persisted version belongs to read start");
 }
 
 #[test]

@@ -3,10 +3,9 @@ use axum::{Json, extract::{RawQuery, State}, http::{HeaderMap, StatusCode}, resp
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use stateful_core::{
-    AuthorizationInput, Decision, DecisionKind, FreshnessMode, ObservationFreshness, PolicyState,
-    QueryEnvelope, RequestEnvelope, ThinSafetyState,
-    V2Error, WriteIntentStart, WriteTarget, authorize_action, evaluate_thin_safety,
-    normalize_relative_path,
+    AuthorizationInput, ContentFingerprint, Decision, DecisionKind, FreshnessMode, ObservationFreshness,
+    PolicyState, QueryEnvelope, RequestEnvelope, ThinSafetyState, V2Error, WriteIntentStart,
+    WriteTarget, authorize_action, evaluate_thin_safety, normalize_relative_path,
 };
 use stateful_store::{NotificationAcknowledgement, PresenceRegistration, Store, StoreError};
 use std::{convert::Infallible, time::Duration};
@@ -44,6 +43,18 @@ pub(crate) struct AuthorizePayload {
 #[derive(Debug, Deserialize)]
 pub(crate) struct WriteReconcilePayload {
     intent_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct WriteRecoveryPayload {
+    intent_id: String,
+    actual_fingerprints: Vec<WriteRecoveryFingerprint>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct WriteRecoveryFingerprint {
+    path: String,
+    fingerprint: ContentFingerprint,
 }
 
 pub(crate) async fn session_register(
@@ -102,6 +113,23 @@ pub(crate) async fn write_complete(State(config): State<ServerConfig>, protocol:
     command(config, body, |store, request| store.complete_write_intent(request))
 }
 
+pub(crate) async fn write_recover(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
+    let request = match protocol::parse_request::<WriteRecoveryPayload>(body) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+    let request_id = request.request_id.to_string();
+    let payload = &request.payload;
+    let request = retarget(
+        &request,
+        (
+            payload.intent_id.clone(),
+            payload.actual_fingerprints.iter().map(|item| (item.path.clone(), item.fingerprint.clone())).collect(),
+        ),
+    );
+    protocol::command_response(&request_id, lock_store(&config.store).and_then(|store| store.recover_write_intent(&request)))
+}
+
 pub(crate) async fn activity_finalize(
     State(config): State<ServerConfig>,
     protocol::V2Json(body): protocol::V2Json,
@@ -109,7 +137,9 @@ pub(crate) async fn activity_finalize(
     if body.pointer("/payload/status").is_some() {
         command(config, body, |store, request| store.finalize_handoff(request))
     } else {
-        command(config, body, |store, request| store.finalize_activity(request))
+        let mut body = body;
+        body["payload"] = Value::Null;
+        command(config, body, |store, request| store.stop_presence(request))
     }
 }
 

@@ -54,6 +54,7 @@ pub struct ReadCompletion {
 pub struct ReadObservationRecord {
     pub workspace_id: String,
     pub agent_id: String,
+    pub actor_id: String,
     pub operation_id: String,
     pub path: String,
     pub status: ReadObservationStatus,

@@ -86,18 +86,20 @@ impl Store {
             .transpose()?
             .and_then(|update| update.goal_excerpt);
         self.execute_command(request, route_kind, |reader| {
+            let mut events = crate::handoff::lazy_current_state_events(request, reader, now)?;
             let existing = reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?;
             let repeated = existing.is_some();
             let presence = register_record(request, existing, first_prompt.clone(), now);
             let event = presence_event(
                 request,
-                0,
+                events.len() as u32,
                 now,
                 if is_resume { PresenceEvent::Heartbeat } else { PresenceEvent::Registered },
                 presence.clone(),
                 repeated,
             )?;
-            Ok(CommandPlan { events: vec![event], response: presence, http_status: 200 })
+            events.push(event);
+            Ok(CommandPlan { events, response: presence, http_status: 200 })
         })
     }
 
@@ -105,18 +107,15 @@ impl Store {
         &mut self,
         request: &RequestEnvelope<()>,
     ) -> StoreResult<CommandOutcome<PresenceRecord>> {
-        let maintenance = self.system_maintenance_request(&request.workspace.workspace_id)?;
-        self.expire_current_state(&maintenance)?;
-        if self.presence_record(&request.workspace.workspace_id, &request.agent.agent_id)?.is_none() {
-            return Err(missing_presence());
-        }
         let now = self.clock.now();
         self.execute_command(request, "presence.heartbeat", |reader| {
+            let mut events = crate::handoff::lazy_current_state_events(request, reader, now)?;
             let mut presence = reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?
                 .ok_or_else(missing_presence)?;
             refresh_presence(&mut presence, now);
-            let event = presence_event(request, 0, now, PresenceEvent::Heartbeat, presence.clone(), true)?;
-            Ok(CommandPlan { events: vec![event], response: presence, http_status: 200 })
+            let event = presence_event(request, events.len() as u32, now, PresenceEvent::Heartbeat, presence.clone(), true)?;
+            events.push(event);
+            Ok(CommandPlan { events, response: presence, http_status: 200 })
         })
     }
 
@@ -133,6 +132,7 @@ impl Store {
             )));
         }
         self.execute_command(request, "presence.update", |reader| {
+            let mut events = crate::handoff::lazy_current_state_events(request, reader, now)?;
             let mut presence = reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?
                 .ok_or_else(missing_presence)?;
             if let Some(goal) = &update.goal_excerpt { presence.goal_excerpt = Some(goal.clone()); }
@@ -146,8 +146,9 @@ impl Store {
             } else {
                 PresenceEvent::PlanUpdated
             };
-            let event = presence_event(request, 0, now, variant, presence.clone(), false)?;
-            Ok(CommandPlan { events: vec![event], response: presence, http_status: 200 })
+            let event = presence_event(request, events.len() as u32, now, variant, presence.clone(), false)?;
+            events.push(event);
+            Ok(CommandPlan { events, response: presence, http_status: 200 })
         })
     }
 
@@ -157,6 +158,7 @@ impl Store {
     ) -> StoreResult<CommandOutcome<PresenceResource>> {
         let now = self.clock.now();
         self.execute_command(request, "presence.resource", |reader| {
+            let mut events = crate::handoff::lazy_current_state_events(request, reader, now)?;
             let mut presence = reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?
                 .ok_or_else(missing_presence)?;
             let resource = PresenceResource::new(
@@ -174,8 +176,9 @@ impl Store {
                 resource.relation,
             )?.is_some();
             refresh_presence(&mut presence, now);
-            let event = presence_resources_event(request, now, presence, resource.clone(), repeated)?;
-            Ok(CommandPlan { events: vec![event], response: resource, http_status: 200 })
+            let event = presence_resources_event(request, now, events.len() as u32, presence, resource.clone(), repeated)?;
+            events.push(event);
+            Ok(CommandPlan { events, response: resource, http_status: 200 })
         })
     }
 
@@ -186,6 +189,7 @@ impl Store {
         let now = self.clock.now();
         validate_tool_name(&request.payload.tool_name)?;
         self.execute_command(request, "presence.tool_start", |reader| {
+            let mut events = crate::handoff::lazy_current_state_events(request, reader, now)?;
             let mut presence = reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?
                 .ok_or_else(missing_presence)?;
             let maximum = now + BUSY_UNTIL_MAXIMUM;
@@ -199,8 +203,9 @@ impl Store {
                 presence.phase = Some(PresencePhase::Testing);
             }
             refresh_presence(&mut presence, now);
-            let event = presence_event(request, 0, now, PresenceEvent::ToolStarted, presence.clone(), false)?;
-            Ok(CommandPlan { events: vec![event], response: presence, http_status: 200 })
+            let event = presence_event(request, events.len() as u32, now, PresenceEvent::ToolStarted, presence.clone(), false)?;
+            events.push(event);
+            Ok(CommandPlan { events, response: presence, http_status: 200 })
         })
     }
 
@@ -226,13 +231,15 @@ impl Store {
             summary: request.payload.summary.clone(),
         })?;
         self.execute_command(request, "presence.tool_result", |reader| {
+            let mut events = crate::handoff::lazy_current_state_events(request, reader, now)?;
             let mut presence = reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?
                 .ok_or_else(missing_presence)?;
             presence.last_result = Some(result.clone());
             presence.busy_until = None;
             refresh_presence(&mut presence, now);
-            let event = presence_event(request, 0, now, PresenceEvent::ToolCompleted, presence.clone(), false)?;
-            Ok(CommandPlan { events: vec![event], response: presence, http_status: 200 })
+            let event = presence_event(request, events.len() as u32, now, PresenceEvent::ToolCompleted, presence.clone(), false)?;
+            events.push(event);
+            Ok(CommandPlan { events, response: presence, http_status: 200 })
         })
     }
 
@@ -352,6 +359,7 @@ pub(crate) fn presence_event<T>(
 pub(crate) fn presence_resources_event<T>(
     request: &RequestEnvelope<T>,
     now: OffsetDateTime,
+    ordinal: u32,
     presence: PresenceRecord,
     resource: PresenceResource,
     repeated: bool,
@@ -359,7 +367,7 @@ pub(crate) fn presence_resources_event<T>(
     let mut data = EventData::new(&request.agent.agent_id);
     data.repeated = repeated;
     data.data = json!({"presence": presence, "resource": resource});
-    NewEvent::new(request.request_id, 0, now, EventPayload::Presence(PresenceEvent::ResourcesUpdated(data))).map_err(StoreError::from)
+    NewEvent::new(request.request_id, ordinal, now, EventPayload::Presence(PresenceEvent::ResourcesUpdated(data))).map_err(StoreError::from)
 }
 
 pub(crate) fn missing_presence() -> StoreError {

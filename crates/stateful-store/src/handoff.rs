@@ -12,6 +12,45 @@ use stateful_core::{
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
+pub(crate) fn lazy_current_state_events<T>(
+    request: &RequestEnvelope<T>,
+    reader: &dyn ProjectionReader,
+    now: OffsetDateTime,
+) -> StoreResult<Vec<NewEvent>> {
+    let mut events = Vec::new();
+    for handoff in reader.handoffs(&request.workspace.workspace_id)? {
+        if handoff.expires_at > now {
+            continue;
+        }
+        let mut data = EventData::new(&handoff.agent_id);
+        data.data = json!({"handoff": handoff});
+        events.push(NewEvent::new(
+            request.request_id,
+            events.len() as u32,
+            now,
+            EventPayload::Handoff(HandoffEvent::Expired(data)),
+        )?);
+    }
+    let unit_request = RequestEnvelope {
+        protocol_version: request.protocol_version,
+        request_id: request.request_id,
+        observed_at: request.observed_at,
+        agent: request.agent.clone(),
+        workspace: request.workspace.clone(),
+        source: request.source.clone(),
+        payload: (),
+    };
+    for presence in reader.live_presences(&request.workspace.workspace_id)? {
+        if presence.expires_at > now || presence.busy_until.is_some_and(|busy_until| busy_until > now) {
+            continue;
+        }
+        let fallback_request = request_for_agent(&unit_request, &presence);
+        let plan = fallback_plan(&fallback_request, reader, now, events.len() as u32)?;
+        events.extend(plan.events);
+    }
+    Ok(events)
+}
+
 impl Store {
     pub fn finalize_handoff(
         &mut self,
@@ -97,28 +136,7 @@ impl Store {
             return Ok(());
         }
         self.execute_command(request, "presence.expire", |reader| {
-            let mut events = Vec::new();
-            for handoff in reader.handoffs(&request.workspace.workspace_id)? {
-                if handoff.expires_at > now {
-                    continue;
-                }
-                let mut data = EventData::new(&handoff.agent_id);
-                data.data = json!({"handoff": handoff});
-                events.push(NewEvent::new(
-                    request.request_id,
-                    events.len() as u32,
-                    now,
-                    EventPayload::Handoff(HandoffEvent::Expired(data)),
-                )?);
-            }
-            for presence in reader.live_presences(&request.workspace.workspace_id)? {
-                if presence.expires_at > now || presence.busy_until.is_some_and(|busy_until| busy_until > now) {
-                    continue;
-                }
-                let fallback_request = request_for_agent(request, &presence);
-                let plan = fallback_plan(&fallback_request, reader, now, events.len() as u32)?;
-                events.extend(plan.events);
-            }
+            let events = lazy_current_state_events(request, reader, now)?;
             Ok(CommandPlan { events, response: (), http_status: 200 })
         })?;
         Ok(())

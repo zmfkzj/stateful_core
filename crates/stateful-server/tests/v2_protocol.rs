@@ -2,6 +2,7 @@ mod support;
 
 use axum::{body::Body, http::{Request, StatusCode}};
 use serde_json::json;
+use stateful_core::{RequestEnvelope, WriteIntentStart, fingerprint_reader};
 use stateful_store::Store;
 use tower::ServiceExt;
 
@@ -44,13 +45,83 @@ async fn duplicate_mutation_returns_identical_frozen_response() {
 async fn v2_post_surface_is_registered() {
     for path in [
         "/v2/session/register", "/v2/presence/update", "/v2/read/start", "/v2/read/complete",
-        "/v2/write/complete", "/v2/activity/finalize", "/v2/reservation/declare", "/v2/reservation/request",
-        "/v2/reservation/claim", "/v2/reservation/cancel", "/v2/claim/acquire", "/v2/claim/release",
-        "/v2/authorize", "/v2/human/observe", "/v2/human/save-check", "/v2/reconcile/ack",
+        "/v2/write/complete", "/v2/write/recover", "/v2/activity/finalize", "/v2/reservation/declare",
+        "/v2/reservation/request", "/v2/reservation/claim", "/v2/reservation/cancel", "/v2/claim/acquire",
+        "/v2/claim/release", "/v2/authorize", "/v2/human/observe", "/v2/human/save-check", "/v2/reconcile/ack",
         "/v2/context/render", "/v2/context/ack", "/v2/notifications/poll", "/v2/resume/next", "/v2/outbox/sync",
     ] {
         assert_ne!(app().oneshot(post(path, envelope(json!({})))).await.unwrap().status(), StatusCode::NOT_FOUND, "{path}");
     }
+}
+
+#[tokio::test]
+async fn empty_activity_finalize_uses_the_idempotent_fallback_handoff_path() {
+    let app = app();
+    let register = app
+        .clone()
+        .oneshot(post(
+            "/v2/session/register",
+            envelope_for("agent-1", "00000000-0000-4000-8000-00000000f001", json!({})),
+        ))
+        .await
+        .expect("registration response");
+    assert_eq!(register.status(), StatusCode::OK);
+
+    let finalize = envelope_for("agent-1", "00000000-0000-4000-8000-00000000f002", json!({}));
+    let first = app
+        .clone()
+        .oneshot(post("/v2/activity/finalize", finalize.clone()))
+        .await
+        .expect("finalization response");
+    assert_eq!(first.status(), StatusCode::OK);
+    let first = response_json(first).await;
+    assert_eq!(first["explicit"], false);
+    assert_eq!(first["status"], "unknown");
+
+    let second = app
+        .oneshot(post("/v2/activity/finalize", finalize))
+        .await
+        .expect("duplicate finalization response");
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(response_json(second).await, first);
+}
+
+#[tokio::test]
+async fn typed_write_recovery_replays_an_outcome_unknown_result() {
+    let before = fingerprint_reader(std::io::Cursor::new(b"before")).expect("before fingerprint");
+    let changed = fingerprint_reader(std::io::Cursor::new(b"changed")).expect("changed fingerprint");
+    let start_request = serde_json::from_value::<RequestEnvelope<WriteIntentStart>>(envelope(json!({
+        "operation_id": "write-1",
+        "action": "write_file",
+        "targets": [{"path": "src/lib.rs", "before": before}],
+    })))
+    .expect("write start request");
+    let store = Store::open_in_memory().expect("store opens");
+    let intent = store
+        .start_write_intent(&start_request)
+        .expect("write intent starts")
+        .response;
+    let app = app_with_store(store);
+    let recovery = envelope_for("agent-1", "00000000-0000-4000-8000-00000000f003", json!({
+        "intent_id": intent.intent_id,
+        "actual_fingerprints": [{"path": "src/lib.rs", "fingerprint": changed}],
+    }));
+
+    let first = app
+        .clone()
+        .oneshot(post("/v2/write/recover", recovery.clone()))
+        .await
+        .expect("recovery response");
+    assert_eq!(first.status(), StatusCode::OK);
+    let first = response_json(first).await;
+    assert_eq!(first["status"], "outcome_unknown");
+
+    let second = app
+        .oneshot(post("/v2/write/recover", recovery))
+        .await
+        .expect("duplicate recovery response");
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(response_json(second).await, first);
 }
 
 #[tokio::test]
@@ -101,6 +172,7 @@ mutation_rejects_non_v2!(presence_update_requires_v2, "/v2/presence/update");
 mutation_rejects_non_v2!(read_start_requires_v2, "/v2/read/start");
 mutation_rejects_non_v2!(read_complete_requires_v2, "/v2/read/complete");
 mutation_rejects_non_v2!(write_complete_requires_v2, "/v2/write/complete");
+mutation_rejects_non_v2!(write_recover_requires_v2, "/v2/write/recover");
 mutation_rejects_non_v2!(activity_finalize_requires_v2, "/v2/activity/finalize");
 mutation_rejects_non_v2!(reservation_declare_requires_v2, "/v2/reservation/declare");
 mutation_rejects_non_v2!(reservation_request_requires_v2, "/v2/reservation/request");

@@ -33,6 +33,7 @@ impl Store {
             let record = ReadObservationRecord {
                 workspace_id: request.workspace.workspace_id.clone(),
                 agent_id: request.agent.agent_id.clone(),
+                actor_id: request.agent.actor_id.clone(),
                 operation_id: payload.operation_id,
                 path,
                 status: ReadObservationStatus::Started,
@@ -69,11 +70,12 @@ impl Store {
             .into_iter()
             .find(|record| {
                 record.agent_id == request.agent.agent_id
+                    && record.actor_id == request.agent.actor_id
                     && record.operation_id == payload.operation_id
                     && record.path == path
             })
             .ok_or(StoreError::ReadOperationNotFound)?;
-            let resource_version = typed_records::<ResourceVersion>(
+            let current_resource_version = typed_records::<ResourceVersion>(
                 reader,
                 CurrentAggregate::ResourceWrite,
                 &request.workspace.workspace_id,
@@ -81,15 +83,19 @@ impl Store {
             .into_iter()
             .find(|version| version.path == path)
             .map_or(0, |version| version.version);
-            let status = observation_status(
+            let mut status = observation_status(
                 payload.classification,
                 &start.before,
                 payload.after.as_ref(),
                 payload.semantic_marker.as_deref(),
             );
+            if current_resource_version != start.resource_version && status == ReadObservationStatus::Stabilized {
+                status = ReadObservationStatus::Unstable;
+            }
             let record = ReadObservationRecord {
                 workspace_id: request.workspace.workspace_id.clone(),
-                agent_id: request.agent.agent_id.clone(),
+                agent_id: start.agent_id.clone(),
+                actor_id: start.actor_id.clone(),
                 operation_id: payload.operation_id,
                 path,
                 status,
@@ -99,7 +105,7 @@ impl Store {
                 semantic_marker: payload.semantic_marker,
                 observed_at: now,
                 expires_at: (status == ReadObservationStatus::Stabilized).then_some(now + OBSERVATION_TTL),
-                resource_version,
+                resource_version: start.resource_version,
                 origin_event_seq: 0,
             };
             let variant = match status {

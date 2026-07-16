@@ -71,6 +71,7 @@ fn persisted_structural_observation_is_never_fresh() {
     let observation = ReadObservationRecord {
         workspace_id: "workspace-1".into(),
         agent_id: "agent-1".into(),
+        actor_id: "actor-1".into(),
         operation_id: "read-1".into(),
         path: "src/lib.rs".into(),
         status: ReadObservationStatus::Stabilized,

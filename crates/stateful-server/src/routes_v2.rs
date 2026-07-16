@@ -8,6 +8,7 @@ pub(crate) fn router() -> Router<crate::ServerConfig> {
         .route("/v2/read/start", post(commands::read_start))
         .route("/v2/read/complete", post(commands::read_complete))
         .route("/v2/write/complete", post(commands::write_complete))
+        .route("/v2/write/recover", post(commands::write_recover))
         .route("/v2/activity/finalize", post(commands::activity_finalize))
         .route("/v2/reservation/declare", post(commands::reservation_declare))
         .route("/v2/reservation/request", post(commands::reservation_request))
