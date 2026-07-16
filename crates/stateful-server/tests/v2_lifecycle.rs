@@ -26,6 +26,7 @@ async fn runtime_identity_reports_v2_schema_mode_version_and_capabilities() {
     assert_eq!(body["coordination_mode"], "awareness");
     assert_eq!(body["workspace_id"], "workspace-1");
     assert!(body["capabilities"].as_array().unwrap().iter().any(|value| value == "presence"));
+    assert_eq!(body["pid"], std::process::id());
 }
 
 #[tokio::test]

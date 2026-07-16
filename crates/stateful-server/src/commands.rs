@@ -337,6 +337,7 @@ pub(crate) async fn runtime_identity(
             "workspace_id": request.workspace.workspace_id,
             "workspace_version": workspace_version,
             "capabilities": RUNTIME_CAPABILITIES,
+            "pid": std::process::id(),
         })).into_response(),
         Err(error) => protocol::store_error_response(&request_id, error),
     }

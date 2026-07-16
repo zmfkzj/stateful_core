@@ -902,7 +902,9 @@ pub fn runtime_identity_matches_pid(runtime: &ServerRuntime) -> anyhow::Result<b
     let Some(identity) = fetch_runtime_identity(runtime)? else {
         return Ok(false);
     };
-    Ok(runtime.pid != 0 && runtime_identity_matches_runtime(runtime, &identity))
+    Ok(runtime.pid != 0
+        && identity.pid == runtime.pid
+        && runtime_identity_matches_runtime(runtime, &identity))
 }
 
 fn runtime_from_env() -> anyhow::Result<Option<ServerRuntime>> {
@@ -1041,6 +1043,7 @@ struct RuntimeIdentity {
     protocol_version: String,
     journal_schema_version: u64,
     coordination_mode: String,
+    pid: u32,
     #[serde(default)]
     workspace_id: String,
     #[serde(default)]

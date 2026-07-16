@@ -216,7 +216,7 @@ fn remote_runtime_with_pid_zero_accepts_matching_identity_capabilities() {
         assert!(request.contains("GET /v2/runtime/identity?"));
         write_http_response(
             &mut stream,
-            r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":["presence"]}"#,
+            r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":1,"capabilities":["presence"]}"#,
         );
     });
 
@@ -235,7 +235,7 @@ fn runtime_status_includes_server_workspace_identity_and_version() {
         assert!(request.contains("GET /v2/runtime/identity?"));
         write_http_response(
             &mut stream,
-            r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"enforcement","workspace_id":"server-workspace","workspace_version":17,"capabilities":["presence"]}"#,
+            r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"enforcement","pid":42,"workspace_id":"server-workspace","workspace_version":17,"capabilities":["presence"]}"#,
         );
     });
 
@@ -252,7 +252,7 @@ fn runtime_status_includes_server_workspace_identity_and_version() {
 }
 
 #[test]
-fn runtime_identity_matches_pid_requires_exact_pid_for_pid_zero_runtime() {
+fn runtime_identity_matches_pid_rejects_different_nonzero_server_pid() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
     thread::spawn(move || {
@@ -261,11 +261,11 @@ fn runtime_identity_matches_pid_requires_exact_pid_for_pid_zero_runtime() {
         assert!(request.contains("GET /v2/runtime/identity?"));
         write_http_response(
             &mut stream,
-            r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":["presence"]}"#,
+            r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":43,"capabilities":["presence"]}"#,
         );
     });
 
-    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "shared", 0);
+    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "shared", 42);
 
     assert!(
         !stateful_cli::runtime_identity_matches_pid(&runtime)
@@ -274,7 +274,51 @@ fn runtime_identity_matches_pid_requires_exact_pid_for_pid_zero_runtime() {
 }
 
 #[test]
-fn runtime_has_required_identity_accepts_nonzero_pid_without_legacy_pid_field() {
+fn runtime_identity_matches_pid_accepts_exact_server_pid() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener addr should load");
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("connection should arrive");
+        let request = read_http_request_without_body(&mut stream);
+        assert!(request.contains("GET /v2/runtime/identity?"));
+        write_http_response(
+            &mut stream,
+            r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":42,"capabilities":["presence"]}"#,
+        );
+    });
+
+    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "shared", 42);
+
+    assert!(
+        stateful_cli::runtime_identity_matches_pid(&runtime)
+            .expect("identity check should succeed")
+    );
+}
+
+#[test]
+fn runtime_identity_matches_pid_rejects_zero_server_pid() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener addr should load");
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("connection should arrive");
+        let request = read_http_request_without_body(&mut stream);
+        assert!(request.contains("GET /v2/runtime/identity?"));
+        write_http_response(
+            &mut stream,
+            r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":0,"capabilities":["presence"]}"#,
+        );
+    });
+
+    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "shared", 42);
+
+    assert!(
+        !stateful_cli::runtime_identity_matches_pid(&runtime)
+            .expect("identity check should succeed")
+    );
+}
+
+#[test]
+fn runtime_has_required_identity_rejects_missing_pid() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
     thread::spawn(move || {
@@ -289,7 +333,7 @@ fn runtime_has_required_identity_accepts_nonzero_pid_without_legacy_pid_field() 
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "shared", 42);
 
-    assert!(stateful_cli::runtime_has_required_identity(&runtime));
+    assert!(!stateful_cli::runtime_has_required_identity(&runtime));
 }
 
 #[test]
@@ -305,7 +349,7 @@ fn cli_current_rejects_env_runtime_without_required_capabilities() {
         assert!(request.contains("GET /v2/runtime/identity?"));
         write_http_response(
             &mut stream,
-            r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":[]}"#,
+            r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":1,"capabilities":[]}"#,
         );
     });
 
@@ -345,7 +389,7 @@ fn cli_current_accepts_env_runtime_with_required_capabilities() {
         assert!(request.contains("GET /v2/runtime/identity?"));
         write_http_response(
             &mut stream,
-            r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":["presence"]}"#,
+            r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":1,"capabilities":["presence"]}"#,
         );
 
         let (mut stream, _) = listener.accept().expect("current connection should arrive");
@@ -761,7 +805,7 @@ fn unsupported_runtime_protocol_fails_before_mutation() {
         tx.send(request).expect("request should send to test");
         write_http_response(
             &mut stream,
-            r#"{"protocol_version":"stateful.v1","journal_schema_version":2,"coordination_mode":"awareness","capabilities":["presence"]}"#,
+            r#"{"protocol_version":"stateful.v1","journal_schema_version":2,"coordination_mode":"awareness","pid":1,"capabilities":["presence"]}"#,
         );
     });
 
@@ -832,7 +876,7 @@ fn write_http_response(stream: &mut std::net::TcpStream, body: &str) {
 fn write_v2_runtime_identity(stream: &mut std::net::TcpStream) {
     write_http_response(
         stream,
-        r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":["presence"]}"#,
+        r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":1,"capabilities":["presence"]}"#,
     );
 }
 

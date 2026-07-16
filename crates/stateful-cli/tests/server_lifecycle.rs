@@ -46,7 +46,7 @@ fn ensure_server_reuses_remote_pid_zero_runtime_when_health_is_ok() {
     let paths = GlobalPaths::new(&home);
     let fake = FakeHttpServer::start(vec![fake_response(
         200,
-        r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":["presence"]}"#,
+        r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":1,"capabilities":["presence"]}"#,
     )]);
     let runtime = ServerRuntime::new(fake.base_url(), "secret-token", "shared", 0);
     stateful_cli::write_global_runtime_file(&paths, &runtime).expect("runtime should write");
@@ -258,14 +258,14 @@ fn runtime_health_requires_v2_identity_and_capabilities() {
 
     let missing_capabilities = FakeHttpServer::start(vec![fake_response(
         200,
-        r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":[]}"#,
+        r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":1,"capabilities":[]}"#,
     )]);
     let runtime = ServerRuntime::new(missing_capabilities.base_url(), "token", "w1", 1);
     assert!(!runtime_is_healthy(&runtime));
 
     let healthy = FakeHttpServer::start(vec![fake_response(
         200,
-        r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":["presence"]}"#,
+        r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":1,"capabilities":["presence"]}"#,
     )]);
     let runtime = ServerRuntime::new(healthy.base_url(), "token", "w1", 1);
     assert!(runtime_is_healthy(&runtime));
@@ -277,7 +277,7 @@ fn stop_server_refuses_to_kill_unverified_pid() {
     let paths = GlobalPaths::new(&home);
     let fake = FakeHttpServer::start(vec![fake_response(
         200,
-        r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":[]}"#,
+        r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":1,"capabilities":[]}"#,
     )]);
     let runtime = ServerRuntime::new(fake.base_url(), "token", "w1", 1);
     stateful_cli::write_global_runtime_file(&paths, &runtime).expect("runtime should write");
@@ -292,12 +292,80 @@ fn stop_server_refuses_to_kill_unverified_pid() {
 }
 
 #[test]
+fn stop_server_refuses_identity_from_different_pid_without_signaling_process() {
+    if cfg!(target_os = "macos") && std::env::var_os("STATEFUL_SANDBOX_RUN_ACTIVE").is_some() {
+        return;
+    }
+
+    let home = temp_home("stateful-server-stop-pid-mismatch");
+    let paths = GlobalPaths::new(home.path());
+    let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should reserve a port");
+    let port = listener
+        .local_addr()
+        .expect("listener should expose local address")
+        .port();
+    drop(listener);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
+        .args([
+            "server",
+            "start",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--workspace-id",
+            "share",
+        ])
+        .env("STATEFUL_HOME", home.path())
+        .output()
+        .expect("stateful server should start");
+    assert!(
+        output.status.success(),
+        "detached start should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual: ServerRuntime = serde_json::from_str(
+        &fs::read_to_string(&paths.server_json).expect("detached runtime should be readable"),
+    )
+    .expect("detached runtime should be valid JSON");
+    let mismatched_pid = actual.pid.checked_add(1).expect("child pid should not overflow");
+    let identity = format!(
+        r#"{{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":{mismatched_pid},"capabilities":["presence"]}}"#
+    );
+    let fake = FakeHttpServer::start(vec![
+        fake_response(200, &identity),
+        fake_response(200, &identity),
+    ]);
+    let stale = ServerRuntime::new(fake.base_url(), actual.token.clone(), "share", actual.pid);
+    stateful_cli::write_global_runtime_file(&paths, &stale).expect("stale runtime should write");
+
+    let result = stop_server(&paths);
+    let process_is_alive = runtime_is_healthy(&actual);
+    let runtime_file_remains = paths.server_json.is_file();
+    if process_is_alive {
+        stateful_cli::write_global_runtime_file(&paths, &actual)
+            .expect("actual runtime should be restored for cleanup");
+        stop_server(&paths).expect("matching child should stop during cleanup");
+    }
+
+    assert!(process_is_alive, "mismatched identity must not signal the child");
+    assert!(runtime_file_remains, "mismatched identity must preserve runtime file");
+    let error = result.expect_err("mismatched identity must refuse stop");
+    assert!(
+        error.to_string().contains("refusing to stop"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn restart_refuses_remote_pid_zero_runtime_that_cannot_be_killed() {
     let home = temp_home("stateful-server-restart-remote-pid-zero");
     let paths = GlobalPaths::new(&home);
     let fake = FakeHttpServer::start(vec![fake_response(
         200,
-        r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":["presence"]}"#,
+        r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":1,"capabilities":["presence"]}"#,
     )]);
     let runtime = ServerRuntime::new(fake.base_url(), "token", "w1", 0);
     stateful_cli::write_global_runtime_file(&paths, &runtime).expect("runtime should write");
@@ -319,7 +387,7 @@ fn restart_refuses_joined_pid_zero_runtime_without_identity_probe() {
     let paths = GlobalPaths::new(&home);
     let fake = FakeHttpServer::start(vec![fake_response(
         200,
-        r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":["presence"]}"#,
+        r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":1,"capabilities":["presence"]}"#,
     )]);
     let runtime = ServerRuntime::new(fake.base_url(), "token", "w1", 0);
     stateful_cli::write_global_runtime_file(&paths, &runtime).expect("runtime should write");
@@ -363,7 +431,7 @@ fn ensure_server_with_options_rejects_healthy_runtime_on_different_port() {
     let paths = GlobalPaths::new(&home);
     let fake = FakeHttpServer::start(vec![fake_response(
         200,
-        r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":["presence"]}"#,
+        r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":1,"capabilities":["presence"]}"#,
     )]);
     let runtime = ServerRuntime::new(fake.base_url(), "token", "w1", 123);
     stateful_cli::write_global_runtime_file(&paths, &runtime).expect("runtime should write");
@@ -618,7 +686,7 @@ fn temp_home(name: &str) -> tempfile::TempDir {
         .expect("temp dir should create")
 }
 
-fn fake_response(status: u16, body: &'static str) -> String {
+fn fake_response(status: u16, body: &str) -> String {
     let reason = match status {
         200 => "OK",
         401 => "Unauthorized",
