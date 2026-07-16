@@ -17,6 +17,8 @@ struct PendingIntent {
     authorization_request: String,
     targets: Vec<String>,
     #[serde(default)]
+    repo_root: String,
+    #[serde(default)]
     claim_ids: Vec<String>,
     #[serde(default)]
     completion_request: Option<String>,
@@ -115,6 +117,7 @@ pub(crate) fn authorize(
     let mut pending = load_pending(paths, agent_id, operation_id)?.unwrap_or(PendingIntent {
         intent_id: None,
         authorization_request: authorization_request.clone(),
+        repo_root: request.workspace.root.clone(),
         targets: targets.iter().map(|(path, _)| path.clone()).collect(),
         claim_ids,
         completion_request: None,
@@ -303,7 +306,7 @@ pub(crate) fn complete(
 pub(crate) fn replay_pending(
     paths: &GlobalPaths,
     runtime: &ServerRuntime,
-    repo_root: &Path,
+    _trigger_repo_root: &Path,
 ) -> anyhow::Result<()> {
     let root = paths.runtime_dir.join("write-intents");
     let agents = match fs::read_dir(&root) {
@@ -342,7 +345,7 @@ pub(crate) fn replay_pending(
             if path.extension().is_none_or(|extension| extension != "json") {
                 continue;
             }
-            if let Err(error) = replay_pending_at(runtime, &path, repo_root) {
+            if let Err(error) = replay_pending_at(runtime, &path) {
                 failure.get_or_insert(error);
             }
         }
@@ -350,7 +353,7 @@ pub(crate) fn replay_pending(
     failure.map_or(Ok(()), Err)
 }
 
-fn replay_pending_at(runtime: &ServerRuntime, path: &Path, repo_root: &Path) -> anyhow::Result<()> {
+fn replay_pending_at(runtime: &ServerRuntime, path: &Path) -> anyhow::Result<()> {
     let mut intent: PendingIntent = serde_json::from_slice(&fs::read(path)?)?;
     if intent.intent_id.is_none() {
         let response = post_frozen_authorization(runtime, &intent.authorization_request)?;
@@ -375,12 +378,10 @@ fn replay_pending_at(runtime: &ServerRuntime, path: &Path, repo_root: &Path) -> 
             if intent.recovery_request.is_none() {
                 let authorization: stateful_core::RequestEnvelope<serde_json::Value> =
                     serde_json::from_str(&intent.authorization_request)?;
-                let recovery_root = PathBuf::from(&authorization.workspace.root);
-                let recovery_root = if recovery_root.is_absolute() {
-                    recovery_root
-                } else {
-                    repo_root.to_path_buf()
-                };
+                let recovery_root = PathBuf::from(&intent.repo_root);
+                if !recovery_root.is_absolute() || intent.repo_root == "unknown" {
+                    anyhow::bail!("pending write authorization has no captured absolute repository root");
+                }
                 let mut request = authorization.clone();
                 request.request_id = uuid::Uuid::new_v4();
                 request.payload = json!({
@@ -548,6 +549,7 @@ mod tests {
         let pending = PendingIntent {
             intent_id: Some("intent-1".to_string()),
             authorization_request: "{}".to_string(),
+            repo_root: "/repo".to_string(),
             targets: vec!["target.txt".to_string()],
             claim_ids: vec!["claim-1".to_string()],
             completion_request: None,
@@ -764,6 +766,44 @@ mod tests {
     }
 
     #[test]
+    fn recovery_without_a_captured_absolute_root_keeps_the_pending_intent() {
+        let temp = tempfile::tempdir().expect("temp dir should create");
+        let paths = GlobalPaths::new(temp.path().join("home"));
+        let repo_a = temp.path().join("repo-a");
+        let repo_b = temp.path().join("repo-b");
+        fs::create_dir_all(&repo_a).expect("repo A should create");
+        fs::create_dir_all(&repo_b).expect("repo B should create");
+        fs::write(repo_b.join("target.txt"), "wrong repository").expect("repo B target should write");
+        let (runtime, requests) = fake_server([Some(AUTHORIZED)]);
+        authorize(
+            &paths,
+            &runtime,
+            "agent-1",
+            "workspace-1",
+            None,
+            None,
+            None,
+            "operation-unknown-root",
+            "write_file",
+            vec![(
+                "target.txt".to_string(),
+                stateful_core::ContentFingerprint::missing(),
+            )],
+            None,
+            Vec::new(),
+            &SOURCE,
+        )
+        .expect("authorization should persist its intent");
+        let _authorize = requests.recv().expect("authorization should arrive");
+
+        let error = replay_pending(&paths, &runtime, &repo_b)
+            .expect_err("unknown root must not fall back to the triggering repository");
+        assert!(error.to_string().contains("captured absolute repository root"));
+        assert!(pending_path(&paths, "agent-1", "operation-unknown-root").exists());
+        assert!(requests.try_recv().is_err(), "no recovery may use repo B");
+    }
+
+    #[test]
     fn recovery_without_completion_replays_all_frozen_claim_releases() {
         let temp = tempfile::tempdir().expect("temp dir should create");
         let paths = GlobalPaths::new(temp.path().join("home"));
@@ -777,13 +817,19 @@ mod tests {
             None,
             Some(r#"{"status":"ok"}"#),
         ]);
+        let identity = RepoIdentity {
+            repo_id: "repo-1".to_string(),
+            worktree_id: "worktree-1".to_string(),
+            root: repo_root.to_string_lossy().into_owned(),
+            branch: "main".to_string(),
+        };
 
         authorize(
             &paths,
             &runtime,
             "agent-1",
             "workspace-1",
-            None,
+            Some(&identity),
             None,
             None,
             "operation-1",

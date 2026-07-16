@@ -514,6 +514,44 @@ fn sync_outbox_discards_deterministic_client_rejections() {
 }
 
 #[test]
+fn sync_outbox_discards_a_structured_404_heartbeat_and_sends_the_next_record() {
+    let temp = temp_root("stateful-outbox-heartbeat-404-test");
+    let paths = paths_for_temp_root(temp.path());
+    fs::create_dir_all(&paths.outbox_dir).expect("outbox dir should be creatable");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener addr should load");
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        for (status, body) in [
+            (
+                "404 Not Found",
+                r#"{"protocol_version":"stateful.v2","request_id":"018f1a33-e3c1-7000-b2a6-000000000001","error":{"code":"not_found","message":"missing"}}"#,
+            ),
+            ("200 OK", r#"{"status":"ok"}"#),
+        ] {
+            let (mut stream, request) = accept_v2_request(&listener);
+            tx.send(request).expect("request should send to test");
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).expect("response should write");
+        }
+    });
+    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
+    let outbox_file = paths.outbox_dir.join("s1.jsonl");
+    write_pending_records(
+        &outbox_file,
+        &[("outbox-heartbeat", "s1", "w1", 1), ("outbox-next", "s1", "w1", 2)],
+    );
+
+    assert_eq!(sync_outbox_with_runtime(&paths, &runtime).expect("next record should sync"), 1);
+    assert!(rx.recv_timeout(Duration::from_secs(2)).is_ok(), "heartbeat should arrive");
+    assert!(rx.recv_timeout(Duration::from_secs(2)).is_ok(), "next record should arrive");
+    assert!(!outbox_file.exists(), "404 heartbeat must not retain the outbox file");
+}
+
+#[test]
 fn sync_outbox_recovers_stranded_claimed_files() {
     let temp = temp_root("stateful-outbox-stranded-claim-test");
     let temp_root = temp.path();

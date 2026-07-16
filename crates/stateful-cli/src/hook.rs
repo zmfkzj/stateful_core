@@ -1861,16 +1861,7 @@ fn post_durable_read_start(
     failed_completion: &stateful_core::RequestEnvelope<serde_json::Value>,
 ) -> anyhow::Result<()> {
     let paths = GlobalPaths::from_env()?;
-    let serialized = exact_envelope_json(request)?;
-    queue_exact_envelope(&paths, "/v2/read/start", request)?;
-    queue_exact_envelope(&paths, "/v2/read/complete", failed_completion)?;
-    match crate::replay_v2_request(runtime, "/v2/read/start", &serialized) {
-        Ok(_) => {
-            acknowledge_exact_envelope(&paths, request)?;
-            acknowledge_exact_envelope(&paths, failed_completion)
-        }
-        Err(error) => Err(error),
-    }
+    crate::outbox::post_durable_read_start_pair(&paths, runtime, request, failed_completion)
 }
 
 fn post_durable_v2(

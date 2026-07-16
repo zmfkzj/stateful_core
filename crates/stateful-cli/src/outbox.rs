@@ -101,7 +101,10 @@ pub fn sync_outbox_with_runtime(
             let response = match stateful_core::RequestEnvelope::<Value>::from_json(
                 &record.request_envelope,
             ) {
-                Ok(request) if exact_envelope_json(&request)? == record.request_envelope => {
+                Ok(request)
+                    if record.route == "/v2/outbox/sync"
+                        || exact_envelope_json(&request)? == record.request_envelope =>
+                {
                     crate::post_v2_raw(runtime, &record.route, &request)
                 }
                 Ok(_) => replay_v2_request(runtime, &record.route, &record.request_envelope),
@@ -121,11 +124,7 @@ pub fn sync_outbox_with_runtime(
 
             if !(200..300).contains(&response.status_code) {
                 if is_deterministic_client_rejection(response.status_code) {
-                    let _lock = acquire_outbox_lock(&outbox_dir)?;
-                    requeue_pending_records(&path, &records[index + 1..])?;
-                    fs::remove_file(&claimed_path)?;
-                    active_claim.finish();
-                    continue 'pending_files;
+                    continue;
                 }
                 let _lock = acquire_outbox_lock(&outbox_dir)?;
                 let pending = increment_attempts(&records[index..]);
@@ -234,6 +233,68 @@ pub(crate) fn queue_exact_envelope(
     Ok(())
 }
 
+pub(crate) fn post_durable_read_start_pair(
+    paths: &GlobalPaths,
+    runtime: &ServerRuntime,
+    start: &RequestEnvelope<Value>,
+    failed_completion: &RequestEnvelope<Value>,
+) -> anyhow::Result<()> {
+    let outbox_dir = ensure_trusted_outbox_dir(paths)?;
+    let _lock = acquire_outbox_lock(&outbox_dir)?;
+    recover_claimed_outbox_files(&outbox_dir)?;
+    if start.agent.agent_id != failed_completion.agent.agent_id {
+        anyhow::bail!("durable read pair agents differ");
+    }
+    let stem = safe_file_stem(&start.agent.agent_id);
+    let path = outbox_dir.join(format!("{stem}.jsonl"));
+    let mut records = match fs::read_to_string(&path) {
+        Ok(records) => records,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    for (route, request) in [
+        ("/v2/read/start", start),
+        ("/v2/read/complete", failed_completion),
+    ] {
+        let record = json!({
+            "outbox_id": uuid::Uuid::new_v4().to_string(),
+            "agent_id": request.agent.agent_id,
+            "workspace_id": request.workspace.workspace_id,
+            "sequence": next_sequence(&outbox_dir, &stem)?,
+            "route": route,
+            "request_id": request.request_id.to_string(),
+            "request_envelope": exact_envelope_json(request)?,
+            "attempts": 0,
+            "sync_status": "pending"
+        });
+        records.push_str(&record.to_string());
+        records.push('\n');
+    }
+    rewrite_outbox(&path, &records)?;
+
+    let serialized = exact_envelope_json(start)?;
+    crate::replay_v2_request(runtime, "/v2/read/start", &serialized)?;
+    let start_request_id = start.request_id.to_string();
+    let complete_request_id = failed_completion.request_id.to_string();
+    let retained = records
+        .lines()
+        .filter(|line| {
+            let Ok(record) = serde_json::from_str::<Value>(line) else {
+                return true;
+            };
+            let request_id = record.get("request_id").and_then(Value::as_str);
+            request_id != Some(start_request_id.as_str())
+                && request_id != Some(complete_request_id.as_str())
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    rewrite_outbox(&path, &retained)?;
+    if retained.is_empty() {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn acknowledge_exact_envelope(
     paths: &GlobalPaths,
     request: &RequestEnvelope<Value>,
@@ -260,15 +321,23 @@ pub(crate) fn acknowledge_exact_envelope(
                         || route == "/v2/activity/finalize"
                 }))
         })
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>()
+        .join("\n");
+    rewrite_outbox(&path, &retained)
+}
+
+fn rewrite_outbox(path: &Path, contents: &str) -> anyhow::Result<()> {
     let temporary = path.with_file_name(format!(
         "{}.ack-{}",
         path.file_name().and_then(|name| name.to_str()).unwrap_or("outbox.jsonl"),
         uuid::Uuid::new_v4()
     ));
     let mut file = OpenOptions::new().create_new(true).write(true).open(&temporary)?;
-    for line in retained {
-        writeln!(file, "{line}")?;
+    if !contents.is_empty() {
+        file.write_all(contents.as_bytes())?;
+        if !contents.ends_with('\n') {
+            file.write_all(b"\n")?;
+        }
     }
     file.sync_all()?;
     fs::rename(temporary, path)?;
@@ -825,6 +894,61 @@ mod tests {
         }
         fs::create_dir_all(&temp_root).expect("temp root should be creatable");
         temp_root
+    }
+
+    #[test]
+    fn durable_read_start_pair_persists_start_and_failed_completion_before_send() {
+        use std::net::TcpListener;
+
+        let temp_root = temp_root("stateful-outbox-read-pair");
+        let paths = GlobalPaths::new(temp_root.join("home"));
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let addr = listener.local_addr().expect("listener address should load");
+        thread::spawn(move || {
+            let _stream = listener.accept().expect("start request should arrive").0;
+        });
+        let runtime = ServerRuntime::new(format!("http://{addr}"), "secret", "w1", 1);
+        let start = v2_request_envelope(
+            uuid::Uuid::new_v4(),
+            "agent-1".to_string(),
+            "w1".to_string(),
+            None,
+            ActorType::Agent,
+            SourceKind::Hook,
+            "read_start",
+            "test",
+            None,
+            json!({"operation_id":"read-1"}),
+        )
+        .expect("start envelope should build");
+        let completion = v2_request_envelope(
+            uuid::Uuid::new_v4(),
+            "agent-1".to_string(),
+            "w1".to_string(),
+            None,
+            ActorType::Agent,
+            SourceKind::Hook,
+            "read_complete",
+            "test",
+            None,
+            json!({"operation_id":"read-1","classification":"failed"}),
+        )
+        .expect("completion envelope should build");
+
+        post_durable_read_start_pair(&paths, &runtime, &start, &completion)
+            .expect_err("dropped start response should leave the pair durable");
+        let records = fs::read_to_string(paths.outbox_dir.join("agent-1.jsonl"))
+            .expect("pair should be durable")
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("record should parse"))
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["route"], "/v2/read/start");
+        assert_eq!(records[1]["route"], "/v2/read/complete");
+        assert_eq!(records[0]["request_id"], start.request_id.to_string());
+        assert_eq!(records[1]["request_id"], completion.request_id.to_string());
+
+        fs::remove_dir_all(temp_root).expect("temp root should remove");
     }
 
     #[test]
