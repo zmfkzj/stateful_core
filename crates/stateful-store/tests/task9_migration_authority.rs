@@ -104,3 +104,68 @@ fn migration_preserves_all_reservation_and_claim_scopes_with_null_expiries() {
         4,
     );
 }
+
+#[test]
+fn migration_excludes_terminal_claim_scopes_and_preserves_active_claim_scopes() {
+    let temp = TempDir::new().expect("temporary directory exists");
+    let path = temp.path().join("legacy.sqlite");
+    let connection = Connection::open(&path).expect("legacy database opens");
+    connection.execute_batch(FIXTURE).expect("fixture applies");
+    connection
+        .execute_batch(
+            "
+            INSERT INTO reservations (reservation_id, agent_id, workspace_id, purpose, scopes_json, status, declared_at, expires_at)
+            VALUES (
+                'reservation-claim-lifecycle',
+                'agent-alpha',
+                'workspace-main',
+                'preserve only active claim scopes',
+                '[{\"kind\":\"file\",\"path\":\"src/a.rs\"}]',
+                'active',
+                '2026-07-15T11:00:00Z',
+                '2026-07-15T12:00:00Z'
+            );
+            INSERT INTO claims (claim_id, reservation_id, agent_id, workspace_id, repo_id, relative_path, absolute_path, purpose, action, status, expires_at, observed_exists, observed_content_hash)
+            VALUES
+                ('claim-lifecycle-released', 'reservation-claim-lifecycle', 'agent-alpha', 'workspace-main', 'repo-main', 'src/b.rs', '/repo/src/b.rs', 'terminal claim', 'write_file', 'released', '2026-07-15T12:00:00Z', 1, NULL),
+                ('claim-lifecycle-expired', 'reservation-claim-lifecycle', 'agent-alpha', 'workspace-main', 'repo-main', 'src/b.rs', '/repo/src/b.rs', 'terminal claim', 'write_file', 'active', '2026-07-15T11:15:00Z', 1, NULL),
+                ('claim-lifecycle-active', 'reservation-claim-lifecycle', 'agent-alpha', 'workspace-main', 'repo-main', 'src/c.rs', '/repo/src/c.rs', 'active claim', 'write_file', 'active', '2026-07-15T12:00:00Z', 1, NULL),
+                ('claim-lifecycle-active-no-deadline', 'reservation-claim-lifecycle', 'agent-alpha', 'workspace-main', 'repo-main', 'src/d.rs', '/repo/src/d.rs', 'active claim', 'write_file', 'active', NULL, 1, NULL);
+            ",
+        )
+        .expect("legacy rows insert");
+    drop(connection);
+
+    let mut store = Store::open_with_clock(
+        &path,
+        FixedClock::new(datetime!(2026-07-15 11:30 UTC)),
+    )
+    .expect("legacy database migrates");
+
+    let reservation = store
+        .reservation("workspace-main", "reservation-claim-lifecycle")
+        .expect("reservation reads")
+        .expect("reservation exists");
+    assert_eq!(
+        reservation.scopes,
+        vec![
+            ReservationScope::file("src/a.rs"),
+            ReservationScope::file("src/c.rs"),
+            ReservationScope::file("src/d.rs"),
+        ],
+    );
+
+    store.rebuild_projections().expect("migration replay succeeds");
+    assert_eq!(
+        store
+            .reservation("workspace-main", "reservation-claim-lifecycle")
+            .expect("reservation reads")
+            .expect("reservation exists")
+            .scopes,
+        vec![
+            ReservationScope::file("src/a.rs"),
+            ReservationScope::file("src/c.rs"),
+            ReservationScope::file("src/d.rs"),
+        ],
+    );
+}

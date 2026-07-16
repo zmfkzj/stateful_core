@@ -344,7 +344,7 @@ fn collect_pending_events(connection: &Connection, now: &str) -> StoreResult<Vec
 
     append_audits(connection, &contexts, &mut pending)?;
     append_presence_seeds(connection, now, &contexts, &mut pending)?;
-    append_reservation_seeds(connection, &contexts, &mut pending)?;
+    append_reservation_seeds(connection, now, &contexts, &mut pending)?;
     append_claim_seeds(connection, now, &contexts, &mut pending)?;
     append_wait_seeds(connection, &contexts, &mut pending)?;
     append_fence_seeds(connection, now, &contexts, &mut pending)?;
@@ -420,11 +420,12 @@ fn latest_activity(values: &[(String, String, Option<String>)]) -> StoreResult<O
     Ok(selected.map(|(_, _, value)| value))
 }
 
-fn append_reservation_seeds(connection: &Connection, contexts: &BTreeMap<String, Metadata>, pending: &mut Vec<PendingEvent>) -> StoreResult<()> {
+fn append_reservation_seeds(connection: &Connection, now: &str, contexts: &BTreeMap<String, Metadata>, pending: &mut Vec<PendingEvent>) -> StoreResult<()> {
+    let now = parse_timestamp(now)?;
     let mut claim_scopes = BTreeMap::<(String, String), Vec<ReservationScope>>::new();
     let mut claims = connection.prepare(
-        "SELECT workspace_id, reservation_id, relative_path, action FROM claims
-         WHERE reservation_id IS NOT NULL AND relative_path IS NOT NULL
+        "SELECT workspace_id, reservation_id, relative_path, action, expires_at FROM claims
+         WHERE reservation_id IS NOT NULL AND relative_path IS NOT NULL AND status = 'active'
          ORDER BY workspace_id, reservation_id, claim_id",
     )?;
     for row in claims.query_map([], |row| {
@@ -433,9 +434,13 @@ fn append_reservation_seeds(connection: &Connection, contexts: &BTreeMap<String,
             row.get::<_, String>(1)?,
             row.get::<_, String>(2)?,
             row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
         ))
     })? {
-        let (workspace_id, reservation_id, relative_path, action) = row?;
+        let (workspace_id, reservation_id, relative_path, action, expires_at) = row?;
+        if expires_at.as_deref().map(parse_timestamp).transpose()?.is_some_and(|expires_at| expires_at <= now) {
+            continue;
+        }
         let scope = if action == "write_directory" || relative_path.ends_with('/') {
             ReservationScope::directory(relative_path)
         } else {
