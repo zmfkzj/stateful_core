@@ -30,3 +30,8 @@
 
 ## Concerns
 - None.
+
+## Follow-up P1: Activity Start Identity
+- RED: `cargo test -p stateful-store --test presence_handoff activity_start_rejects_changed_identity_for_live_or_retained_presence` failed because `start_activity` accepted a different actor for a live presence.
+- GREEN: `cargo test -p stateful-store --test presence_handoff` passed with 29 tests after `start_activity` validated live presence or relevant retained-handoff identity before `register_record`.
+- Fix commit: `a68ebfa` (`fix(store): protect activity identity`); push `807bcf1..a68ebfa` to `origin/presence-first-event-journal-v2` succeeded.
