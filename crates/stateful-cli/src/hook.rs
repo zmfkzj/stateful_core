@@ -649,11 +649,12 @@ fn authorize_omp_targets(
     let mut retried = false;
 
     loop {
-        match write_lifecycle::authorize(
+        match write_lifecycle::authorize_at_root(
             &paths,
             runtime,
             &input.agent_id,
             &workspace_id,
+            repo_root,
             identity,
             input.omp_agent_id.as_deref(),
             input.parent_agent_id.as_deref(),
@@ -2992,11 +2993,12 @@ fn authorize_targets(
     }
     let paths = GlobalPaths::from_env()?;
     let workspace_id = effective_workspace_id(runtime, identity);
-    match write_lifecycle::authorize(
+    match write_lifecycle::authorize_at_root(
         &paths,
         runtime,
         input.stateful_agent_id(),
         &workspace_id,
+        repo_root,
         identity,
         None,
         None,

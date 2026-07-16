@@ -290,7 +290,7 @@ pub(crate) fn post_durable_read_start_pair(
         .join("\n");
     rewrite_outbox(&path, &retained)?;
     if retained.is_empty() {
-        fs::remove_file(path)?;
+        let _ = fs::remove_file(path);
     }
     Ok(())
 }

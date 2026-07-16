@@ -74,11 +74,40 @@ pub(crate) struct LifecycleSource {
     clippy::too_many_arguments,
     reason = "write authorization carries protocol and lifecycle identity"
 )]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "legacy callers do not pass the authorization root"
+)]
 pub(crate) fn authorize(
     paths: &GlobalPaths,
     runtime: &ServerRuntime,
     agent_id: &str,
     workspace_id: &str,
+    identity: Option<&RepoIdentity>,
+    actor_id: Option<&str>,
+    parent_agent_id: Option<&str>,
+    operation_id: &str,
+    action: &str,
+    targets: Vec<(String, ContentFingerprint)>,
+    reservation_id: Option<&str>,
+    claim_ids: Vec<String>,
+    source: &LifecycleSource,
+) -> anyhow::Result<Authorization> {
+    let root = identity
+        .map(|identity| Path::new(&identity.root))
+        .ok_or_else(|| anyhow::anyhow!("write authorization requires an explicit repository root"))?;
+    authorize_at_root(
+        paths, runtime, agent_id, workspace_id, root, identity, actor_id, parent_agent_id,
+        operation_id, action, targets, reservation_id, claim_ids, source,
+    )
+}
+
+pub(crate) fn authorize_at_root(
+    paths: &GlobalPaths,
+    runtime: &ServerRuntime,
+    agent_id: &str,
+    workspace_id: &str,
+    repo_root: &Path,
     identity: Option<&RepoIdentity>,
     actor_id: Option<&str>,
     parent_agent_id: Option<&str>,
@@ -114,10 +143,11 @@ pub(crate) fn authorize(
     }
     request.agent.parent_agent_id = parent_agent_id.map(str::to_string);
     let authorization_request = serde_json::to_string(&request)?;
+    let captured_repo_root = fs::canonicalize(repo_root)?;
     let mut pending = load_pending(paths, agent_id, operation_id)?.unwrap_or(PendingIntent {
         intent_id: None,
         authorization_request: authorization_request.clone(),
-        repo_root: request.workspace.root.clone(),
+        repo_root: captured_repo_root.to_string_lossy().into_owned(),
         targets: targets.iter().map(|(path, _)| path.clone()).collect(),
         claim_ids,
         completion_request: None,
@@ -378,7 +408,17 @@ fn replay_pending_at(runtime: &ServerRuntime, path: &Path) -> anyhow::Result<()>
             if intent.recovery_request.is_none() {
                 let authorization: stateful_core::RequestEnvelope<serde_json::Value> =
                     serde_json::from_str(&intent.authorization_request)?;
-                let recovery_root = PathBuf::from(&intent.repo_root);
+                let recovery_root = if intent.repo_root.is_empty() {
+                    let root = PathBuf::from(&authorization.workspace.root);
+                    if !root.is_absolute() || authorization.workspace.root == "unknown" {
+                        anyhow::bail!("pending write authorization has no captured absolute repository root");
+                    }
+                    intent.repo_root = root.to_string_lossy().into_owned();
+                    save_pending_at(path, &intent)?;
+                    root
+                } else {
+                    PathBuf::from(&intent.repo_root)
+                };
                 if !recovery_root.is_absolute() || intent.repo_root == "unknown" {
                     anyhow::bail!("pending write authorization has no captured absolute repository root");
                 }
@@ -588,11 +628,12 @@ mod tests {
         fs::write(repo_root.join("target.txt"), "after").expect("target should write");
         let (runtime, requests) = fake_server([Some(AUTHORIZED), None, Some(r#"{"status":"ok"}"#)]);
 
-        authorize(
+        authorize_at_root(
             &paths,
             &runtime,
             "agent-1",
             "workspace-1",
+            &repo_root,
             None,
             None,
             None,
@@ -653,11 +694,12 @@ mod tests {
             Some(r#"{"status":"ok"}"#),
         ]);
 
-        authorize(
+        authorize_at_root(
             &paths,
             &runtime,
             "agent-1",
             "workspace-1",
+            &repo_root,
             None,
             None,
             None,
@@ -734,11 +776,12 @@ mod tests {
             root: repo_a.to_string_lossy().into_owned(),
             branch: "main".to_string(),
         };
-        authorize(
+        authorize_at_root(
             &paths,
             &runtime,
             "agent-1",
             "workspace-1",
+            &repo_a,
             Some(&identity),
             None,
             None,
@@ -766,24 +809,29 @@ mod tests {
     }
 
     #[test]
-    fn recovery_without_a_captured_absolute_root_keeps_the_pending_intent() {
+    fn identityless_authorization_captures_the_actual_root_for_recovery() {
         let temp = tempfile::tempdir().expect("temp dir should create");
         let paths = GlobalPaths::new(temp.path().join("home"));
         let repo_a = temp.path().join("repo-a");
         let repo_b = temp.path().join("repo-b");
         fs::create_dir_all(&repo_a).expect("repo A should create");
         fs::create_dir_all(&repo_b).expect("repo B should create");
+        fs::write(repo_a.join("target.txt"), "right repository").expect("repo A target should write");
         fs::write(repo_b.join("target.txt"), "wrong repository").expect("repo B target should write");
-        let (runtime, requests) = fake_server([Some(AUTHORIZED)]);
-        authorize(
+        let (runtime, requests) = fake_server([
+            Some(AUTHORIZED),
+            Some(r#"{"intent_id":"intent-1","operation_id":"operation-root"}"#),
+        ]);
+        authorize_at_root(
             &paths,
             &runtime,
             "agent-1",
             "workspace-1",
+            &repo_a,
             None,
             None,
             None,
-            "operation-unknown-root",
+            "operation-root",
             "write_file",
             vec![(
                 "target.txt".to_string(),
@@ -795,12 +843,61 @@ mod tests {
         )
         .expect("authorization should persist its intent");
         let _authorize = requests.recv().expect("authorization should arrive");
+        replay_pending(&paths, &runtime, &repo_b).expect("captured root should recover safely");
+        let recovery = request_body(&requests.recv().expect("recovery should arrive"));
+        assert_eq!(
+            recovery["payload"]["actual_fingerprints"][0]["fingerprint"],
+            serde_json::to_value(stateful_core::fingerprint_path(&repo_a.join("target.txt")).expect("repo A fingerprint should load"))
+                .expect("fingerprint should serialize")
+        );
+        assert!(!pending_path(&paths, "agent-1", "operation-root").exists());
+    }
 
-        let error = replay_pending(&paths, &runtime, &repo_b)
-            .expect_err("unknown root must not fall back to the triggering repository");
-        assert!(error.to_string().contains("captured absolute repository root"));
-        assert!(pending_path(&paths, "agent-1", "operation-unknown-root").exists());
-        assert!(requests.try_recv().is_err(), "no recovery may use repo B");
+
+    #[test]
+    fn legacy_pending_intent_backfills_a_known_absolute_authorization_root() {
+        let temp = tempfile::tempdir().expect("temp dir should create");
+        let paths = GlobalPaths::new(temp.path().join("home"));
+        let repo_root = temp.path().join("repo");
+        fs::create_dir_all(&repo_root).expect("repo should create");
+        fs::write(repo_root.join("target.txt"), "legacy target").expect("target should write");
+        let identity = RepoIdentity {
+            repo_id: "repo-1".to_string(),
+            worktree_id: "worktree-1".to_string(),
+            root: repo_root.to_string_lossy().into_owned(),
+            branch: "main".to_string(),
+        };
+        let authorization = crate::v2_request_envelope(
+            uuid::Uuid::new_v4(),
+            "agent-1".to_string(),
+            "workspace-1".to_string(),
+            Some(identity),
+            ActorType::Agent,
+            SourceKind::Hook,
+            "write_start",
+            "test",
+            None,
+            json!({"operation_id":"legacy-root"}),
+        )
+        .expect("authorization should build");
+        let pending = PendingIntent {
+            intent_id: Some("intent-1".to_string()),
+            authorization_request: serde_json::to_string(&authorization).expect("authorization should serialize"),
+            repo_root: String::new(),
+            targets: vec!["target.txt".to_string()],
+            claim_ids: Vec::new(),
+            completion_request: None,
+            recovery_request: None,
+            release_requests: Vec::new(),
+            completed: false,
+        };
+        save_pending(&paths, "agent-1", "legacy-root", &pending).expect("legacy pending should save");
+        let (runtime, requests) = fake_server([Some(r#"{"intent_id":"intent-1","operation_id":"legacy-root"}"#)]);
+
+        replay_pending(&paths, &runtime, &temp.path().join("other"))
+            .expect("known authorization root should backfill");
+        let _recovery = requests.recv().expect("recovery should arrive");
+        assert!(!pending_path(&paths, "agent-1", "legacy-root").exists());
     }
 
     #[test]
@@ -824,11 +921,12 @@ mod tests {
             branch: "main".to_string(),
         };
 
-        authorize(
+        authorize_at_root(
             &paths,
             &runtime,
             "agent-1",
             "workspace-1",
+            &repo_root,
             Some(&identity),
             None,
             None,
