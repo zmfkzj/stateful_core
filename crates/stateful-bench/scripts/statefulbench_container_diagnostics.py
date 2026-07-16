@@ -6,7 +6,6 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
-import re
 import os
 import sqlite3
 import shutil
@@ -28,12 +27,61 @@ _V2_TABLES = {
     "workspace_version",
     "notification_current",
 }
-_V2_NOTIFICATION_KINDS = {
-    "context_invalidated",
-    "reservation_granted",
-    "scope_overlap",
-}
-_CATEGORY = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)?")
+_V2_JOURNAL_EVENT_TYPES = frozenset(
+    {
+        "migration.started", "migration.legacy_audit_imported",
+        "migration.presence_snapshot_seeded", "migration.reservation_snapshot_seeded",
+        "migration.claim_snapshot_seeded", "migration.wait_snapshot_seeded",
+        "migration.write_fence_snapshot_seeded", "migration.human_observation_snapshot_seeded",
+        "migration.legacy_handoff_snapshot_seeded", "migration.delivery_snapshot_seeded",
+        "migration.validated", "migration.completed",
+        "presence.registered", "presence.heartbeat", "presence.goal_updated",
+        "presence.phase_updated", "presence.plan_updated", "presence.resources_updated",
+        "presence.tool_started", "presence.tool_completed", "presence.finalized",
+        "presence.expired",
+        "reservation.declared", "reservation.refreshed", "reservation.released",
+        "reservation.expired",
+        "claim.acquired", "claim.observation_refreshed", "claim.released", "claim.expired",
+        "wait.requested", "wait.became_claimable", "wait.claimed", "wait.cancelled",
+        "wait.expired",
+        "write_fence.acquired", "write_fence.conflict_observed", "write_fence.released",
+        "write_fence.expired",
+        "read_observation.started", "read_observation.stabilized",
+        "read_observation.unstable", "read_observation.aborted",
+        "read_observation.invalidated", "read_observation.expired",
+        "write_intent.started", "write_intent.committed", "write_intent.failed",
+        "write_intent.outcome_unknown", "write_intent.reconciled",
+        "human_observation.observed", "human_observation.reconciled",
+        "human_observation.expired", "human_acknowledgement.recorded",
+        "handoff.finalized", "handoff.expired",
+        "authorization.allowed", "authorization.warned", "authorization.denied",
+        "authorization.override_granted",
+        "context.rendered", "context.delivery_created",
+        "context.delivery_acknowledged", "context.delivery_superseded",
+        "notification.created", "notification.delivered", "notification.expired",
+        "notification.coalesced",
+        "recovery.queued", "recovery.attempted", "recovery.delivered", "recovery.failed",
+    }
+)
+_V2_NOTIFICATION_KINDS = frozenset(
+    {"context_invalidated", "reservation_granted", "scope_overlap"}
+)
+_V2_HANDOFF_STATUSES = frozenset({"done", "failed", "blocked", "cancelled", "unknown"})
+_V2_WARNED_REASON_CODES = frozenset(
+    {
+        "missing_read_provenance", "missing_reservation", "inactive_session_phase",
+        "scope_mismatch", "invalid_write_action", "missing_claim",
+    }
+)
+_V2_DENIED_REASON_CODES = frozenset(
+    {
+        "invalid_target", "unknown_write_outcome", "stale_observation",
+        "write_fence_conflict", "unreconciled_human_write", "missing_read_provenance",
+        "missing_reservation", "inactive_session_phase", "scope_mismatch",
+        "invalid_write_action", "missing_claim",
+    }
+)
+_V2_WAIT_STATUSES = frozenset({"queued", "claimable", "claimed", "canceled", "expired"})
 
 
 def _group_counts(rows) -> dict[str, int]:
@@ -223,8 +271,6 @@ def _event_data(value: object) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _safe_category(value: object) -> str | None:
-    return value if isinstance(value, str) and _CATEGORY.fullmatch(value) else None
 
 
 def _projection_statuses(connection: sqlite3.Connection) -> dict[str, int]:
@@ -234,8 +280,8 @@ def _projection_statuses(connection: sqlite3.Connection) -> dict[str, int]:
             payload = json.loads(payload_json)
         except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
             continue
-        status = _safe_category(payload.get("status") if isinstance(payload, dict) else None)
-        if status is not None:
+        status = payload.get("status") if isinstance(payload, dict) else None
+        if isinstance(status, str) and status in _V2_WAIT_STATUSES:
             statuses[status] = statuses.get(status, 0) + 1
     return dict(sorted(statuses.items()))
 
@@ -267,7 +313,11 @@ def _coordination_metrics(
     cross_agent_overwrites = 0
 
     for aggregate_id, event_type, occurred_at, payload_json, agent_id, source_ref in rows:
-        category = _safe_category(event_type)
+        category = (
+            event_type
+            if isinstance(event_type, str) and event_type in _V2_JOURNAL_EVENT_TYPES
+            else None
+        )
         if category is None:
             continue
         by_event_type[category] = by_event_type.get(category, 0) + 1
@@ -281,8 +331,8 @@ def _coordination_metrics(
         if category == "handoff.finalized":
             handoff = data.get("handoff")
             if isinstance(handoff, dict):
-                status = _safe_category(handoff.get("status"))
-                if status is not None:
+                status = handoff.get("status")
+                if isinstance(status, str) and status in _V2_HANDOFF_STATUSES:
                     handoff_statuses[status] = handoff_statuses.get(status, 0) + 1
                 if handoff.get("explicit") is False:
                     if isinstance(source_ref, str) and "stop" in source_ref:
@@ -295,8 +345,8 @@ def _coordination_metrics(
         if category == "notification.created":
             notification = data.get("notification")
             if isinstance(notification, dict):
-                kind = _safe_category(notification.get("kind"))
-                if kind in _V2_NOTIFICATION_KINDS:
+                kind = notification.get("kind")
+                if isinstance(kind, str) and kind in _V2_NOTIFICATION_KINDS:
                     notification_kinds[kind] = notification_kinds.get(kind, 0) + 1
                     if kind == "reservation_granted":
                         grants.append((notification.get("payload"), occurred_at))
@@ -307,8 +357,13 @@ def _coordination_metrics(
                 requested_at[aggregate_id] = timestamp
 
         if category in {"authorization.warned", "authorization.denied"}:
-            reason = _safe_category(data.get("reason_code"))
-            if reason is not None:
+            reason = data.get("reason_code")
+            allowed_reasons = (
+                _V2_WARNED_REASON_CODES
+                if category == "authorization.warned"
+                else _V2_DENIED_REASON_CODES
+            )
+            if isinstance(reason, str) and reason in allowed_reasons:
                 target = warned if category == "authorization.warned" else denied
                 target[reason] = target.get(reason, 0) + 1
 

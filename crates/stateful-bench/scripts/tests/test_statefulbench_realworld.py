@@ -2281,6 +2281,22 @@ class RealWorldRunnerTests(unittest.TestCase):
             },
         }
 
+    def test_coordination_metrics_reject_unknown_category_keys(self) -> None:
+        category_maps = (
+            ("journal", "by_event_type"),
+            ("handoffs", "by_status"),
+            ("authorization", "warned_by_reason"),
+            ("authorization", "denied_by_reason"),
+            ("notifications", "by_kind"),
+            ("waits", "by_final_status"),
+        )
+        for section, category_map in category_maps:
+            with self.subTest(section=section, category_map=category_map):
+                metrics = self.coordination_aggregate("initialized")
+                metrics[section][category_map]["customer_secret"] = 1
+                with self.assertRaisesRegex(ValueError, "invalid"):
+                    self.mod._normalized_coordination_metrics(metrics)
+
     @classmethod
     def container_diagnostics(cls, _container, phase):
         return {
@@ -2669,16 +2685,16 @@ class RealWorldRunnerTests(unittest.TestCase):
                 "by_final_status"
             ]
             if phase == "after-tasks":
-                statuses["granted"] = 1
+                statuses["claimable"] = 1
             elif phase == "after-final":
-                statuses["completed"] = 1
+                statuses["claimed"] = 1
             return snapshot
 
         result = self.run_container_with_diagnostics("parallel-on", diagnostics)
 
         self.assertTrue(result["cleared"], result)
         self.assertEqual(
-            result["coordination_metrics"]["waits"]["by_final_status"], {"completed": 1}
+            result["coordination_metrics"]["waits"]["by_final_status"], {"claimed": 1}
         )
 
     def test_coordination_metrics_are_null_for_off_arms(self) -> None:

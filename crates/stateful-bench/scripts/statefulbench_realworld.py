@@ -2775,7 +2775,61 @@ def _report_row(result: dict) -> dict:
         "coordination_metrics": result.get("coordination_metrics"),
     }
 
-_CATEGORY = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)?")
+_V2_JOURNAL_EVENT_TYPES = frozenset(
+    {
+        "migration.started", "migration.legacy_audit_imported",
+        "migration.presence_snapshot_seeded", "migration.reservation_snapshot_seeded",
+        "migration.claim_snapshot_seeded", "migration.wait_snapshot_seeded",
+        "migration.write_fence_snapshot_seeded", "migration.human_observation_snapshot_seeded",
+        "migration.legacy_handoff_snapshot_seeded", "migration.delivery_snapshot_seeded",
+        "migration.validated", "migration.completed",
+        "presence.registered", "presence.heartbeat", "presence.goal_updated",
+        "presence.phase_updated", "presence.plan_updated", "presence.resources_updated",
+        "presence.tool_started", "presence.tool_completed", "presence.finalized",
+        "presence.expired",
+        "reservation.declared", "reservation.refreshed", "reservation.released",
+        "reservation.expired",
+        "claim.acquired", "claim.observation_refreshed", "claim.released", "claim.expired",
+        "wait.requested", "wait.became_claimable", "wait.claimed", "wait.cancelled",
+        "wait.expired",
+        "write_fence.acquired", "write_fence.conflict_observed", "write_fence.released",
+        "write_fence.expired",
+        "read_observation.started", "read_observation.stabilized",
+        "read_observation.unstable", "read_observation.aborted",
+        "read_observation.invalidated", "read_observation.expired",
+        "write_intent.started", "write_intent.committed", "write_intent.failed",
+        "write_intent.outcome_unknown", "write_intent.reconciled",
+        "human_observation.observed", "human_observation.reconciled",
+        "human_observation.expired", "human_acknowledgement.recorded",
+        "handoff.finalized", "handoff.expired",
+        "authorization.allowed", "authorization.warned", "authorization.denied",
+        "authorization.override_granted",
+        "context.rendered", "context.delivery_created",
+        "context.delivery_acknowledged", "context.delivery_superseded",
+        "notification.created", "notification.delivered", "notification.expired",
+        "notification.coalesced",
+        "recovery.queued", "recovery.attempted", "recovery.delivered", "recovery.failed",
+    }
+)
+_V2_NOTIFICATION_KINDS = frozenset(
+    {"context_invalidated", "reservation_granted", "scope_overlap"}
+)
+_V2_HANDOFF_STATUSES = frozenset({"done", "failed", "blocked", "cancelled", "unknown"})
+_V2_WARNED_REASON_CODES = frozenset(
+    {
+        "missing_read_provenance", "missing_reservation", "inactive_session_phase",
+        "scope_mismatch", "invalid_write_action", "missing_claim",
+    }
+)
+_V2_DENIED_REASON_CODES = frozenset(
+    {
+        "invalid_target", "unknown_write_outcome", "stale_observation",
+        "write_fence_conflict", "unreconciled_human_write", "missing_read_provenance",
+        "missing_reservation", "inactive_session_phase", "scope_mismatch",
+        "invalid_write_action", "missing_claim",
+    }
+)
+_V2_WAIT_STATUSES = frozenset({"queued", "claimable", "claimed", "canceled", "expired"})
 
 
 def _nonnegative_number(value: object, label: str) -> float:
@@ -2784,12 +2838,12 @@ def _nonnegative_number(value: object, label: str) -> float:
     return float(value)
 
 
-def _integer_map(value: object, label: str) -> dict[str, int]:
+def _integer_map(value: object, label: str, allowed: frozenset[str]) -> dict[str, int]:
     if type(value) is not dict:
         raise ValueError(f"{label} is invalid")
     result: dict[str, int] = {}
     for key, count in value.items():
-        if type(key) is not str or _CATEGORY.fullmatch(key) is None:
+        if type(key) is not str or key not in allowed:
             raise ValueError(f"{label} is invalid")
         result[key] = _nonnegative_int(count, f"{label}.{key}")
     return dict(sorted(result.items()))
@@ -2839,7 +2893,9 @@ def _normalized_coordination_metrics(value: object) -> dict:
         "bytes_start": _nonnegative_int(journal["bytes_start"], "coordination journal bytes start"),
         "bytes_end": _nonnegative_int(journal["bytes_end"], "coordination journal bytes end"),
         "bytes_growth": _nonnegative_int(journal["bytes_growth"], "coordination journal bytes growth"),
-        "by_event_type": _integer_map(journal["by_event_type"], "coordination journal event types"),
+        "by_event_type": _integer_map(
+            journal["by_event_type"], "coordination journal event types", _V2_JOURNAL_EVENT_TYPES
+        ),
     }
     if normalized_journal["bytes_growth"] != normalized_journal["bytes_end"] - normalized_journal["bytes_start"]:
         raise ValueError("coordination journal is invalid")
@@ -2865,7 +2921,9 @@ def _normalized_coordination_metrics(value: object) -> dict:
         "fallback_ttl": _nonnegative_int(
             handoffs["fallback_ttl"], "coordination handoffs.fallback_ttl"
         ),
-        "by_status": _integer_map(handoffs["by_status"], "coordination handoff statuses"),
+        "by_status": _integer_map(
+            handoffs["by_status"], "coordination handoff statuses", _V2_HANDOFF_STATUSES
+        ),
     }
     read_observations = _integer_fields(
         value["read_observations"],
@@ -2938,19 +2996,25 @@ def _normalized_coordination_metrics(value: object) -> dict:
         "context": context,
         "authorization": {
             "warned_by_reason": _integer_map(
-                authorization["warned_by_reason"], "coordination warned reasons"
+                authorization["warned_by_reason"],
+                "coordination warned reasons",
+                _V2_WARNED_REASON_CODES,
             ),
             "denied_by_reason": _integer_map(
-                authorization["denied_by_reason"], "coordination denied reasons"
+                authorization["denied_by_reason"],
+                "coordination denied reasons",
+                _V2_DENIED_REASON_CODES,
             ),
         },
         "write_safety": write_safety,
         "notifications": {
-            "by_kind": _integer_map(notifications["by_kind"], "coordination notifications")
+            "by_kind": _integer_map(
+                notifications["by_kind"], "coordination notifications", _V2_NOTIFICATION_KINDS
+            )
         },
         "waits": {
             "by_final_status": _integer_map(
-                waits["by_final_status"], "coordination wait statuses"
+                waits["by_final_status"], "coordination wait statuses", _V2_WAIT_STATUSES
             ),
             "grant_wait_time_s": {
                 "count": count,

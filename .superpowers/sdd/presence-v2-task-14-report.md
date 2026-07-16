@@ -54,3 +54,22 @@ No model-backed benchmark was launched. `git status --short` showed no changes u
 ## Checklist review
 
 Steps 1–4 are evidenced above. Steps 5–7 require a running Docker daemon and must be rerun in sequence with one inspected `linux/arm64` image before this task can be declared fully qualified. Step 8 remains pending that gate.
+
+## Independent review finding
+
+- **Allowlist every published metric category (P1).** `_safe_category`
+  currently accepts any regex-shaped journal event, handoff status,
+  authorization reason, or wait status, and the runner normalization accepts
+  the same arbitrary keys. A value such as `customer_secret` can therefore
+  escape through `journal.by_event_type` into published output. Extraction
+  must emit only contract-enumerated categories, normalization must reject
+  unknown keys, and privacy tests must cover unknown non-notification
+  categories.
+
+### P1 resolution
+
+- **Root cause:** extraction and normalization treated a regex match as category authorization. The closed V2 journal/handoff enums and the metric-specific notification, authorization, and wait-status contracts were not enforced at either boundary.
+- **Fix:** both scripts now use immutable per-map V2 allowlists. Extraction drops unknown journal event types, handoff statuses, authorization reasons, notification kinds, and wait statuses; normalization rejects unknown keys for each corresponding map before publishing or aggregation. The locked object shape, sorted maps, integer checks, weighted wait means, off-arm nulls, and incomplete-row clearing are unchanged.
+- **RED:** `stateful sandbox run --fs build --network enabled --write-dir task14-red --command 'python3 -m unittest crates.stateful-bench.scripts.tests.test_statefulbench_realworld.RealWorldRunnerTests.test_coordination_metrics_reject_unknown_category_keys crates.stateful-bench.scripts.tests.test_statefulbench_docker.V2DiagnosticContractTests.test_v2_snapshot_emits_only_locked_value_free_metrics'` ran 2 tests and failed 7 assertions: all six normalization maps accepted `customer_secret`, and extraction emitted unknown authorization categories.
+- **GREEN:** `stateful sandbox run --fs build --network enabled --write-dir task14-green-rerun --command 'python3 -m unittest crates.stateful-bench.scripts.tests.test_statefulbench_realworld.RealWorldRunnerTests crates.stateful-bench.scripts.tests.test_statefulbench_docker.V2DiagnosticContractTests'` ran 27 tests in 0.731s: `OK`.
+- **Residual blocker:** Docker qualification remains blocked by the missing `/Users/arthur/.colima/default/docker.sock`; no Docker image identity, qualification receipt, or E2E result was fabricated.

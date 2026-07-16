@@ -1462,7 +1462,7 @@ class V2DiagnosticContractTests(unittest.TestCase):
             ("agent-one", "presence.registered", payload({})),
             ("agent-one", "presence.finalized", payload({})),
             ("agent-two", "presence.expired", payload({})),
-            ("handoff-one", "handoff.finalized", payload({"handoff": {"explicit": True, "status": "done"}})),
+            ("handoff-one", "handoff.finalized", payload({"handoff": {"explicit": True, "status": "customer_secret"}})),
             ("handoff-two", "handoff.finalized", payload({"handoff": {"explicit": False, "status": "unknown"}})),
             ("handoff-three", "handoff.finalized", payload({"handoff": {"explicit": False, "status": "unknown"}})),
             ("read-one", "read_observation.started", payload({})),
@@ -1508,6 +1508,9 @@ class V2DiagnosticContractTests(unittest.TestCase):
             ("audit-two", "authorization.denied", payload({"reason_code": "active_claim_conflict", "path": "private/path.txt"})),
             ("fence-one", "write_fence.conflict_observed", payload({"operation_id": "operation-private"})),
             ("intent-one", "write_intent.outcome_unknown", payload({})),
+            ("unknown-event", "customer_secret", payload({})),
+            ("audit-three", "authorization.warned", payload({"reason_code": "customer_secret"})),
+            ("audit-four", "authorization.denied", payload({"reason_code": "customer_secret"})),
         ]
         connection.executemany(
             "INSERT INTO journal_events VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1524,7 +1527,10 @@ class V2DiagnosticContractTests(unittest.TestCase):
                 for index, (aggregate_id, event_type, body) in enumerate(rows, start=1)
             ],
         )
-        connection.execute("INSERT INTO wait_current VALUES (?)", (json.dumps({"status": "claimed"}),))
+        connection.executemany(
+            "INSERT INTO wait_current VALUES (?)",
+            [(json.dumps({"status": "claimed"}),), (json.dumps({"status": "customer_secret"}),)],
+        )
         connection.execute("INSERT INTO workspace_version VALUES (3)")
         connection.commit()
         connection.close()
@@ -1560,7 +1566,7 @@ class V2DiagnosticContractTests(unittest.TestCase):
         self.assertEqual(metrics["context"]["deliveries"], 1)
         self.assertEqual(metrics["context"]["acks"], 1)
         self.assertEqual(metrics["context"]["redeliveries"], 1)
-        self.assertEqual(metrics["authorization"], {"warned_by_reason": {"missing_claim": 1}, "denied_by_reason": {"active_claim_conflict": 1}})
+        self.assertEqual(metrics["authorization"], {"warned_by_reason": {"missing_claim": 1}, "denied_by_reason": {}})
         self.assertEqual(metrics["write_safety"]["fence_conflicts"], 1)
         self.assertEqual(metrics["write_safety"]["unknown_outcomes"], 1)
         self.assertEqual(metrics["notifications"]["by_kind"], {"reservation_granted": 1, "scope_overlap": 1})
@@ -1578,6 +1584,7 @@ class V2DiagnosticContractTests(unittest.TestCase):
             "2026-07-16T00:00:01Z",
         ):
             self.assertNotIn(private_value, encoded)
+        self.assertNotIn("customer_secret", encoded)
     def test_v2_snapshot_excludes_unknown_notification_kind(self) -> None:
         import sqlite3
 
