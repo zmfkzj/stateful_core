@@ -184,6 +184,10 @@ pub(crate) async fn authorize(State(config): State<ServerConfig>, protocol::V2Js
         Ok(decision) => decision,
         Err(response) => return response,
     };
+    let authorization_workspace_version = match store.workspace_version(&request.workspace.workspace_id) {
+        Ok(version) => version,
+        Err(error) => return protocol::store_error_response(&request_id, error),
+    };
     let write_payload = WriteIntentStart {
         operation_id: request.payload.operation_id.clone(),
         action: request.payload.action.clone(),
@@ -191,7 +195,12 @@ pub(crate) async fn authorize(State(config): State<ServerConfig>, protocol::V2Js
     };
     protocol::command_response(
         &request_id,
-        store.start_write_intent_authorized(&request, write_payload, decision),
+        store.start_write_intent_authorized(
+            &request,
+            write_payload,
+            decision,
+            authorization_workspace_version,
+        ),
     )
 }
 

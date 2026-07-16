@@ -101,6 +101,8 @@ pub enum StoreError {
     MissingReservation,
     #[error("write fence conflict on `{path}` held by `{owner_agent_id}`")]
     WriteFenceConflict { path: String, owner_agent_id: String },
+    #[error("authorization snapshot is stale")]
+    StaleAuthorization,
     #[error("invalid claim path `{0}`: direct tmp claims are not allowed; claim a file or subdirectory under tmp instead")]
     InvalidClaimPath(String),
     #[error("purpose is required")]
@@ -129,6 +131,7 @@ impl StoreError {
             Self::V2(error) => &error.code,
             Self::IdempotencyKeyReused => "idempotency_key_reused",
             Self::MigrationValidation(_) => "migration_validation",
+            Self::StaleAuthorization => "stale_authorization",
             _ => "store_error",
         }
     }

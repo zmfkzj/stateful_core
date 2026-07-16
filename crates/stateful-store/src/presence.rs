@@ -1,4 +1,4 @@
-use crate::{CommandOutcome, CommandPlan, Store, StoreError, StoreResult};
+use crate::{CommandOutcome, CommandPlan, ProjectionReader, Store, StoreError, StoreResult};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -233,20 +233,19 @@ impl Store {
                 )));
             }
         }
-        let result = serde_json::to_string(&StoredToolResult {
-            tool_name: request.payload.tool_name.clone(),
-            outcome: request.payload.outcome.clone(),
-            completed_at: now,
-            summary: request.payload.summary.clone(),
-        })?;
         self.execute_command(request, "presence.tool_result", |reader| {
             let mut events = crate::handoff::lazy_current_state_events(request, reader, now)?;
             let mut presence = reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?
                 .ok_or_else(missing_presence)?;
-            presence.last_result = Some(result.clone());
-            presence.busy_until = None;
-            refresh_presence(&mut presence, now);
-            let event = presence_event(request, events.len() as u32, now, PresenceEvent::ToolCompleted, presence.clone(), false)?;
+            let event = tool_completed_event(
+                request,
+                events.len() as u32,
+                now,
+                &mut presence,
+                &request.payload.tool_name,
+                &request.payload.outcome,
+                request.payload.summary.clone(),
+            )?;
             events.push(event);
             Ok(CommandPlan { events, response: presence, http_status: 200 })
         })
@@ -377,6 +376,65 @@ pub(crate) fn presence_resources_event<T>(
     data.repeated = repeated;
     data.data = json!({"presence": presence, "resource": resource});
     NewEvent::new(request.request_id, ordinal, now, EventPayload::Presence(PresenceEvent::ResourcesUpdated(data))).map_err(StoreError::from)
+}
+
+pub(crate) fn presence_for_resource_update<T>(
+    reader: &dyn ProjectionReader,
+    request: &RequestEnvelope<T>,
+    now: OffsetDateTime,
+) -> StoreResult<PresenceRecord> {
+    Ok(reader
+        .presence(&request.workspace.workspace_id, &request.agent.agent_id)?
+        .unwrap_or_else(|| register_record(request, None, None, now)))
+}
+
+pub(crate) fn resource_update_event<T>(
+    reader: &dyn ProjectionReader,
+    request: &RequestEnvelope<T>,
+    now: OffsetDateTime,
+    ordinal: u32,
+    presence: &mut PresenceRecord,
+    relative_path: &str,
+    relation: PresenceResourceRelation,
+) -> StoreResult<NewEvent> {
+    let resource = PresenceResource::new(
+        &request.workspace.workspace_id,
+        &request.agent.agent_id,
+        relative_path,
+        relation,
+        now,
+        0,
+    )?;
+    let repeated = reader
+        .presence_resource(
+            &request.workspace.workspace_id,
+            &request.agent.agent_id,
+            &resource.relative_path,
+            relation,
+        )?
+        .is_some();
+    refresh_presence(presence, now);
+    presence_resources_event(request, now, ordinal, presence.clone(), resource, repeated)
+}
+
+pub(crate) fn tool_completed_event<T>(
+    request: &RequestEnvelope<T>,
+    ordinal: u32,
+    now: OffsetDateTime,
+    presence: &mut PresenceRecord,
+    tool_name: &str,
+    outcome: &str,
+    summary: Option<String>,
+) -> StoreResult<NewEvent> {
+    presence.last_result = Some(serde_json::to_string(&StoredToolResult {
+        tool_name: tool_name.into(),
+        outcome: outcome.into(),
+        completed_at: now,
+        summary,
+    })?);
+    presence.busy_until = None;
+    refresh_presence(presence, now);
+    presence_event(request, ordinal, now, PresenceEvent::ToolCompleted, presence.clone(), false)
 }
 
 pub(crate) fn missing_presence() -> StoreError {

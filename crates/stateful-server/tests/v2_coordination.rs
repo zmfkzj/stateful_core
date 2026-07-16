@@ -32,6 +32,87 @@ async fn awareness_warns_for_missing_read_provenance_while_enforcement_denies() 
 }
 
 #[tokio::test]
+async fn committed_write_requires_a_new_exact_read_before_a_second_enforced_authorization() {
+    let app = build_router(
+        ServerConfig::new("test-token").with_coordination_mode(CoordinationMode::Enforcement),
+    );
+    let reservation = successful_post(
+        &app,
+        "/v2/reservation/declare",
+        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d201", json!({
+            "scopes": [{"kind": "file", "path": "src/lib.rs"}],
+            "action": "write_file",
+            "purpose": "Update the module."
+        })),
+    )
+    .await;
+    let reservation_id = reservation["reservation_id"].as_str().expect("reservation id").to_owned();
+    successful_post(
+        &app,
+        "/v2/claim/acquire",
+        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d202", json!({
+            "reservation_id": reservation_id,
+            "paths": [{"relative_path": "src/lib.rs", "observation": {"exists": false}}]
+        })),
+    )
+    .await;
+    successful_post(
+        &app,
+        "/v2/read/start",
+        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d203", json!({
+            "operation_id": "read-1", "path": "src/lib.rs",
+            "before": {"exists": false, "byte_len": 0}
+        })),
+    )
+    .await;
+    successful_post(
+        &app,
+        "/v2/read/complete",
+        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d204", json!({
+            "operation_id": "read-1", "path": "src/lib.rs", "classification": "exact",
+            "after": {"exists": false, "byte_len": 0}
+        })),
+    )
+    .await;
+    let first = successful_post(
+        &app,
+        "/v2/authorize",
+        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d205", json!({
+            "reservation_id": reservation_id,
+            "operation_id": "write-1",
+            "action": "write_file",
+            "targets": [{"path": "src/lib.rs", "before": {"exists": false, "byte_len": 0}}]
+        })),
+    )
+    .await;
+    successful_post(
+        &app,
+        "/v2/write/complete",
+        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d206", json!({
+            "intent_id": first["intent_id"],
+            "outcome": "committed",
+            "post_fingerprints": [["src/lib.rs", {"exists": false, "byte_len": 0}]]
+        })),
+    )
+    .await;
+
+    let second = app
+        .oneshot(post(
+            "/v2/authorize",
+            envelope_for("agent-1", "00000000-0000-4000-8000-00000000d207", json!({
+                "reservation_id": reservation_id,
+                "operation_id": "write-2",
+                "action": "write_file",
+                "targets": [{"path": "src/lib.rs", "before": {"exists": false, "byte_len": 0}}]
+            })),
+        ))
+        .await
+        .expect("second authorization responds");
+    assert_eq!(second.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response_json(second).await["reason_code"], "stale_observation");
+}
+
+#[tokio::test]
 async fn every_v2_route_executes_a_real_store_flow() {
     let app = app();
     successful_post(

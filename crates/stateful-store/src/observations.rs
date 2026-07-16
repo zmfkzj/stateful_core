@@ -1,12 +1,13 @@
 use crate::{
     CommandOutcome, CommandPlan, CurrentAggregate, Store, StoreError, StoreResult,
     reservations::{normalized_scope, record_from_current, typed_records},
+    presence::{presence_for_resource_update, resource_update_event},
 };
 use serde_json::json;
 use stateful_core::{
     EventData, EventPayload, NewEvent, OBSERVATION_TTL, ReadCompletion, ReadObservationRecord,
     ReadObservationStart, ReadObservationStatus, RequestEnvelope, ResourceVersion,
-    ReadObservationEvent, observation_status,
+    ReadObservationEvent, PresenceResourceRelation, observation_status,
 };
 use time::OffsetDateTime;
 
@@ -114,8 +115,21 @@ impl Store {
                 ReadObservationStatus::Unstable => ReadObservationEvent::Unstable,
                 _ => return Err(StoreError::InvalidReadOperation),
             };
+            let mut events = vec![read_event(request, 0, now, variant, &record)?];
+            if status == ReadObservationStatus::Stabilized {
+                let mut presence = presence_for_resource_update(reader, request, now)?;
+                events.push(resource_update_event(
+                    reader,
+                    request,
+                    now,
+                    events.len() as u32,
+                    &mut presence,
+                    &record.path,
+                    PresenceResourceRelation::Read,
+                )?);
+            }
             Ok(CommandPlan {
-                events: vec![read_event(request, 0, now, variant, &record)?],
+                events,
                 response: record,
                 http_status: 200,
             })

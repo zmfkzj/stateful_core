@@ -1,4 +1,4 @@
-use crate::{ContentFingerprint, Decision, DecisionKind};
+use crate::{ActorType, AgentIdentity, ContentFingerprint, Decision, DecisionKind};
 use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 
@@ -169,12 +169,30 @@ impl WriteIntentStatus {
     }
 }
 
+fn unknown_actor_id() -> String {
+    "unknown".into()
+}
+
+fn unknown_actor_type() -> ActorType {
+    ActorType::Unknown
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WriteIntentRecord {
     pub intent_id: String,
     pub operation_id: String,
     pub workspace_id: String,
     pub agent_id: String,
+    #[serde(default = "unknown_actor_id")]
+    pub actor_id: String,
+    #[serde(default = "unknown_actor_type")]
+    pub actor_type: ActorType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_actor_id: Option<String>,
     pub action: String,
     pub targets: Vec<WriteTarget>,
     pub fence_ids: Vec<String>,
@@ -186,6 +204,17 @@ pub struct WriteIntentRecord {
     pub failure_code: Option<String>,
     #[serde(default)]
     pub origin_event_seq: u64,
+}
+
+impl WriteIntentRecord {
+    pub fn is_owned_by(&self, agent: &AgentIdentity) -> bool {
+        self.agent_id == agent.agent_id
+            && self.actor_id == agent.actor_id
+            && self.actor_type == agent.actor_type
+            && self.owner_id == agent.owner_id
+            && self.parent_agent_id == agent.parent_agent_id
+            && self.parent_actor_id == agent.parent_actor_id
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

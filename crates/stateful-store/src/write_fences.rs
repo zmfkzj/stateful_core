@@ -5,12 +5,20 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use serde_json::json;
-use stateful_core::{EventData, EventPayload, NewEvent, RequestEnvelope, WriteFenceEvent};
+use stateful_core::{ActorType, AgentIdentity, EventData, EventPayload, NewEvent, RequestEnvelope, WriteFenceEvent};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 const WRITE_FENCE_TTL: Duration = Duration::minutes(5);
 const FENCE_ATTRIBUTION_GRACE: Duration = Duration::seconds(2);
+
+fn unknown_actor_id() -> String {
+    "unknown".into()
+}
+
+fn unknown_actor_type() -> ActorType {
+    ActorType::Unknown
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WriteFenceAcquire {
@@ -27,6 +35,16 @@ pub struct WriteFenceRelease {
 pub struct WriteFenceRecord {
     pub fence_id: String,
     pub agent_id: String,
+    #[serde(default = "unknown_actor_id")]
+    pub actor_id: String,
+    #[serde(default = "unknown_actor_type")]
+    pub actor_type: ActorType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_actor_id: Option<String>,
     pub workspace_id: String,
     pub relative_path: String,
     pub action: String,
@@ -37,6 +55,17 @@ pub struct WriteFenceRecord {
     pub released_at: Option<String>,
     #[serde(default)]
     pub origin_event_seq: u64,
+}
+
+impl WriteFenceRecord {
+    fn is_owned_by(&self, agent: &AgentIdentity) -> bool {
+        self.agent_id == agent.agent_id
+            && self.actor_id == agent.actor_id
+            && self.actor_type == agent.actor_type
+            && self.owner_id == agent.owner_id
+            && self.parent_agent_id == agent.parent_agent_id
+            && self.parent_actor_id == agent.parent_actor_id
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +116,9 @@ impl Store {
                         && fence.agent_id == request.agent.agent_id
                         && fence.relative_path == path
                 }).cloned() {
+                    if !fence.is_owned_by(&request.agent) {
+                        return Err(StoreError::ClaimOwnerMismatch);
+                    }
                     fence.action = payload.action.clone();
                     fence.expires_at = timestamp(now + WRITE_FENCE_TTL)?;
                     events.push(fence_event(request, events.len() as u32, now, WriteFenceEvent::Acquired, &fence)?);
@@ -96,6 +128,11 @@ impl Store {
                 let fence = WriteFenceRecord {
                     fence_id: Uuid::new_v4().to_string(),
                     agent_id: request.agent.agent_id.clone(),
+                    actor_id: request.agent.actor_id.clone(),
+                    actor_type: request.agent.actor_type.clone(),
+                    owner_id: request.agent.owner_id.clone(),
+                    parent_agent_id: request.agent.parent_agent_id.clone(),
+                    parent_actor_id: request.agent.parent_actor_id.clone(),
                     workspace_id: request.workspace.workspace_id.clone(),
                     relative_path: path,
                     action: payload.action.clone(),
@@ -129,7 +166,9 @@ impl Store {
                 }
                 let mut fence = existing.iter().find(|fence| fence.fence_id == *fence_id)
                     .cloned().ok_or(StoreError::ClaimNotFound)?;
-                if fence.agent_id != request.agent.agent_id { return Err(StoreError::ClaimOwnerMismatch); }
+                if !fence.is_owned_by(&request.agent) {
+                    return Err(StoreError::ClaimOwnerMismatch);
+                }
                 if fence.status == "active" {
                     fence.status = "released".into();
                     fence.released_at = Some(timestamp(now)?);

@@ -154,6 +154,14 @@ pub(crate) fn store_error_response(request_id: &str, error: StoreError) -> Respo
             StatusCode::CONFLICT,
             V2Error::new("coordination_conflict", "The requested coordination state conflicts with an active record."),
         ),
+        StoreError::StaleAuthorization => (
+            StatusCode::CONFLICT,
+            V2Error::new(
+                "stale_authorization",
+                "Coordination state changed while the write authorization was being recorded.",
+            )
+            .with_required_next_action("Re-read coordination state and retry authorization."),
+        ),
         StoreError::MissingReservation => (
             StatusCode::CONFLICT,
             V2Error::new("missing_reservation", "A matching active reservation is required."),
