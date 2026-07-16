@@ -1312,84 +1312,63 @@ def _nonnegative_int(value: object, label: str) -> int:
     return value
 
 
-def _context_render_snapshot_count(snapshot: dict, phase: str) -> int:
-    if type(snapshot) is not dict:
-        raise ValueError(f"missing context render metrics at {phase}")
-    runtime_metrics = snapshot.get("runtime_metrics")
-    if type(runtime_metrics) is not dict:
-        raise ValueError(f"missing context render metrics at {phase}")
-    return _nonnegative_int(
-        runtime_metrics.get("context_render_success_count"),
-        f"context render count at {phase}",
-    )
-
-
-def _after_final_coordination_metrics(snapshot: dict) -> dict:
-    if type(snapshot) is not dict:
-        raise ValueError("after-final coordination diagnostics are invalid")
-    databases = snapshot.get("databases")
-    if type(databases) is not dict:
-        raise ValueError("after-final coordination diagnostics are invalid")
-    recognized = [
-        record["coordination_metrics"]
-        for record in databases.values()
-        if type(record) is dict and type(record.get("coordination_metrics")) is dict
+def _coordination_snapshot_metrics(snapshot: object, phase: str) -> dict:
+    if type(snapshot) is not dict or type(snapshot.get("databases")) is not dict:
+        raise ValueError(f"coordination diagnostics are invalid at {phase}")
+    metrics = [
+        database["coordination_metrics"]
+        for database in snapshot["databases"].values()
+        if type(database) is dict and type(database.get("coordination_metrics")) is dict
     ]
-    if len(recognized) != 1:
+    if len(metrics) != 1:
         raise ValueError("exactly one coordination metrics database is required")
-    return copy.deepcopy(recognized[0])
+    return _normalized_coordination_metrics(metrics[0])
+
+
+def _metric_counters(value: object, prefix: str = "") -> dict[str, int]:
+    if type(value) is not dict:
+        return {}
+    counters: dict[str, int] = {}
+    for key, item in value.items():
+        label = f"{prefix}.{key}" if prefix else key
+        if label in {"journal.bytes_start", "journal.bytes_end", "journal.bytes_growth"}:
+            continue
+        if type(item) is int:
+            counters[label] = item
+        elif type(item) is dict:
+            counters.update(_metric_counters(item, label))
+    return counters
+
+
+def _require_monotonic_metrics(before: dict, after: dict) -> None:
+    before_counters = _metric_counters(before)
+    after_counters = _metric_counters(after)
+    if any(after_counters.get(key, 0) < value for key, value in before_counters.items()):
+        raise ValueError("coordination counters decreased across phases")
 
 
 def _build_coordination_metrics(
     arm: str, snapshots: dict[str, dict], agents: list[dict]
 ) -> dict | None:
+    del agents
     if arm != "parallel-on":
         return None
     if type(snapshots) is not dict:
-        raise ValueError("context render snapshots are invalid")
-    before_tasks = _context_render_snapshot_count(
-        snapshots.get("before-tasks"), "before-tasks"
+        raise ValueError("coordination diagnostics are invalid")
+    before_tasks = _coordination_snapshot_metrics(snapshots.get("before-tasks"), "before-tasks")
+    after_tasks = _coordination_snapshot_metrics(snapshots.get("after-tasks"), "after-tasks")
+    after_final = _coordination_snapshot_metrics(snapshots.get("after-final"), "after-final")
+    _require_monotonic_metrics(before_tasks, after_tasks)
+    _require_monotonic_metrics(after_tasks, after_final)
+    start = before_tasks["journal"]["bytes_end"]
+    end = after_final["journal"]["bytes_end"]
+    if end < start:
+        raise ValueError("coordination journal bytes decreased across phases")
+    metrics = copy.deepcopy(after_final)
+    metrics["journal"].update(
+        {"bytes_start": start, "bytes_end": end, "bytes_growth": end - start}
     )
-    after_tasks = _context_render_snapshot_count(
-        snapshots.get("after-tasks"), "after-tasks"
-    )
-    after_final = _context_render_snapshot_count(
-        snapshots.get("after-final"), "after-final"
-    )
-    if before_tasks > after_tasks or after_tasks > after_final:
-        raise ValueError("context render counts decreased across phases")
-    if type(agents) is not list:
-        raise ValueError("agent coordination metrics are invalid")
-    explicit_calls = {"task": 0, "final": 0}
-    for record in agents:
-        if type(record) is not dict:
-            raise ValueError("agent coordination metrics are invalid")
-        kind = record.get("kind")
-        if kind in explicit_calls:
-            explicit_calls[kind] += _nonnegative_int(
-                record.get("context_render_tool_calls"),
-                f"context render tool calls for {kind}",
-            )
-    metrics = _after_final_coordination_metrics(snapshots.get("after-final"))
-    task_server = after_tasks - before_tasks
-    final_server = after_final - after_tasks
-    context_renders = {
-        "server": {
-            "tasks": task_server,
-            "final": final_server,
-            "total": task_server + final_server,
-        },
-        "explicit_tool_calls": {
-            "tasks": explicit_calls["task"],
-            "final": explicit_calls["final"],
-            "total": explicit_calls["task"] + explicit_calls["final"],
-        },
-    }
-    _normalized_coordination_metrics(
-        {**metrics, "context_renders": context_renders}
-    )
-    metrics["context_renders"] = context_renders
-    return metrics
+    return _normalized_coordination_metrics(metrics)
 
 
 
@@ -2791,10 +2770,7 @@ def _report_row(result: dict) -> dict:
         "coordination_metrics": result.get("coordination_metrics"),
     }
 
-_NOTIFICATION_STATUSES = frozenset({"created", "delivered", "pending", "expired"})
-_COORDINATION_RENDER_SOURCES = frozenset({"server", "explicit_tool_calls"})
-_COORDINATION_RENDER_PHASES = frozenset({"tasks", "final", "total"})
-_REQUIRED_NOTIFICATION_KINDS = frozenset({"reservation_granted", "scope_overlap"})
+_CATEGORY = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)?")
 
 
 def _nonnegative_number(value: object, label: str) -> float:
@@ -2803,19 +2779,21 @@ def _nonnegative_number(value: object, label: str) -> float:
     return float(value)
 
 
-def _integer_map(
-    value: object, label: str, required_keys: frozenset[str] | None = None
-) -> dict[str, int]:
+def _integer_map(value: object, label: str) -> dict[str, int]:
     if type(value) is not dict:
-        raise ValueError(f"{label} is invalid")
-    if required_keys is not None and set(value) != required_keys:
         raise ValueError(f"{label} is invalid")
     result: dict[str, int] = {}
     for key, count in value.items():
-        if type(key) is not str or not key:
+        if type(key) is not str or _CATEGORY.fullmatch(key) is None:
             raise ValueError(f"{label} is invalid")
         result[key] = _nonnegative_int(count, f"{label}.{key}")
-    return result
+    return dict(sorted(result.items()))
+
+
+def _integer_fields(value: object, label: str, fields: tuple[str, ...]) -> dict[str, int]:
+    if type(value) is not dict or set(value) != set(fields):
+        raise ValueError(f"{label} is invalid")
+    return {field: _nonnegative_int(value[field], f"{label}.{field}") for field in fields}
 
 
 def _sum_integer_maps(values: list[dict[str, int]]) -> dict[str, int]:
@@ -2827,32 +2805,102 @@ def _sum_integer_maps(values: list[dict[str, int]]) -> dict[str, int]:
 
 
 def _normalized_coordination_metrics(value: object) -> dict:
-    required = {"notifications", "waits", "authorization", "context_renders"}
-    if type(value) is not dict or set(value) != required:
+    required = {
+        "protocol_version",
+        "journal",
+        "presence",
+        "handoffs",
+        "read_observations",
+        "context",
+        "authorization",
+        "write_safety",
+        "notifications",
+        "waits",
+    }
+    if type(value) is not dict or set(value) != required or value["protocol_version"] != "stateful.v2":
         raise ValueError("coordination metrics are invalid")
 
+    journal = value["journal"]
+    if type(journal) is not dict or set(journal) != {
+        "events",
+        "bytes_start",
+        "bytes_end",
+        "bytes_growth",
+        "by_event_type",
+    }:
+        raise ValueError("coordination journal is invalid")
+    normalized_journal = {
+        "events": _nonnegative_int(journal["events"], "coordination journal events"),
+        "bytes_start": _nonnegative_int(journal["bytes_start"], "coordination journal bytes start"),
+        "bytes_end": _nonnegative_int(journal["bytes_end"], "coordination journal bytes end"),
+        "bytes_growth": _nonnegative_int(journal["bytes_growth"], "coordination journal bytes growth"),
+        "by_event_type": _integer_map(journal["by_event_type"], "coordination journal event types"),
+    }
+    if normalized_journal["bytes_growth"] != normalized_journal["bytes_end"] - normalized_journal["bytes_start"]:
+        raise ValueError("coordination journal is invalid")
+
+    presence = _integer_fields(
+        value["presence"],
+        "coordination presence",
+        ("registered", "expired", "finalized", "peak_active"),
+    )
+    handoffs = value["handoffs"]
+    if type(handoffs) is not dict or set(handoffs) != {
+        "explicit",
+        "fallback_stop",
+        "fallback_ttl",
+        "by_status",
+    }:
+        raise ValueError("coordination handoffs are invalid")
+    normalized_handoffs = {
+        "explicit": _nonnegative_int(handoffs["explicit"], "coordination handoffs.explicit"),
+        "fallback_stop": _nonnegative_int(
+            handoffs["fallback_stop"], "coordination handoffs.fallback_stop"
+        ),
+        "fallback_ttl": _nonnegative_int(
+            handoffs["fallback_ttl"], "coordination handoffs.fallback_ttl"
+        ),
+        "by_status": _integer_map(handoffs["by_status"], "coordination handoff statuses"),
+    }
+    read_observations = _integer_fields(
+        value["read_observations"],
+        "coordination read observations",
+        ("started", "stable", "unstable", "aborted", "invalidated"),
+    )
+    context = _integer_fields(
+        value["context"],
+        "coordination context",
+        (
+            "versions",
+            "renders",
+            "deliveries",
+            "acks",
+            "redeliveries",
+            "coalesced",
+            "prompt_utf8_bytes",
+            "prompt_unicode_scalars",
+            "prompt_items",
+        ),
+    )
+    authorization = value["authorization"]
+    if type(authorization) is not dict or set(authorization) != {
+        "warned_by_reason",
+        "denied_by_reason",
+    }:
+        raise ValueError("coordination authorization is invalid")
+    write_safety = _integer_fields(
+        value["write_safety"],
+        "coordination write safety",
+        (
+            "fence_conflicts",
+            "unknown_outcomes",
+            "same_path_overlaps",
+            "cross_agent_overwrites",
+        ),
+    )
     notifications = value["notifications"]
     if type(notifications) is not dict or set(notifications) != {"by_kind"}:
         raise ValueError("coordination notifications are invalid")
-    notification_by_kind = notifications["by_kind"]
-    if type(notification_by_kind) is not dict:
-        raise ValueError("coordination notifications are invalid")
-    if not _REQUIRED_NOTIFICATION_KINDS.issubset(notification_by_kind):
-        raise ValueError("coordination notifications are invalid")
-    normalized_notifications: dict[str, dict[str, int]] = {}
-    for kind, counts in notification_by_kind.items():
-        if type(kind) is not str or not kind:
-            raise ValueError("coordination notifications are invalid")
-        normalized_counts = _integer_map(
-            counts, f"coordination notifications.{kind}", _NOTIFICATION_STATUSES
-        )
-        if normalized_counts["created"] != sum(
-            normalized_counts[status]
-            for status in _NOTIFICATION_STATUSES
-            if status != "created"
-        ):
-            raise ValueError("coordination notifications are invalid")
-        normalized_notifications[kind] = normalized_counts
 
     waits = value["waits"]
     if type(waits) is not dict or set(waits) != {
@@ -2861,80 +2909,54 @@ def _normalized_coordination_metrics(value: object) -> dict:
         "unmeasured_grants",
     }:
         raise ValueError("coordination waits are invalid")
-    wait_statuses = _integer_map(
-        waits["by_final_status"], "coordination wait statuses"
-    )
     wait_time = waits["grant_wait_time_s"]
-    if type(wait_time) is not dict or set(wait_time) != {
-        "count",
-        "total",
-        "mean",
-        "max",
-    }:
+    if type(wait_time) is not dict or set(wait_time) != {"count", "total", "mean", "max"}:
         raise ValueError("coordination grant wait time is invalid")
-    grant_count = _nonnegative_int(wait_time["count"], "coordination grant count")
-    grant_total = _nonnegative_number(
-        wait_time["total"], "coordination grant total"
-    )
-    grant_mean = wait_time["mean"]
-    grant_maximum = wait_time["max"]
-    if grant_count == 0:
-        if grant_total != 0.0 or grant_mean is not None or grant_maximum is not None:
+    count = _nonnegative_int(wait_time["count"], "coordination grant count")
+    total = _nonnegative_number(wait_time["total"], "coordination grant total")
+    mean, maximum = wait_time["mean"], wait_time["max"]
+    if count == 0:
+        if total != 0.0 or mean is not None or maximum is not None:
             raise ValueError("coordination grant wait time is invalid")
     else:
-        grant_mean = _nonnegative_number(grant_mean, "coordination grant mean")
-        grant_maximum = _nonnegative_number(
-            grant_maximum, "coordination grant maximum"
-        )
-        if grant_mean != round(grant_total / grant_count, 6):
+        mean = _nonnegative_number(mean, "coordination grant mean")
+        maximum = _nonnegative_number(maximum, "coordination grant maximum")
+        if mean != round(total / count, 6):
             raise ValueError("coordination grant wait time is invalid")
-    normalized_wait_time = {
-        "count": grant_count,
-        "total": grant_total,
-        "mean": grant_mean,
-        "max": grant_maximum,
-    }
-    unmeasured_grants = _nonnegative_int(
-        waits["unmeasured_grants"], "coordination unmeasured grants"
-    )
-
-    authorization = value["authorization"]
-    if type(authorization) is not dict or set(authorization) != {
-        "denied_by_reason",
-        "warned_by_reason",
-    }:
-        raise ValueError("coordination authorization is invalid")
-    denied = _integer_map(
-        authorization["denied_by_reason"], "coordination denied reasons"
-    )
-    warned = _integer_map(
-        authorization["warned_by_reason"], "coordination warned reasons"
-    )
-
-    context_renders = value["context_renders"]
-    if type(context_renders) is not dict or set(context_renders) != _COORDINATION_RENDER_SOURCES:
-        raise ValueError("coordination context renders are invalid")
-    normalized_renders: dict[str, dict[str, int]] = {}
-    for source, counts in context_renders.items():
-        normalized = _integer_map(
-            counts, f"coordination context renders.{source}", _COORDINATION_RENDER_PHASES
-        )
-        if normalized["total"] != normalized["tasks"] + normalized["final"]:
-            raise ValueError("coordination context renders are invalid")
-        normalized_renders[source] = normalized
 
     return {
-        "notifications": {"by_kind": normalized_notifications},
-        "waits": {
-            "by_final_status": wait_statuses,
-            "grant_wait_time_s": normalized_wait_time,
-            "unmeasured_grants": unmeasured_grants,
-        },
+        "protocol_version": "stateful.v2",
+        "journal": normalized_journal,
+        "presence": presence,
+        "handoffs": normalized_handoffs,
+        "read_observations": read_observations,
+        "context": context,
         "authorization": {
-            "denied_by_reason": denied,
-            "warned_by_reason": warned,
+            "warned_by_reason": _integer_map(
+                authorization["warned_by_reason"], "coordination warned reasons"
+            ),
+            "denied_by_reason": _integer_map(
+                authorization["denied_by_reason"], "coordination denied reasons"
+            ),
         },
-        "context_renders": normalized_renders,
+        "write_safety": write_safety,
+        "notifications": {
+            "by_kind": _integer_map(notifications["by_kind"], "coordination notifications")
+        },
+        "waits": {
+            "by_final_status": _integer_map(
+                waits["by_final_status"], "coordination wait statuses"
+            ),
+            "grant_wait_time_s": {
+                "count": count,
+                "total": total,
+                "mean": mean,
+                "max": maximum,
+            },
+            "unmeasured_grants": _nonnegative_int(
+                waits["unmeasured_grants"], "coordination unmeasured grants"
+            ),
+        },
     }
 
 
@@ -2947,75 +2969,88 @@ def _aggregate_coordination_metrics(
         or type(trials) is not int
         or trials < 1
         or len(rows) != trials
-        or any(type(row) is not dict for row in rows)
+        or any(type(row) is not dict or row.get("cleared") is not True for row in rows)
         or any(type(row.get("trial")) is not int for row in rows)
         or {row["trial"] for row in rows} != set(range(1, trials + 1))
     ):
         return None
     try:
-        metrics = [
-            _normalized_coordination_metrics(row.get("coordination_metrics"))
-            for row in rows
-            if type(row) is dict
-        ]
-        if len(metrics) != len(rows):
-            return None
+        metrics = [_normalized_coordination_metrics(row.get("coordination_metrics")) for row in rows]
     except ValueError:
         return None
 
-    notification_by_kind: dict[str, dict[str, int]] = {}
-    for metric in metrics:
-        for kind, counts in metric["notifications"]["by_kind"].items():
-            existing = notification_by_kind.setdefault(
-                kind, {status: 0 for status in _NOTIFICATION_STATUSES}
-            )
-            for status, count in counts.items():
-                existing[status] += count
-    notification_by_kind = {
-        kind: dict(sorted(counts.items()))
-        for kind, counts in sorted(notification_by_kind.items())
-    }
-    wait_time_rows = [metric["waits"]["grant_wait_time_s"] for metric in metrics]
-    grant_count = sum(value["count"] for value in wait_time_rows)
-    grant_total = round(sum(value["total"] for value in wait_time_rows), 6)
-    maxima = [value["max"] for value in wait_time_rows if value["max"] is not None]
-    grant_wait_time_s = {
-        "count": grant_count,
-        "total": grant_total,
-        "mean": None if grant_count == 0 else round(grant_total / grant_count, 6),
-        "max": None if grant_count == 0 else max(maxima),
-    }
+    def summed(group: str, fields: tuple[str, ...]) -> dict[str, int]:
+        return {
+            field: sum(metric[group][field] for metric in metrics)
+            for field in fields
+        }
 
+    waits = [metric["waits"]["grant_wait_time_s"] for metric in metrics]
+    count = sum(wait["count"] for wait in waits)
+    total = round(sum(wait["total"] for wait in waits), 6)
+    maxima = [wait["max"] for wait in waits if wait["max"] is not None]
     return {
-        "notifications": {"by_kind": notification_by_kind},
+        "protocol_version": "stateful.v2",
+        "journal": {
+            **summed("journal", ("events", "bytes_start", "bytes_end", "bytes_growth")),
+            "by_event_type": _sum_integer_maps(
+                [metric["journal"]["by_event_type"] for metric in metrics]
+            ),
+        },
+        "presence": summed("presence", ("registered", "expired", "finalized", "peak_active")),
+        "handoffs": {
+            **summed("handoffs", ("explicit", "fallback_stop", "fallback_ttl")),
+            "by_status": _sum_integer_maps(
+                [metric["handoffs"]["by_status"] for metric in metrics]
+            ),
+        },
+        "read_observations": summed(
+            "read_observations", ("started", "stable", "unstable", "aborted", "invalidated")
+        ),
+        "context": summed(
+            "context",
+            (
+                "versions",
+                "renders",
+                "deliveries",
+                "acks",
+                "redeliveries",
+                "coalesced",
+                "prompt_utf8_bytes",
+                "prompt_unicode_scalars",
+                "prompt_items",
+            ),
+        ),
+        "authorization": {
+            "warned_by_reason": _sum_integer_maps(
+                [metric["authorization"]["warned_by_reason"] for metric in metrics]
+            ),
+            "denied_by_reason": _sum_integer_maps(
+                [metric["authorization"]["denied_by_reason"] for metric in metrics]
+            ),
+        },
+        "write_safety": summed(
+            "write_safety",
+            ("fence_conflicts", "unknown_outcomes", "same_path_overlaps", "cross_agent_overwrites"),
+        ),
+        "notifications": {
+            "by_kind": _sum_integer_maps(
+                [metric["notifications"]["by_kind"] for metric in metrics]
+            )
+        },
         "waits": {
             "by_final_status": _sum_integer_maps(
                 [metric["waits"]["by_final_status"] for metric in metrics]
             ),
-            "grant_wait_time_s": grant_wait_time_s,
+            "grant_wait_time_s": {
+                "count": count,
+                "total": total,
+                "mean": None if count == 0 else round(total / count, 6),
+                "max": None if count == 0 else max(maxima),
+            },
             "unmeasured_grants": sum(
                 metric["waits"]["unmeasured_grants"] for metric in metrics
             ),
-        },
-        "authorization": {
-            "denied_by_reason": _sum_integer_maps(
-                [
-                    metric["authorization"]["denied_by_reason"]
-                    for metric in metrics
-                ]
-            ),
-            "warned_by_reason": _sum_integer_maps(
-                [
-                    metric["authorization"]["warned_by_reason"]
-                    for metric in metrics
-                ]
-            ),
-        },
-        "context_renders": {
-            source: _sum_integer_maps(
-                [metric["context_renders"][source] for metric in metrics]
-            )
-            for source in sorted(_COORDINATION_RENDER_SOURCES)
         },
     }
 

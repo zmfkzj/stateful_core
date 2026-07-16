@@ -805,6 +805,7 @@ def prepare_arm_runtime(
         "TMPDIR": "/runtime/tmp",
         "STATEFUL_OMP_SANDBOX": "off",
     }
+    exec_in_container(container, "rm", "-rf", env["STATEFUL_HOME"], env=env, runner=runner)
     exec_in_container(
         container,
         "mkdir",
@@ -846,7 +847,7 @@ def prepare_arm_runtime(
             "server",
             "start",
             "--coordination-mode",
-            "enforcement",
+            "awareness",
             env=env,
             runner=runner,
         )

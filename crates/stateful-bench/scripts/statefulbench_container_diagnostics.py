@@ -6,6 +6,7 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
+import re
 import os
 import sqlite3
 import shutil
@@ -17,9 +18,17 @@ from pathlib import Path
 _SENSITIVE = ("auth", "credential", "token", "secret", "cookie", "header")
 _LOCK_SUFFIXES = ("-wal", "-shm", "-journal", ".lock", ".tmp", ".temp")
 _CONTEXT_RENDER_SUCCESS_MARKER = b"[stateful-metric] context_render_success"
-_COORDINATION_TABLES = {"events", "notifications", "wait_queue"}
-_REQUIRED_NOTIFICATION_KINDS = ("reservation_granted", "scope_overlap")
-_NOTIFICATION_STATUSES = ("delivered", "expired", "pending")
+_V2_TABLES = {
+    "journal_events",
+    "presence_current",
+    "handoff_current",
+    "read_observation_current",
+    "wait_current",
+    "context_delivery_current",
+    "workspace_version",
+    "notification_current",
+}
+_CATEGORY = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)?")
 
 
 def _group_counts(rows) -> dict[str, int]:
@@ -198,70 +207,128 @@ def _unchanged(current: os.stat_result, expected: os.stat_result) -> bool:
         expected.st_mtime_ns,
     )
 
-def _coordination_metrics(
-    connection: sqlite3.Connection, table_names: set[str]
-) -> dict | None:
-    if not _COORDINATION_TABLES.issubset(table_names):
-        return None
+def _event_data(value: object) -> dict:
+    try:
+        payload = json.loads(value)
+    except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    event = payload.get("event") if isinstance(payload, dict) else None
+    event_data = event.get("data") if isinstance(event, dict) else None
+    data = event_data.get("data") if isinstance(event_data, dict) else None
+    return data if isinstance(data, dict) else {}
 
-    notification_counts: dict[str, dict[str, int]] = {
-        kind: {status: 0 for status in _NOTIFICATION_STATUSES}
-        for kind in _REQUIRED_NOTIFICATION_KINDS
-    }
-    for kind, status, count in connection.execute(
-        """
-        SELECT kind, status, COUNT(*)
-        FROM notifications
-        GROUP BY kind, status
-        """
-    ):
-        if (
-            isinstance(kind, str)
-            and isinstance(status, str)
-            and status in _NOTIFICATION_STATUSES
-            and isinstance(count, int)
-            and count >= 0
-        ):
-            notification_counts.setdefault(
-                kind, {known_status: 0 for known_status in _NOTIFICATION_STATUSES}
-            )[status] = count
-    notification_by_kind = {
-        kind: {
-            "created": sum(status_counts.values()),
-            **{
-                status: status_counts[status]
-                for status in _NOTIFICATION_STATUSES
-            },
-        }
-        for kind, status_counts in sorted(notification_counts.items())
-    }
 
-    wait_statuses = _group_counts(
-        connection.execute(
-            "SELECT status, COUNT(*) FROM wait_queue GROUP BY status"
-        )
-    )
-    requested_at = {
-        wait_id: _parse_timestamp(timestamp)
-        for wait_id, timestamp in connection.execute(
-            "SELECT wait_id, requested_at FROM wait_queue"
-        )
-        if isinstance(wait_id, str)
-    }
-    durations: list[float] = []
-    unmeasured_grants = 0
-    for payload_json, created_at in connection.execute(
-        """
-        SELECT payload_json, created_at
-        FROM notifications
-        WHERE kind = 'reservation_granted'
-        """
-    ):
+def _safe_category(value: object) -> str | None:
+    return value if isinstance(value, str) and _CATEGORY.fullmatch(value) else None
+
+
+def _projection_statuses(connection: sqlite3.Connection) -> dict[str, int]:
+    statuses: dict[str, int] = {}
+    for (payload_json,) in connection.execute("SELECT payload_json FROM wait_current"):
         try:
             payload = json.loads(payload_json)
         except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
-            unmeasured_grants += 1
             continue
+        status = _safe_category(payload.get("status") if isinstance(payload, dict) else None)
+        if status is not None:
+            statuses[status] = statuses.get(status, 0) + 1
+    return dict(sorted(statuses.items()))
+
+
+def _coordination_metrics(
+    connection: sqlite3.Connection, table_names: set[str], database_bytes: int
+) -> dict | None:
+    if not _V2_TABLES.issubset(table_names) or database_bytes < 0:
+        return None
+    rows = list(
+        connection.execute(
+            """
+            SELECT aggregate_id, event_type, occurred_at, payload_json, agent_id, source_ref
+            FROM journal_events ORDER BY event_seq
+            """
+        )
+    )
+    by_event_type: dict[str, int] = {}
+    active_presence: set[str] = set()
+    peak_active = 0
+    handoff_statuses: dict[str, int] = {}
+    notification_kinds: dict[str, int] = {}
+    warned: dict[str, int] = {}
+    denied: dict[str, int] = {}
+    requested_at: dict[str, datetime] = {}
+    grants: list[tuple[object, object]] = []
+    same_path_operations: set[str] = set()
+    previous_writers: dict[str, str] = {}
+    cross_agent_overwrites = 0
+
+    for aggregate_id, event_type, occurred_at, payload_json, agent_id, source_ref in rows:
+        category = _safe_category(event_type)
+        if category is None:
+            continue
+        by_event_type[category] = by_event_type.get(category, 0) + 1
+        data = _event_data(payload_json)
+        if category == "presence.registered" and isinstance(aggregate_id, str):
+            active_presence.add(aggregate_id)
+            peak_active = max(peak_active, len(active_presence))
+        elif category in {"presence.finalized", "presence.expired"} and isinstance(aggregate_id, str):
+            active_presence.discard(aggregate_id)
+
+        if category == "handoff.finalized":
+            handoff = data.get("handoff")
+            if isinstance(handoff, dict):
+                status = _safe_category(handoff.get("status"))
+                if status is not None:
+                    handoff_statuses[status] = handoff_statuses.get(status, 0) + 1
+                if handoff.get("explicit") is False:
+                    if isinstance(source_ref, str) and "stop" in source_ref:
+                        handoff_statuses.setdefault("_fallback_stop", 0)
+                        handoff_statuses["_fallback_stop"] += 1
+                    else:
+                        handoff_statuses.setdefault("_fallback_ttl", 0)
+                        handoff_statuses["_fallback_ttl"] += 1
+
+        if category == "notification.created":
+            notification = data.get("notification")
+            if isinstance(notification, dict):
+                kind = _safe_category(notification.get("kind"))
+                if kind is not None:
+                    notification_kinds[kind] = notification_kinds.get(kind, 0) + 1
+                    if kind == "reservation_granted":
+                        grants.append((notification.get("payload"), occurred_at))
+
+        if category == "wait.requested" and isinstance(aggregate_id, str):
+            timestamp = _parse_timestamp(occurred_at)
+            if timestamp is not None:
+                requested_at[aggregate_id] = timestamp
+
+        if category in {"authorization.warned", "authorization.denied"}:
+            reason = _safe_category(data.get("reason_code"))
+            if reason is not None:
+                target = warned if category == "authorization.warned" else denied
+                target[reason] = target.get(reason, 0) + 1
+
+        if category == "write_fence.conflict_observed":
+            operation = data.get("operation_id")
+            if isinstance(operation, str) and operation:
+                same_path_operations.add(operation)
+
+        if category == "write_intent.committed":
+            intent = data.get("write_intent")
+            writer = agent_id if isinstance(agent_id, str) else None
+            targets = intent.get("targets") if isinstance(intent, dict) else None
+            if writer is not None and isinstance(targets, list):
+                for target in targets:
+                    path = target.get("path") if isinstance(target, dict) else None
+                    if isinstance(path, str):
+                        if path in previous_writers and previous_writers[path] != writer:
+                            cross_agent_overwrites += 1
+                        previous_writers[path] = writer
+
+    fallback_stop = handoff_statuses.pop("_fallback_stop", 0)
+    fallback_ttl = handoff_statuses.pop("_fallback_ttl", 0)
+    durations: list[float] = []
+    unmeasured_grants = 0
+    for payload, created_at in grants:
         wait_id = payload.get("wait_id") if isinstance(payload, dict) else None
         requested = requested_at.get(wait_id) if isinstance(wait_id, str) else None
         created = _parse_timestamp(created_at)
@@ -273,41 +340,95 @@ def _coordination_metrics(
             unmeasured_grants += 1
             continue
         durations.append(round(seconds, 6))
-    wait_total = round(sum(durations), 6) if durations else 0.0
-    wait_count = len(durations)
-    wait_stats = {
-        "count": wait_count,
-        "total": wait_total,
-        "mean": None if wait_count == 0 else round(wait_total / wait_count, 6),
-        "max": None if wait_count == 0 else max(durations),
-    }
+    total = round(sum(durations), 6) if durations else 0.0
+    count = len(durations)
+    version_row = connection.execute("SELECT COALESCE(MAX(version), 0) FROM workspace_version").fetchone()
+    versions = version_row[0] if version_row and type(version_row[0]) is int and version_row[0] >= 0 else 0
 
-    def authorization_counts(event_type: str) -> dict[str, int]:
-        counts: dict[str, int] = {}
-        for (payload_json,) in connection.execute(
-            "SELECT payload_json FROM events WHERE event_type = ?", (event_type,)
-        ):
-            try:
-                payload = json.loads(payload_json)
-            except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
-                continue
-            reason_code = (
-                payload.get("reason_code") if isinstance(payload, dict) else None
-            )
-            if isinstance(reason_code, str) and reason_code:
-                counts[reason_code] = counts.get(reason_code, 0) + 1
-        return dict(sorted(counts.items()))
+    def event_count(name: str) -> int:
+        return by_event_type.get(name, 0)
+
+    prompt_utf8_bytes = 0
+    prompt_unicode_scalars = 0
+    prompt_items = 0
+    for _aggregate_id, event_type, _occurred_at, payload_json, _agent_id, _source_ref in rows:
+        if event_type != "context.delivery_created":
+            continue
+        delivery = _event_data(payload_json).get("context_delivery")
+        if not isinstance(delivery, dict):
+            continue
+        prompt = delivery.get("prompt_text")
+        if isinstance(prompt, str):
+            prompt_utf8_bytes += len(prompt.encode("utf-8"))
+            prompt_unicode_scalars += len(prompt)
+        items = delivery.get("items")
+        if isinstance(items, list):
+            prompt_items += len(items)
 
     return {
-        "notifications": {"by_kind": notification_by_kind},
-        "waits": {
-            "by_final_status": wait_statuses,
-            "grant_wait_time_s": wait_stats,
-            "unmeasured_grants": unmeasured_grants,
+        "protocol_version": "stateful.v2",
+        "journal": {
+            "events": len(rows),
+            "bytes_start": database_bytes,
+            "bytes_end": database_bytes,
+            "bytes_growth": 0,
+            "by_event_type": dict(sorted(by_event_type.items())),
+        },
+        "presence": {
+            "registered": event_count("presence.registered"),
+            "expired": event_count("presence.expired"),
+            "finalized": event_count("presence.finalized"),
+            "peak_active": peak_active,
+        },
+        "handoffs": {
+            "explicit": sum(
+                isinstance(handoff, dict) and handoff.get("explicit") is True
+                for _aggregate_id, event_type, _occurred_at, payload_json, _agent_id, _source_ref in rows
+                if event_type == "handoff.finalized"
+                for handoff in (_event_data(payload_json).get("handoff"),)
+            ),
+            "fallback_stop": fallback_stop,
+            "fallback_ttl": fallback_ttl,
+            "by_status": dict(sorted(handoff_statuses.items())),
+        },
+        "read_observations": {
+            "started": event_count("read_observation.started"),
+            "stable": event_count("read_observation.stabilized"),
+            "unstable": event_count("read_observation.unstable"),
+            "aborted": event_count("read_observation.aborted"),
+            "invalidated": event_count("read_observation.invalidated"),
+        },
+        "context": {
+            "versions": versions,
+            "renders": event_count("context.rendered"),
+            "deliveries": event_count("context.delivery_created"),
+            "acks": event_count("context.delivery_acknowledged"),
+            "redeliveries": event_count("context.delivery_superseded"),
+            "coalesced": event_count("notification.coalesced"),
+            "prompt_utf8_bytes": prompt_utf8_bytes,
+            "prompt_unicode_scalars": prompt_unicode_scalars,
+            "prompt_items": prompt_items,
         },
         "authorization": {
-            "denied_by_reason": authorization_counts("AuthorizationDenied"),
-            "warned_by_reason": authorization_counts("AuthorizationWarned"),
+            "warned_by_reason": dict(sorted(warned.items())),
+            "denied_by_reason": dict(sorted(denied.items())),
+        },
+        "write_safety": {
+            "fence_conflicts": event_count("write_fence.conflict_observed"),
+            "unknown_outcomes": event_count("write_intent.outcome_unknown"),
+            "same_path_overlaps": len(same_path_operations),
+            "cross_agent_overwrites": cross_agent_overwrites,
+        },
+        "notifications": {"by_kind": dict(sorted(notification_kinds.items()))},
+        "waits": {
+            "by_final_status": _projection_statuses(connection),
+            "grant_wait_time_s": {
+                "count": count,
+                "total": total,
+                "mean": None if count == 0 else round(total / count, 6),
+                "max": None if count == 0 else max(durations),
+            },
+            "unmeasured_grants": unmeasured_grants,
         },
     }
 
@@ -365,7 +486,9 @@ def _sqlite_record(path: Path, expected: os.stat_result) -> dict:
             name: connection.execute(f"select count(*) from {_quote_identifier(name)}").fetchone()[0]
             for name in names
         }
-        coordination_metrics = _coordination_metrics(connection, set(names))
+        coordination_metrics = _coordination_metrics(
+            connection, set(names), sum(metadata.st_size for _, metadata in sources)
+        )
         if coordination_metrics is not None:
             record["coordination_metrics"] = coordination_metrics
     except sqlite3.OperationalError as error:

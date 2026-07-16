@@ -308,10 +308,15 @@ class DockerArmContainerTests(unittest.TestCase):
             runner=runner,
         )
         commands = [call.args[0] for call in runner.call_args_list]
+        self.assertIn(["rm", "-rf", "/home/stateful/.stateful"], [command[-3:] for command in commands])
         self.assertEqual(sum(command[-4:] == ["install", "--agent", "omp", "--yes"] for command in commands), 1)
         self.assertEqual(sum(command[-3:] == ["enable", "--repo", "/workspace"] for command in commands), 1)
         self.assertEqual(
-            sum(command[-3:] == ["server", "start", "--coordination-mode"] or command[-4:] == ["server", "start", "--coordination-mode", "enforcement"] for command in commands),
+            sum(
+                command[-4:]
+                == ["server", "start", "--coordination-mode", "awareness"]
+                for command in commands
+            ),
             1,
         )
 
@@ -808,259 +813,6 @@ class DockerDiagnosticTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
-    def coordination_database(self):
-        import sqlite3
-
-        database = self.home / ".stateful" / "state.db"
-        database.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(database)
-        connection.executescript(
-            """
-            CREATE TABLE notifications (
-                notification_id TEXT PRIMARY KEY,
-                kind TEXT NOT NULL,
-                payload_json TEXT NOT NULL,
-                status TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-            CREATE TABLE wait_queue (
-                wait_id TEXT PRIMARY KEY,
-                status TEXT NOT NULL,
-                requested_at TEXT NOT NULL
-            );
-            CREATE TABLE events (
-                event_id TEXT PRIMARY KEY,
-                event_type TEXT NOT NULL,
-                payload_json TEXT NOT NULL
-            );
-            """
-        )
-        return connection, database
-
-    def test_snapshot_aggregates_value_free_coordination_metrics(self) -> None:
-        connection, _database = self.coordination_database()
-        try:
-            connection.executemany(
-                "INSERT INTO notifications VALUES (?, ?, ?, ?, ?)",
-                [
-                    (
-                        "scope-delivered-id",
-                        "scope_overlap",
-                        '{"path":"private/scope.txt"}',
-                        "delivered",
-                        "2026-07-14T10:00:00Z",
-                    ),
-                    (
-                        "scope-pending-id",
-                        "scope_overlap",
-                        '{"message":"private overlap message"}',
-                        "pending",
-                        "2026-07-14T10:00:01Z",
-                    ),
-                    (
-                        "grant-linked-id",
-                        "reservation_granted",
-                        '{"wait_id":"wait-linked","reservation_id":"private-reservation"}',
-                        "delivered",
-                        "2026-07-14T10:00:02.500Z",
-                    ),
-                    (
-                        "grant-unlinked-id",
-                        "reservation_granted",
-                        "not valid JSON",
-                        "pending",
-                        "2026-07-14T10:00:03Z",
-                    ),
-                ],
-            )
-            connection.executemany(
-                "INSERT INTO wait_queue VALUES (?, ?, ?)",
-                [
-                    ("wait-linked", "claimed", "2026-07-14T10:00:00Z"),
-                    ("wait-queued-id", "queued", "2026-07-14T10:00:04Z"),
-                ],
-            )
-            connection.executemany(
-                "INSERT INTO events VALUES (?, ?, ?)",
-                [
-                    (
-                        "denied-event-id",
-                        "AuthorizationDenied",
-                        '{"reason_code":"active_claim_conflict","message":"private denial"}',
-                    ),
-                    (
-                        "warned-event-id",
-                        "AuthorizationWarned",
-                        '{"reason_code":"missing_claim","path":"private/warned.txt"}',
-                    ),
-                ],
-            )
-            connection.commit()
-            snapshot = self.diagnostics.snapshot_home(self.home)
-        finally:
-            connection.close()
-
-        self.assertEqual(
-            snapshot["databases"][".stateful/state.db"]["coordination_metrics"],
-            {
-                "notifications": {
-                    "by_kind": {
-                        "reservation_granted": {
-                            "created": 2,
-                            "delivered": 1,
-                            "pending": 1,
-                            "expired": 0,
-                        },
-                        "scope_overlap": {
-                            "created": 2,
-                            "delivered": 1,
-                            "pending": 1,
-                            "expired": 0,
-                        },
-                    }
-                },
-                "waits": {
-                    "by_final_status": {"claimed": 1, "queued": 1},
-                    "grant_wait_time_s": {
-                        "count": 1,
-                        "total": 2.5,
-                        "mean": 2.5,
-                        "max": 2.5,
-                    },
-                    "unmeasured_grants": 1,
-                },
-                "authorization": {
-                    "denied_by_reason": {"active_claim_conflict": 1},
-                    "warned_by_reason": {"missing_claim": 1},
-                },
-            },
-        )
-        encoded = json.dumps(snapshot)
-        for private_value in (
-            "scope-delivered-id",
-            "private/scope.txt",
-            "private overlap message",
-            "private-reservation",
-            "wait-linked",
-            "denied-event-id",
-            "private denial",
-            "private/warned.txt",
-            "2026-07-14T10:00:00Z",
-        ):
-            self.assertNotIn(private_value, encoded)
-
-    def test_coordination_metrics_keep_required_zero_notification_kinds(self) -> None:
-        connection, _database = self.coordination_database()
-        try:
-            connection.commit()
-            snapshot = self.diagnostics.snapshot_home(self.home)
-        finally:
-            connection.close()
-
-        notifications = snapshot["databases"][".stateful/state.db"][
-            "coordination_metrics"
-        ]["notifications"]["by_kind"]
-        self.assertEqual(
-            notifications,
-            {
-                "reservation_granted": {
-                    "created": 0,
-                    "delivered": 0,
-                    "pending": 0,
-                    "expired": 0,
-                },
-                "scope_overlap": {
-                    "created": 0,
-                    "delivered": 0,
-                    "pending": 0,
-                    "expired": 0,
-                },
-            },
-        )
-
-    def test_coordination_metrics_reject_negative_grant_duration(self) -> None:
-        connection, _database = self.coordination_database()
-        try:
-            connection.execute(
-                "INSERT INTO notifications VALUES (?, ?, ?, ?, ?)",
-                (
-                    "negative-grant-id",
-                    "reservation_granted",
-                    '{"wait_id":"negative-wait-id"}',
-                    "delivered",
-                    "2026-07-14T10:00:00Z",
-                ),
-            )
-            connection.execute(
-                "INSERT INTO wait_queue VALUES (?, ?, ?)",
-                ("negative-wait-id", "claimed", "2026-07-14T10:00:01Z"),
-            )
-            connection.commit()
-            snapshot = self.diagnostics.snapshot_home(self.home)
-        finally:
-            connection.close()
-
-        wait_stats = snapshot["databases"][".stateful/state.db"][
-            "coordination_metrics"
-        ]["waits"]
-        self.assertEqual(
-            wait_stats["grant_wait_time_s"],
-            {"count": 0, "total": 0, "mean": None, "max": None},
-        )
-        self.assertIsInstance(wait_stats["grant_wait_time_s"]["total"], float)
-        self.assertEqual(wait_stats["unmeasured_grants"], 1)
-
-    def test_coordination_metrics_treat_invalid_utf8_grant_as_unmeasured(self) -> None:
-        import sqlite3
-
-        connection, _database = self.coordination_database()
-        try:
-            connection.execute(
-                "INSERT INTO notifications VALUES (?, ?, ?, ?, ?)",
-                (
-                    "invalid-utf8-grant",
-                    "reservation_granted",
-                    sqlite3.Binary(b"\xff"),
-                    "delivered",
-                    "2026-07-14T10:00:00Z",
-                ),
-            )
-            connection.commit()
-            snapshot = self.diagnostics.snapshot_home(self.home)
-        finally:
-            connection.close()
-
-        waits = snapshot["databases"][".stateful/state.db"][
-            "coordination_metrics"
-        ]["waits"]
-        self.assertEqual(waits["grant_wait_time_s"]["count"], 0)
-        self.assertEqual(waits["unmeasured_grants"], 1)
-
-    def test_coordination_metrics_ignore_invalid_utf8_authorization_payload(self) -> None:
-        import sqlite3
-
-        connection, _database = self.coordination_database()
-        try:
-            connection.execute(
-                "INSERT INTO events VALUES (?, ?, ?)",
-                (
-                    "invalid-utf8-event",
-                    "AuthorizationDenied",
-                    sqlite3.Binary(b"\xff"),
-                ),
-            )
-            connection.commit()
-            snapshot = self.diagnostics.snapshot_home(self.home)
-        finally:
-            connection.close()
-
-        authorization = snapshot["databases"][".stateful/state.db"][
-            "coordination_metrics"
-        ]["authorization"]
-        self.assertEqual(authorization["denied_by_reason"], {})
-
-
-
     def test_snapshot_counts_exact_context_render_markers(self) -> None:
         log = self.home / ".stateful" / "runtime" / "server.log"
         log.parent.mkdir(parents=True)
@@ -1652,7 +1404,7 @@ class DockerEndToEndTests(unittest.TestCase):
         invocations = (
             self.root / "out" / "docker-e2e" / "parallel-on" / "trial-1" / "workspace" / "stateful-invocations.log"
         ).read_text().splitlines()
-        self.assertEqual(invocations.count("server start --coordination-mode enforcement"), 1)
+        self.assertEqual(invocations.count("server start --coordination-mode awareness"), 1)
         names = ",".join(f"statefulbench-docker-e2e-{arm}-1" for arm in results)
         completed = subprocess.run(
             ["docker", "ps", "-a", "--format", "{{.Names}}"],
@@ -1662,5 +1414,169 @@ class DockerEndToEndTests(unittest.TestCase):
         )
         self.assertFalse(set(completed.stdout.splitlines()) & set(names.split(",")))
 
+
+class V2DiagnosticContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.diagnostics = load_script("statefulbench_container_diagnostics.py")
+
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.home = Path(self.tempdir.name) / "home"
+        self.home.mkdir()
+
+    def tearDown(self) -> None:
+        self.tempdir.cleanup()
+
+    def test_v2_snapshot_emits_only_locked_value_free_metrics(self) -> None:
+        import sqlite3
+
+        database = self.home / ".stateful" / "state.db"
+        database.parent.mkdir()
+        connection = sqlite3.connect(database)
+        connection.executescript(
+            """
+            CREATE TABLE journal_events (
+                event_seq INTEGER PRIMARY KEY,
+                aggregate_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                source_ref TEXT NOT NULL
+            );
+            CREATE TABLE presence_current (payload_json TEXT);
+            CREATE TABLE handoff_current (payload_json TEXT);
+            CREATE TABLE read_observation_current (payload_json TEXT);
+            CREATE TABLE wait_current (payload_json TEXT);
+            CREATE TABLE context_delivery_current (payload_json TEXT);
+            CREATE TABLE workspace_version (version INTEGER);
+            CREATE TABLE notification_current (payload_json TEXT);
+            """
+        )
+
+        def payload(data: dict) -> str:
+            return json.dumps({"event": {"data": {"data": data}}})
+
+        rows = [
+            ("agent-one", "presence.registered", payload({})),
+            ("agent-one", "presence.finalized", payload({})),
+            ("agent-two", "presence.expired", payload({})),
+            ("handoff-one", "handoff.finalized", payload({"handoff": {"explicit": True, "status": "done"}})),
+            ("handoff-two", "handoff.finalized", payload({"handoff": {"explicit": False, "status": "unknown"}})),
+            ("handoff-three", "handoff.finalized", payload({"handoff": {"explicit": False, "status": "unknown"}})),
+            ("read-one", "read_observation.started", payload({})),
+            ("read-one", "read_observation.stabilized", payload({})),
+            ("read-two", "read_observation.unstable", payload({})),
+            ("read-three", "read_observation.aborted", payload({})),
+            ("read-four", "read_observation.invalidated", payload({})),
+            ("context-one", "context.rendered", payload({})),
+            (
+                "delivery-one",
+                "context.delivery_created",
+                payload(
+                    {
+                        "context_delivery": {
+                            "prompt_text": "private context message",
+                            "items": [{"resource": "private/path.txt"}],
+                        }
+                    }
+                ),
+            ),
+            ("delivery-one", "context.delivery_acknowledged", payload({})),
+            ("delivery-two", "context.delivery_superseded", payload({})),
+            (
+                "notification-one",
+                "notification.created",
+                payload({"notification": {"kind": "scope_overlap", "payload": {"path": "private/path.txt"}}}),
+            ),
+            ("wait-private", "wait.requested", payload({})),
+            (
+                "notification-two",
+                "notification.created",
+                payload(
+                    {
+                        "notification": {
+                            "kind": "reservation_granted",
+                            "payload": {"wait_id": "wait-private", "message": "private grant"},
+                        }
+                    }
+                ),
+            ),
+            ("wait-private", "wait.claimed", payload({})),
+            ("audit-one", "authorization.warned", payload({"reason_code": "missing_claim", "message": "private warning"})),
+            ("audit-two", "authorization.denied", payload({"reason_code": "active_claim_conflict", "path": "private/path.txt"})),
+            ("fence-one", "write_fence.conflict_observed", payload({"operation_id": "operation-private"})),
+            ("intent-one", "write_intent.outcome_unknown", payload({})),
+        ]
+        connection.executemany(
+            "INSERT INTO journal_events VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    index,
+                    aggregate_id,
+                    event_type,
+                    f"2026-07-16T00:00:{index:02d}Z",
+                    body,
+                    "agent-private",
+                    "presence.stop" if aggregate_id == "handoff-two" else "presence.expire",
+                )
+                for index, (aggregate_id, event_type, body) in enumerate(rows, start=1)
+            ],
+        )
+        connection.execute("INSERT INTO wait_current VALUES (?)", (json.dumps({"status": "claimed"}),))
+        connection.execute("INSERT INTO workspace_version VALUES (3)")
+        connection.commit()
+        connection.close()
+
+        snapshot = self.diagnostics.snapshot_home(self.home)
+        metrics = snapshot["databases"][".stateful/state.db"]["coordination_metrics"]
+
+        self.assertEqual(
+            set(metrics),
+            {
+                "protocol_version",
+                "journal",
+                "presence",
+                "handoffs",
+                "read_observations",
+                "context",
+                "authorization",
+                "write_safety",
+                "notifications",
+                "waits",
+            },
+        )
+        self.assertEqual(metrics["protocol_version"], "stateful.v2")
+        self.assertEqual(metrics["journal"]["events"], len(rows))
+        self.assertEqual(metrics["journal"]["by_event_type"], dict(sorted(metrics["journal"]["by_event_type"].items())))
+        self.assertEqual(metrics["presence"], {"registered": 1, "expired": 1, "finalized": 1, "peak_active": 1})
+        self.assertEqual(metrics["handoffs"]["explicit"], 1)
+        self.assertEqual(metrics["handoffs"]["fallback_stop"], 1)
+        self.assertEqual(metrics["handoffs"]["fallback_ttl"], 1)
+        self.assertEqual(metrics["read_observations"], {"started": 1, "stable": 1, "unstable": 1, "aborted": 1, "invalidated": 1})
+        self.assertEqual(metrics["context"]["versions"], 3)
+        self.assertEqual(metrics["context"]["renders"], 1)
+        self.assertEqual(metrics["context"]["deliveries"], 1)
+        self.assertEqual(metrics["context"]["acks"], 1)
+        self.assertEqual(metrics["context"]["redeliveries"], 1)
+        self.assertEqual(metrics["authorization"], {"warned_by_reason": {"missing_claim": 1}, "denied_by_reason": {"active_claim_conflict": 1}})
+        self.assertEqual(metrics["write_safety"]["fence_conflicts"], 1)
+        self.assertEqual(metrics["write_safety"]["unknown_outcomes"], 1)
+        self.assertEqual(metrics["notifications"]["by_kind"], {"reservation_granted": 1, "scope_overlap": 1})
+        self.assertEqual(metrics["waits"]["by_final_status"], {"claimed": 1})
+        self.assertEqual(metrics["waits"]["grant_wait_time_s"], {"count": 1, "total": 1.0, "mean": 1.0, "max": 1.0})
+        encoded = json.dumps(snapshot)
+        for private_value in (
+            "agent-private",
+            "agent-one",
+            "private/path.txt",
+            "private context message",
+            "private grant",
+            "private warning",
+            "operation-private",
+            "2026-07-16T00:00:01Z",
+        ):
+            self.assertNotIn(private_value, encoded)
 if __name__ == "__main__":
     unittest.main()

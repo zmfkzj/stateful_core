@@ -2225,70 +2225,79 @@ class RealWorldRunnerTests(unittest.TestCase):
         self.tempdir.cleanup()
 
     @staticmethod
-    def coordination_aggregate() -> dict:
+    def coordination_aggregate(phase: str) -> dict:
+        bytes_by_phase = {
+            "initialized": 10,
+            "before-tasks": 10,
+            "after-tasks": 20,
+            "after-final": 30,
+            "after-grading": 30,
+            "before-remove": 30,
+        }
+        renders_by_phase = {
+            "initialized": 0,
+            "before-tasks": 1,
+            "after-tasks": 2,
+            "after-final": 3,
+            "after-grading": 3,
+            "before-remove": 3,
+        }
+        bytes_at = bytes_by_phase[phase]
         return {
-            "notifications": {
-                "by_kind": {
-                    "reservation_granted": {
-                        "created": 2,
-                        "delivered": 1,
-                        "pending": 1,
-                        "expired": 0,
-                    },
-                    "scope_overlap": {
-                        "created": 2,
-                        "delivered": 1,
-                        "pending": 1,
-                        "expired": 0,
-                    },
-                }
+            "protocol_version": "stateful.v2",
+            "journal": {
+                "events": 0,
+                "bytes_start": bytes_at,
+                "bytes_end": bytes_at,
+                "bytes_growth": 0,
+                "by_event_type": {},
             },
+            "presence": {"registered": 0, "expired": 0, "finalized": 0, "peak_active": 0},
+            "handoffs": {"explicit": 0, "fallback_stop": 0, "fallback_ttl": 0, "by_status": {}},
+            "read_observations": {"started": 0, "stable": 0, "unstable": 0, "aborted": 0, "invalidated": 0},
+            "context": {
+                "versions": 0,
+                "renders": renders_by_phase[phase],
+                "deliveries": 0,
+                "acks": 0,
+                "redeliveries": 0,
+                "coalesced": 0,
+                "prompt_utf8_bytes": 0,
+                "prompt_unicode_scalars": 0,
+                "prompt_items": 0,
+            },
+            "authorization": {"warned_by_reason": {}, "denied_by_reason": {}},
+            "write_safety": {
+                "fence_conflicts": 0,
+                "unknown_outcomes": 0,
+                "same_path_overlaps": 0,
+                "cross_agent_overwrites": 0,
+            },
+            "notifications": {"by_kind": {}},
             "waits": {
-                "by_final_status": {"claimed": 1, "queued": 1},
-                "grant_wait_time_s": {
-                    "count": 1,
-                    "total": 2.5,
-                    "mean": 2.5,
-                    "max": 2.5,
-                },
-                "unmeasured_grants": 1,
-            },
-            "authorization": {
-                "denied_by_reason": {"active_claim_conflict": 1},
-                "warned_by_reason": {"missing_claim": 1},
+                "by_final_status": {},
+                "grant_wait_time_s": {"count": 0, "total": 0.0, "mean": None, "max": None},
+                "unmeasured_grants": 0,
             },
         }
 
     @classmethod
     def container_diagnostics(cls, _container, phase):
-        context_render_counts = {
-            "initialized": 0,
-            "before-tasks": 2,
-            "after-tasks": 11,
-            "after-final": 16,
-            "after-grading": 16,
-            "before-remove": 16,
-        }
-        databases = {}
-        if phase == "after-final":
-            databases = {
-                ".stateful/state.db": {
-                    "integrity": "ok",
-                    "coordination_metrics": cls.coordination_aggregate(),
-                }
-            }
         return {
             "schema_version": 1,
             "phase": phase,
             "home": "/home/stateful",
             "files": [],
-            "databases": databases,
+            "databases": {
+                ".stateful/state.db": {
+                    "integrity": "ok",
+                    "coordination_metrics": cls.coordination_aggregate(phase),
+                }
+            },
             "lock_files": [],
             "per_agent_home_tree": False,
             "processes": [],
-            "runtime_metrics": {
-                "context_render_success_count": context_render_counts[phase],
-            },
+            "runtime_metrics": {"context_render_success_count": 0},
         }
 
     @contextlib.contextmanager
@@ -2646,23 +2655,12 @@ class RealWorldRunnerTests(unittest.TestCase):
 
         self.assertTrue(result["cleared"], result)
         self.assertEqual(
-            result["coordination_metrics"]["context_renders"],
-            {
-                "server": {"tasks": 9, "final": 5, "total": 14},
-                "explicit_tool_calls": {"tasks": 3, "final": 2, "total": 5},
-            },
+            result["coordination_metrics"]["journal"],
+            {"events": 0, "bytes_start": 10, "bytes_end": 30, "bytes_growth": 20, "by_event_type": {}},
         )
-        self.assertEqual(
-            result["coordination_metrics"]["notifications"],
-            aggregate["notifications"],
-        )
-        self.assertEqual(result["coordination_metrics"]["waits"], aggregate["waits"])
-        self.assertEqual(
-            result["coordination_metrics"]["authorization"],
-            aggregate["authorization"],
-        )
-        result["coordination_metrics"]["waits"]["unmeasured_grants"] = 99
-        self.assertEqual(aggregate["waits"]["unmeasured_grants"], 1)
+        self.assertEqual(result["coordination_metrics"]["context"]["renders"], 3)
+        result["coordination_metrics"]["journal"]["bytes_growth"] = 99
+        self.assertEqual(aggregate["journal"]["bytes_growth"], 0)
 
     def test_coordination_metrics_are_null_for_off_arms(self) -> None:
         result = self.run_container_with_diagnostics(
@@ -2676,14 +2674,14 @@ class RealWorldRunnerTests(unittest.TestCase):
         def diagnostics(container, phase):
             snapshot = self.container_diagnostics(container, phase)
             if phase == "after-tasks":
-                snapshot["runtime_metrics"]["context_render_success_count"] = 1
+                snapshot["databases"][".stateful/state.db"]["coordination_metrics"]["context"]["renders"] = 0
             return snapshot
 
         result = self.run_container_with_diagnostics("parallel-on", diagnostics)
 
         self.assertFalse(result["cleared"])
         self.assertIsNone(result["coordination_metrics"])
-        self.assertEqual(result["error"], "context render counts decreased across phases")
+        self.assertEqual(result["error"], "coordination counters decreased across phases")
 
     def test_coordination_metrics_malformed_database_evidence_unclears_row(self) -> None:
         def diagnostics(container, phase):
@@ -2700,66 +2698,6 @@ class RealWorldRunnerTests(unittest.TestCase):
         self.assertIsNone(result["coordination_metrics"])
         self.assertEqual(result["error"], "coordination unmeasured grants is invalid")
 
-    def test_coordination_metrics_missing_required_notification_kinds_unclear_row(self) -> None:
-        for missing_kind in ("reservation_granted", "scope_overlap"):
-            with self.subTest(missing_kind=missing_kind):
-                def diagnostics(container, phase):
-                    snapshot = self.container_diagnostics(container, phase)
-                    if phase == "after-final":
-                        snapshot["databases"][".stateful/state.db"][
-                            "coordination_metrics"
-                        ]["notifications"]["by_kind"].pop(missing_kind)
-                    return snapshot
-
-                result = self.run_container_with_diagnostics("parallel-on", diagnostics)
-
-                self.assertFalse(result["cleared"])
-                self.assertIsNone(result["coordination_metrics"])
-
-    def test_coordination_metrics_inconsistent_notification_created_unclears_row(self) -> None:
-        def diagnostics(container, phase):
-            snapshot = self.container_diagnostics(container, phase)
-            if phase == "after-final":
-                snapshot["databases"][".stateful/state.db"][
-                    "coordination_metrics"
-                ]["notifications"]["by_kind"]["scope_overlap"]["created"] = 3
-            return snapshot
-
-        result = self.run_container_with_diagnostics("parallel-on", diagnostics)
-
-        self.assertFalse(result["cleared"])
-        self.assertIsNone(result["coordination_metrics"])
-
-    def test_coordination_metrics_reject_invalid_and_ambiguous_evidence(self) -> None:
-        snapshots = {
-            phase: self.container_diagnostics(None, phase)
-            for phase in ("before-tasks", "after-tasks", "after-final")
-        }
-        agents = [
-            {"kind": "task", "context_render_tool_calls": 1},
-            {"kind": "final", "context_render_tool_calls": 2},
-        ]
-        snapshots["before-tasks"]["runtime_metrics"][
-            "context_render_success_count"
-        ] = True
-        with self.assertRaisesRegex(
-            ValueError, "context render count at before-tasks is invalid"
-        ):
-            self.mod._build_coordination_metrics("parallel-on", snapshots, agents)
-
-        snapshots["before-tasks"]["runtime_metrics"][
-            "context_render_success_count"
-        ] = 2
-        snapshots["after-final"]["databases"]["another.db"] = {
-            "integrity": "ok",
-            "coordination_metrics": copy.deepcopy(
-                snapshots["after-final"]["databases"][".stateful/state.db"][
-                    "coordination_metrics"
-                ]
-            ),
-        }
-        with self.assertRaisesRegex(ValueError, "exactly one coordination metrics"):
-            self.mod._build_coordination_metrics("parallel-on", snapshots, agents)
 
     def test_container_cleanup_error_blocks_final_and_grading(self) -> None:
         runtime = self.mod._DOCKER.DockerRuntime(
@@ -3638,272 +3576,7 @@ class RealWorldReportingTests(unittest.TestCase):
         self.assertEqual(summary["trials"], 2)
         self.assertEqual(summary["generated_at"], "2026-07-12T00:00:00Z")
 
-    def test_coordination_metrics_aggregate_complete_parallel_on_trials(self) -> None:
-        first = {
-            "notifications": {
-                "by_kind": {
-                    "scope_overlap": {
-                        "created": 2,
-                        "delivered": 1,
-                        "pending": 1,
-                        "expired": 0,
-                    },
-                    "reservation_granted": {
-                        "created": 0,
-                        "delivered": 0,
-                        "pending": 0,
-                        "expired": 0,
-                    },
-                    "first_only": {
-                        "created": 1,
-                        "delivered": 1,
-                        "pending": 0,
-                        "expired": 0,
-                    },
-                }
-            },
-            "waits": {
-                "by_final_status": {"claimed": 2},
-                "grant_wait_time_s": {
-                    "count": 2,
-                    "total": 3.0,
-                    "mean": 1.5,
-                    "max": 2.5,
-                },
-                "unmeasured_grants": 1,
-            },
-            "authorization": {
-                "denied_by_reason": {"active_claim_conflict": 1},
-                "warned_by_reason": {},
-            },
-            "context_renders": {
-                "server": {"tasks": 9, "final": 5, "total": 14},
-                "explicit_tool_calls": {"tasks": 3, "final": 2, "total": 5},
-            },
-        }
-        second = {
-            "notifications": {
-                "by_kind": {
-                    "reservation_granted": {
-                        "created": 3,
-                        "delivered": 2,
-                        "pending": 0,
-                        "expired": 1,
-                    },
-                    "scope_overlap": {
-                        "created": 0,
-                        "delivered": 0,
-                        "pending": 0,
-                        "expired": 0,
-                    },
-                    "second_only": {
-                        "created": 2,
-                        "delivered": 0,
-                        "pending": 1,
-                        "expired": 1,
-                    },
-                }
-            },
-            "waits": {
-                "by_final_status": {"queued": 1, "claimed": 3},
-                "grant_wait_time_s": {
-                    "count": 3,
-                    "total": 12.0,
-                    "mean": 4.0,
-                    "max": 7.0,
-                },
-                "unmeasured_grants": 2,
-            },
-            "authorization": {
-                "denied_by_reason": {"missing_claim": 2},
-                "warned_by_reason": {"scope_overlap": 1},
-            },
-            "context_renders": {
-                "server": {"tasks": 4, "final": 6, "total": 10},
-                "explicit_tool_calls": {"tasks": 1, "final": 3, "total": 4},
-            },
-        }
-        summary = self.mod.build_run_summary(
-            [self.repositories[0]],
-            ["parallel-on"],
-            2,
-            "model",
-            "thinking",
-            [
-                self.result(
-                    "alpha",
-                    "parallel-on",
-                    1,
-                    coordination_metrics=first,
-                ),
-                self.result(
-                    "alpha",
-                    "parallel-on",
-                    2,
-                    coordination_metrics=second,
-                ),
-            ],
-            "2026-07-12T00:00:00Z",
-        )
-        metrics = summary["aggregates"][0]["coordination_metrics"]
 
-        self.assertEqual(
-            metrics["notifications"]["by_kind"],
-            {
-                "first_only": {
-                    "created": 1,
-                    "delivered": 1,
-                    "pending": 0,
-                    "expired": 0,
-                },
-                "reservation_granted": {
-                    "created": 3,
-                    "delivered": 2,
-                    "pending": 0,
-                    "expired": 1,
-                },
-                "scope_overlap": {
-                    "created": 2,
-                    "delivered": 1,
-                    "pending": 1,
-                    "expired": 0,
-                },
-                "second_only": {
-                    "created": 2,
-                    "delivered": 0,
-                    "pending": 1,
-                    "expired": 1,
-                },
-            },
-        )
-        self.assertEqual(
-            metrics["waits"]["by_final_status"], {"claimed": 5, "queued": 1}
-        )
-        self.assertEqual(
-            metrics["authorization"]["denied_by_reason"],
-            {"active_claim_conflict": 1, "missing_claim": 2},
-        )
-        self.assertEqual(
-            metrics["authorization"]["warned_by_reason"], {"scope_overlap": 1}
-        )
-        self.assertEqual(
-            metrics["context_renders"],
-            {
-                "server": {"tasks": 13, "final": 11, "total": 24},
-                "explicit_tool_calls": {"tasks": 4, "final": 5, "total": 9},
-            },
-        )
-        self.assertEqual(
-            metrics["waits"]["grant_wait_time_s"],
-            {"count": 5, "total": 15.0, "mean": 3.0, "max": 7.0},
-        )
-        self.assertEqual(metrics["waits"]["unmeasured_grants"], 3)
-
-        malformed = copy.deepcopy(first)
-        malformed["context_renders"]["server"]["tasks"] = True
-        self.assertIsNone(
-            self.mod._aggregate_coordination_metrics(
-                "parallel-on", [malformed, second], 2
-            )
-        )
-
-    def test_coordination_metrics_are_null_for_incomplete_and_off_aggregates(self) -> None:
-        complete = {
-            "notifications": {
-                "by_kind": {
-                    "reservation_granted": {
-                        "created": 0,
-                        "delivered": 0,
-                        "pending": 0,
-                        "expired": 0,
-                    },
-                    "scope_overlap": {
-                        "created": 0,
-                        "delivered": 0,
-                        "pending": 0,
-                        "expired": 0,
-                    },
-                }
-            },
-            "waits": {
-                "by_final_status": {},
-                "grant_wait_time_s": {
-                    "count": 0,
-                    "total": 0.0,
-                    "mean": None,
-                    "max": None,
-                },
-                "unmeasured_grants": 0,
-            },
-            "authorization": {
-                "denied_by_reason": {},
-                "warned_by_reason": {},
-            },
-            "context_renders": {
-                "server": {"tasks": 0, "final": 0, "total": 0},
-                "explicit_tool_calls": {"tasks": 0, "final": 0, "total": 0},
-            },
-        }
-        incomplete = self.mod.build_run_summary(
-            [self.repositories[0]],
-            ["parallel-on"],
-            2,
-            "model",
-            "thinking",
-            [
-                self.result(
-                    "alpha",
-                    "parallel-on",
-                    1,
-                    coordination_metrics=complete,
-                )
-            ],
-            "2026-07-12T00:00:00Z",
-        )
-        duplicate_trials = self.mod.build_run_summary(
-            [self.repositories[0]],
-            ["parallel-on"],
-            2,
-            "model",
-            "thinking",
-            [
-                self.result(
-                    "alpha",
-                    "parallel-on",
-                    1,
-                    coordination_metrics=complete,
-                ),
-                self.result(
-                    "alpha",
-                    "parallel-on",
-                    1,
-                    coordination_metrics=complete,
-                ),
-            ],
-            "2026-07-12T00:00:00Z",
-        )
-        sequential = self.result("alpha", "sequential", 1)
-        parallel_off = self.result("alpha", "parallel-off", 1)
-        sequential.pop("coordination_metrics")
-        parallel_off.pop("coordination_metrics")
-        off_arms = self.mod.build_run_summary(
-            [self.repositories[0]],
-            ["sequential", "parallel-off"],
-            1,
-            "model",
-            "thinking",
-            [sequential, parallel_off],
-            "2026-07-12T00:00:00Z",
-        )
-
-        self.assertIsNone(incomplete["aggregates"][0]["coordination_metrics"])
-        self.assertIsNone(
-            duplicate_trials["aggregates"][0]["coordination_metrics"]
-        )
-        self.assertEqual(
-            [aggregate["coordination_metrics"] for aggregate in off_arms["aggregates"]],
-            [None, None],
-        )
 
     def test_summary_marks_missing_scheduled_rows_without_inventing_metrics(self) -> None:
         rows = [
@@ -4615,6 +4288,112 @@ class RealWorldDiagnosticsReportingTests(unittest.TestCase):
         self.assertEqual(
             self.mod.validate_shared_home_evidence(evidence, "container-1", {"task-a", "final"}),
             "contradictory shared HOME evidence",
+        )
+
+class V2RunnerMetricContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.mod = load_script("statefulbench_realworld.py")
+
+    @staticmethod
+    def metrics(*, bytes_at: int, wait_count: int = 0, wait_total: float = 0.0) -> dict:
+        return {
+            "protocol_version": "stateful.v2",
+            "journal": {
+                "events": 0,
+                "bytes_start": bytes_at,
+                "bytes_end": bytes_at,
+                "bytes_growth": 0,
+                "by_event_type": {},
+            },
+            "presence": {"registered": 0, "expired": 0, "finalized": 0, "peak_active": 0},
+            "handoffs": {"explicit": 0, "fallback_stop": 0, "fallback_ttl": 0, "by_status": {}},
+            "read_observations": {"started": 0, "stable": 0, "unstable": 0, "aborted": 0, "invalidated": 0},
+            "context": {
+                "versions": 0,
+                "renders": 0,
+                "deliveries": 0,
+                "acks": 0,
+                "redeliveries": 0,
+                "coalesced": 0,
+                "prompt_utf8_bytes": 0,
+                "prompt_unicode_scalars": 0,
+                "prompt_items": 0,
+            },
+            "authorization": {"warned_by_reason": {}, "denied_by_reason": {}},
+            "write_safety": {
+                "fence_conflicts": 0,
+                "unknown_outcomes": 0,
+                "same_path_overlaps": 0,
+                "cross_agent_overwrites": 0,
+            },
+            "notifications": {"by_kind": {}},
+            "waits": {
+                "by_final_status": {},
+                "grant_wait_time_s": {
+                    "count": wait_count,
+                    "total": wait_total,
+                    "mean": None if wait_count == 0 else round(wait_total / wait_count, 6),
+                    "max": None if wait_count == 0 else wait_total,
+                },
+                "unmeasured_grants": 0,
+            },
+        }
+
+    def test_parallel_on_rows_require_complete_v2_phase_metrics(self) -> None:
+        before = self.metrics(bytes_at=10)
+        after_tasks = self.metrics(bytes_at=20)
+        after_final = self.metrics(bytes_at=30)
+        snapshots = {
+            phase: {"databases": {"state.db": {"coordination_metrics": metrics}}}
+            for phase, metrics in (
+                ("before-tasks", before),
+                ("after-tasks", after_tasks),
+                ("after-final", after_final),
+            )
+        }
+
+        result = self.mod._build_coordination_metrics("parallel-on", snapshots, [])
+
+        self.assertEqual(set(result), set(self.metrics(bytes_at=0)))
+        self.assertEqual(
+            result["journal"],
+            {"events": 0, "bytes_start": 10, "bytes_end": 30, "bytes_growth": 20, "by_event_type": {}},
+        )
+        incomplete = copy.deepcopy(snapshots)
+        del incomplete["after-final"]["databases"]["state.db"]["coordination_metrics"]["write_safety"]
+        with self.assertRaisesRegex(ValueError, "coordination"):
+            self.mod._build_coordination_metrics("parallel-on", incomplete, [])
+
+    def test_aggregate_nulls_uncleared_rows_and_weights_wait_means(self) -> None:
+        first = self.metrics(bytes_at=10, wait_count=2, wait_total=3.0)
+        second = self.metrics(bytes_at=20, wait_count=3, wait_total=12.0)
+        aggregate = self.mod._aggregate_coordination_metrics(
+            "parallel-on",
+            [
+                {"trial": 1, "cleared": True, "coordination_metrics": first},
+                {"trial": 2, "cleared": True, "coordination_metrics": second},
+            ],
+            2,
+        )
+
+        self.assertEqual(
+            aggregate["waits"]["grant_wait_time_s"],
+            {"count": 5, "total": 15.0, "mean": 3.0, "max": 12.0},
+        )
+        self.assertEqual(
+            aggregate["journal"],
+            {"events": 0, "bytes_start": 30, "bytes_end": 30, "bytes_growth": 0, "by_event_type": {}},
+        )
+        self.assertIsNone(
+            self.mod._aggregate_coordination_metrics(
+                "parallel-on",
+                [
+                    {"trial": 1, "cleared": True, "coordination_metrics": first},
+                    {"trial": 2, "cleared": False, "coordination_metrics": second},
+                ],
+                2,
+            )
         )
 if __name__ == "__main__":
     unittest.main()
