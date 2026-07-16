@@ -72,6 +72,7 @@ pub(crate) fn create_v2_schema(connection: &Connection) -> StoreResult<()> {
             workspace_id TEXT NOT NULL,
             http_status INTEGER NOT NULL,
             response_json TEXT NOT NULL,
+            rejection_json TEXT,
             first_event_seq INTEGER,
             last_event_seq INTEGER,
             committed_at TEXT NOT NULL
@@ -255,7 +256,19 @@ pub(crate) fn create_v2_schema(connection: &Connection) -> StoreResult<()> {
             ON context_delivery_current(workspace_id, target_agent_id, version, sequence);
         ",
     )?;
+    ensure_command_receipt_columns(connection)?;
     ensure_presence_resource_columns(connection)?;
+    Ok(())
+}
+
+fn ensure_command_receipt_columns(connection: &Connection) -> StoreResult<()> {
+    let mut statement = connection.prepare("PRAGMA table_info(command_receipts)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !columns.iter().any(|column| column == "rejection_json") {
+        connection.execute_batch("ALTER TABLE command_receipts ADD COLUMN rejection_json TEXT;")?;
+    }
     Ok(())
 }
 

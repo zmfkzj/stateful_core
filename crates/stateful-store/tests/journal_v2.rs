@@ -1,9 +1,11 @@
+use rusqlite::Connection;
 use serde_json::json;
 use stateful_core::{
     ActorType, AgentIdentity, AuthorizationEvent, EventData, EventPayload, NewEvent, RequestEnvelope,
     SourceKind, SourceRef, WorkspaceIdentity,
 };
-use stateful_store::{CommandPlan, FixedClock, Store};
+use stateful_store::{CommandPlan, FixedClock, Store, StoreError};
+use tempfile::TempDir;
 use time::{macros::datetime, OffsetDateTime};
 use uuid::Uuid;
 
@@ -106,6 +108,248 @@ fn command_appends_projects_versions_receipts_and_commits_atomically() {
     ] {
         assert!(store.has_index(index).expect("schema lookup should work"), "{index} must exist");
     }
+}
+
+#[test]
+fn deterministic_rejection_is_frozen_without_events() {
+    let mut store = store();
+    let frozen_request = request(Uuid::new_v4(), json!({"intent":"deny"}));
+
+    assert!(matches!(
+        store.execute_command(
+            &frozen_request,
+            "test.command",
+            |_| -> stateful_store::StoreResult<CommandPlan<serde_json::Value>> {
+                Err(StoreError::ClaimConflict)
+            },
+        ),
+        Err(StoreError::ClaimConflict)
+    ));
+    assert_eq!(store.command_receipt_count().expect("receipt count loads"), 1);
+    assert_eq!(store.journal_event_count().expect("journal count loads"), 0);
+
+    let state_change = request(Uuid::new_v4(), json!({"intent":"allow"}));
+    store
+        .execute_command(&state_change, "test.state_change", |_| {
+            Ok(command_plan(
+                state_change.request_id,
+                vec![event(
+                    state_change.request_id,
+                    0,
+                    "authorization.denied",
+                )],
+            ))
+        })
+        .expect("unrelated state change commits");
+    let event_count = store.journal_event_count().expect("journal count loads");
+
+    assert!(matches!(
+        store.execute_command(
+            &frozen_request,
+            "test.command",
+            |_| -> stateful_store::StoreResult<CommandPlan<serde_json::Value>> {
+                panic!("duplicate must not rerun policy")
+            },
+        ),
+        Err(StoreError::ClaimConflict)
+    ));
+    assert_eq!(store.journal_event_count().expect("journal count loads"), event_count);
+
+    let mut changed_actor = frozen_request.clone();
+    changed_actor.agent.actor_id = "other-actor".into();
+    assert!(matches!(
+        store.execute_command(
+            &changed_actor,
+            "test.command",
+            |_| -> stateful_store::StoreResult<CommandPlan<serde_json::Value>> {
+                panic!("mismatched duplicate must fail before policy")
+            },
+        ),
+        Err(StoreError::IdempotencyKeyReused)
+    ));
+    store.rebuild_projections().expect("eventless rejection receipts replay");
+}
+
+#[test]
+fn unexpected_protocol_errors_remain_retryable() {
+    let store = store();
+    let request = request(Uuid::new_v4(), json!({"intent":"deny"}));
+
+    let error = store
+        .execute_command(
+            &request,
+            "test.command",
+            |_| -> stateful_store::StoreResult<CommandPlan<serde_json::Value>> {
+                Err(StoreError::V2(stateful_core::V2Error::new(
+                    "internal_test_failure",
+                    "simulated internal defect",
+                )))
+            },
+        )
+        .expect_err("unexpected protocol errors must not freeze a receipt");
+    assert_eq!(error.code(), "internal_test_failure");
+    assert_eq!(store.command_receipt_count().expect("receipt count loads"), 0);
+    assert_eq!(store.journal_event_count().expect("journal count loads"), 0);
+
+    let retry = store
+        .execute_command(&request, "test.command", |_| {
+            Ok(command_plan(request.request_id, vec![]))
+        })
+        .expect("the repaired command retries");
+    assert!(!retry.duplicate);
+}
+
+#[test]
+fn frozen_rejection_reconstructs_its_exact_store_error() {
+    let store = store();
+    let request = request(Uuid::new_v4(), json!({"intent":"deny"}));
+    let expected = StoreError::WriteFenceConflict {
+        path: "src/lib.rs".into(),
+        owner_agent_id: "agent-2".into(),
+    };
+
+    assert!(matches!(
+        store.execute_command(
+            &request,
+            "test.command",
+            |_| -> stateful_store::StoreResult<CommandPlan<serde_json::Value>> {
+                Err(expected)
+            },
+        ),
+        Err(StoreError::WriteFenceConflict { .. })
+    ));
+    let duplicate = store
+        .execute_command(
+            &request,
+            "test.command",
+            |_| -> stateful_store::StoreResult<CommandPlan<serde_json::Value>> {
+                panic!("duplicate must replay the persisted rejection")
+            },
+        )
+        .expect_err("frozen rejection replays");
+    assert!(matches!(
+        duplicate,
+        StoreError::WriteFenceConflict {
+            path,
+            owner_agent_id,
+        } if path == "src/lib.rs" && owner_agent_id == "agent-2"
+    ));
+}
+
+#[test]
+fn replay_rejects_corrupt_eventless_rejection_receipts() {
+    let temp = TempDir::new().expect("temporary directory exists");
+    let path = temp.path().join("eventless-rejection.sqlite");
+    let request = request(Uuid::new_v4(), json!({"intent":"deny"}));
+    {
+        let store = Store::open_with_clock(&path, FixedClock::new(NOW))
+            .expect("store opens");
+        assert!(matches!(
+            store.execute_command(
+                &request,
+                "test.command",
+                |_| -> stateful_store::StoreResult<CommandPlan<serde_json::Value>> {
+                    Err(StoreError::ClaimConflict)
+                },
+            ),
+            Err(StoreError::ClaimConflict)
+        ));
+    }
+    Connection::open(&path)
+        .expect("database opens")
+        .execute(
+            "UPDATE command_receipts SET rejection_json = 'not JSON'",
+            [],
+        )
+        .expect("receipt corruption applies");
+
+    let mut store = Store::open_with_clock(&path, FixedClock::new(NOW))
+        .expect("store reopens");
+    assert!(
+        store.rebuild_projections().is_err(),
+        "replay must validate eventless rejection receipts"
+    );
+}
+
+#[test]
+fn prechange_v2_receipts_upgrade_and_replay() {
+    let temp = TempDir::new().expect("temporary directory exists");
+    let path = temp.path().join("prechange-v2.sqlite");
+    let frozen_request = request(Uuid::new_v4(), json!({"intent":"deny"}));
+    {
+        let store = Store::open_with_clock(&path, FixedClock::new(NOW))
+            .expect("v2 store opens");
+        store
+            .execute_command(&frozen_request, "test.command", |_| {
+                Ok(command_plan(
+                    frozen_request.request_id,
+                    vec![event(
+                        frozen_request.request_id,
+                        0,
+                        "authorization.denied",
+                    )],
+                ))
+            })
+            .expect("receipt commits");
+    }
+    let connection = Connection::open(&path).expect("database opens");
+    connection
+        .execute_batch(
+            "
+            ALTER TABLE command_receipts RENAME TO command_receipts_prechange;
+            CREATE TABLE command_receipts (
+                request_id TEXT PRIMARY KEY,
+                route_kind TEXT NOT NULL,
+                request_sha256 TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                actor_id TEXT NOT NULL,
+                workspace_id TEXT NOT NULL,
+                http_status INTEGER NOT NULL,
+                response_json TEXT NOT NULL,
+                first_event_seq INTEGER,
+                last_event_seq INTEGER,
+                committed_at TEXT NOT NULL
+            );
+            INSERT INTO command_receipts (
+                request_id, route_kind, request_sha256, agent_id, actor_id, workspace_id,
+                http_status, response_json, first_event_seq, last_event_seq, committed_at
+            )
+            SELECT
+                request_id, route_kind, request_sha256, agent_id, actor_id, workspace_id,
+                http_status, response_json, first_event_seq, last_event_seq, committed_at
+            FROM command_receipts_prechange;
+            DROP TABLE command_receipts_prechange;
+            ",
+        )
+        .expect("prechange receipt schema restores");
+    drop(connection);
+
+    let mut store = Store::open_with_clock(&path, FixedClock::new(NOW))
+        .expect("prechange v2 store upgrades");
+    let duplicate = store
+        .execute_command(
+            &frozen_request,
+            "test.command",
+            |_| -> stateful_store::StoreResult<CommandPlan<serde_json::Value>> {
+                panic!("upgraded receipt must replay")
+            },
+        )
+        .expect("upgraded receipt replays");
+    assert!(duplicate.duplicate);
+    store
+        .rebuild_projections()
+        .expect("upgraded receipt still validates event metadata during replay");
+    drop(store);
+
+    let connection = Connection::open(&path).expect("upgraded database opens");
+    let columns = connection
+        .prepare("PRAGMA table_info(command_receipts)")
+        .expect("schema query prepares")
+        .query_map([], |row| row.get::<_, String>(1))
+        .expect("schema query runs")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("schema columns load");
+    assert!(columns.iter().any(|column| column == "rejection_json"));
 }
 
 #[test]

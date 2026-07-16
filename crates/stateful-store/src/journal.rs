@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use stateful_core::{
     ActorType, AgentIdentity, EventPayload, HandoffRecord, NewEvent, PresenceRecord,
     PresenceResource, PresenceResourceRelation, ReadObservationRecord, RequestEnvelope,
-    SourceKind, SourceRef, StoredEvent, WorkspaceIdentity,
+    SourceKind, SourceRef, StoredEvent, V2Error, WorkspaceIdentity,
 };
 use std::{collections::BTreeMap, path::Path};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -442,11 +442,36 @@ impl Store {
             if receipt.route_kind != route_kind || receipt.request_sha256 != request_sha256 || receipt.agent_id != request.agent.agent_id || receipt.workspace_id != request.workspace.workspace_id || receipt.actor_id != request.agent.actor_id {
                 return Err(StoreError::IdempotencyKeyReused);
             }
+            if let Some(rejection_json) = receipt.rejection_json {
+                return Err(serde_json::from_str::<FrozenRejection>(&rejection_json)?.into_store_error());
+            }
             let response = serde_json::from_str(&receipt.response_json)?;
             return Ok(CommandOutcome { response, http_status: receipt.http_status, first_event_seq: receipt.first_event_seq, last_event_seq: receipt.last_event_seq, duplicate: true });
         }
 
-        let plan = build(&SqlProjectionReader { transaction: &transaction })?;
+        let plan = match build(&SqlProjectionReader { transaction: &transaction }) {
+            Ok(plan) => plan,
+            Err(error) => {
+                let Some(rejection) = FrozenRejection::from_store_error(&error) else {
+                    return Err(error);
+                };
+                let occurred_at = format_timestamp(self.clock.now());
+                persist_receipt(
+                    &transaction,
+                    request,
+                    route_kind,
+                    &request_sha256,
+                    rejection.http_status(),
+                    "null",
+                    Some(&serde_json::to_string(&rejection)?),
+                    None,
+                    None,
+                    &occurred_at,
+                )?;
+                transaction.commit()?;
+                return Err(rejection.into_store_error());
+            }
+        };
         let occurred_at = format_timestamp(self.clock.now());
         let mut projector = Projector::new(&transaction, "", self.projector_fail_on_event);
         let mut first_event_seq = None;
@@ -468,9 +493,17 @@ impl Store {
             last_event_seq = Some(event_seq);
         }
         let response_json = serde_json::to_string(&plan.response)?;
-        transaction.execute(
-            "INSERT INTO command_receipts (request_id, route_kind, request_sha256, agent_id, actor_id, workspace_id, http_status, response_json, first_event_seq, last_event_seq, committed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![request.request_id.to_string(), route_kind, request_sha256, request.agent.agent_id, request.agent.actor_id, request.workspace.workspace_id, plan.http_status, response_json, first_event_seq, last_event_seq, occurred_at],
+        persist_receipt(
+            &transaction,
+            request,
+            route_kind,
+            &request_sha256,
+            plan.http_status,
+            &response_json,
+            None,
+            first_event_seq,
+            last_event_seq,
+            &occurred_at,
         )?;
         transaction.commit()?;
         Ok(CommandOutcome { response: plan.response, http_status: plan.http_status, first_event_seq, last_event_seq, duplicate: false })
@@ -557,6 +590,140 @@ impl Store {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum FrozenRejection {
+    V2(V2Error),
+    ClaimConflict,
+    ClaimAlreadyHeld,
+    WriteFenceConflict { path: String, owner_agent_id: String },
+    StaleAuthorization,
+    MissingReservation,
+    ReservationOwnerMismatch,
+    ReservationRequestNotFound,
+    ReservationRequestOwnerMismatch,
+    ReservationRequestNotCancelable,
+    ClaimNotFound,
+    ClaimOwnerMismatch,
+    MissingPurpose,
+    MissingScope,
+    InvalidClaimPath(String),
+    InvalidReadOperation,
+    ReadOperationNotFound,
+    InvalidWriteIntent,
+    WriteIntentNotFound,
+    WriteIntentOwnerMismatch,
+}
+
+impl FrozenRejection {
+    fn from_store_error(error: &StoreError) -> Option<Self> {
+        Some(match error {
+            StoreError::V2(error)
+                if matches!(
+                    error.code.as_str(),
+                    "invalid_context_delivery"
+                        | "missing_reservation"
+                        | "reservation_owner_mismatch"
+                        | "scope_mismatch"
+                        | "missing_read_provenance"
+                        | "stale_observation"
+                        | "notification_target_mismatch"
+                        | "tool_fields_require_tool_command"
+                        | "last_result_too_long"
+                        | "presence_not_found"
+                        | "invalid_tool_result"
+                ) =>
+            {
+                Self::V2(error.clone())
+            }
+            StoreError::ClaimConflict => Self::ClaimConflict,
+            StoreError::ClaimAlreadyHeld => Self::ClaimAlreadyHeld,
+            StoreError::WriteFenceConflict { path, owner_agent_id } => Self::WriteFenceConflict {
+                path: path.clone(),
+                owner_agent_id: owner_agent_id.clone(),
+            },
+            StoreError::StaleAuthorization => Self::StaleAuthorization,
+            StoreError::MissingReservation => Self::MissingReservation,
+            StoreError::ReservationOwnerMismatch => Self::ReservationOwnerMismatch,
+            StoreError::ReservationRequestNotFound => Self::ReservationRequestNotFound,
+            StoreError::ReservationRequestOwnerMismatch => Self::ReservationRequestOwnerMismatch,
+            StoreError::ReservationRequestNotCancelable => Self::ReservationRequestNotCancelable,
+            StoreError::ClaimNotFound => Self::ClaimNotFound,
+            StoreError::ClaimOwnerMismatch => Self::ClaimOwnerMismatch,
+            StoreError::MissingPurpose => Self::MissingPurpose,
+            StoreError::MissingScope => Self::MissingScope,
+            StoreError::InvalidClaimPath(path) => Self::InvalidClaimPath(path.clone()),
+            StoreError::InvalidReadOperation => Self::InvalidReadOperation,
+            StoreError::ReadOperationNotFound => Self::ReadOperationNotFound,
+            StoreError::InvalidWriteIntent => Self::InvalidWriteIntent,
+            StoreError::WriteIntentNotFound => Self::WriteIntentNotFound,
+            StoreError::WriteIntentOwnerMismatch => Self::WriteIntentOwnerMismatch,
+            StoreError::V2(_)
+            | StoreError::Io(_)
+            | StoreError::Sqlite(_)
+            | StoreError::Json(_)
+            | StoreError::IdempotencyKeyReused
+            | StoreError::InvalidCommandEvent
+            | StoreError::InvalidJournalEvent
+            | StoreError::MigrationValidation(_)
+            | StoreError::ProjectorFailure
+            | StoreError::ReplayMismatch
+            | StoreError::InvalidTimestamp(_) => return None,
+        })
+    }
+
+    fn http_status(&self) -> u16 {
+        match self {
+            Self::V2(_)
+            | Self::ReservationRequestNotCancelable
+            | Self::MissingPurpose
+            | Self::MissingScope
+            | Self::InvalidClaimPath(_)
+            | Self::InvalidReadOperation
+            | Self::InvalidWriteIntent => 400,
+            Self::ClaimConflict
+            | Self::ClaimAlreadyHeld
+            | Self::WriteFenceConflict { .. }
+            | Self::StaleAuthorization
+            | Self::MissingReservation => 409,
+            Self::ReservationOwnerMismatch
+            | Self::ReservationRequestOwnerMismatch
+            | Self::ClaimOwnerMismatch
+            | Self::WriteIntentOwnerMismatch => 403,
+            Self::ReservationRequestNotFound
+            | Self::ClaimNotFound
+            | Self::ReadOperationNotFound
+            | Self::WriteIntentNotFound => 404,
+        }
+    }
+
+    fn into_store_error(self) -> StoreError {
+        match self {
+            Self::V2(error) => StoreError::V2(error),
+            Self::ClaimConflict => StoreError::ClaimConflict,
+            Self::ClaimAlreadyHeld => StoreError::ClaimAlreadyHeld,
+            Self::WriteFenceConflict { path, owner_agent_id } => {
+                StoreError::WriteFenceConflict { path, owner_agent_id }
+            }
+            Self::StaleAuthorization => StoreError::StaleAuthorization,
+            Self::MissingReservation => StoreError::MissingReservation,
+            Self::ReservationOwnerMismatch => StoreError::ReservationOwnerMismatch,
+            Self::ReservationRequestNotFound => StoreError::ReservationRequestNotFound,
+            Self::ReservationRequestOwnerMismatch => StoreError::ReservationRequestOwnerMismatch,
+            Self::ReservationRequestNotCancelable => StoreError::ReservationRequestNotCancelable,
+            Self::ClaimNotFound => StoreError::ClaimNotFound,
+            Self::ClaimOwnerMismatch => StoreError::ClaimOwnerMismatch,
+            Self::MissingPurpose => StoreError::MissingPurpose,
+            Self::MissingScope => StoreError::MissingScope,
+            Self::InvalidClaimPath(path) => StoreError::InvalidClaimPath(path),
+            Self::InvalidReadOperation => StoreError::InvalidReadOperation,
+            Self::ReadOperationNotFound => StoreError::ReadOperationNotFound,
+            Self::InvalidWriteIntent => StoreError::InvalidWriteIntent,
+            Self::WriteIntentNotFound => StoreError::WriteIntentNotFound,
+            Self::WriteIntentOwnerMismatch => StoreError::WriteIntentOwnerMismatch,
+        }
+    }
+}
+
 struct Receipt {
     route_kind: String,
     request_sha256: String,
@@ -564,6 +731,7 @@ struct Receipt {
     actor_id: String,
     workspace_id: String,
     response_json: String,
+    rejection_json: Option<String>,
     http_status: u16,
     first_event_seq: Option<u64>,
     last_event_seq: Option<u64>,
@@ -571,7 +739,7 @@ struct Receipt {
 
 fn load_receipt(transaction: &Transaction<'_>, request_id: Uuid) -> StoreResult<Option<Receipt>> {
     transaction.query_row(
-        "SELECT route_kind, request_sha256, agent_id, actor_id, workspace_id, response_json, http_status, first_event_seq, last_event_seq FROM command_receipts WHERE request_id = ?1",
+        "SELECT route_kind, request_sha256, agent_id, actor_id, workspace_id, response_json, rejection_json, http_status, first_event_seq, last_event_seq FROM command_receipts WHERE request_id = ?1",
         [request_id.to_string()],
         |row| Ok(Receipt {
             route_kind: row.get(0)?,
@@ -580,11 +748,31 @@ fn load_receipt(transaction: &Transaction<'_>, request_id: Uuid) -> StoreResult<
             actor_id: row.get(3)?,
             workspace_id: row.get(4)?,
             response_json: row.get(5)?,
-            http_status: row.get(6)?,
-            first_event_seq: row.get(7)?,
-            last_event_seq: row.get(8)?,
+            rejection_json: row.get(6)?,
+            http_status: row.get(7)?,
+            first_event_seq: row.get(8)?,
+            last_event_seq: row.get(9)?,
         }),
     ).optional().map_err(StoreError::from)
+}
+
+fn persist_receipt<T: Serialize>(
+    transaction: &Transaction<'_>,
+    request: &RequestEnvelope<T>,
+    route_kind: &str,
+    request_sha256: &str,
+    http_status: u16,
+    response_json: &str,
+    rejection_json: Option<&str>,
+    first_event_seq: Option<u64>,
+    last_event_seq: Option<u64>,
+    committed_at: &str,
+) -> StoreResult<()> {
+    transaction.execute(
+        "INSERT INTO command_receipts (request_id, route_kind, request_sha256, agent_id, actor_id, workspace_id, http_status, response_json, rejection_json, first_event_seq, last_event_seq, committed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![request.request_id.to_string(), route_kind, request_sha256, request.agent.agent_id, request.agent.actor_id, request.workspace.workspace_id, http_status, response_json, rejection_json, first_event_seq, last_event_seq, committed_at],
+    )?;
+    Ok(())
 }
 
 fn insert_journal_event(transaction: &Transaction<'_>, event: &NewEvent, request: &RequestEnvelope<impl Serialize>, occurred_at: &str) -> StoreResult<u64> {
@@ -599,6 +787,7 @@ fn insert_journal_event(transaction: &Transaction<'_>, event: &NewEvent, request
 const JOURNAL_EVENT_COLUMNS: &str = "event_seq, event_id, request_id, event_ordinal, agent_id, turn_id, workspace_id, repo_id, worktree_id, root, branch, aggregate_kind, aggregate_id, event_type, event_schema_version, actor_id, actor_type, owner_id, parent_agent_id, parent_actor_id, source_kind, source_ref, causation_id, correlation_id, occurred_at, affects_context, payload_json";
 
 pub(crate) fn load_journal_events(connection: &Connection) -> StoreResult<Vec<JournalEvent>> {
+    validate_command_receipts(connection)?;
     let mut statement = connection.prepare(&format!(
         "SELECT {JOURNAL_EVENT_COLUMNS} FROM journal_events ORDER BY event_seq"
     ))?;
@@ -623,6 +812,50 @@ pub(crate) fn load_journal_events(connection: &Connection) -> StoreResult<Vec<Jo
         }
     }
     Ok(events)
+}
+
+fn validate_command_receipts(connection: &Connection) -> StoreResult<()> {
+    let mut statement = connection.prepare(
+        "SELECT request_id, http_status, first_event_seq, last_event_seq, rejection_json FROM command_receipts",
+    )?;
+    let receipts = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u16>(1)?,
+                row.get::<_, Option<u64>>(2)?,
+                row.get::<_, Option<u64>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (request_id, http_status, first_event_seq, last_event_seq, rejection_json) in receipts {
+        Uuid::parse_str(&request_id).map_err(|_| StoreError::InvalidJournalEvent)?;
+        let bounds = connection.query_row(
+            "SELECT MIN(event_seq), MAX(event_seq) FROM journal_events WHERE request_id = ?1",
+            [&request_id],
+            |row| Ok((row.get::<_, Option<u64>>(0)?, row.get::<_, Option<u64>>(1)?)),
+        )?;
+        match (first_event_seq, last_event_seq) {
+            (None, None) => {
+                if bounds.0.is_some() {
+                    return Err(StoreError::InvalidJournalEvent);
+                }
+                if let Some(rejection_json) = rejection_json {
+                    let rejection = serde_json::from_str::<FrozenRejection>(&rejection_json)?;
+                    if http_status != rejection.http_status() {
+                        return Err(StoreError::InvalidJournalEvent);
+                    }
+                }
+            }
+            (Some(first_event_seq), Some(last_event_seq))
+                if rejection_json.is_none()
+                    && first_event_seq <= last_event_seq
+                    && bounds == (Some(first_event_seq), Some(last_event_seq)) => {}
+            _ => return Err(StoreError::InvalidJournalEvent),
+        }
+    }
+    Ok(())
 }
 
 fn load_journal_event(

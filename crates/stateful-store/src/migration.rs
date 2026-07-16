@@ -605,13 +605,17 @@ fn append_fence_seeds(connection: &Connection, now: &str, contexts: &BTreeMap<St
 fn append_human_seeds(connection: &Connection, contexts: &BTreeMap<String, Metadata>, pending: &mut Vec<PendingEvent>) -> StoreResult<()> {
     let mut statement = connection.prepare("SELECT observation_id, workspace_id, relative_path, kind, source, confidence, observed_exists, observed_content_hash, observed_at, summary, expires_at, reconciled_at, reconcile_decision, reconciled_by_agent_id FROM human_observations ORDER BY workspace_id, observation_id")?;
     for row in statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, i64>(6)?, row.get::<_, Option<String>>(7)?, row.get::<_, String>(8)?, row.get::<_, String>(9)?, row.get::<_, Option<String>>(10)?, row.get::<_, Option<String>>(11)?, row.get::<_, Option<String>>(12)?, row.get::<_, Option<String>>(13)?)))? {
-        let (observation_id, workspace_id, relative_path, kind, source, confidence, _observed_exists, _observed_content_hash, observed_at, summary, expires_at, reconciled_at, reconcile_decision, reconciled_by_agent_id) = row?;
+        let (observation_id, workspace_id, relative_path, kind, source, confidence, observed_exists, observed_content_hash, observed_at, summary, expires_at, reconciled_at, reconcile_decision, reconciled_by_agent_id) = row?;
         let kind = match kind.as_str() {
             "save" | "change" | "delete" | "presence" | "dirty" => kind,
             _ => "change".into(),
         };
         let confidence = if confidence == "high" { "high" } else { "low" };
         let status = if reconciled_at.is_some() { "reconciled" } else { "pending" };
+        let legacy_observation = json!({
+            "exists": observed_exists != 0,
+            "content_hash": observed_content_hash,
+        });
         pending.push(PendingEvent {
             payload: EventPayload::Migration(MigrationEvent::HumanObservationSnapshotSeeded(seed_data("human_observation", &observation_id, json!({
                 "observation_id": observation_id,
@@ -623,6 +627,7 @@ fn append_human_seeds(connection: &Connection, contexts: &BTreeMap<String, Metad
                 "observed_at": observed_at,
                 "summary": summary,
                 "status": status,
+                "legacy_observation": legacy_observation,
                 "expires_at": expires_at,
                 "reconciled_at": reconciled_at,
                 "decision": reconcile_decision,

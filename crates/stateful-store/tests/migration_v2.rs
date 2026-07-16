@@ -5,7 +5,10 @@ use stateful_core::{
     SourceRef, WorkspaceIdentity,
 };
 use stateful_core::migration_seed_event_id;
-use stateful_store::{FixedClock, PresenceRegistration, Store};
+use stateful_store::{
+    ClaimAcquire, ClaimPath, ClaimRelease, FixedClock, PresenceRegistration,
+    ReservationDeclaration, Store, WriteFenceAcquire,
+};
 use std::{fs, path::{Path, PathBuf}};
 use time::macros::datetime;
 use uuid::Uuid;
@@ -263,6 +266,206 @@ fn legacy_claim_hash_is_not_read_provenance() {
         .expect("active claim seed should exist");
     assert_eq!(active["data"]["data"]["legacy_base_observation"]["content_hash"], "legacy-claim-sha");
     assert!(active["data"]["data"].get("read_provenance").is_none());
+}
+
+#[test]
+fn migration_keeps_human_fingerprints_and_terminal_coordination_records() {
+    let temp = TempDir::new().expect("temporary directory should exist");
+    let path = legacy_database(&temp, "terminal-provenance.sqlite");
+    Connection::open(&path)
+        .expect("legacy database should open")
+        .execute(
+            "UPDATE reservations SET status = 'released' WHERE reservation_id = 'reservation-active'",
+            [],
+        )
+        .expect("legacy blocker reservation releases");
+    let mut store = open_legacy(&path).expect("legacy database should migrate");
+
+    let human = journal_payloads(&path, "migration.human_observation_snapshot_seeded")
+        .into_iter()
+        .find(|payload| payload["data"]["aggregate_id"] == "human-reconciled")
+        .expect("human seed should exist");
+    assert_eq!(
+        human["data"]["data"]["legacy_observation"],
+        serde_json::json!({"exists": true, "content_hash": "human-sha"})
+    );
+    let before_rebuild = store.projection_snapshot().expect("projection snapshot loads");
+    store.rebuild_projections().expect("migration replay succeeds");
+    assert_eq!(
+        store.projection_snapshot().expect("projection snapshot loads"),
+        before_rebuild,
+        "replay must retain the exact legacy human fingerprint",
+    );
+
+    assert_eq!(
+        store
+            .claim("workspace-main", "claim-expired")
+            .expect("terminal claim reads")
+            .expect("terminal claim remains queryable")
+            .status,
+        "expired",
+    );
+    let fence_payload: String = Connection::open(&path)
+        .expect("migrated database should open")
+        .query_row(
+            "SELECT payload_json FROM write_fence_current WHERE aggregate_id = 'fence-expired'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("terminal fence remains queryable");
+    assert_eq!(
+        serde_json::from_str::<Value>(&fence_payload)
+            .expect("terminal fence payload is JSON")["status"],
+        "released",
+    );
+
+    let reservation = store
+        .declare_reservation(&request(
+            "agent-gamma",
+            ReservationDeclaration {
+                scopes: vec![stateful_core::ReservationScope::file("src/review.rs")],
+                action: "write_file".into(),
+                purpose: "replace terminal records".into(),
+            },
+        ))
+        .expect("terminal records must not block a new reservation")
+        .response;
+    let claim = store
+        .acquire_claim(&request(
+            "agent-gamma",
+            ClaimAcquire {
+                reservation_id: reservation.reservation_id,
+                paths: vec![ClaimPath {
+                    relative_path: "src/review.rs".into(),
+                    observation: None,
+                }],
+            },
+        ))
+        .expect("terminal claim must not conflict")
+        .response
+        .claims
+        .remove(0);
+    let fence = store
+        .acquire_write_fences(&request(
+            "agent-gamma",
+            WriteFenceAcquire {
+                paths: vec!["src/review.rs".into()],
+                action: "write_file".into(),
+            },
+        ))
+        .expect("terminal fence must not conflict")
+        .response;
+    assert_eq!(fence.fences.len(), 1);
+    assert_eq!(fence.conflict, None);
+    store
+        .release_claim(&request(
+            "agent-gamma",
+            ClaimRelease {
+                claim_id: claim.claim_id,
+            },
+        ))
+        .expect("new claim releases");
+}
+
+#[test]
+fn migrated_claim_conflict_is_frozen_after_blocker_release() {
+    let temp = TempDir::new().expect("temporary directory should exist");
+    let path = legacy_database(&temp, "frozen-claim-conflict.sqlite");
+    Connection::open(&path)
+        .expect("legacy database should open")
+        .execute(
+            "UPDATE reservations SET status = 'released' WHERE reservation_id = 'reservation-active'",
+            [],
+        )
+        .expect("legacy reservation releases");
+    let store = open_legacy(&path).expect("legacy database should migrate");
+    let reservation = store
+        .declare_reservation(&request(
+            "agent-beta",
+            ReservationDeclaration {
+                scopes: vec![stateful_core::ReservationScope::file("src/state.rs")],
+                action: "write_file".into(),
+                purpose: "contend for a migrated claim".into(),
+            },
+        ))
+        .expect("contender reservation declares")
+        .response;
+    let request_id = Uuid::new_v4();
+    let contender = RequestEnvelope::new(
+        request_id,
+        datetime!(2026-07-15 11:30 UTC),
+        AgentIdentity {
+            agent_id: "agent-beta".into(),
+            turn_id: Some("migration-test".into()),
+            actor_id: "agent-beta-actor".into(),
+            actor_type: ActorType::Agent,
+            owner_id: None,
+            parent_agent_id: None,
+            parent_actor_id: None,
+        },
+        WorkspaceIdentity {
+            root: "/repo".into(),
+            workspace_id: "workspace-main".into(),
+            repo_id: "repo-main".into(),
+            worktree_id: "worktree-main".into(),
+            branch: "main".into(),
+        },
+        SourceRef {
+            kind: SourceKind::Server,
+            event: "migration-test".into(),
+            tool_name: None,
+            source_ref: "migration-v2-test".into(),
+        },
+        ClaimAcquire {
+            reservation_id: reservation.reservation_id,
+            paths: vec![ClaimPath {
+                relative_path: "src/state.rs".into(),
+                observation: None,
+            }],
+        },
+    )
+    .expect("contender request is valid");
+
+    assert!(matches!(
+        store.acquire_claim(&contender),
+        Err(stateful_store::StoreError::ClaimConflict)
+    ));
+    store
+        .release_claim(&request(
+            "agent-alpha",
+            ClaimRelease {
+                claim_id: "claim-active".into(),
+            },
+        ))
+        .expect("migrated blocker claim releases");
+    let event_count = store.journal_event_count().expect("journal count loads");
+
+    assert!(matches!(
+        store.acquire_claim(&contender),
+        Err(stateful_store::StoreError::ClaimConflict)
+    ));
+    assert_eq!(
+        store.journal_event_count().expect("journal count loads"),
+        event_count,
+        "the duplicate must not acquire a now-unblocked claim",
+    );
+    assert!(store
+        .active_claims_for_path("workspace-main", "src/state.rs")
+        .expect("active claims load")
+        .is_empty());
+
+    let mut changed_actor = contender.clone();
+    changed_actor.agent.actor_id = "other-actor".into();
+    assert!(matches!(
+        store.acquire_claim(&changed_actor),
+        Err(stateful_store::StoreError::IdempotencyKeyReused)
+    ));
+    let mut changed_body = contender.clone();
+    changed_body.payload.paths[0].relative_path = "src/other.rs".into();
+    assert!(matches!(
+        store.acquire_claim(&changed_body),
+        Err(stateful_store::StoreError::IdempotencyKeyReused)
+    ));
 }
 
 #[test]

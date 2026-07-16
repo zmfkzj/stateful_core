@@ -37,7 +37,7 @@ impl<'a> Projector<'a> {
         if matches!(
             event.stored.payload(),
             EventPayload::Migration(MigrationEvent::LegacyAuditImported(_))
-        ) || migration_snapshot_is_terminal(event) {
+        ) {
             return Ok(());
         }
         if self.apply_typed_migration_seed(event)? {
@@ -828,32 +828,3 @@ fn migration_seed_projection_table(event: &JournalEvent) -> Option<&'static str>
     }
 }
 
-fn migration_seed_data(event: &JournalEvent) -> Option<&serde_json::Value> {
-    match event.stored.payload() {
-        EventPayload::Migration(MigrationEvent::PresenceSnapshotSeeded(data))
-        | EventPayload::Migration(MigrationEvent::ReservationSnapshotSeeded(data))
-        | EventPayload::Migration(MigrationEvent::ClaimSnapshotSeeded(data))
-        | EventPayload::Migration(MigrationEvent::WaitSnapshotSeeded(data))
-        | EventPayload::Migration(MigrationEvent::WriteFenceSnapshotSeeded(data))
-        | EventPayload::Migration(MigrationEvent::HumanObservationSnapshotSeeded(data))
-        | EventPayload::Migration(MigrationEvent::LegacyHandoffSnapshotSeeded(data))
-        | EventPayload::Migration(MigrationEvent::DeliverySnapshotSeeded(data)) => Some(&data.data),
-        _ => None,
-    }
-}
-
-fn migration_snapshot_is_terminal(event: &JournalEvent) -> bool {
-    let terminal: &[&str] = match event.stored.payload() {
-        EventPayload::Migration(MigrationEvent::ClaimSnapshotSeeded(_)) => {
-            &["released", "expired", "cancelled"]
-        }
-        EventPayload::Migration(MigrationEvent::WriteFenceSnapshotSeeded(_)) => {
-            &["released", "expired"]
-        }
-        _ => return false,
-    };
-    migration_seed_data(event)
-        .and_then(|data| data.get("status"))
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|status| terminal.contains(&status))
-}
