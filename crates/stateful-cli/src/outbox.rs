@@ -73,7 +73,7 @@ pub fn sync_outbox_with_runtime(
     };
 
     let mut synced = 0_usize;
-    for path in pending_paths {
+    'pending_files: for path in pending_paths {
         if path.file_name().and_then(|name| name.to_str()).is_none() {
             continue;
         }
@@ -105,6 +105,13 @@ pub fn sync_outbox_with_runtime(
             ) {
                 Ok(response) => response,
                 Err(error) => {
+                    if replay_error_status(&error).is_some_and(is_deterministic_client_rejection) {
+                        let _lock = acquire_outbox_lock(&outbox_dir)?;
+                        requeue_pending_records(&path, &records[index + 1..])?;
+                        fs::remove_file(&claimed_path)?;
+                        active_claim.finish();
+                        continue 'pending_files;
+                    }
                     let _lock = acquire_outbox_lock(&outbox_dir)?;
                     let pending = increment_attempts(&records[index..]);
                     requeue_pending_records(&path, &pending)?;
@@ -115,6 +122,13 @@ pub fn sync_outbox_with_runtime(
             };
 
             if !(200..300).contains(&response.status_code) {
+                if is_deterministic_client_rejection(response.status_code) {
+                    let _lock = acquire_outbox_lock(&outbox_dir)?;
+                    requeue_pending_records(&path, &records[index + 1..])?;
+                    fs::remove_file(&claimed_path)?;
+                    active_claim.finish();
+                    continue 'pending_files;
+                }
                 let _lock = acquire_outbox_lock(&outbox_dir)?;
                 let pending = increment_attempts(&records[index..]);
                 requeue_pending_records(&path, &pending)?;
@@ -135,6 +149,18 @@ pub fn sync_outbox_with_runtime(
     }
 
     Ok(synced)
+}
+
+fn is_deterministic_client_rejection(status_code: u16) -> bool {
+    (400..500).contains(&status_code) && !matches!(status_code, 408 | 429)
+}
+
+fn replay_error_status(error: &anyhow::Error) -> Option<u16> {
+    error
+        .to_string()
+        .rsplit_once("HTTP ")
+        .and_then(|(_, suffix)| suffix.split_whitespace().next())
+        .and_then(|status| status.parse().ok())
 }
 
 pub(crate) fn queue_session_heartbeat_outbox(
@@ -210,6 +236,47 @@ pub(crate) fn queue_exact_envelope(
     let mut file = open_plain_outbox_append(&path, "outbox file")?;
     writeln!(file, "{record}")?;
     file.sync_all()?;
+    Ok(())
+}
+
+pub(crate) fn acknowledge_exact_envelope(
+    paths: &GlobalPaths,
+    request: &RequestEnvelope<Value>,
+) -> anyhow::Result<()> {
+    let outbox_dir = ensure_trusted_outbox_dir(paths)?;
+    let _lock = acquire_outbox_lock(&outbox_dir)?;
+    recover_claimed_outbox_files(&outbox_dir)?;
+    let path = outbox_dir.join(format!("{}.jsonl", safe_file_stem(&request.agent.agent_id)));
+    if !existing_plain_file(&path, "outbox file")? {
+        return Ok(());
+    }
+    let request_id = request.request_id.to_string();
+    let contents = fs::read_to_string(&path)?;
+    let retained = contents
+        .lines()
+        .filter(|line| {
+            let Ok(record) = serde_json::from_str::<Value>(line) else {
+                return true;
+            };
+            !(record.get("request_id").and_then(Value::as_str) == Some(request_id.as_str())
+                && record.get("route").and_then(Value::as_str).is_some_and(|route| {
+                    route == "/v2/read/start"
+                        || route == "/v2/read/complete"
+                        || route == "/v2/activity/finalize"
+                }))
+        })
+        .collect::<Vec<_>>();
+    let temporary = path.with_file_name(format!(
+        "{}.ack-{}",
+        path.file_name().and_then(|name| name.to_str()).unwrap_or("outbox.jsonl"),
+        uuid::Uuid::new_v4()
+    ));
+    let mut file = OpenOptions::new().create_new(true).write(true).open(&temporary)?;
+    for line in retained {
+        writeln!(file, "{line}")?;
+    }
+    file.sync_all()?;
+    fs::rename(temporary, path)?;
     Ok(())
 }
 

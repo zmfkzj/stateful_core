@@ -28,7 +28,10 @@ const OMP_WRITE_LIFECYCLE: write_lifecycle::LifecycleSource = write_lifecycle::L
     complete_ref: "hook:omp_post_tool_use",
 };
 
-use crate::outbox::{queue_exact_envelope, queue_session_heartbeat_outbox};
+use crate::outbox::{
+    acknowledge_exact_envelope, queue_exact_envelope, queue_session_heartbeat_outbox,
+    sync_outbox_with_runtime,
+};
 use crate::sandbox::{
     SandboxFsProfile, parse_sandbox_process_find_bash_invocation,
     parse_sandbox_run_bash_invocation, validate_process_find_request,
@@ -167,6 +170,9 @@ fn run_omp_hook(command: HookCommand) -> anyhow::Result<()> {
     if let Err(error) = write_lifecycle::replay_pending(&paths, &runtime, &repo_root) {
         eprintln!("stateful OMP write lifecycle replay warning: {error}");
     }
+    if let Err(error) = sync_outbox_with_runtime(&paths, &runtime) {
+        eprintln!("stateful OMP lifecycle outbox replay warning: {error}");
+    }
 
     match command {
         HookCommand::PreToolUse => {
@@ -269,6 +275,9 @@ pub fn handle_pre_tool_use_in_repo(
         RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(HookOutcome::Allow),
     };
     let runtime = prepare_pre_tool_use_runtime(&repo_root, &paths, input).ok();
+    if let Some(runtime) = runtime.as_ref() {
+        let _ = sync_outbox_with_runtime(&paths, runtime);
+    }
     handle_pre_tool_use_with_runtime(
         input,
         runtime.as_ref(),
@@ -298,17 +307,24 @@ fn handle_omp_pre_tool_use_with_identity(
     if runtime_tool_name_leaf(&input.tool_name).eq_ignore_ascii_case("read") {
         record_omp_read_start(&input, runtime, repo_root, cwd, identity)?;
     }
-    if is_testing_command(&input.tool_input) {
-        post_omp_testing_start(&input, runtime, identity)?;
-    }
+    let command = runtime_tool_name_leaf(&input.tool_name)
+        .eq_ignore_ascii_case("bash")
+        .then(|| testing_command(&input.tool_input))
+        .flatten();
     let global_paths = GlobalPaths::from_env().ok();
-    match omp_pre_tool_action(&input, repo_root, cwd, global_paths.as_ref())? {
-        OmpPreToolAction::Allow => Ok(OmpHookOutcome::Allow),
-        OmpPreToolAction::Block { reason } => Ok(OmpHookOutcome::Block { reason }),
+    let outcome = match omp_pre_tool_action(&input, repo_root, cwd, global_paths.as_ref())? {
+        OmpPreToolAction::Allow => OmpHookOutcome::Allow,
+        OmpPreToolAction::Block { reason } => OmpHookOutcome::Block { reason },
         OmpPreToolAction::Targets(targets) => {
-            authorize_omp_targets(&input, runtime, repo_root, cwd, identity, targets)
+            authorize_omp_targets(&input, runtime, repo_root, cwd, identity, targets)?
         }
+    };
+    if matches!(outcome, OmpHookOutcome::Allow | OmpHookOutcome::Warn { .. })
+        && let Some(command) = command
+    {
+        post_omp_testing_start(&input, runtime, identity, command)?;
     }
+    Ok(outcome)
 }
 
 fn record_omp_read_start(
@@ -326,13 +342,14 @@ fn record_omp_read_start(
     let Some(path) = read_target(&input.tool_input, repo_root, cwd)? else {
         return Ok(());
     };
+    let workspace_id = input
+        .workspace_id
+        .clone()
+        .unwrap_or_else(|| effective_workspace_id(runtime, identity));
     let mut request = crate::v2_request_envelope(
         uuid::Uuid::new_v4(),
         input.agent_id.clone(),
-        input
-            .workspace_id
-            .clone()
-            .unwrap_or_else(|| effective_workspace_id(runtime, identity)),
+        workspace_id.clone(),
         identity.cloned(),
         stateful_core::ActorType::Agent,
         stateful_core::SourceKind::Hook,
@@ -351,7 +368,30 @@ fn record_omp_read_start(
         input.omp_agent_id.as_deref(),
         input.parent_agent_id.as_deref(),
     );
-    post_durable_v2(runtime, "/v2/read/start", &request)?;
+    let mut failed_completion = crate::v2_request_envelope(
+        uuid::Uuid::new_v4(),
+        input.agent_id.clone(),
+        workspace_id,
+        identity.cloned(),
+        stateful_core::ActorType::Agent,
+        stateful_core::SourceKind::Hook,
+        "omp_read_complete",
+        "hook:omp_pre_tool_use",
+        Some(input.tool_name.clone()),
+        json!({
+            "operation_id": operation_id,
+            "path": path,
+            "classification": stateful_core::ReadClassification::Failed,
+            "semantic_marker": "pre_tool_start_delivery_failed",
+        }),
+    )?;
+    set_omp_lineage(
+        &mut failed_completion,
+        &input.agent_id,
+        input.omp_agent_id.as_deref(),
+        input.parent_agent_id.as_deref(),
+    );
+    post_durable_read_start(runtime, &request, &failed_completion)?;
     Ok(())
 }
 
@@ -1114,8 +1154,10 @@ fn post_omp_post_tool_use_event(
             &OMP_WRITE_LIFECYCLE,
         )?;
     }
-    if is_testing_command(&input.tool_input) {
-        post_omp_testing_result(runtime, input, identity)?;
+    if tool_name.eq_ignore_ascii_case("bash")
+        && let Some(command) = testing_command(&input.tool_input)
+    {
+        post_omp_testing_result(runtime, input, identity, command)?;
     }
     post_omp_presence_heartbeat(runtime, input, identity)
 }
@@ -1235,6 +1277,9 @@ fn record_omp_read_complete(
         input.parent_agent_id.as_deref(),
     );
     post_durable_v2(runtime, "/v2/read/complete", &request)?;
+    if let Some(update) = update {
+        crate::post_v2(runtime, "/v2/presence/update", &update)?;
+    }
     Ok(())
 }
 
@@ -1307,6 +1352,9 @@ fn handle_session_start_context_in_repo(
     if let Err(error) = write_lifecycle::replay_pending(&paths, &runtime, &repo_root) {
         eprintln!("stateful write lifecycle replay warning: {error}");
     }
+    if let Err(error) = sync_outbox_with_runtime(&paths, &runtime) {
+        eprintln!("stateful lifecycle outbox replay warning: {error}");
+    }
     handle_session_start_with_runtime(input, &runtime, Some(&identity))
 }
 
@@ -1327,6 +1375,7 @@ pub fn handle_post_tool_use_in_repo(
     };
     let runtime = discover_runtime_with_global(&repo_root, &paths)?;
     let identity = repo_identity(&paths, &repo_root)?;
+    let _ = sync_outbox_with_runtime(&paths, &runtime);
     if let Err(error) =
         handle_post_tool_use_with_runtime(input, &runtime, Some(&repo_root), Some(&identity))
     {
@@ -1360,6 +1409,7 @@ pub fn handle_user_prompt_submit_in_repo(
     };
     let runtime = discover_runtime_with_global(&repo_root, &paths)?;
     let identity = repo_identity(&paths, &repo_root)?;
+    let _ = sync_outbox_with_runtime(&paths, &runtime);
     let input: input::CodexUserPrompt = serde_json::from_str(input)?;
     input.validate()?;
     handle_user_prompt_submit_with_runtime(&input, &runtime, Some(&identity))
@@ -1379,6 +1429,7 @@ pub fn handle_stop_in_repo(input: &str, repo_root: impl AsRef<Path>) -> anyhow::
     };
     let runtime = discover_runtime_with_global(&repo_root, &paths)?;
     let identity = repo_identity(&paths, &repo_root)?;
+    let _ = sync_outbox_with_runtime(&paths, &runtime);
     handle_stop_with_runtime(input, &runtime, Some(&identity))
 }
 
@@ -1435,27 +1486,27 @@ fn handle_post_tool_use_with_runtime(
             .as_str(),
         "write" | "edit" | "apply_patch" | "file_change"
     ) {
-        let (Some(repo_root), Some(operation_id)) = (repo_root, input.metadata.operation_id())
-        else {
-            return Ok(());
-        };
-        let paths = GlobalPaths::from_env()?;
-        write_lifecycle::complete(
-            &paths,
-            runtime,
-            input.stateful_agent_id(),
-            &effective_workspace_id(runtime, identity),
-            identity,
-            None,
-            None,
-            repo_root,
-            operation_id,
-            input.metadata.failed(),
-            &CODEX_WRITE_LIFECYCLE,
-        )?;
+        if let (Some(repo_root), Some(operation_id)) = (repo_root, input.metadata.operation_id()) {
+            let paths = GlobalPaths::from_env()?;
+            write_lifecycle::complete(
+                &paths,
+                runtime,
+                input.stateful_agent_id(),
+                &effective_workspace_id(runtime, identity),
+                identity,
+                None,
+                None,
+                repo_root,
+                operation_id,
+                input.metadata.failed(),
+                &CODEX_WRITE_LIFECYCLE,
+            )?;
+        }
     }
-    if is_testing_command(&input.tool_input) {
-        post_codex_testing_result(runtime, &input, identity)?;
+    if tool_name.eq_ignore_ascii_case("bash")
+        && let Some(command) = testing_command(&input.tool_input)
+    {
+        post_codex_testing_result(runtime, &input, identity, command)?;
     }
     post_codex_presence_heartbeat(runtime, &input, identity)
 }
@@ -1552,7 +1603,7 @@ fn read_target(
     let Some(path) = read_input_path(tool_input) else {
         return Ok(None);
     };
-    normalize_file_tool_target(read_selector_target(path).0, Some(repo_root), cwd)
+    normalize_file_tool_target(read_selector_target(path).target, Some(repo_root), cwd)
 }
 
 fn read_input_path(tool_input: &serde_json::Value) -> Option<&str> {
@@ -1564,17 +1615,47 @@ fn read_input_path(tool_input: &serde_json::Value) -> Option<&str> {
         .filter(|path| !path.is_empty())
 }
 
-fn read_selector_target(path: &str) -> (&str, bool) {
-    let path = path.trim();
-    if let Some((target, suffix)) = path.split_once(":raw") {
-        return (target, suffix.is_empty());
+struct ReadSelector<'a> {
+    target: &'a str,
+    raw: bool,
+    has_line_selector: bool,
+}
+
+fn read_selector_target(path: &str) -> ReadSelector<'_> {
+    let mut target = path.trim();
+    let mut raw = false;
+    let mut has_line_selector = false;
+    loop {
+        if let Some(stripped) = target.strip_suffix(":raw") {
+            raw = true;
+            target = stripped;
+            continue;
+        }
+        let Some((stripped, selector)) = target.rsplit_once(':') else {
+            break;
+        };
+        if is_read_line_selector(selector) {
+            has_line_selector = true;
+            target = stripped;
+            continue;
+        }
+        break;
     }
-    if let Some((target, selector)) = path.rsplit_once(':')
-        && selector.starts_with(|character: char| character.is_ascii_digit())
-    {
-        return (target, false);
+    ReadSelector {
+        target,
+        raw,
+        has_line_selector,
     }
-    (path, false)
+}
+
+fn is_read_line_selector(selector: &str) -> bool {
+    selector
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_digit())
+        && selector
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'-' | b'+' | b','))
 }
 
 fn read_classification(
@@ -1582,11 +1663,20 @@ fn read_classification(
     metadata: &input::ToolMetadata,
 ) -> stateful_core::ReadClassification {
     let classification = observation::classification(metadata);
-    if classification == stateful_core::ReadClassification::Exact
-        && (!read_input_path(tool_input).is_some_and(|path| read_selector_target(path).1)
-            || ["offset", "limit", "start_line", "end_line", "line_start", "line_end"]
-                .iter()
-                .any(|key| tool_input.get(*key).is_some_and(|value| !value.is_null())))
+    if classification != stateful_core::ReadClassification::Exact {
+        return classification;
+    }
+    let selector = read_input_path(tool_input).map(read_selector_target);
+    if selector
+        .as_ref()
+        .is_some_and(|selector| selector.has_line_selector)
+    {
+        return stateful_core::ReadClassification::Partial;
+    }
+    if !selector.as_ref().is_some_and(|selector| selector.raw)
+        || ["offset", "limit", "start_line", "end_line", "line_start", "line_end"]
+            .iter()
+            .any(|key| tool_input.get(*key).is_some_and(|value| !value.is_null()))
     {
         stateful_core::ReadClassification::StructuralSummary
     } else {
@@ -1610,10 +1700,11 @@ fn record_read_start(
         return Ok(());
     };
     let before = observation::fingerprint(repo_root, &path)?;
+    let workspace_id = effective_workspace_id(runtime, identity);
     let request = crate::v2_request_envelope(
         uuid::Uuid::new_v4(),
         input.stateful_agent_id().to_string(),
-        effective_workspace_id(runtime, identity),
+        workspace_id.clone(),
         identity.cloned(),
         stateful_core::ActorType::Agent,
         stateful_core::SourceKind::Hook,
@@ -1626,7 +1717,24 @@ fn record_read_start(
             "before": before,
         }),
     )?;
-    post_durable_v2(runtime, "/v2/read/start", &request)?;
+    let failed_completion = crate::v2_request_envelope(
+        uuid::Uuid::new_v4(),
+        input.stateful_agent_id().to_string(),
+        workspace_id,
+        identity.cloned(),
+        stateful_core::ActorType::Agent,
+        stateful_core::SourceKind::Hook,
+        "codex_read_complete",
+        "hook:codex_pre_tool_use",
+        Some(input.tool_name.clone()),
+        json!({
+            "operation_id": operation_id,
+            "path": path,
+            "classification": stateful_core::ReadClassification::Failed,
+            "semantic_marker": "pre_tool_start_delivery_failed",
+        }),
+    )?;
+    post_durable_read_start(runtime, &request, &failed_completion)?;
     Ok(())
 }
 
@@ -1720,38 +1828,75 @@ fn post_codex_presence_heartbeat(
     Ok(())
 }
 
+fn post_durable_read_start(
+    runtime: &ServerRuntime,
+    request: &stateful_core::RequestEnvelope<serde_json::Value>,
+    failed_completion: &stateful_core::RequestEnvelope<serde_json::Value>,
+) -> anyhow::Result<()> {
+    let paths = GlobalPaths::from_env()?;
+    let serialized = serde_json::to_string(request)?;
+    queue_exact_envelope(&paths, "/v2/read/start", request)?;
+    match crate::replay_v2_request(runtime, "/v2/read/start", &serialized) {
+        Ok(_) => acknowledge_exact_envelope(&paths, request),
+        Err(error) => {
+            queue_exact_envelope(&paths, "/v2/read/complete", failed_completion)?;
+            Err(error)
+        }
+    }
+}
+
 fn post_durable_v2(
     runtime: &ServerRuntime,
     route: &str,
     request: &stateful_core::RequestEnvelope<serde_json::Value>,
 ) -> anyhow::Result<()> {
-    queue_exact_envelope(&GlobalPaths::from_env()?, route, request)?;
-    crate::post_v2(runtime, route, request)?;
-    Ok(())
+    let paths = GlobalPaths::from_env()?;
+    let serialized = serde_json::to_string(request)?;
+    queue_exact_envelope(&paths, route, request)?;
+    crate::replay_v2_request(runtime, route, &serialized)?;
+    acknowledge_exact_envelope(&paths, request)
 }
 
-fn is_testing_command(tool_input: &serde_json::Value) -> bool {
-    tool_input
-        .get("command")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|command| {
-            ["cargo test", "pytest", "python -m pytest", "go test"]
-                .iter()
-                .any(|test| command.contains(test))
-        })
+fn testing_command(tool_input: &serde_json::Value) -> Option<String> {
+    let command = tool_input.get("command")?.as_str()?;
+    let command = parse_sandbox_run_bash_invocation(command)
+        .map(|invocation| invocation.request.command)
+        .unwrap_or_else(|_| command.to_string());
+    let words = split_simple_command_words(&command).ok()?;
+    let canonical = match words.as_slice() {
+        [command, subcommand, ..] if command == "cargo" && subcommand == "test" => "cargo test",
+        [command, subcommand, ..] if command == "cargo" && subcommand == "nextest" => {
+            "cargo nextest"
+        }
+        [command, ..] if command == "pytest" => "pytest",
+        [python, module, command, ..]
+            if python == "python" && module == "-m" && command == "pytest" =>
+        {
+            "pytest"
+        }
+        [command, subcommand, ..] if command == "go" && subcommand == "test" => "go test",
+        [command, subcommand, ..] if command == "npm" && subcommand == "test" => "npm test",
+        [command, subcommand, ..] if command == "bun" && subcommand == "test" => "bun test",
+        [command, subcommand, ..] if command == "yarn" && subcommand == "test" => "yarn test",
+        [command, subcommand, ..] if command == "pnpm" && subcommand == "test" => "pnpm test",
+        [command, ..] if command == "jest" => "jest",
+        _ => return None,
+    };
+    Some(canonical.to_string())
 }
 
 fn post_codex_testing_start(
     input: &PreToolUseInput,
     runtime: &ServerRuntime,
     identity: Option<&RepoIdentity>,
+    tool_name: String,
 ) -> anyhow::Result<()> {
     post_testing_presence(
         runtime,
         input.stateful_agent_id(),
         &effective_workspace_id(runtime, identity),
         identity,
-        input.tool_name.clone(),
+        tool_name,
         None,
     )
 }
@@ -1760,13 +1905,14 @@ fn post_codex_testing_result(
     runtime: &ServerRuntime,
     input: &SessionEventInput,
     identity: Option<&RepoIdentity>,
+    tool_name: String,
 ) -> anyhow::Result<()> {
     post_testing_presence(
         runtime,
         input.stateful_agent_id(),
         &effective_workspace_id(runtime, identity),
         identity,
-        input.tool_name.clone().unwrap_or_else(|| "Bash".to_string()),
+        tool_name,
         Some(!input.metadata.failed()),
     )
 }
@@ -1775,6 +1921,7 @@ fn post_omp_testing_start(
     input: &OmpPreToolUseInput,
     runtime: Option<&ServerRuntime>,
     identity: Option<&RepoIdentity>,
+    tool_name: String,
 ) -> anyhow::Result<()> {
     let Some(runtime) = runtime else {
         return Ok(());
@@ -1784,7 +1931,7 @@ fn post_omp_testing_start(
         &input.agent_id,
         &input.workspace_id.clone().unwrap_or_else(|| effective_workspace_id(runtime, identity)),
         identity,
-        input.tool_name.clone(),
+        tool_name,
         None,
     )
 }
@@ -1793,13 +1940,14 @@ fn post_omp_testing_result(
     runtime: &ServerRuntime,
     input: &OmpSessionEventInput,
     identity: Option<&RepoIdentity>,
+    tool_name: String,
 ) -> anyhow::Result<()> {
     post_testing_presence(
         runtime,
         &input.agent_id,
         &input.workspace_id.clone().unwrap_or_else(|| effective_workspace_id(runtime, identity)),
         identity,
-        input.tool_name.clone().unwrap_or_else(|| "bash".to_string()),
+        tool_name,
         Some(!input.metadata.failed()),
     )
 }
@@ -1853,14 +2001,13 @@ fn handle_pre_tool_use_with_runtime(
             .as_ref()
             .and_then(|paths| repo_identity_for_enabled_repo(paths, repo_root).ok())
     });
-    if is_testing_command(&input.tool_input)
-        && let Some(runtime) = runtime
-    {
-        post_codex_testing_start(&input, runtime, identity.as_ref())?;
-    }
 
+    let command = runtime_tool_name_leaf(&input.tool_name)
+        .eq_ignore_ascii_case("bash")
+        .then(|| testing_command(&input.tool_input))
+        .flatten();
     let tool_name = runtime_tool_name_leaf(&input.tool_name);
-    match tool_name {
+    let outcome = match tool_name {
         tool_name if tool_name.eq_ignore_ascii_case("read") => {
             match record_read_start(&input, runtime, repo_root, cwd, identity.as_ref()) {
                 Ok(()) => Ok(HookOutcome::Allow),
@@ -1901,7 +2048,13 @@ fn handle_pre_tool_use_with_runtime(
                 ),
             })
         }
+    }?;
+    if matches!(outcome, HookOutcome::Allow | HookOutcome::AllowWithContext { .. })
+        && let (Some(command), Some(runtime)) = (command, runtime)
+    {
+        post_codex_testing_start(&input, runtime, identity.as_ref(), command)?;
     }
+    Ok(outcome)
 }
 
 fn runtime_tool_name_leaf(tool_name: &str) -> &str {
@@ -2761,6 +2914,17 @@ fn authorize_targets(
     targets: Vec<PatchTarget>,
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<HookOutcome> {
+    if targets
+        .first()
+        .is_some_and(|first| targets.iter().any(|target| target.action != first.action))
+    {
+        return Ok(HookOutcome::Deny {
+            reason: format!(
+                "{} mixes write actions; split the operation into one action per patch",
+                input.tool_name
+            ),
+        });
+    }
     let Some(repo_root) = repo_root else {
         return Ok(HookOutcome::Deny {
             reason: format!("{} writes require an enabled repository", input.tool_name),
@@ -2789,17 +2953,6 @@ fn authorize_targets(
             ),
         });
     };
-    if targets
-        .first()
-        .is_some_and(|first| targets.iter().any(|target| target.action != first.action))
-    {
-        return Ok(HookOutcome::Deny {
-            reason: format!(
-                "{} mixes write actions; split the operation into one action per patch",
-                input.tool_name
-            ),
-        });
-    }
     if targets.is_empty() {
         return Ok(HookOutcome::Allow);
     }
@@ -3520,5 +3673,24 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&temp);
+    }
+    #[test]
+    fn testing_command_accepts_only_executed_supported_test_grammar() {
+        assert_eq!(
+            testing_command(&json!({ "command": "stateful sandbox run --fs build --network enabled --write-dir target --command 'cargo nextest run'" })),
+            Some("cargo nextest".to_string())
+        );
+        assert_eq!(
+            testing_command(&json!({ "command": "stateful sandbox run --fs build --network enabled --write-dir target --command 'npm test -- --runInBand'" })),
+            Some("npm test".to_string())
+        );
+        assert_eq!(
+            testing_command(&json!({ "command": "python -m pytest tests/unit.py" })),
+            Some("pytest".to_string())
+        );
+        assert_eq!(
+            testing_command(&json!({ "command": "echo cargo test" })),
+            None
+        );
     }
 }

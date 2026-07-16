@@ -127,9 +127,14 @@ pub(crate) fn authorize(
     }
     save_pending(paths, agent_id, operation_id, &pending)?;
 
-    let response = crate::replay_v2_request(runtime, "/v2/authorize", &pending.authorization_request)?;
+    let response = post_frozen_authorization(runtime, &pending.authorization_request)?;
     if !(200..300).contains(&response.status_code) {
         if let Ok(decision) = serde_json::from_str::<Decision>(&response.body) {
+            finish_denied_authorization(
+                runtime,
+                &pending_path(paths, agent_id, operation_id),
+                &mut pending,
+            )?;
             return Err(AuthorizationDenied { decision }.into());
         }
         anyhow::bail!(
@@ -145,6 +150,32 @@ pub(crate) fn authorize(
     pending.intent_id = Some(intent_id);
     save_pending(paths, agent_id, operation_id, &pending)?;
     Ok(Authorization { decision })
+}
+
+fn post_frozen_authorization(
+    runtime: &ServerRuntime,
+    serialized_request: &str,
+) -> anyhow::Result<crate::HttpResponse> {
+    let request: stateful_core::RequestEnvelope<serde_json::Value> =
+        serde_json::from_str(serialized_request)?;
+    crate::post_v2_raw(runtime, "/v2/authorize", &request)
+}
+
+fn finish_denied_authorization(
+    runtime: &ServerRuntime,
+    path: &Path,
+    intent: &mut PendingIntent,
+) -> anyhow::Result<()> {
+    intent.completed = true;
+    freeze_release_requests(intent)?;
+    save_pending_at(path, intent)?;
+    while let Some(release) = intent.release_requests.first() {
+        crate::replay_v2_request(runtime, "/v2/claim/release", release)?;
+        intent.release_requests.remove(0);
+        save_pending_at(path, intent)?;
+    }
+    fs::remove_file(path)?;
+    Ok(())
 }
 
 #[expect(
@@ -322,9 +353,16 @@ pub(crate) fn replay_pending(
 fn replay_pending_at(runtime: &ServerRuntime, path: &Path, repo_root: &Path) -> anyhow::Result<()> {
     let mut intent: PendingIntent = serde_json::from_slice(&fs::read(path)?)?;
     if intent.intent_id.is_none() {
-        let response = crate::replay_v2_request(runtime, "/v2/authorize", &intent.authorization_request)?;
+        let response = post_frozen_authorization(runtime, &intent.authorization_request)?;
         if !(200..300).contains(&response.status_code) {
-            anyhow::bail!("pending authorization replay failed with HTTP {}", response.status_code);
+            if serde_json::from_str::<Decision>(&response.body).is_ok() {
+                finish_denied_authorization(runtime, path, &mut intent)?;
+                return Ok(());
+            }
+            anyhow::bail!(
+                "pending authorization replay failed with HTTP {}",
+                response.status_code
+            );
         }
         let response: IntentResponse = serde_json::from_str(&response.body)?;
         intent.intent_id = Some(response.intent_id);
@@ -362,12 +400,35 @@ fn replay_pending_at(runtime: &ServerRuntime, path: &Path, repo_root: &Path) -> 
         intent.completed = true;
         save_pending_at(path, &intent)?;
     }
+        if intent.release_requests.is_empty() {
+            freeze_release_requests(&mut intent)?;
+            save_pending_at(path, &intent)?;
+        }
     while let Some(request) = intent.release_requests.first() {
         crate::replay_v2_request(runtime, "/v2/claim/release", request)?;
         intent.release_requests.remove(0);
         save_pending_at(path, &intent)?;
     }
     fs::remove_file(path)?;
+    Ok(())
+}
+
+fn freeze_release_requests(intent: &mut PendingIntent) -> anyhow::Result<()> {
+    if !intent.release_requests.is_empty() || intent.claim_ids.is_empty() {
+        return Ok(());
+    }
+    let authorization: stateful_core::RequestEnvelope<serde_json::Value> =
+        serde_json::from_str(&intent.authorization_request)?;
+    intent.release_requests = intent
+        .claim_ids
+        .iter()
+        .map(|claim_id| {
+            let mut request = authorization.clone();
+            request.request_id = uuid::Uuid::new_v4();
+            request.payload = json!({ "claim_id": claim_id });
+            serde_json::to_string(&request).map_err(anyhow::Error::from)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
     Ok(())
 }
 
@@ -454,6 +515,46 @@ mod tests {
         r#"{"intent_id":"intent-1","decision":{"decision":"allow","reason_code":"allowed","message":"ok"}}"#;
     const IDENTITY: &str =
         r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":1,"workspace_id":"workspace-1","workspace_version":1,"capabilities":["presence"]}"#;
+
+    #[test]
+    fn atomic_pending_save_replaces_a_corrupt_old_record_without_temp_residue() {
+        let temp = tempfile::tempdir().expect("temp dir should create");
+        let paths = GlobalPaths::new(temp.path().join("home"));
+        let path = pending_path(&paths, "agent-1", "operation-1");
+        fs::create_dir_all(path.parent().expect("pending path should have parent"))
+            .expect("pending parent should create");
+        fs::write(&path, b"{corrupt").expect("corrupt old record should write");
+        let pending = PendingIntent {
+            intent_id: Some("intent-1".to_string()),
+            authorization_request: "{}".to_string(),
+            targets: vec!["target.txt".to_string()],
+            claim_ids: vec!["claim-1".to_string()],
+            completion_request: None,
+            recovery_request: None,
+            release_requests: Vec::new(),
+            completed: false,
+        };
+
+        save_pending(&paths, "agent-1", "operation-1", &pending)
+            .expect("atomic save should replace corrupt old record");
+
+        let persisted: PendingIntent =
+            serde_json::from_slice(&fs::read(&path).expect("pending record should read"))
+                .expect("pending record should be complete JSON");
+        assert_eq!(persisted.intent_id.as_deref(), Some("intent-1"));
+        assert!(
+            fs::read_dir(path.parent().expect("pending path should have parent"))
+                .expect("pending parent should read")
+                .all(|entry| {
+                    !entry
+                        .expect("pending entry should read")
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".operation-1.json.tmp-")
+                }),
+            "successful atomic save should leave no temporary recovery record"
+        );
+    }
 
     #[test]
     fn retries_failed_write_completion_with_the_original_request_and_operation_ids() {
@@ -587,6 +688,72 @@ mod tests {
             .expect("later lifecycle should replay second release");
         let replay = request_body(&requests.recv().expect("replayed release should arrive"));
         assert_eq!(replay, second_release, "claim release replay must retain its request UUID");
+        assert!(!pending_path(&paths, "agent-1", "operation-1").exists());
+    }
+
+    #[test]
+    fn recovery_without_completion_replays_all_frozen_claim_releases() {
+        let temp = tempfile::tempdir().expect("temp dir should create");
+        let paths = GlobalPaths::new(temp.path().join("home"));
+        let repo_root = temp.path().join("repo");
+        fs::create_dir_all(&repo_root).expect("repo should create");
+        fs::write(repo_root.join("target.txt"), "after").expect("target should write");
+        let (runtime, requests) = fake_server([
+            Some(AUTHORIZED),
+            Some(r#"{"status":"recovered"}"#),
+            Some(r#"{"status":"ok"}"#),
+            None,
+            Some(r#"{"status":"ok"}"#),
+        ]);
+
+        authorize(
+            &paths,
+            &runtime,
+            "agent-1",
+            "workspace-1",
+            None,
+            None,
+            None,
+            "operation-1",
+            "write_file",
+            vec![(
+                "target.txt".to_string(),
+                stateful_core::ContentFingerprint::missing(),
+            )],
+            None,
+            vec!["claim-1".to_string(), "claim-2".to_string()],
+            &SOURCE,
+        )
+        .expect("authorization should persist its intent");
+        let _authorize = requests.recv().expect("authorization should arrive");
+
+        assert!(
+            replay_pending(&paths, &runtime, &repo_root).is_err(),
+            "a lost second release must retain recovery state"
+        );
+        let recovery = request_body(&requests.recv().expect("recovery should arrive"));
+        let first_release = request_body(&requests.recv().expect("first release should arrive"));
+        let second_release = request_body(&requests.recv().expect("second release should arrive"));
+        assert_eq!(recovery["payload"]["intent_id"], "intent-1");
+        assert_eq!(first_release["payload"]["claim_id"], "claim-1");
+        assert_eq!(second_release["payload"]["claim_id"], "claim-2");
+
+        let pending = load_pending(&paths, "agent-1", "operation-1")
+            .expect("pending record should load")
+            .expect("lost release should remain pending");
+        assert!(pending.completed);
+        assert_eq!(pending.release_requests.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&pending.release_requests[0])
+                .expect("pending release should be JSON"),
+            second_release,
+            "only the failed release remains replayable"
+        );
+
+        replay_pending(&paths, &runtime, &repo_root)
+            .expect("restart should replay the failed release");
+        let replay = request_body(&requests.recv().expect("release replay should arrive"));
+        assert_eq!(replay, second_release, "release replay must retain its request UUID");
         assert!(!pending_path(&paths, "agent-1", "operation-1").exists());
     }
 

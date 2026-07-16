@@ -463,6 +463,40 @@ fn sync_outbox_requeues_only_unsent_records_after_failure() {
 }
 
 #[test]
+fn sync_outbox_discards_deterministic_client_rejections() {
+    let temp = temp_root("stateful-outbox-client-rejection-test");
+    let paths = paths_for_temp_root(temp.path());
+    fs::create_dir_all(&paths.outbox_dir).expect("outbox dir should be creatable");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener addr should load");
+    thread::spawn(move || {
+        let (mut stream, _request) = accept_v2_request(&listener);
+        let body = r#"{"status":"error","message":"invalid lifecycle payload"}"#;
+        let response = format!(
+            "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("client rejection should write");
+    });
+    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
+    let outbox_file = paths.outbox_dir.join("s1.jsonl");
+    write_pending_records(&outbox_file, &[("outbox-rejected", "s1", "w1", 1)]);
+
+    assert_eq!(
+        sync_outbox_with_runtime(&paths, &runtime)
+            .expect("deterministic client rejection should not retry forever"),
+        0
+    );
+    assert!(
+        !outbox_file.exists(),
+        "a deterministic client rejection must be removed rather than replayed forever"
+    );
+}
+
+#[test]
 fn sync_outbox_recovers_stranded_claimed_files() {
     let temp = temp_root("stateful-outbox-stranded-claim-test");
     let temp_root = temp.path();

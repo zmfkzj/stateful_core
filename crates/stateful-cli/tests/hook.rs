@@ -15,7 +15,8 @@ use stateful_cli::{
     deny_tool_for_repo, enable_repo, handle_omp_post_tool_use_with_runtime,
     handle_omp_pre_tool_use_with_runtime, handle_omp_session_start_with_runtime,
     handle_post_tool_use_in_repo, handle_pre_tool_use, handle_pre_tool_use_in_repo,
-    tool_list_for_repo, workspace_id_for_enabled_repo, write_global_runtime_file,
+    sync_outbox_with_runtime, tool_list_for_repo, workspace_id_for_enabled_repo,
+    write_global_runtime_file,
 };
 
 fn assert_raw_bash_denied_with_sandbox_run_guidance(outcome: HookOutcome) {
@@ -243,6 +244,10 @@ fn normal_read_posts_structural_completion_with_one_operation_id() {
         identity,
         identity,
         r#"{"operation_id":"read-call-1","path":"src/read.txt","status":"stabilized"}"#,
+        identity,
+        r#"{"status":"ok"}"#,
+        identity,
+        r#"{"status":"ok"}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
     let input = serde_json::json!({
@@ -302,6 +307,25 @@ fn normal_read_posts_structural_completion_with_one_operation_id() {
     assert_eq!(complete_body["payload"]["operation_id"], "read-call-1");
     assert_eq!(complete_body["payload"]["classification"], "structural_summary");
     assert!(complete_body["payload"].get("after").is_none());
+    let result_identity = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("read result identity request should arrive");
+    assert!(result_identity.contains("GET /v2/runtime/identity?"));
+    let result = request_json_body(
+        &rx.recv_timeout(Duration::from_secs(2))
+            .expect("read result should arrive"),
+    );
+    assert_eq!(result["payload"]["kind"], "tool_result");
+    assert_eq!(result["payload"]["outcome"], "structural_summary");
+    let heartbeat_identity = rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("heartbeat identity request should arrive");
+    assert!(heartbeat_identity.contains("GET /v2/runtime/identity?"));
+    let heartbeat = request_json_body(
+        &rx.recv_timeout(Duration::from_secs(2))
+            .expect("read heartbeat should arrive"),
+    );
+    assert_eq!(heartbeat["payload"]["kind"], "heartbeat");
 }
 
 #[test]
@@ -501,6 +525,503 @@ fn omp_raw_reads_use_the_underlying_file_for_lifecycle_fingerprints() {
     let complete = request_json_body(&post_requests[completion_index]);
     assert_eq!(complete["payload"]["path"], "src/read.txt");
     assert!(complete["payload"]["after"]["sha256"].is_string());
+    let heartbeat = request_json_body(&post_requests[heartbeat_index]);
+    assert_eq!(heartbeat["payload"]["kind"], "heartbeat");
+}
+
+#[test]
+fn omp_namespaced_nested_raw_read_selectors_use_file_target_and_are_partial() {
+    for selector in [
+        "src/read.txt:2-4",
+        "src/read.txt:raw:2-4",
+        "src/read.txt:2-4:raw",
+    ] {
+        let temp = tempfile::tempdir().expect("temp dir should create");
+        let paths = GlobalPaths::new(temp.path().join("home"));
+        let repo_root = temp.path().join("repo");
+        fs::create_dir_all(repo_root.join("src")).expect("repo source should create");
+        fs::write(repo_root.join("src/read.txt"), "contents\n")
+            .expect("read fixture should write");
+        enable_test_repo(&paths, &repo_root);
+        let (runtime, rx) = spawn_v2_started_deny_server();
+        write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+        let input = serde_json::json!({
+            "agent_id": "omp-agent-1",
+            "workspace_id": runtime.workspace_id,
+            "cwd": repo_root,
+            "operation_id": "omp-read-nested-selector",
+            "tool_name": "functions.read",
+            "tool_input": { "path": selector }
+        })
+        .to_string();
+
+        let pre =
+            run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "pre-tool-use"], &input);
+        assert!(
+            String::from_utf8_lossy(&pre.stdout).contains(r#""decision":"allow""#),
+            "nested selector should be allowed: {}",
+            String::from_utf8_lossy(&pre.stdout)
+        );
+        let start = request_json_body(
+            &rx.recv_timeout(Duration::from_secs(2))
+                .expect("read start should arrive"),
+        );
+        assert_eq!(start["payload"]["path"], "src/read.txt");
+
+        let post =
+            run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "post-tool-use"], &input);
+        assert!(post.status.success(), "{}", String::from_utf8_lossy(&post.stderr));
+        let mut requests = Vec::new();
+        while let Ok(request) = rx.recv_timeout(Duration::from_millis(250)) {
+            requests.push(request);
+            if requests.len() == 3 {
+                break;
+            }
+        }
+        assert_eq!(
+            requests.len(),
+            3,
+            "read completion, result, and heartbeat should arrive; stderr: {}; requests: {requests:?}",
+            String::from_utf8_lossy(&post.stderr)
+        );
+        let complete = requests
+            .iter()
+            .find(|request| request.starts_with("POST /v2/read/complete "))
+            .map(|request| request_json_body(request))
+            .expect("read completion should arrive");
+        assert_eq!(complete["payload"]["path"], "src/read.txt");
+        assert_eq!(complete["payload"]["classification"], "partial");
+        assert!(complete["payload"].get("after").is_none());
+        assert!(requests.iter().any(|request| {
+            let body = request_json_body(request);
+            body["payload"]["kind"] == "tool_result" && body["payload"]["outcome"] == "partial"
+        }));
+        assert!(requests.iter().any(|request| {
+            request_json_body(request)["payload"]["kind"] == "heartbeat"
+        }));
+    }
+}
+
+#[test]
+fn denied_recognized_test_commands_do_not_emit_testing_starts() {
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let paths = GlobalPaths::new(temp.path().join("home"));
+    let repo_root = temp.path().join("repo");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, rx) = spawn_v2_started_deny_server();
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+    let codex = serde_json::json!({
+        "agent_id": "codex-agent-1",
+        "cwd": repo_root,
+        "tool_name": "Bash",
+        "tool_input": { "command": "cargo test" }
+    })
+    .to_string();
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        &codex,
+    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        rx.recv_timeout(Duration::from_millis(250)).is_err(),
+        "denied Codex command must not enter Testing"
+    );
+
+    let omp = serde_json::json!({
+        "agent_id": "omp-agent-1",
+        "workspace_id": runtime.workspace_id,
+        "cwd": repo_root,
+        "tool_name": "functions.bash",
+        "tool_input": { "command": "cargo test" }
+    })
+    .to_string();
+    let output =
+        run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "pre-tool-use"], &omp);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        rx.recv_timeout(Duration::from_millis(250)).is_err(),
+        "denied OMP command must not enter Testing"
+    );
+}
+
+#[test]
+fn codex_permitted_tests_emit_typed_results_and_heartbeats() {
+    for success in [true, false] {
+        let temp = tempfile::tempdir().expect("temp dir should create");
+        let paths = GlobalPaths::new(temp.path().join("home"));
+        let repo_root = temp.path().join("repo");
+        enable_test_repo(&paths, &repo_root);
+        let (runtime, rx) = spawn_v2_started_deny_server();
+        write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+        let command = format!(
+            "{} sandbox run --fs build --network enabled --write-dir target --command 'python -m pytest'",
+            env!("CARGO_BIN_EXE_stateful")
+        );
+        let pre = serde_json::json!({
+            "agent_id": "codex-agent-1",
+            "cwd": repo_root,
+            "tool_name": "Bash",
+            "tool_input": { "command": command }
+        })
+        .to_string();
+        let output = run_hook_subprocess(
+            &repo_root,
+            &paths,
+            &["hook", "codex", "pre-tool-use"],
+            &pre,
+        );
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let start_request = rx.recv_timeout(Duration::from_secs(2)).unwrap_or_else(|_| {
+            panic!(
+                "testing start should arrive; stdout: {}; stderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        let start = request_json_body(&start_request);
+        assert_eq!(start["payload"]["kind"], "tool_start");
+        assert_eq!(start["payload"]["tool_name"], "pytest");
+
+        let post = serde_json::json!({
+            "agent_id": "codex-agent-1",
+            "cwd": repo_root,
+            "tool_name": "Bash",
+            "success": success,
+            "tool_input": { "command": command }
+        })
+        .to_string();
+        let output = run_hook_subprocess(
+            &repo_root,
+            &paths,
+            &["hook", "codex", "post-tool-use"],
+            &post,
+        );
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let requests = (0..2)
+            .map(|_| {
+                request_json_body(
+                    &rx.recv_timeout(Duration::from_secs(2))
+                        .expect("testing result and heartbeat should arrive"),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(requests.iter().any(|body| {
+            body["payload"]["kind"] == "tool_result"
+                && body["payload"]["tool_name"] == "pytest"
+                && body["payload"]["outcome"]
+                    == if success { "succeeded" } else { "failed" }
+        }));
+        assert!(
+            requests
+                .iter()
+                .any(|body| body["payload"]["kind"] == "heartbeat")
+        );
+    }
+}
+
+#[test]
+fn omp_permitted_tests_emit_typed_results_and_heartbeats() {
+    for success in [true, false] {
+        let temp = tempfile::tempdir().expect("temp dir should create");
+        let paths = GlobalPaths::new(temp.path().join("home"));
+        let repo_root = temp.path().join("repo");
+        enable_test_repo(&paths, &repo_root);
+        let (runtime, rx) = spawn_v2_started_deny_server();
+        write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+        let command = format!(
+            "{} sandbox run --fs build --network enabled --write-dir target --command 'python -m pytest'",
+            env!("CARGO_BIN_EXE_stateful")
+        );
+        let pre = serde_json::json!({
+            "agent_id": "omp-agent-1",
+            "workspace_id": runtime.workspace_id,
+            "cwd": repo_root,
+            "tool_name": "functions.bash",
+            "tool_input": { "command": command }
+        })
+        .to_string();
+        let output =
+            run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "pre-tool-use"], &pre);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let start = request_json_body(
+            &rx.recv_timeout(Duration::from_secs(2))
+                .expect("testing start should arrive"),
+        );
+        assert_eq!(start["payload"]["kind"], "tool_start");
+        assert_eq!(start["payload"]["tool_name"], "pytest");
+
+        let post = serde_json::json!({
+            "agent_id": "omp-agent-1",
+            "workspace_id": runtime.workspace_id,
+            "cwd": repo_root,
+            "tool_name": "functions.bash",
+            "success": success,
+            "tool_input": { "command": command }
+        })
+        .to_string();
+        let output =
+            run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "post-tool-use"], &post);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let requests = (0..2)
+            .map(|_| {
+                request_json_body(
+                    &rx.recv_timeout(Duration::from_secs(2))
+                        .expect("testing result and heartbeat should arrive"),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(requests.iter().any(|body| {
+            body["payload"]["kind"] == "tool_result"
+                && body["payload"]["tool_name"] == "pytest"
+                && body["payload"]["outcome"]
+                    == if success { "succeeded" } else { "failed" }
+        }));
+        assert!(
+            requests
+                .iter()
+                .any(|body| body["payload"]["kind"] == "heartbeat")
+        );
+    }
+}
+
+#[test]
+fn lost_read_start_response_queues_failed_completion_and_replays_frozen_envelopes() {
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let paths = GlobalPaths::new(temp.path().join("home"));
+    let repo_root = temp.path().join("repo");
+    fs::create_dir_all(repo_root.join("src")).expect("repo source should create");
+    fs::write(repo_root.join("src/read.txt"), "contents\n").expect("read fixture should write");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, dropped) = spawn_fake_stateful_server_dropping_authorize();
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+    let input = serde_json::json!({
+        "agent_id": "codex-agent-1",
+        "cwd": repo_root,
+        "tool_name": "functions.read",
+        "tool_use_id": "read-response-loss-1",
+        "tool_input": { "file_path": "src/read.txt:raw" }
+    })
+    .to_string();
+
+    let pre = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        &input,
+    );
+    assert!(pre.status.success(), "{}", String::from_utf8_lossy(&pre.stderr));
+    let accepted = dropped
+        .recv_timeout(Duration::from_secs(2))
+        .expect("read start should reach the server before its response is lost");
+    assert!(accepted.starts_with("POST /v2/read/start "));
+
+    let outbox_file = paths.outbox_dir.join("codex-agent-1.jsonl");
+    let pending = fs::read_to_string(&outbox_file)
+        .expect("lost read start should remain durable")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("outbox line should parse"))
+        .collect::<Vec<_>>();
+    assert_eq!(pending.len(), 2, "failed start must have a terminal completion");
+    assert_eq!(pending[0]["route"], "/v2/read/start");
+    assert_eq!(pending[1]["route"], "/v2/read/complete");
+    assert_eq!(
+        accepted
+            .split_once("\r\n\r\n")
+            .expect("accepted request should have a body")
+            .1,
+        pending[0]["request_envelope"]
+            .as_str()
+            .expect("start request should be frozen")
+    );
+    for record in &pending {
+        let request = record["request_envelope"]
+            .as_str()
+            .expect("frozen request should be a string");
+        let body: serde_json::Value =
+            serde_json::from_str(request).expect("frozen request should parse");
+        assert_eq!(body["payload"]["operation_id"], "read-response-loss-1");
+    }
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(
+            pending[1]["request_envelope"]
+                .as_str()
+                .expect("completion request should be frozen"),
+        )
+        .expect("completion request should parse")["payload"]["classification"],
+        "failed"
+    );
+
+    let (replay_runtime, replayed) = spawn_fake_stateful_server_sequence(vec![
+        r#"{"status":"ok"}"#,
+        r#"{"status":"ok"}"#,
+    ]);
+    assert_eq!(
+        sync_outbox_with_runtime(&paths, &replay_runtime).expect("restart should replay both"),
+        2
+    );
+    for record in &pending {
+        let request = replayed
+            .recv_timeout(Duration::from_secs(2))
+            .expect("frozen lifecycle request should replay");
+        let body = request
+            .split_once("\r\n\r\n")
+            .expect("replayed request should have a body")
+            .1;
+        assert_eq!(
+            body,
+            record["request_envelope"]
+                .as_str()
+                .expect("frozen request should be a string")
+        );
+    }
+    assert!(
+        !outbox_file.exists(),
+        "successful replay must remove start and failed completion together"
+    );
+}
+
+#[test]
+fn lost_read_complete_response_replays_the_frozen_completion_after_restart() {
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let paths = GlobalPaths::new(temp.path().join("home"));
+    let repo_root = temp.path().join("repo");
+    fs::create_dir_all(repo_root.join("src")).expect("repo source should create");
+    fs::write(repo_root.join("src/read.txt"), "contents\n").expect("read fixture should write");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, received) = spawn_server_dropping_route("POST /v2/read/complete ");
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+    let input = serde_json::json!({
+        "agent_id": "codex-agent-1",
+        "cwd": repo_root,
+        "tool_name": "functions.read",
+        "tool_use_id": "read-complete-response-loss-1",
+        "tool_input": { "file_path": "src/read.txt:raw" }
+    })
+    .to_string();
+    let pre = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        &input,
+    );
+    assert!(pre.status.success(), "{}", String::from_utf8_lossy(&pre.stderr));
+    assert!(
+        received
+            .recv_timeout(Duration::from_secs(2))
+            .expect("read start should arrive")
+            .starts_with("POST /v2/read/start ")
+    );
+
+    let post = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "post-tool-use"],
+        &input,
+    );
+    assert!(post.status.success(), "{}", String::from_utf8_lossy(&post.stderr));
+    let accepted = received
+        .recv_timeout(Duration::from_secs(2))
+        .expect("read completion should reach the server before its response is lost");
+    assert!(accepted.starts_with("POST /v2/read/complete "));
+
+    let outbox_file = paths.outbox_dir.join("codex-agent-1.jsonl");
+    let pending = fs::read_to_string(&outbox_file)
+        .expect("lost completion should remain durable")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("outbox line should parse"))
+        .collect::<Vec<_>>();
+    let frozen = pending
+        .iter()
+        .find(|record| record["route"] == "/v2/read/complete")
+        .expect("read completion should be queued")
+        ["request_envelope"]
+        .as_str()
+        .expect("completion should be frozen")
+        .to_string();
+    assert_eq!(
+        accepted
+            .split_once("\r\n\r\n")
+            .expect("accepted completion should have a body")
+            .1,
+        frozen
+    );
+
+    let (replay_runtime, replayed) = spawn_fake_stateful_server_sequence(
+        std::iter::repeat_n(r#"{"status":"ok"}"#, pending.len()).collect(),
+    );
+    assert_eq!(
+        sync_outbox_with_runtime(&paths, &replay_runtime).expect("restart should replay pending"),
+        pending.len()
+    );
+    let replayed = (0..pending.len())
+        .map(|_| {
+            replayed
+                .recv_timeout(Duration::from_secs(2))
+                .expect("pending request should replay")
+        })
+        .collect::<Vec<_>>();
+    assert!(replayed.iter().any(|request| {
+        request
+            .split_once("\r\n\r\n")
+            .is_some_and(|(_, body)| body == frozen)
+    }));
+    assert!(!outbox_file.exists(), "replayed completion should be acknowledged");
+}
+
+#[test]
+fn lost_stop_response_replays_the_frozen_finalize_after_restart() {
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let paths = GlobalPaths::new(temp.path().join("home"));
+    let repo_root = temp.path().join("repo");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, received) = spawn_server_dropping_route("POST /v2/activity/finalize ");
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+    let input = r#"{"agent_id":"codex-agent-1","hook_event_name":"Stop"}"#;
+
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "codex", "stop"], input);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let accepted = received
+        .recv_timeout(Duration::from_secs(2))
+        .expect("finalize should reach the server before its response is lost");
+    assert!(accepted.starts_with("POST /v2/activity/finalize "));
+
+    let outbox_file = paths.outbox_dir.join("codex-agent-1.jsonl");
+    let pending = fs::read_to_string(&outbox_file)
+        .expect("lost finalize should remain durable")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("outbox line should parse"))
+        .collect::<Vec<_>>();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0]["route"], "/v2/activity/finalize");
+    let frozen = pending[0]["request_envelope"]
+        .as_str()
+        .expect("finalize should be frozen");
+    assert_eq!(
+        accepted
+            .split_once("\r\n\r\n")
+            .expect("accepted finalize should have a body")
+            .1,
+        frozen
+    );
+
+    let (replay_runtime, replayed) = spawn_fake_stateful_server_sequence(vec![r#"{"status":"ok"}"#]);
+    assert_eq!(
+        sync_outbox_with_runtime(&paths, &replay_runtime).expect("restart should replay finalize"),
+        1
+    );
+    let replayed = replayed
+        .recv_timeout(Duration::from_secs(2))
+        .expect("finalize should replay");
+    assert_eq!(
+        replayed
+            .split_once("\r\n\r\n")
+            .expect("replayed finalize should have a body")
+            .1,
+        frozen
+    );
+    assert!(!outbox_file.exists(), "replayed finalize should be acknowledged");
 }
 
 #[test]
@@ -3099,16 +3620,27 @@ fn pre_tool_use_denies_edit_and_write_without_runtime() {
 
 #[test]
 fn omp_write_authorize_records_runtime_lineage_without_commit_policy_input() {
-    let (runtime, rx) = spawn_fake_stateful_server(
-        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"blocked"}"#,
-    );
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let paths = GlobalPaths::new(temp.path().join("home"));
+    let repo_root = temp.path().join("repo");
+    fs::create_dir_all(repo_root.join("docs")).expect("repo docs should create");
+    fs::write(repo_root.join("docs/a.md"), "before\n").expect("fixture should write");
+    enable_test_repo(&paths, &repo_root);
+    let identity = r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":42,"workspace_id":"w1","workspace_version":1,"capabilities":["presence"]}"#;
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        identity,
+        identity,
+        r#"{"intent_id":"intent-1","decision":{"decision":"deny","reason_code":"active_claim_conflict","message":"blocked"}}"#,
+        r#"{"status":"completed"}"#,
+    ]);
+    write_global_runtime_file(&paths, &runtime).expect("runtime file should write");
     let input = serde_json::json!({
         "runtime": "omp",
         "agent_id": "omp-parent",
         "parent_agent_id": serde_json::Value::Null,
         "omp_agent_id": "main",
         "workspace_id": runtime.workspace_id,
-        "cwd": "/repo",
+        "cwd": repo_root,
         "yolo": false,
         "commit_id": "abc123",
         "operation_id": "omp-write-lineage",
@@ -3117,17 +3649,18 @@ fn omp_write_authorize_records_runtime_lineage_without_commit_policy_input() {
     })
     .to_string();
 
-    let outcome = handle_omp_pre_tool_use_with_runtime(
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "omp", "pre-tool-use"],
         &input,
-        Some(&runtime),
-        Some(Path::new("/repo")),
-        Some(Path::new("/repo")),
-    )
-    .expect("omp pre-tool should parse");
-
-    assert!(matches!(outcome, OmpHookOutcome::Block { .. }));
-    let request = rx.recv().expect("authorize request should arrive");
-    let body = request_json_body(&request);
+    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    for _ in 0..2 {
+        let identity_request = rx.recv().expect("identity request should arrive");
+        assert!(identity_request.starts_with("GET /v2/runtime/identity?"));
+    }
+    let body = request_json_body(&rx.recv().expect("authorize request should arrive"));
     assert_eq!(body["source"]["kind"], "hook");
     assert_eq!(body["source"]["event"], "omp_write_start");
     assert_eq!(body["agent"]["agent_id"], "omp-parent");
@@ -3640,13 +4173,24 @@ fn run_hook_omp_env_runtime_derives_workspace_id_from_enabled_repo() {
 
 #[test]
 fn omp_edit_extracts_hashline_file_targets() {
-    let (runtime, rx) = spawn_fake_stateful_server(
-        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"blocked"}"#,
-    );
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let paths = GlobalPaths::new(temp.path().join("home"));
+    let repo_root = temp.path().join("repo");
+    fs::create_dir_all(repo_root.join("docs")).expect("repo docs should create");
+    fs::write(repo_root.join("docs/a.md"), "before\n").expect("fixture should write");
+    enable_test_repo(&paths, &repo_root);
+    let identity = r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":42,"workspace_id":"w1","workspace_version":1,"capabilities":["presence"]}"#;
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        identity,
+        identity,
+        r#"{"intent_id":"intent-1","decision":{"decision":"deny","reason_code":"active_claim_conflict","message":"blocked"}}"#,
+        r#"{"status":"completed"}"#,
+    ]);
+    write_global_runtime_file(&paths, &runtime).expect("runtime file should write");
     let input = serde_json::json!({
         "agent_id": "omp-parent",
         "workspace_id": runtime.workspace_id,
-        "cwd": "/repo",
+        "cwd": repo_root,
         "yolo": false,
         "operation_id": "omp-edit-hashline",
         "tool_name": "edit",
@@ -3654,18 +4198,40 @@ fn omp_edit_extracts_hashline_file_targets() {
     })
     .to_string();
 
-    let outcome = handle_omp_pre_tool_use_with_runtime(
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "omp", "pre-tool-use"],
         &input,
-        Some(&runtime),
-        Some(Path::new("/repo")),
-        Some(Path::new("/repo")),
-    )
-    .expect("omp edit should authorize");
-
-    assert!(matches!(outcome, OmpHookOutcome::Block { .. }));
+    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    for _ in 0..2 {
+        let identity_request = rx.recv().expect("identity request should arrive");
+        assert!(identity_request.starts_with("GET /v2/runtime/identity?"));
+    }
     let body = request_json_body(&rx.recv().expect("authorize request should arrive"));
     assert_eq!(body["payload"]["action"], "write_file");
     assert_eq!(body["payload"]["targets"][0]["path"], "docs/a.md");
+}
+
+#[test]
+fn pre_tool_use_rejects_codex_mixed_patch_actions_before_authorization() {
+    let input = serde_json::json!({
+        "agent_id": "codex-agent",
+        "tool_name": "apply_patch",
+        "tool_use_id": "mixed-actions",
+        "tool_input": {
+            "patch": "*** Begin Patch\n*** Update File: docs/a.md\n@@\n-old\n+new\n*** Delete File: docs/b.md\n*** End Patch"
+        }
+    })
+    .to_string();
+
+    let HookOutcome::Deny { reason } =
+        handle_pre_tool_use(&input).expect("mixed patch should parse")
+    else {
+        panic!("mixed patch must be denied");
+    };
+    assert!(reason.contains("mixes write actions"), "{reason}");
 }
 
 #[test]
@@ -3699,14 +4265,25 @@ fn omp_edit_rejects_mixed_patch_actions_before_authorization() {
 
 #[test]
 fn omp_write_uses_tool_input_reservation_when_top_level_reservation_is_blank() {
-    let (runtime, rx) = spawn_fake_stateful_server(
-        r#"{"decision":"deny","message":"missing","reason_code":"missing_reservation"}"#,
-    );
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let paths = GlobalPaths::new(temp.path().join("home"));
+    let repo_root = temp.path().join("repo");
+    fs::create_dir_all(repo_root.join("docs")).expect("repo docs should create");
+    fs::write(repo_root.join("docs/a.md"), "before\n").expect("fixture should write");
+    enable_test_repo(&paths, &repo_root);
+    let identity = r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":42,"workspace_id":"w1","workspace_version":1,"capabilities":["presence"]}"#;
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        identity,
+        identity,
+        r#"{"intent_id":"intent-1","decision":{"decision":"deny","reason_code":"missing_reservation","message":"missing"}}"#,
+        r#"{"status":"completed"}"#,
+    ]);
+    write_global_runtime_file(&paths, &runtime).expect("runtime file should write");
     let input = serde_json::json!({
         "agent_id": "omp-parent",
         "reservation_id": "   ",
         "workspace_id": runtime.workspace_id,
-        "cwd": "/repo",
+        "cwd": repo_root,
         "yolo": false,
         "operation_id": "omp-write-explicit-reservation",
         "tool_name": "write",
@@ -3718,44 +4295,44 @@ fn omp_write_uses_tool_input_reservation_when_top_level_reservation_is_blank() {
     })
     .to_string();
 
-    let outcome = handle_omp_pre_tool_use_with_runtime(
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "omp", "pre-tool-use"],
         &input,
-        Some(&runtime),
-        Some(Path::new("/repo")),
-        Some(Path::new("/repo")),
-    )
-    .expect("omp write should parse");
-
-    assert!(matches!(outcome, OmpHookOutcome::Block { .. }));
-    let authorize = request_json_body(&rx.recv().expect("authorize should arrive"));
-    assert_eq!(
-        authorize["payload"]["reservation_id"],
-        "explicit-reservation"
     );
-    assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    for _ in 0..2 {
+        let identity_request = rx.recv().expect("identity request should arrive");
+        assert!(identity_request.starts_with("GET /v2/runtime/identity?"));
+    }
+    let authorize = request_json_body(&rx.recv().expect("authorize should arrive"));
+    assert_eq!(authorize["payload"]["reservation_id"], "explicit-reservation");
 }
 
 #[test]
 fn omp_write_releases_auto_claim_when_retry_authorization_blocks() {
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let paths = GlobalPaths::new(temp.path().join("home"));
+    let repo_root = temp.path().join("repo");
+    fs::create_dir_all(repo_root.join("docs")).expect("repo docs should create");
+    fs::write(repo_root.join("docs/a.md"), "before\n").expect("fixture should write");
+    enable_test_repo(&paths, &repo_root);
+    let identity = r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":42,"workspace_id":"w1","workspace_version":1,"capabilities":["presence"]}"#;
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
-        r#"{
-            "decision": "deny",
-            "message": "Supported writes require active file or directory reservation.",
-            "reason_code": "missing_reservation"
-        }"#,
+        identity,
+        identity,
+        r#"{"decision":"deny","message":"Supported writes require active file or directory reservation.","reason_code":"missing_reservation"}"#,
         r#"{"status":"ok","reservation_id":"auto-reservation"}"#,
         r#"{"claims":[{"claim_id":"auto-claim"}]}"#,
-        r#"{
-            "decision": "deny",
-            "message": "Write target is covered by another active agent claim.",
-            "reason_code": "active_claim_conflict"
-        }"#,
+        r#"{"decision":"deny","message":"Write target is covered by another active agent claim.","reason_code":"active_claim_conflict"}"#,
         r#"{"status":"ok"}"#,
     ]);
+    write_global_runtime_file(&paths, &runtime).expect("runtime file should write");
     let input = serde_json::json!({
         "agent_id": "omp-parent",
         "workspace_id": runtime.workspace_id,
-        "cwd": "/repo",
+        "cwd": repo_root,
         "yolo": false,
         "operation_id": "omp-write-release-claim",
         "tool_name": "write",
@@ -3763,15 +4340,17 @@ fn omp_write_releases_auto_claim_when_retry_authorization_blocks() {
     })
     .to_string();
 
-    let outcome = handle_omp_pre_tool_use_with_runtime(
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "omp", "pre-tool-use"],
         &input,
-        Some(&runtime),
-        Some(Path::new("/repo")),
-        Some(Path::new("/repo")),
-    )
-    .expect("omp write should parse");
-
-    assert!(matches!(outcome, OmpHookOutcome::Block { .. }));
+    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    for _ in 0..2 {
+        let identity_request = rx.recv().expect("identity request should arrive");
+        assert!(identity_request.starts_with("GET /v2/runtime/identity?"));
+    }
     let _first_authorize = rx.recv().expect("first authorize should arrive");
     let _declare = rx.recv().expect("reservation declare should arrive");
     let _claim = rx.recv().expect("claim acquire should arrive");
@@ -3787,14 +4366,25 @@ fn omp_write_releases_auto_claim_when_retry_authorization_blocks() {
 
 #[test]
 fn omp_raw_bash_authorizes_trusted_write_target_sandbox_run() {
-    let stateful = trusted_stateful_path();
-    let (runtime, rx) = spawn_fake_stateful_server(
-        r#"{"decision":"deny","reason_code":"active_claim_conflict","message":"blocked"}"#,
-    );
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let paths = GlobalPaths::new(temp.path().join("home"));
+    let repo_root = temp.path().join("repo");
+    fs::create_dir_all(repo_root.join("docs")).expect("repo docs should create");
+    fs::write(repo_root.join("docs/a.md"), "before\n").expect("fixture should write");
+    enable_test_repo(&paths, &repo_root);
+    let stateful = env!("CARGO_BIN_EXE_stateful");
+    let identity = r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":42,"workspace_id":"w1","workspace_version":1,"capabilities":["presence"]}"#;
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        identity,
+        identity,
+        r#"{"intent_id":"intent-1","decision":{"decision":"deny","reason_code":"active_claim_conflict","message":"blocked"}}"#,
+        r#"{"status":"completed"}"#,
+    ]);
+    write_global_runtime_file(&paths, &runtime).expect("runtime file should write");
     let input = serde_json::json!({
         "agent_id": "omp-parent",
         "workspace_id": runtime.workspace_id,
-        "cwd": "/repo",
+        "cwd": repo_root,
         "yolo": false,
         "operation_id": "omp-bash-write",
         "tool_name": "bash",
@@ -3803,17 +4393,11 @@ fn omp_raw_bash_authorizes_trusted_write_target_sandbox_run() {
         }
     })
     .to_string();
-
-    assert!(matches!(
-        handle_omp_pre_tool_use_with_runtime(
-            &input,
-            Some(&runtime),
-            Some(Path::new("/repo")),
-            Some(Path::new("/repo"))
-        )
-        .expect("trusted write-target sandbox run should authorize"),
-        OmpHookOutcome::Block { .. }
-    ));
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "pre-tool-use"], &input);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    for _ in 0..2 {
+        assert!(rx.recv().expect("identity request should arrive").starts_with("GET /v2/runtime/identity?"));
+    }
     let body = request_json_body(&rx.recv().expect("authorize request should arrive"));
     assert_eq!(body["payload"]["action"], "write_file");
     assert_eq!(body["payload"]["targets"][0]["path"], "docs/a.md");
@@ -5095,6 +5679,7 @@ fn pre_tool_use_apply_patch_denies_when_server_denies() {
       "cwd": "/repo",
       "hook_event_name": "PreToolUse",
       "tool_name": "apply_patch",
+      "tool_use_id": "deny-authorization",
       "tool_input": {
         "command": "*** Begin Patch\n*** Update File: src/auth.ts\n*** End Patch\n"
       }
@@ -5121,6 +5706,13 @@ fn pre_tool_use_apply_patch_denies_when_server_denies() {
             .as_str()
             .expect("denial reason should be text")
             .contains("Declare matching reservation.")
+    );
+    assert!(
+        !paths
+            .runtime_dir
+            .join("write-intents/7331/64656e792d617574686f72697a6174696f6e.json")
+            .exists(),
+        "a definitive denial must not remain replayable"
     );
 }
 
@@ -5280,7 +5872,8 @@ fn stop_posts_activity_finalize() {
     let repo_root = temp_root.join("repo");
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     enable_test_repo(&paths, &repo_root);
-    let (runtime, rx) = spawn_fake_stateful_server(r#"{"status":"ok"}"#);
+    let (runtime, rx) =
+        spawn_fake_stateful_server_sequence(vec![r#"{"status":"ok"}"#, r#"{"status":"ok"}"#]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
@@ -5300,6 +5893,24 @@ fn stop_posts_activity_finalize() {
     let body = request_json_body(&request);
     assert_eq!(body["agent"]["agent_id"], "s1");
     assert_eq!(body["workspace"]["workspace_id"], "w1");
+    assert!(body["payload"].is_null(), "unspecified Stop must use automatic fallback");
+
+    let explicit = r#"{
+      "agent_id": "s1",
+      "hook_event_name": "Stop",
+      "handoff": {"status":"done","summary":"complete"}
+    }"#;
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "codex", "stop"], explicit);
+    assert!(
+        output.status.success(),
+        "explicit Stop hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let explicit = request_json_body(&rx.recv().expect("explicit finalize should arrive"));
+    assert_eq!(
+        explicit["payload"],
+        serde_json::json!({"status":"done","summary":"complete"})
+    );
 }
 
 fn read_http_request_maybe_body(stream: &mut std::net::TcpStream) -> String {
@@ -5546,6 +6157,31 @@ fn spawn_fake_stateful_server_dropping_authorize() -> (ServerRuntime, mpsc::Rece
         }
     });
 
+    (
+        ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42),
+        rx,
+    )
+}
+
+fn spawn_server_dropping_route(route: &'static str) -> (ServerRuntime, mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener addr should load");
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        while let Ok((mut stream, _)) = listener.accept() {
+            let request = read_http_request_maybe_body(&mut stream);
+            if request.starts_with("GET /v2/runtime/identity?") {
+                write_json_response(&mut stream, fake_v2_runtime_identity());
+                continue;
+            }
+            tx.send(request.clone()).expect("request should send to test");
+            if request.starts_with(route) {
+                drop(stream);
+                break;
+            }
+            write_json_response(&mut stream, r#"{"status":"ok"}"#);
+        }
+    });
     (
         ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42),
         rx,
