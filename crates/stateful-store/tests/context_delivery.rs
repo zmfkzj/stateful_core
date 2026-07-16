@@ -6,10 +6,10 @@ use stateful_core::{
     WriteTarget,
 };
 use stateful_store::{
-    Clock, CommandPlan, ContextAcknowledgement, ContextRender, DeliveryAttempt, FixedClock,
-    HumanObservationConfidence, HumanObservationInput, HumanObservationKind, NotificationCreate,
-    NotificationDelivery, PresenceRegistration, PresenceResourceUpdate, ReservationDeclaration,
-    ReservationRelease, Store, WaitRequest,
+    ClaimAcquire, ClaimPath, Clock, CommandPlan, ContextAcknowledgement, ContextRender,
+    DeliveryAttempt, FixedClock, HumanObservationConfidence, HumanObservationInput,
+    HumanObservationKind, NotificationCreate, NotificationDelivery, PresenceRegistration,
+    PresenceResourceUpdate, ReservationDeclaration, ReservationRelease, Store, WaitRequest,
 };
 use tempfile::TempDir;
 use std::sync::{Arc, Mutex};
@@ -691,7 +691,7 @@ fn own_outcome_unknown_remains_a_blocking_safety_state() {
         .render_context(&request(
             "agent-1",
             Uuid::new_v4(),
-            ContextRender { mode: RenderMode::Brief, resource: None },
+            ContextRender { mode: RenderMode::Brief, resource: Some("src/unknown.rs".into()) },
         ))
         .expect("render succeeds")
         .response;
@@ -1232,5 +1232,265 @@ fn pending_human_writes_render_while_reconciled_and_expired_writes_do_not() {
     assert_eq!(
         delta.items.iter().filter(|item| item.kind == CurrentItemKind::Claim).map(|item| item.resource.as_str()).collect::<Vec<_>>(),
         vec![pending.relative_path.as_str()],
+    );
+}
+
+fn migration_seed(aggregate_id: &str, entity_kind: &str, payload: serde_json::Value) -> EventData {
+    let mut data = EventData::new(aggregate_id);
+    let mut payload = payload.as_object().expect("seed payload is an object").clone();
+    payload.insert("legacy_entity_kind".into(), entity_kind.into());
+    payload.insert("legacy_primary_key".into(), aggregate_id.into());
+    data.data = payload.into();
+    data
+}
+
+#[test]
+fn cursor_zero_context_includes_migrated_items_in_event_order_and_honors_filters() {
+    let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    let request_id = Uuid::new_v4();
+    let owner = request("agent-peer", request_id, ());
+    store
+        .execute_command(&owner, "test.migration_context", |_| {
+            Ok(CommandPlan {
+                events: vec![
+                    NewEvent::new(
+                        request_id,
+                        0,
+                        NOW,
+                        EventPayload::Migration(MigrationEvent::PresenceSnapshotSeeded(migration_seed(
+                            "agent-peer",
+                            "presence",
+                            serde_json::json!({
+                                "agent_id": "agent-peer",
+                                "phase": "working",
+                                "expires_at": "2026-07-16T12:00:00Z"
+                            }),
+                        ))),
+                    )
+                    .expect("presence seed builds"),
+                    NewEvent::new(
+                        request_id,
+                        1,
+                        NOW,
+                        EventPayload::Migration(MigrationEvent::ReservationSnapshotSeeded(migration_seed(
+                            "reservation-seed",
+                            "reservation",
+                            serde_json::json!({
+                                "reservation_id": "reservation-seed",
+                                "agent_id": "agent-peer",
+                                "workspace_id": "workspace-1",
+                                "scopes": [{"kind": "file", "path": "src/reserved.rs"}],
+                                "action": "write_file",
+                                "purpose": "Coordinate migrated work.",
+                                "status": "active"
+                            }),
+                        ))),
+                    )
+                    .expect("reservation seed builds"),
+                    NewEvent::new(
+                        request_id,
+                        2,
+                        NOW,
+                        EventPayload::Migration(MigrationEvent::ClaimSnapshotSeeded(migration_seed(
+                            "claim-seed",
+                            "claim",
+                            serde_json::json!({
+                                "claim_id": "claim-seed",
+                                "reservation_id": "reservation-seed",
+                                "agent_id": "agent-peer",
+                                "workspace_id": "workspace-1",
+                                "relative_path": "src/claimed.rs",
+                                "action": "write_file",
+                                "status": "active"
+                            }),
+                        ))),
+                    )
+                    .expect("claim seed builds"),
+                    NewEvent::new(
+                        request_id,
+                        3,
+                        NOW,
+                        EventPayload::Migration(MigrationEvent::WriteFenceSnapshotSeeded(migration_seed(
+                            "fence-seed",
+                            "write_fence",
+                            serde_json::json!({
+                                "fence_id": "fence-seed",
+                                "agent_id": "agent-peer",
+                                "workspace_id": "workspace-1",
+                                "relative_path": "src/fenced.rs",
+                                "action": "write_file",
+                                "status": "active"
+                            }),
+                        ))),
+                    )
+                    .expect("fence seed builds"),
+                    NewEvent::new(
+                        request_id,
+                        4,
+                        NOW,
+                        EventPayload::Migration(MigrationEvent::HumanObservationSnapshotSeeded(migration_seed(
+                            "human-seed",
+                            "human_observation",
+                            serde_json::json!({
+                                "observation_id": "human-seed",
+                                "workspace_id": "workspace-1",
+                                "relative_path": "src/human.rs",
+                                "kind": "save",
+                                "confidence": "high",
+                                "status": "pending"
+                            }),
+                        ))),
+                    )
+                    .expect("human seed builds"),
+                    NewEvent::new(
+                        request_id,
+                        5,
+                        NOW,
+                        EventPayload::Migration(MigrationEvent::LegacyHandoffSnapshotSeeded(migration_seed(
+                            "legacy-handoff",
+                            "handoff",
+                            serde_json::json!({}),
+                        ))),
+                    )
+                    .expect("handoff seed builds"),
+                ],
+                response: (),
+                http_status: 200,
+            })
+        })
+        .expect("migration seeds commit");
+
+    let all = store
+        .render_context(&request(
+            "reader",
+            Uuid::new_v4(),
+            ContextRender { mode: RenderMode::Brief, resource: None },
+        ))
+        .expect("cursor-zero context renders")
+        .response;
+    assert_eq!(
+        all.items.iter().map(|item| item.resource.as_str()).collect::<Vec<_>>(),
+        vec!["presence", "src/reserved.rs", "src/claimed.rs", "src/fenced.rs", "src/human.rs", "handoff"],
+    );
+    store
+        .acknowledge_context(&request(
+            "reader",
+            Uuid::new_v4(),
+            ContextAcknowledgement {
+                delivery_id: all.delivery_id.expect("delivery id"),
+                sequence: all.sequence.expect("delivery sequence"),
+                workspace_version: all.workspace_version,
+            },
+        ))
+        .expect("context acknowledges");
+    assert_eq!(
+        store.context_cursor("workspace-1", "reader").expect("cursor loads"),
+        all.workspace_version,
+    );
+
+    let filtered = store
+        .render_context(&request(
+            "filtered-reader",
+            Uuid::new_v4(),
+            ContextRender { mode: RenderMode::Brief, resource: Some("src/fenced.rs".into()) },
+        ))
+        .expect("filtered cursor-zero context renders")
+        .response;
+    assert_eq!(
+        filtered.items.iter().map(|item| item.resource.as_str()).collect::<Vec<_>>(),
+        vec!["src/fenced.rs"],
+    );
+}
+
+#[test]
+fn only_high_confidence_write_observations_are_hard_context_blocks() {
+    let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    for (path, kind, confidence) in [
+        ("src/low-write.rs", HumanObservationKind::Save, HumanObservationConfidence::Low),
+        ("src/presence.rs", HumanObservationKind::Presence, HumanObservationConfidence::High),
+        ("src/dirty.rs", HumanObservationKind::Dirty, HumanObservationConfidence::High),
+        ("src/high-write.rs", HumanObservationKind::Change, HumanObservationConfidence::High),
+    ] {
+        store
+            .record_human_observation(&request(
+                "human",
+                Uuid::new_v4(),
+                HumanObservationInput {
+                    relative_path: path.into(),
+                    kind,
+                    confidence,
+                    source: "watcher".into(),
+                    summary: "observation".into(),
+                    observed_at: None,
+                },
+            ))
+            .expect("observation records");
+    }
+
+    let delta = store
+        .render_context(&request(
+            "reader",
+            Uuid::new_v4(),
+            ContextRender { mode: RenderMode::Brief, resource: None },
+        ))
+        .expect("context renders")
+        .response;
+    for path in ["src/low-write.rs", "src/presence.rs", "src/dirty.rs"] {
+        let item = delta.items.iter().find(|item| item.resource == path).expect("advisory item");
+        assert_eq!(item.severity, CurrentSeverity::Warn);
+        assert!(item.next_action.is_none());
+    }
+    let hard_block = delta
+        .items
+        .iter()
+        .find(|item| item.resource == "src/high-write.rs")
+        .expect("high-confidence write item");
+    assert_eq!(hard_block.severity, CurrentSeverity::Block);
+    assert!(hard_block.next_action.is_some());
+}
+
+#[test]
+fn active_claim_is_advisory_in_default_context() {
+    let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    let reservation = store
+        .declare_reservation(&request(
+            "agent-1",
+            Uuid::new_v4(),
+            ReservationDeclaration {
+                scopes: vec![stateful_core::ReservationScope::file("src/claimed.rs")],
+                action: "write_file".into(),
+                purpose: "Coordinate claimed work.".into(),
+            },
+        ))
+        .expect("reservation declares")
+        .response;
+    store
+        .acquire_claim(&request(
+            "agent-1",
+            Uuid::new_v4(),
+            ClaimAcquire {
+                reservation_id: reservation.reservation_id,
+                paths: vec![ClaimPath { relative_path: "src/claimed.rs".into(), observation: None }],
+            },
+        ))
+        .expect("claim acquires");
+
+    let delta = store
+        .render_context(&request(
+            "agent-2",
+            Uuid::new_v4(),
+            ContextRender { mode: RenderMode::Brief, resource: Some("src/claimed.rs".into()) },
+        ))
+        .expect("context renders")
+        .response;
+    let claim = delta
+        .items
+        .iter()
+        .find(|item| item.summary.contains("active claim"))
+        .expect("active claim item");
+    assert_eq!(claim.severity, CurrentSeverity::Warn);
+    assert_eq!(
+        claim.next_action.as_deref(),
+        Some("Coordinate with the claim owner before editing this resource."),
     );
 }

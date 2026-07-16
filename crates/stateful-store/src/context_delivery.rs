@@ -484,97 +484,207 @@ fn changed_current_items(
     after_version: u64,
     resource_filter: Option<&str>,
 ) -> StoreResult<Vec<CurrentItem>> {
-    let changed = reader.context_changes(workspace_id, after_version)?
-        .into_iter()
-        .collect::<BTreeSet<_>>();
+    let changed = reader.context_changes(workspace_id, after_version)?;
+    let mut seen = BTreeSet::new();
     let mut items = Vec::new();
-    for (kind, aggregate_id) in &changed {
-        match kind.as_str() {
-            "presence" => {
-                if let Some(presence) = reader.live_presences(workspace_id)?
-                    .into_iter()
-                    .find(|presence| presence.agent_id == *aggregate_id && presence.agent_id != target_agent_id)
-                {
-                    let resources = reader.presence_resources(workspace_id, &presence.agent_id)?;
-                    let resource = resources.iter().find_map(|resource| {
-                        resource_relevant(resource_filter, &resource.relative_path)
-                            .then(|| resource.relative_path.clone())
-                    });
-                    if resource_filter.is_none() || resource.is_some() {
-                        let summary = match (&presence.goal_excerpt, &presence.phase) {
-                            (Some(goal), Some(phase)) => format!("Agent {} is {:?}: {goal}.", presence.agent_id, phase),
-                            (Some(goal), None) => format!("Agent {}: {goal}.", presence.agent_id),
-                            _ => format!("Agent {} is active.", presence.agent_id),
-                        };
-                        items.push(
-                            CurrentItem::new(
-                                CurrentItemKind::Agent,
-                                CurrentSeverity::Info,
-                                CurrentFreshness::Live,
-                                resource.unwrap_or_else(|| "presence".into()),
-                                "Understand nearby active work before editing.",
-                                summary,
-                            )
-                            .with_agent(presence.agent_id)
-                            .with_workspace(workspace_id),
-                        );
-                    }
-                }
+    for (kind, aggregate_id) in changed {
+        if !seen.insert((kind.clone(), aggregate_id.clone())) {
+            continue;
+        }
+        if kind == "migration" {
+            append_migrated_current_items(
+                &mut items,
+                reader,
+                workspace_id,
+                target_agent_id,
+                after_version,
+                resource_filter,
+                &aggregate_id,
+            )?;
+            continue;
+        }
+        if kind == "presence" {
+            if let Some(presence) = reader
+                .live_presences(workspace_id)?
+                .into_iter()
+                .find(|presence| presence.agent_id == aggregate_id)
+                && let Some(item) = presence_item(reader, presence, workspace_id, target_agent_id, resource_filter)?
+            {
+                items.push((item.0, item.1));
             }
-            "handoff" => {
-                if let Some(handoff) = reader.handoff(workspace_id, aggregate_id)? {
-                    let resource = handoff.files_changed.iter().find(|path| resource_relevant(resource_filter, path));
-                    if resource_filter.is_none() || resource.is_some() {
-                        items.push(
-                            CurrentItem::new(
-                                CurrentItemKind::Finalization,
-                                CurrentSeverity::Info,
-                                CurrentFreshness::Finalized,
-                                resource.cloned().unwrap_or_else(|| "handoff".into()),
-                                "Preserve handoff context from previous work.",
-                                handoff.summary,
-                            )
-                            .with_agent(handoff.agent_id)
-                            .with_workspace(workspace_id),
-                        );
-                    }
-                }
+            continue;
+        }
+        if kind == "handoff" {
+            if let Some(handoff) = reader.handoff(workspace_id, &aggregate_id)?
+                && let Some(item) = handoff_item(handoff, workspace_id, resource_filter)
+            {
+                items.push(item);
             }
-            _ => {
-                if let Some(aggregate) = aggregate_for_kind(kind)
-                    && let Some(record) = reader
-                        .aggregate_records(aggregate, workspace_id)?
-                        .into_iter()
-                        .find(|record| record.aggregate_id == *aggregate_id)
-                {
-                    if kind == "reservation" {
-                        for relative_path in reservation_scope_paths(&record.payload) {
-                            let mut scoped_record = record.clone();
-                            scoped_record
-                                .payload
-                                .as_object_mut()
-                                .expect("projected reservation is an object")
-                                .insert("relative_path".into(), Value::String(relative_path));
-                            if let Some(item) = item_from_current(
-                                kind,
-                                scoped_record,
-                                workspace_id,
-                                target_agent_id,
-                                resource_filter,
-                            ) {
-                                items.push(item);
-                            }
-                        }
-                    } else if let Some(item) =
-                        item_from_current(kind, record, workspace_id, target_agent_id, resource_filter)
-                    {
-                        items.push(item);
-                    }
-                }
+            continue;
+        }
+        if let Some(aggregate) = aggregate_for_kind(&kind)
+            && let Some(record) = reader
+                .aggregate_records(aggregate, workspace_id)?
+                .into_iter()
+                .find(|record| record.aggregate_id == aggregate_id)
+        {
+            append_record_items(
+                &mut items,
+                &kind,
+                record,
+                workspace_id,
+                target_agent_id,
+                resource_filter,
+            );
+        }
+    }
+    items.sort_by_key(|(sequence, _)| *sequence);
+    items.dedup();
+    Ok(items.into_iter().map(|(_, item)| item).collect())
+}
+
+fn append_migrated_current_items(
+    items: &mut Vec<(u64, CurrentItem)>,
+    reader: &dyn ProjectionReader,
+    workspace_id: &str,
+    target_agent_id: &str,
+    after_version: u64,
+    resource_filter: Option<&str>,
+    aggregate_id: &str,
+) -> StoreResult<()> {
+    for presence in reader.live_presences(workspace_id)? {
+        if presence.agent_id == aggregate_id
+            && presence.origin_event_seq > after_version
+            && let Some(item) = presence_item(reader, presence, workspace_id, target_agent_id, resource_filter)?
+        {
+            items.push(item);
+        }
+    }
+    for handoff in reader.handoffs(workspace_id)? {
+        if handoff.origin_event_seq > after_version
+            && let Some(item) = handoff_item(handoff, workspace_id, resource_filter)
+        {
+            items.push(item);
+        }
+    }
+    for kind in [
+        "reservation",
+        "claim",
+        "wait",
+        "write_fence",
+        "read_observation",
+        "write_intent",
+        "human_observation",
+        "human_acknowledgement",
+    ] {
+        let aggregate = aggregate_for_kind(kind).expect("migration current kind is mapped");
+        for record in reader.aggregate_records(aggregate, workspace_id)? {
+            if record.aggregate_id == aggregate_id && record.origin_event_seq > after_version {
+                append_record_items(
+                    items,
+                    kind,
+                    record,
+                    workspace_id,
+                    target_agent_id,
+                    resource_filter,
+                );
             }
         }
     }
-    Ok(items)
+    Ok(())
+}
+
+fn presence_item(
+    reader: &dyn ProjectionReader,
+    presence: stateful_core::PresenceRecord,
+    workspace_id: &str,
+    target_agent_id: &str,
+    resource_filter: Option<&str>,
+) -> StoreResult<Option<(u64, CurrentItem)>> {
+    if presence.agent_id == target_agent_id {
+        return Ok(None);
+    }
+    let resources = reader.presence_resources(workspace_id, &presence.agent_id)?;
+    let resource = resources.iter().find_map(|resource| {
+        resource_relevant(resource_filter, &resource.relative_path).then(|| resource.relative_path.clone())
+    });
+    if resource_filter.is_some() && resource.is_none() {
+        return Ok(None);
+    }
+    let summary = match (&presence.goal_excerpt, &presence.phase) {
+        (Some(goal), Some(phase)) => format!("Agent {} is {:?}: {goal}.", presence.agent_id, phase),
+        (Some(goal), None) => format!("Agent {}: {goal}.", presence.agent_id),
+        _ => format!("Agent {} is active.", presence.agent_id),
+    };
+    Ok(Some((
+        presence.origin_event_seq,
+        CurrentItem::new(
+            CurrentItemKind::Agent,
+            CurrentSeverity::Info,
+            CurrentFreshness::Live,
+            resource.unwrap_or_else(|| "presence".into()),
+            "Understand nearby active work before editing.",
+            summary,
+        )
+        .with_agent(presence.agent_id)
+        .with_workspace(workspace_id),
+    )))
+}
+
+fn handoff_item(
+    handoff: stateful_core::HandoffRecord,
+    workspace_id: &str,
+    resource_filter: Option<&str>,
+) -> Option<(u64, CurrentItem)> {
+    let resource = handoff.files_changed.iter().find(|path| resource_relevant(resource_filter, path));
+    (resource_filter.is_none() || resource.is_some()).then(|| (
+        handoff.origin_event_seq,
+        CurrentItem::new(
+            CurrentItemKind::Finalization,
+            CurrentSeverity::Info,
+            CurrentFreshness::Finalized,
+            resource.cloned().unwrap_or_else(|| "handoff".into()),
+            "Preserve handoff context from previous work.",
+            handoff.summary,
+        )
+        .with_agent(handoff.agent_id)
+        .with_workspace(workspace_id),
+    ))
+}
+
+fn append_record_items(
+    items: &mut Vec<(u64, CurrentItem)>,
+    kind: &str,
+    record: CurrentRecord,
+    workspace_id: &str,
+    target_agent_id: &str,
+    resource_filter: Option<&str>,
+) {
+    let sequence = record.origin_event_seq;
+    let mut resources = if kind == "reservation" {
+        reservation_scope_paths(&record.payload)
+    } else if kind == "write_intent"
+        && record.payload.get("status").and_then(Value::as_str) == Some("outcome_unknown")
+    {
+        write_intent_target_paths(&record.payload)
+    } else {
+        Vec::new()
+    };
+    if resources.is_empty() {
+        resources.push(String::new());
+    }
+    for resource in resources {
+        if let Some(item) = item_from_current(
+            kind,
+            record.clone(),
+            workspace_id,
+            target_agent_id,
+            resource_filter,
+            (!resource.is_empty()).then_some(resource.as_str()),
+        ) {
+            items.push((sequence, item));
+        }
+    }
 }
 
 fn aggregate_for_kind(kind: &str) -> Option<CurrentAggregate> {
@@ -597,14 +707,17 @@ fn item_from_current(
     workspace_id: &str,
     target_agent_id: &str,
     resource_filter: Option<&str>,
+    resource_override: Option<&str>,
 ) -> Option<CurrentItem> {
     let value = record.payload;
     let status = value.get("status").and_then(Value::as_str).unwrap_or_default();
-    let resource = value
-        .get("relative_path")
-        .or_else(|| value.get("path"))
-        .and_then(Value::as_str)
-        .unwrap_or(kind);
+    let resource = resource_override.unwrap_or_else(|| {
+        value
+            .get("relative_path")
+            .or_else(|| value.get("path"))
+            .and_then(Value::as_str)
+            .unwrap_or(kind)
+    });
     if !resource_relevant(resource_filter, resource) {
         return None;
     }
@@ -616,43 +729,51 @@ fn item_from_current(
             CurrentItemKind::Reservation,
             CurrentSeverity::Warn,
             format!("Agent {} reserved {resource}.", agent_id.unwrap_or("another agent")),
-            "Coordinate with the reservation owner before editing this resource.",
+            Some("Coordinate with the reservation owner before editing this resource."),
         ),
         "claim" if status == "active" => (
             CurrentItemKind::Claim,
-            CurrentSeverity::Block,
+            CurrentSeverity::Warn,
             format!("Agent {} holds an active claim on {resource}.", agent_id.unwrap_or("another agent")),
-            "Wait for the active claim to release or coordinate with its owner.",
+            Some("Coordinate with the claim owner before editing this resource."),
         ),
         "wait" if matches!(status, "queued" | "waiting") => (
             CurrentItemKind::WaitQueue,
             CurrentSeverity::Warn,
             format!("Agent {} is queued for {resource}.", agent_id.unwrap_or("another agent")),
-            "Wait for the reservation to become claimable.",
+            Some("Wait for the reservation to become claimable."),
         ),
         "wait" if status == "claimable" => (
             CurrentItemKind::ClaimableReservation,
             CurrentSeverity::Warn,
             format!("Agent {} has a claimable reservation for {resource}.", agent_id.unwrap_or("another agent")),
-            "Claim the granted reservation before it expires.",
+            Some("Claim the granted reservation before it expires."),
         ),
         "write_fence" if status == "active" => (
             CurrentItemKind::Claim,
             CurrentSeverity::Block,
             format!("Agent {} has a write fence on {resource}.", agent_id.unwrap_or("another agent")),
-            "Wait for the write fence to release or coordinate with its owner.",
+            Some("Wait for the write fence to release or coordinate with its owner."),
         ),
-        "human_observation" if status == "pending" => (
+        "human_observation" if status == "pending"
+            && value.get("confidence").and_then(Value::as_str) == Some("high")
+            && matches!(value.get("kind").and_then(Value::as_str), Some("save" | "change" | "delete")) => (
             CurrentItemKind::Claim,
             CurrentSeverity::Block,
             format!("{resource} has an unreconciled human write."),
-            "Reread the resource, summarize the human change, then acknowledge reconciliation.",
+            Some("Reread the resource, summarize the human change, then acknowledge reconciliation."),
+        ),
+        "human_observation" if status == "pending" => (
+            CurrentItemKind::Claim,
+            CurrentSeverity::Warn,
+            format!("Human activity was observed on {resource}."),
+            None,
         ),
         "write_intent" if status == "outcome_unknown" => (
             CurrentItemKind::Claim,
             CurrentSeverity::Block,
             format!("The write outcome for {resource} is unknown."),
-            "Perform a fresh exact read and reconcile the unknown write outcome.",
+            Some("Perform a fresh exact read and reconcile the unknown write outcome."),
         ),
         _ => return None,
     };
@@ -664,8 +785,10 @@ fn item_from_current(
         purpose,
         summary,
     )
-    .with_next_action(next_action)
     .with_workspace(workspace_id);
+    if let Some(next_action) = next_action {
+        item = item.with_next_action(next_action);
+    }
     if let Some(agent_id) = agent_id {
         item = item.with_agent(agent_id);
         if agent_id == target_agent_id
@@ -691,6 +814,18 @@ fn reservation_scope_paths(value: &Value) -> Vec<String> {
                 path.into()
             })
         })
+        .collect()
+}
+
+fn write_intent_target_paths(value: &Value) -> Vec<String> {
+    value
+        .get("targets")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|target| target.get("path").and_then(Value::as_str).map(str::to_owned))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .collect()
 }
 

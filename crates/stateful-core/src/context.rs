@@ -328,15 +328,12 @@ enum ContextStatus {
 }
 
 pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String {
-    let mut output = String::new();
-    let max_total = match mode {
-        RenderMode::Brief => BRIEF_CONTEXT_MAX_ITEMS,
-        RenderMode::Detailed => 20,
-    };
-    let mut rendered = 0usize;
     if matches!(mode, RenderMode::Brief) {
-        render_brief_summary(&mut output, &package.items);
+        return render_brief_prompt(package);
     }
+
+    let mut output = String::new();
+    let mut rendered = 0usize;
 
     let active_scope = package
         .items
@@ -350,7 +347,7 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
         "Your Active Scope",
         &active_scope,
         mode,
-        max_total,
+        20,
         true,
         &mut rendered,
     );
@@ -369,7 +366,7 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
         "Blocking",
         &blocking,
         mode,
-        max_total,
+        20,
         true,
         &mut rendered,
     );
@@ -392,7 +389,7 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
         "Warnings",
         &warnings,
         mode,
-        max_total,
+        20,
         true,
         &mut rendered,
     );
@@ -411,37 +408,146 @@ pub fn render_prompt_text(package: &ContextPackage, mode: RenderMode) -> String 
         "Nearby Activity",
         &nearby,
         mode,
-        max_total,
-        !matches!(mode, RenderMode::Brief),
+        20,
+        true,
         &mut rendered,
     );
 
-    let stale_limit = match mode {
-        RenderMode::Brief => 3,
-        RenderMode::Detailed => 10,
-    };
     let stale = package
         .items
         .iter()
         .filter(|item| {
             item.freshness != CurrentFreshness::Live && !is_current_agent_scope_item(item)
         })
-        .take(stale_limit)
+        .take(10)
         .collect::<Vec<_>>();
     render_section(
         &mut output,
         "Stale/Expired",
         &stale,
         mode,
-        max_total,
-        !matches!(mode, RenderMode::Brief),
+        20,
+        true,
         &mut rendered,
     );
-
-    if matches!(mode, RenderMode::Brief) && output.chars().count() > BRIEF_CONTEXT_MAX_SCALARS {
-        output = output.chars().take(BRIEF_CONTEXT_MAX_SCALARS).collect();
-    }
     output
+}
+
+fn render_brief_prompt(package: &ContextPackage) -> String {
+    let mut output = String::new();
+    render_brief_summary(&mut output, &package.items);
+    let blocking = package
+        .items
+        .iter()
+        .filter(|item| {
+            item.freshness == CurrentFreshness::Live
+                && item.severity == CurrentSeverity::Block
+                && !is_current_agent_scope_item(item)
+        })
+        .collect::<Vec<_>>();
+    let required_actions = required_next_action_text(&blocking);
+    let rendered = render_brief_section(
+        &mut output,
+        "Blocking",
+        &blocking,
+        true,
+        required_actions.chars().count(),
+        0,
+    );
+    append_brief(&mut output, &required_actions);
+
+    let warnings = package
+        .items
+        .iter()
+        .filter(|item| {
+            item.freshness == CurrentFreshness::Live
+                && item.severity == CurrentSeverity::Warn
+                && !is_current_agent_scope_item(item)
+        })
+        .collect::<Vec<_>>();
+    let rendered = render_brief_section(&mut output, "Warnings", &warnings, true, 0, rendered);
+
+    let active_scope = package
+        .items
+        .iter()
+        .filter(|item| {
+            item.freshness == CurrentFreshness::Live && is_current_agent_scope_item(item)
+        })
+        .collect::<Vec<_>>();
+    let rendered = render_brief_section(
+        &mut output,
+        "Your Active Scope",
+        &active_scope,
+        true,
+        0,
+        rendered,
+    );
+
+    let nearby = package
+        .items
+        .iter()
+        .filter(|item| {
+            item.freshness == CurrentFreshness::Live
+                && item.severity == CurrentSeverity::Info
+                && !is_current_agent_scope_item(item)
+        })
+        .collect::<Vec<_>>();
+    let rendered =
+        render_brief_section(&mut output, "Nearby Activity", &nearby, false, 0, rendered);
+
+    let stale = package
+        .items
+        .iter()
+        .filter(|item| {
+            item.freshness != CurrentFreshness::Live && !is_current_agent_scope_item(item)
+        })
+        .take(3)
+        .collect::<Vec<_>>();
+    render_brief_section(&mut output, "Stale/Expired", &stale, false, 0, rendered);
+    output
+}
+
+fn render_brief_section(
+    output: &mut String,
+    title: &str,
+    items: &[&CurrentItem],
+    show_info_purpose: bool,
+    reserve: usize,
+    mut rendered: usize,
+) -> usize {
+    let mut has_title = false;
+    for item in items {
+        if rendered >= BRIEF_CONTEXT_MAX_ITEMS {
+            break;
+        }
+        let item_text = render_item_text(item, show_info_purpose);
+        let title_text = (!has_title).then(|| {
+            if output.is_empty() {
+                format!("{title}\n")
+            } else {
+                format!("\n{title}\n")
+            }
+        });
+        let title_len = title_text.as_deref().map_or(0, |text| text.chars().count());
+        if output.chars().count() + title_len + item_text.chars().count() + reserve
+            > BRIEF_CONTEXT_MAX_SCALARS
+        {
+            continue;
+        }
+        if let Some(title_text) = title_text {
+            output.push_str(&title_text);
+            has_title = true;
+        }
+        output.push_str(&item_text);
+        rendered += 1;
+    }
+    rendered
+}
+
+fn append_brief(output: &mut String, text: &str) {
+    if output.chars().count() + text.chars().count() <= BRIEF_CONTEXT_MAX_SCALARS {
+        output.push_str(text);
+    }
 }
 
 fn render_brief_summary(output: &mut String, items: &[CurrentItem]) {
@@ -489,6 +595,10 @@ fn package_status(items: &[CurrentItem]) -> ContextStatus {
 }
 
 fn render_required_next_action(output: &mut String, items: &[&CurrentItem]) {
+    output.push_str(&required_next_action_text(items));
+}
+
+fn required_next_action_text(items: &[&CurrentItem]) -> String {
     let mut next_actions = Vec::new();
     for item in items {
         let Some(next_action) = item.next_action.as_deref() else {
@@ -500,16 +610,38 @@ fn render_required_next_action(output: &mut String, items: &[&CurrentItem]) {
         }
     }
     if next_actions.is_empty() {
-        return;
+        return String::new();
     }
 
-    if !output.is_empty() {
-        output.push('\n');
-    }
-    output.push_str("Required Next Action\n");
+    let mut output = String::from("\nRequired Next Action\n");
     for next_action in next_actions {
         output.push_str(&format!("- {next_action}\n"));
     }
+    output
+}
+
+fn render_item_text(item: &CurrentItem, show_info_purpose: bool) -> String {
+    let mut output = format!(
+        "- [{}] {}: {}.\n",
+        item.severity.as_str(),
+        item.resource,
+        trim_trailing_period(&item.summary)
+    );
+    if item.severity != CurrentSeverity::Info || show_info_purpose {
+        output.push_str(&format!(
+            "  purpose: {}\n",
+            trim_trailing_period(&item.purpose)
+        ));
+    }
+    if item.severity != CurrentSeverity::Info {
+        if let Some(next_action) = &item.next_action {
+            output.push_str(&format!("  next: {}\n", trim_trailing_period(next_action)));
+        }
+    }
+    if let Some(evidence_kind) = item.evidence_kind {
+        output.push_str(&format!("  evidence kind: {}\n", evidence_kind.as_str()));
+    }
+    output
 }
 
 fn render_section(
