@@ -378,16 +378,25 @@ pub(crate) fn presence_resources_event<T>(
     NewEvent::new(request.request_id, ordinal, now, EventPayload::Presence(PresenceEvent::ResourcesUpdated(data))).map_err(StoreError::from)
 }
 
-pub(crate) fn presence_for_resource_update<T>(
+pub(crate) fn lifecycle_presence_for_resource_update<T>(
     reader: &dyn ProjectionReader,
     request: &RequestEnvelope<T>,
     now: OffsetDateTime,
-) -> StoreResult<PresenceRecord> {
-    let presence = reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?;
-    if let Some(presence) = &presence {
-        crate::handoff::ensure_presence_owner(request, presence)?;
+) -> StoreResult<(Vec<NewEvent>, PresenceRecord)> {
+    let events = crate::handoff::lazy_current_state_events(request, reader, now)?;
+    if let Some(presence) = reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)? {
+        crate::handoff::ensure_presence_owner(request, &presence)?;
+        if presence.expires_at <= now && presence.busy_until.is_none_or(|busy_until| busy_until <= now) {
+            return Ok((events, register_record(request, None, None, now)));
+        }
+        return Ok((events, presence));
     }
-    Ok(presence.unwrap_or_else(|| register_record(request, None, None, now)))
+    if let Some(handoff) = reader.handoff(&request.workspace.workspace_id, &request.agent.agent_id)?
+        && handoff.expires_at > now
+    {
+        crate::handoff::ensure_handoff_owner(request, &handoff)?;
+    }
+    Ok((events, register_record(request, None, None, now)))
 }
 
 pub(crate) fn resource_update_event<T>(

@@ -461,42 +461,44 @@ impl<'a> Projector<'a> {
             "write_fence_current",
         ] {
             let table = format!("{}{}", self.prefix, table);
-            if let Some(actor) = actor {
-                let actor_type = serde_json::to_value(&actor.actor_type)?
-                    .as_str()
-                    .expect("actor type serializes as a string")
-                    .to_owned();
-                self.connection.execute(
-                    &format!(
-                        "DELETE FROM {table}
-                         WHERE workspace_id = ?1
-                           AND json_extract(payload_json, '$.agent_id') = ?2
-                           AND json_extract(payload_json, '$.actor_id') = ?3
-                           AND json_extract(payload_json, '$.actor_type') = ?4
-                           AND json_extract(payload_json, '$.owner_id') IS ?5
-                           AND json_extract(payload_json, '$.parent_agent_id') IS ?6
-                           AND json_extract(payload_json, '$.parent_actor_id') IS ?7"
-                    ),
-                    params![
-                        event.workspace_id,
-                        agent_id,
-                        actor.actor_id,
-                        actor_type,
-                        actor.owner_id,
-                        actor.parent_agent_id,
-                        actor.parent_actor_id,
-                    ],
-                )?;
-            } else {
-                self.connection.execute(
-                    &format!(
-                        "DELETE FROM {table}
-                         WHERE workspace_id = ?1
-                           AND json_extract(payload_json, '$.agent_id') = ?2"
-                    ),
-                    params![event.workspace_id, agent_id],
-                )?;
+            if table == format!("{}write_fence_current", self.prefix) {
+                if let Some(actor) = actor {
+                    let actor_type = serde_json::to_value(&actor.actor_type)?
+                        .as_str()
+                        .expect("actor type serializes as a string")
+                        .to_owned();
+                    self.connection.execute(
+                        &format!(
+                            "DELETE FROM {table}
+                             WHERE workspace_id = ?1
+                               AND json_extract(payload_json, '$.agent_id') = ?2
+                               AND json_extract(payload_json, '$.actor_id') = ?3
+                               AND json_extract(payload_json, '$.actor_type') = ?4
+                               AND json_extract(payload_json, '$.owner_id') IS ?5
+                               AND json_extract(payload_json, '$.parent_agent_id') IS ?6
+                               AND json_extract(payload_json, '$.parent_actor_id') IS ?7"
+                        ),
+                        params![
+                            event.workspace_id,
+                            agent_id,
+                            actor.actor_id,
+                            actor_type,
+                            actor.owner_id,
+                            actor.parent_agent_id,
+                            actor.parent_actor_id,
+                        ],
+                    )?;
+                    continue;
+                }
             }
+            self.connection.execute(
+                &format!(
+                    "DELETE FROM {table}
+                     WHERE workspace_id = ?1
+                       AND json_extract(payload_json, '$.agent_id') = ?2"
+                ),
+                params![event.workspace_id, agent_id],
+            )?;
         }
         Ok(())
     }

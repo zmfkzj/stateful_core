@@ -1,7 +1,7 @@
 use crate::{
     CommandOutcome, CommandPlan, CurrentAggregate, Store, StoreError, StoreResult,
     observations::read_event,
-    presence::{presence_for_resource_update, resource_update_event, tool_completed_event},
+    presence::{lifecycle_presence_for_resource_update, resource_update_event, tool_completed_event},
     reservations::{expired, normalized_scope, record_from_current, scopes_conflict, timestamp, typed_records},
     write_fences::{WriteFenceRecord, fence_event},
 };
@@ -46,14 +46,14 @@ impl Store {
         request: &RequestEnvelope<T>,
         payload: WriteIntentStart,
         decision: Decision,
-        authorized_workspace_version: u64,
+        authorized_journal_sequence: u64,
     ) -> StoreResult<CommandOutcome<WriteIntentStartResult>> {
         self.start_write_intent_for(
             request,
             payload,
             "server.authorize",
             Some(decision),
-            Some(authorized_workspace_version),
+            Some(authorized_journal_sequence),
         )
     }
 
@@ -63,15 +63,15 @@ impl Store {
         payload: WriteIntentStart,
         route_kind: &'static str,
         decision: Option<Decision>,
-        authorized_workspace_version: Option<u64>,
+        authorized_journal_sequence: Option<u64>,
     ) -> StoreResult<CommandOutcome<WriteIntentStartResult>> {
         let now = self.clock.now();
         self.execute_command(request, route_kind, |reader| {
             if payload.operation_id.trim().is_empty() || payload.action.trim().is_empty() {
                 return Err(StoreError::InvalidWriteIntent);
             }
-            if let Some(version) = authorized_workspace_version
-                && reader.workspace_version(&request.workspace.workspace_id)? != version
+            if let Some(sequence) = authorized_journal_sequence
+                && reader.workspace_journal_sequence(&request.workspace.workspace_id)? != sequence
             {
                 return Err(StoreError::StaleAuthorization);
             }
@@ -151,7 +151,8 @@ impl Store {
                 failure_code: None,
                 origin_event_seq: 0,
             };
-            let mut events = Vec::new();
+            let (mut events, mut presence) =
+                lifecycle_presence_for_resource_update(reader, request, now)?;
             if decision.as_ref().is_some_and(|decision| decision.decision == DecisionKind::Warn) {
                 events.push(authorization_warned_event(
                     request,
@@ -169,7 +170,6 @@ impl Store {
                 &intent,
                 &[],
             )?);
-            let mut presence = presence_for_resource_update(reader, request, now)?;
             for target in &intent.targets {
                 events.push(resource_update_event(
                     reader,
@@ -230,6 +230,9 @@ impl Store {
                     )?);
                 }
                 WriteIntentOutcome::Committed => {
+                    let (lifecycle_events, mut presence) =
+                        lifecycle_presence_for_resource_update(reader, request, now)?;
+                    events.extend(lifecycle_events);
                     let posts = post_fingerprints(&intent.targets, payload.post_fingerprints)?;
                     completed.status = WriteIntentStatus::Committed;
                     let versions = next_resource_versions(reader, request, &intent, &posts)?;
@@ -248,7 +251,6 @@ impl Store {
                         &intent.targets,
                         &mut events,
                     )?;
-                    let mut presence = presence_for_resource_update(reader, request, now)?;
                     for target in &intent.targets {
                         events.push(resource_update_event(
                             reader,
@@ -370,15 +372,19 @@ impl Store {
             let mut reconciled = intent.clone();
             reconciled.status = WriteIntentStatus::Reconciled;
             reconciled.completed_at = Some(now);
-            let mut events = vec![intent_event(
-                request,
-                0,
-                now,
-                WriteIntentEvent::Reconciled,
-                &reconciled,
-                &versions,
-            )?];
+            let mut events = Vec::new();
             if !unchanged {
+                let (lifecycle_events, mut presence) =
+                    lifecycle_presence_for_resource_update(reader, request, now)?;
+                events.extend(lifecycle_events);
+                events.push(intent_event(
+                    request,
+                    events.len() as u32,
+                    now,
+                    WriteIntentEvent::Reconciled,
+                    &reconciled,
+                    &versions,
+                )?);
                 for version in &versions {
                     let mut observation = rereads
                         .remove(&version.path)
@@ -399,7 +405,6 @@ impl Store {
                     &intent.targets,
                     &mut events,
                 )?;
-                let mut presence = presence_for_resource_update(reader, request, now)?;
                 for target in &intent.targets {
                     events.push(resource_update_event(
                         reader,
@@ -411,6 +416,15 @@ impl Store {
                         PresenceResourceRelation::Changed,
                     )?);
                 }
+            } else {
+                events.push(intent_event(
+                    request,
+                    0,
+                    now,
+                    WriteIntentEvent::Reconciled,
+                    &reconciled,
+                    &versions,
+                )?);
             }
             append_fence_releases(request, reader, now, &intent, &mut events)?;
             Ok(CommandPlan { events, response: reconciled, http_status: 200 })
@@ -595,6 +609,15 @@ fn append_fence_releases<T>(
         &request.workspace.workspace_id,
     )?;
     for fence_id in &intent.fence_ids {
+        if events.iter().any(|event| {
+            matches!(
+                &event.payload,
+                EventPayload::WriteFence(WriteFenceEvent::Released(data))
+                    if data.aggregate_id == fence_id.as_str()
+            )
+        }) {
+            continue;
+        }
         let mut fence = fences.iter().find(|fence| fence.fence_id == *fence_id)
             .cloned().ok_or(StoreError::WriteIntentNotFound)?;
         if fence.status == "active" {

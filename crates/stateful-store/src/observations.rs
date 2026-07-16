@@ -1,7 +1,7 @@
 use crate::{
     CommandOutcome, CommandPlan, CurrentAggregate, Store, StoreError, StoreResult,
     reservations::{normalized_scope, record_from_current, typed_records},
-    presence::{presence_for_resource_update, resource_update_event},
+    presence::{lifecycle_presence_for_resource_update, resource_update_event},
 };
 use serde_json::json;
 use stateful_core::{
@@ -115,9 +115,18 @@ impl Store {
                 ReadObservationStatus::Unstable => ReadObservationEvent::Unstable,
                 _ => return Err(StoreError::InvalidReadOperation),
             };
-            let mut events = vec![read_event(request, 0, now, variant, &record)?];
+            let mut events = Vec::new();
             if status == ReadObservationStatus::Stabilized {
-                let mut presence = presence_for_resource_update(reader, request, now)?;
+                let (lifecycle_events, mut presence) =
+                    lifecycle_presence_for_resource_update(reader, request, now)?;
+                events.extend(lifecycle_events);
+                events.push(read_event(
+                    request,
+                    events.len() as u32,
+                    now,
+                    variant,
+                    &record,
+                )?);
                 events.push(resource_update_event(
                     reader,
                     request,
@@ -127,6 +136,8 @@ impl Store {
                     &record.path,
                     PresenceResourceRelation::Read,
                 )?);
+            } else {
+                events.push(read_event(request, 0, now, variant, &record)?);
             }
             Ok(CommandPlan {
                 events,

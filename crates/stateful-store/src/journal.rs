@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 pub trait ProjectionReader {
     fn workspace_version(&self, workspace_id: &str) -> StoreResult<u64>;
+    fn workspace_journal_sequence(&self, workspace_id: &str) -> StoreResult<u64>;
     fn context_cursor(&self, workspace_id: &str, agent_id: &str) -> StoreResult<u64>;
     fn context_changes(
         &self,
@@ -201,6 +202,16 @@ impl ProjectionReader for SqlProjectionReader<'_> {
             )
             .optional()
             .map(|value: Option<u64>| value.unwrap_or(0))
+            .map_err(StoreError::from)
+    }
+
+    fn workspace_journal_sequence(&self, workspace_id: &str) -> StoreResult<u64> {
+        self.transaction
+            .query_row(
+                "SELECT COALESCE(MAX(event_seq), 0) FROM journal_events WHERE workspace_id = ?1",
+                [workspace_id],
+                |row| row.get(0),
+            )
             .map_err(StoreError::from)
     }
 
@@ -528,6 +539,16 @@ impl Store {
 
     pub fn workspace_version(&self, workspace_id: &str) -> StoreResult<u64> {
         self.conn.query_row("SELECT version FROM workspace_version WHERE workspace_id = ?1", [workspace_id], |row| row.get(0)).optional().map(|value: Option<u64>| value.unwrap_or(0)).map_err(StoreError::from)
+    }
+
+    pub fn workspace_journal_sequence(&self, workspace_id: &str) -> StoreResult<u64> {
+        self.conn
+            .query_row(
+                "SELECT COALESCE(MAX(event_seq), 0) FROM journal_events WHERE workspace_id = ?1",
+                [workspace_id],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::from)
     }
 
     #[doc(hidden)]

@@ -1327,3 +1327,114 @@ fn existing_presence_rejects_same_agent_different_actor_read_and_write_lifecycle
     assert!(matches!(error, stateful_store::StoreError::ReservationOwnerMismatch));
     assert_eq!(store.journal_event_count().expect("journal count loads"), journal_count);
 }
+
+#[test]
+fn non_context_heartbeat_invalidates_authorization_journal_sequence() {
+    let temporary = tempfile::tempdir().expect("temporary database directory creates");
+    let database = temporary.path().join("authorization-sequence.sqlite");
+    let mut first = Store::open_with_clock(&database, FixedClock::new(NOW)).expect("first store opens");
+    first
+        .register_presence(&request(
+            "agent-1",
+            PresenceRegistration {
+                first_prompt: None,
+            },
+        ))
+        .expect("presence registers");
+    let mut second = Store::open_with_clock(&database, FixedClock::new(NOW)).expect("second store opens");
+    let sequence = first
+        .workspace_journal_sequence("workspace-1")
+        .expect("authorization sequence loads");
+    second
+        .heartbeat_presence(&request("agent-1", ()))
+        .expect("non-context heartbeat journals");
+    let before = first.journal_event_count().expect("journal count loads");
+
+    let error = first
+        .start_write_intent_authorized(
+            &request("agent-1", ()),
+            WriteIntentStart {
+                operation_id: "write-authorization-sequence".into(),
+                action: "write_file".into(),
+                targets: vec![WriteTarget {
+                    path: "src/authorization-sequence.rs".into(),
+                    before: fingerprint(b"before"),
+                }],
+            },
+            Decision::allow("authorized", "Action is authorized."),
+            sequence,
+        )
+        .expect_err("heartbeat interleaving must stale the authorization");
+    assert!(matches!(error, stateful_store::StoreError::StaleAuthorization));
+    assert_eq!(first.journal_event_count().expect("journal count loads"), before);
+    assert_eq!(first.command_receipt_count().expect("receipt count loads"), 2);
+    assert!(first
+        .active_write_intent("workspace-1", "src/authorization-sequence.rs")
+        .expect("intent query succeeds")
+        .is_none());
+    assert!(first
+        .active_write_fence("workspace-1", "src/authorization-sequence.rs")
+        .expect("fence query succeeds")
+        .is_none());
+}
+
+#[test]
+fn retained_handoff_blocks_other_actor_implicit_read_and_write_presence() {
+    let mut store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    store
+        .register_presence(&request(
+            "agent-1",
+            PresenceRegistration {
+                first_prompt: None,
+            },
+        ))
+        .expect("presence registers");
+    store
+        .stop_presence(&request("agent-1", ()))
+        .expect("owner stops presence");
+    let content = fingerprint(b"content");
+    store
+        .start_read_observation(&request_as(
+            "agent-1",
+            "actor-other",
+            ReadObservationStart {
+                operation_id: "retained-handoff-read".into(),
+                path: "src/retained.rs".into(),
+                before: content.clone(),
+            },
+        ))
+        .expect("read start journals");
+    let before = store.journal_event_count().expect("journal count loads");
+    let error = store
+        .complete_read_observation(&request_as(
+            "agent-1",
+            "actor-other",
+            ReadCompletion {
+                operation_id: "retained-handoff-read".into(),
+                path: "src/retained.rs".into(),
+                classification: ReadClassification::Exact,
+                after: Some(content.clone()),
+                semantic_marker: None,
+            },
+        ))
+        .expect_err("retained handoff must reject another actor's read lifecycle");
+    assert!(matches!(error, stateful_store::StoreError::ReservationOwnerMismatch));
+    assert_eq!(store.journal_event_count().expect("journal count loads"), before);
+
+    let error = store
+        .start_write_intent(&request_as(
+            "agent-1",
+            "actor-other",
+            WriteIntentStart {
+                operation_id: "retained-handoff-write".into(),
+                action: "write_file".into(),
+                targets: vec![WriteTarget {
+                    path: "src/retained.rs".into(),
+                    before: content,
+                }],
+            },
+        ))
+        .expect_err("retained handoff must reject another actor's write lifecycle");
+    assert!(matches!(error, stateful_store::StoreError::ReservationOwnerMismatch));
+    assert_eq!(store.journal_event_count().expect("journal count loads"), before);
+}
