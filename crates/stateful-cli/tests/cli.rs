@@ -1341,7 +1341,7 @@ fn reservation_request_command_parses_request_id_action_and_path() {
 }
 
 #[test]
-fn reservation_cancel_command_parses_request_id() {
+fn reservation_cancel_command_parses_wait_id() {
     let cli = Cli::try_parse_from([
         "stateful",
         "reservation",
@@ -1350,8 +1350,8 @@ fn reservation_cancel_command_parses_request_id() {
         "s1",
         "--workspace-id",
         "w1",
-        "--request-id",
-        "request-1",
+        "--wait-id",
+        "wait-1",
     ])
     .expect("reservation cancel command should parse");
 
@@ -1360,10 +1360,10 @@ fn reservation_cancel_command_parses_request_id() {
         Command::Reservation(stateful_cli::ReservationCommand::Cancel {
             ref agent_id,
             ref workspace_id,
-            ref request_id,
+            ref wait_id,
         }) if agent_id.as_deref() == Some("s1")
             && workspace_id.as_deref() == Some("w1")
-            && request_id == "request-1"
+            && wait_id == "wait-1"
     ));
 }
 

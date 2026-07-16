@@ -14,8 +14,8 @@ use crate::global_paths::GlobalPaths;
 use crate::repo_registry::RepoIdentity;
 use serde::{Deserialize, Serialize};
 use stateful_core::{
-    ActorType, AgentIdentity, ProtocolVersion, QueryEnvelope, RequestEnvelope, SourceKind,
-    SourceRef, V2ErrorEnvelope, WorkspaceIdentity,
+    ActorType, AgentIdentity, ProtocolVersion, QueryEnvelope, RequestEnvelope, ReservationScope,
+    SourceKind, SourceRef, V2ErrorEnvelope, WorkspaceIdentity,
 };
 
 const REQUIRED_RUNTIME_CAPABILITIES: &[&str] = &["presence"];
@@ -23,6 +23,7 @@ static SECRET_JSON_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReservationDeclareArgs {
+    pub request_id: uuid::Uuid,
     pub agent_id: String,
     pub workspace_id: String,
     pub purpose: String,
@@ -32,6 +33,7 @@ pub struct ReservationDeclareArgs {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReservationClaimArgs {
+    pub request_id: uuid::Uuid,
     pub agent_id: String,
     pub workspace_id: String,
     pub wait_id: String,
@@ -41,9 +43,9 @@ pub struct ReservationClaimArgs {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReservationRequestArgs {
+    pub request_id: uuid::Uuid,
     pub agent_id: String,
     pub workspace_id: String,
-    pub request_id: String,
     pub reservation_id: Option<String>,
     pub action: String,
     pub path: String,
@@ -53,9 +55,10 @@ pub struct ReservationRequestArgs {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReservationCancelArgs {
+    pub request_id: uuid::Uuid,
     pub agent_id: String,
     pub workspace_id: String,
-    pub request_id: String,
+    pub wait_id: String,
     pub identity: Option<RepoIdentity>,
 }
 
@@ -65,6 +68,8 @@ pub struct ServerRuntime {
     pub token: String,
     pub pid: u32,
     pub workspace_id: String,
+    #[serde(default = "default_coordination_mode")]
+    pub coordination_mode: String,
     pub protocol_version: String,
     pub started_at: String,
 }
@@ -84,6 +89,10 @@ impl AgentContext {
     }
 }
 
+fn default_coordination_mode() -> String {
+    "awareness".to_string()
+}
+
 impl ServerRuntime {
     pub fn new(
         base_url: impl Into<String>,
@@ -96,6 +105,7 @@ impl ServerRuntime {
             token: token.into(),
             pid,
             workspace_id: workspace_id.into(),
+            coordination_mode: default_coordination_mode(),
             protocol_version: "stateful.v2".to_string(),
             started_at: "2026-05-31T00:00:00Z".to_string(),
         }
@@ -113,6 +123,8 @@ pub struct RuntimeStatus {
     pub protocol_version: String,
     pub journal_schema_version: u64,
     pub coordination_mode: String,
+    pub workspace_id: String,
+    pub workspace_version: u64,
     pub capabilities: Vec<String>,
 }
 
@@ -546,38 +558,49 @@ fn decode_v2_response(response: HttpResponse, request_id: uuid::Uuid) -> anyhow:
     )
 }
 
+fn reservation_scope_for_planned_path(path: String) -> ReservationScope {
+    if path.ends_with('/') || path.ends_with('\\') {
+        ReservationScope::directory(path)
+    } else {
+        ReservationScope::file(path)
+    }
+}
+
 pub fn declare_reservation_via_http(
     runtime: &ServerRuntime,
     args: ReservationDeclareArgs,
 ) -> anyhow::Result<HttpResponse> {
     let ReservationDeclareArgs {
+        request_id,
         agent_id,
         workspace_id,
         purpose,
         files_planned,
         identity,
     } = args;
-    let mut response = None;
-    for relative_path in files_planned {
-        let request = v2_request_envelope(
-            uuid::Uuid::new_v4(),
-            agent_id.clone(),
-            workspace_id.clone(),
-            identity.clone(),
-            ActorType::Agent,
-            SourceKind::Cli,
-            "reservation_declare",
-            "stateful-cli",
-            None,
-            serde_json::json!({
-                "relative_path": relative_path,
-                "action": "write",
-                "purpose": purpose,
-            }),
-        )?;
-        response = Some(post_v2(runtime, "/v2/reservation/declare", &request)?);
+    if files_planned.is_empty() {
+        anyhow::bail!("at least one planned file is required");
     }
-    response.ok_or_else(|| anyhow::anyhow!("at least one planned file is required"))
+    let request = v2_request_envelope(
+        request_id,
+        agent_id,
+        workspace_id,
+        identity,
+        ActorType::Agent,
+        SourceKind::Cli,
+        "reservation_declare",
+        "stateful-cli",
+        None,
+        serde_json::json!({
+            "scopes": files_planned
+                .into_iter()
+                .map(reservation_scope_for_planned_path)
+                .collect::<Vec<_>>(),
+            "action": "write",
+            "purpose": purpose,
+        }),
+    )?;
+    post_v2(runtime, "/v2/reservation/declare", &request)
 }
 
 pub fn claim_reservation_via_http(
@@ -585,7 +608,7 @@ pub fn claim_reservation_via_http(
     args: ReservationClaimArgs,
 ) -> anyhow::Result<()> {
     let request = v2_request_envelope(
-        uuid::Uuid::new_v4(),
+        args.request_id,
         args.agent_id,
         args.workspace_id,
         args.identity,
@@ -605,7 +628,7 @@ pub fn request_reservation_via_http(
     args: ReservationRequestArgs,
 ) -> anyhow::Result<HttpResponse> {
     let request = v2_request_envelope(
-        uuid::Uuid::new_v4(),
+        args.request_id,
         args.agent_id,
         args.workspace_id,
         args.identity,
@@ -629,7 +652,7 @@ pub fn cancel_reservation_via_http(
     args: ReservationCancelArgs,
 ) -> anyhow::Result<()> {
     let request = v2_request_envelope(
-        uuid::Uuid::new_v4(),
+        args.request_id,
         args.agent_id,
         args.workspace_id,
         args.identity,
@@ -638,7 +661,7 @@ pub fn cancel_reservation_via_http(
         "reservation_cancel",
         "stateful-cli",
         None,
-        serde_json::json!({ "wait_id": args.request_id }),
+        serde_json::json!({ "wait_id": args.wait_id }),
     )?;
     post_v2(runtime, "/v2/reservation/cancel", &request)?;
     Ok(())
@@ -651,6 +674,7 @@ pub fn reservation_declare_protocol_body(
     source_ref: &str,
 ) -> serde_json::Value {
     let ReservationDeclareArgs {
+        request_id,
         agent_id,
         workspace_id,
         purpose,
@@ -659,7 +683,7 @@ pub fn reservation_declare_protocol_body(
     } = args;
     protocol_envelope(ProtocolEnvelopeArgs {
         runtime,
-        request_id: uuid::Uuid::new_v4().to_string(),
+        request_id: request_id.to_string(),
         agent_id,
         workspace_id,
         identity,
@@ -668,8 +692,12 @@ pub fn reservation_declare_protocol_body(
         source_ref,
         source_tool_name: None,
         payload: serde_json::json!({
+            "scopes": files_planned
+                .into_iter()
+                .map(reservation_scope_for_planned_path)
+                .collect::<Vec<_>>(),
+            "action": "write",
             "purpose": purpose,
-            "files_planned": files_planned
         }),
     })
 }
@@ -681,6 +709,7 @@ pub fn reservation_claim_protocol_body(
     source_ref: &str,
 ) -> serde_json::Value {
     let ReservationClaimArgs {
+        request_id,
         agent_id,
         workspace_id,
         wait_id,
@@ -695,7 +724,7 @@ pub fn reservation_claim_protocol_body(
     }
     protocol_envelope(ProtocolEnvelopeArgs {
         runtime,
-        request_id: uuid::Uuid::new_v4().to_string(),
+        request_id: request_id.to_string(),
         agent_id,
         workspace_id,
         identity,
@@ -714,9 +743,9 @@ pub fn reservation_request_protocol_body(
     source_ref: &str,
 ) -> serde_json::Value {
     let ReservationRequestArgs {
+        request_id,
         agent_id,
         workspace_id,
-        request_id,
         reservation_id,
         action,
         path,
@@ -724,7 +753,6 @@ pub fn reservation_request_protocol_body(
         identity,
     } = args;
     let mut payload = serde_json::json!({
-        "request_id": request_id,
         "action": action,
         "path": path,
         "purpose": purpose
@@ -734,7 +762,7 @@ pub fn reservation_request_protocol_body(
     }
     protocol_envelope(ProtocolEnvelopeArgs {
         runtime,
-        request_id: uuid::Uuid::new_v4().to_string(),
+        request_id: request_id.to_string(),
         agent_id,
         workspace_id,
         identity,
@@ -753,14 +781,15 @@ pub fn reservation_cancel_protocol_body(
     source_ref: &str,
 ) -> serde_json::Value {
     let ReservationCancelArgs {
+        request_id,
         agent_id,
         workspace_id,
-        request_id,
+        wait_id,
         identity,
     } = args;
     protocol_envelope(ProtocolEnvelopeArgs {
         runtime,
-        request_id: uuid::Uuid::new_v4().to_string(),
+        request_id: request_id.to_string(),
         agent_id,
         workspace_id,
         identity,
@@ -769,7 +798,7 @@ pub fn reservation_cancel_protocol_body(
         source_ref,
         source_tool_name: None,
         payload: serde_json::json!({
-            "request_id": request_id
+            "wait_id": wait_id
         }),
     })
 }
@@ -809,7 +838,8 @@ pub fn protocol_envelope(args: ProtocolEnvelopeArgs<'_>) -> serde_json::Value {
     };
 
     let request = v2_request_envelope(
-        uuid::Uuid::parse_str(&request_id).unwrap_or_else(|_| uuid::Uuid::new_v4()),
+        uuid::Uuid::parse_str(&request_id)
+            .expect("protocol envelope request ID must be a UUID"),
         agent_id,
         workspace_id,
         identity,
@@ -862,6 +892,8 @@ pub fn runtime_status(runtime: &ServerRuntime) -> anyhow::Result<RuntimeStatus> 
         protocol_version: identity.protocol_version,
         journal_schema_version: identity.journal_schema_version,
         coordination_mode: identity.coordination_mode,
+        workspace_id: identity.workspace_id,
+        workspace_version: identity.workspace_version,
         capabilities: identity.capabilities,
     })
 }
@@ -1009,6 +1041,10 @@ struct RuntimeIdentity {
     protocol_version: String,
     journal_schema_version: u64,
     coordination_mode: String,
+    #[serde(default)]
+    workspace_id: String,
+    #[serde(default)]
+    workspace_version: u64,
     #[serde(default)]
     capabilities: Vec<String>,
 }

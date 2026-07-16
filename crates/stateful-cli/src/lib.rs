@@ -389,7 +389,7 @@ pub enum ReservationCommand {
         #[arg(long = "workspace-id")]
         workspace_id: Option<String>,
         #[arg(long)]
-        request_id: String,
+        wait_id: String,
     },
 }
 
@@ -629,12 +629,15 @@ pub fn run() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::Current => {
-            let (_repo_root, runtime) = discover_runtime_for_current_dir()?;
+            let (repo_root, runtime) = discover_runtime_for_current_dir()?;
+            let identity = GlobalPaths::from_env()
+                .ok()
+                .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok());
             let request = v2_query_for_runtime(
                 uuid::Uuid::new_v4(),
                 "stateful-cli".to_string(),
                 runtime.workspace_id.clone(),
-                None,
+                identity,
                 SourceKind::Cli,
                 "current",
                 "stateful-cli",
@@ -644,12 +647,15 @@ pub fn run() -> anyhow::Result<()> {
             print_http_response(get_v2(&runtime, "/v2/current", &request)?)?;
         }
         Command::Events => {
-            let (_repo_root, runtime) = discover_runtime_for_current_dir()?;
+            let (repo_root, runtime) = discover_runtime_for_current_dir()?;
+            let identity = GlobalPaths::from_env()
+                .ok()
+                .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok());
             let request = v2_query_for_runtime(
                 uuid::Uuid::new_v4(),
                 "stateful-cli".to_string(),
                 runtime.workspace_id.clone(),
-                None,
+                identity,
                 SourceKind::Cli,
                 "events",
                 "stateful-cli",
@@ -922,6 +928,7 @@ pub fn run() -> anyhow::Result<()> {
             let response = declare_reservation_via_http(
                 &runtime,
                 ReservationDeclareArgs {
+                    request_id: uuid::Uuid::new_v4(),
                     agent_id,
                     workspace_id,
                     purpose,
@@ -948,9 +955,9 @@ pub fn run() -> anyhow::Result<()> {
             let response = request_reservation_via_http(
                 &runtime,
                 ReservationRequestArgs {
+                    request_id: uuid::Uuid::parse_str(&request_id)?,
                     agent_id,
                     workspace_id,
-                    request_id,
                     reservation_id,
                     action,
                     path,
@@ -974,6 +981,7 @@ pub fn run() -> anyhow::Result<()> {
             claim_reservation_via_http(
                 &runtime,
                 ReservationClaimArgs {
+                    request_id: uuid::Uuid::new_v4(),
                     agent_id,
                     workspace_id,
                     wait_id,
@@ -988,7 +996,7 @@ pub fn run() -> anyhow::Result<()> {
         Command::Reservation(ReservationCommand::Cancel {
             agent_id,
             workspace_id,
-            request_id,
+            wait_id,
         }) => {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
             let (agent_id, workspace_id) =
@@ -996,9 +1004,10 @@ pub fn run() -> anyhow::Result<()> {
             cancel_reservation_via_http(
                 &runtime,
                 ReservationCancelArgs {
+                    request_id: uuid::Uuid::new_v4(),
                     agent_id,
                     workspace_id,
-                    request_id,
+                    wait_id,
                     identity: GlobalPaths::from_env()
                         .ok()
                         .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok()),
@@ -1183,7 +1192,8 @@ fn run_server(
         workspace_id: workspace_id.clone(),
         coordination_mode: coordination_mode.clone(),
     };
-    let runtime = ServerRuntime::new(&base_url, &token, workspace_id, std::process::id());
+    let mut runtime = ServerRuntime::new(&base_url, &token, workspace_id, std::process::id());
+    runtime.coordination_mode = coordination_mode.clone();
     let store = stateful_store::Store::open(global_state_db_path(&paths))?;
 
     let addr: SocketAddr = format!("{host}:{port}").parse()?;

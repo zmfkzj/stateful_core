@@ -340,6 +340,22 @@ fn restart_refuses_joined_pid_zero_runtime_without_identity_probe() {
     assert_eq!(preserved.base_url, runtime.base_url);
 }
 
+#[test]
+fn restart_refuses_unsupported_runtime_schemes_before_pid_evaluation() {
+    let home = temp_home("stateful-server-restart-unsupported-scheme");
+    let paths = GlobalPaths::new(&home);
+    let runtime = ServerRuntime::new("https://127.0.0.1:43873", "token", "w1", 0);
+    stateful_cli::write_global_runtime_file(&paths, &runtime).expect("runtime should write");
+
+    let error = restart_server(&paths).expect_err("unsupported runtime scheme must not restart");
+
+    assert!(
+        error.to_string().contains("only http://"),
+        "unexpected error: {error}"
+    );
+    assert!(paths.server_json.is_file());
+}
+
 
 #[test]
 fn ensure_server_with_options_rejects_healthy_runtime_on_different_port() {
@@ -377,8 +393,11 @@ fn ensure_server_with_options_rejects_healthy_runtime_on_different_port() {
 }
 
 #[test]
-fn server_start_options_from_runtime_preserves_previous_start_options() {
-    let runtime = ServerRuntime::new("http://0.0.0.0:43874", "secret-token", "shared", 123);
+fn server_start_options_from_runtime_preserves_exact_previous_start_options() {
+    let runtime: ServerRuntime = serde_json::from_str(
+        r#"{"base_url":"http://0.0.0.0:43874","token":"secret-token","pid":123,"workspace_id":"shared","protocol_version":"stateful.v2","started_at":"2026-05-31T00:00:00Z","coordination_mode":"enforcement"}"#,
+    )
+    .expect("runtime should deserialize");
 
     let options =
         server_start_options_from_runtime(&runtime).expect("runtime options should parse");
@@ -390,7 +409,7 @@ fn server_start_options_from_runtime_preserves_previous_start_options() {
             port: 43874,
             token: Some("secret-token".to_string()),
             workspace_id: "shared".to_string(),
-            coordination_mode: "awareness".to_string(),
+            coordination_mode: "enforcement".to_string(),
         }
     );
 }

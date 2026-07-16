@@ -5,6 +5,7 @@ use std::{
     process::Command,
     sync::mpsc,
     thread,
+    time::Duration,
 };
 
 #[cfg(unix)]
@@ -13,11 +14,11 @@ use std::os::unix::fs::PermissionsExt;
 use stateful_cli::{
     GlobalPaths, ReservationCancelArgs, ReservationClaimArgs, ReservationDeclareArgs,
     ReservationRequestArgs, ServerRuntime, cancel_reservation_via_http, claim_reservation_via_http,
-    declare_reservation_via_http, discover_runtime, discover_runtime_with_global, get_json,
-    global_state_db_path, post_json, request_reservation_via_http, runtime_has_required_identity,
-    state_db_path, validate_agent_id, write_global_runtime_file, write_runtime_file,
+    declare_reservation_via_http, discover_runtime, discover_runtime_with_global, enable_repo,
+    get_json, global_state_db_path, post_json, repo_identity_for_enabled_repo,
+    request_reservation_via_http, runtime_has_required_identity, runtime_status, state_db_path,
+    validate_agent_id, write_global_runtime_file, write_runtime_file,
 };
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 #[test]
 fn validate_agent_id_accepts_safe_agent_identifiers() {
@@ -98,36 +99,86 @@ fn runtime_discovery_keeps_local_runtime_compatibility_fallback() {
 }
 
 #[test]
-fn cli_current_uses_local_runtime_when_global_paths_are_unavailable() {
+fn cli_current_and_events_serialize_enabled_repo_identity() {
     let temp = tempfile::tempdir().expect("temp dir should create");
     let temp_root = temp.path();
-    fs::create_dir_all(temp_root.join(".git")).expect("git marker should write");
+    Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(temp_root)
+        .status()
+        .expect("git init should run")
+        .success()
+        .then_some(())
+        .expect("git init should succeed");
+    Command::new("git")
+        .args(["checkout", "--orphan", "task9-identity"])
+        .current_dir(temp_root)
+        .status()
+        .expect("git checkout should run")
+        .success()
+        .then_some(())
+        .expect("git checkout should succeed");
+
+    let paths = GlobalPaths::new(temp_root.join("stateful-home"));
+    enable_repo(&paths, temp_root).expect("repo should enable");
+    let identity =
+        repo_identity_for_enabled_repo(&paths, temp_root).expect("enabled identity should load");
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
+    let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("connection should arrive");
-        let request = read_http_request_without_body(&mut stream);
-        assert!(request.contains("GET /v2/current?"));
-        write_http_response(&mut stream, r#"{"presence":null,"resources":[]}"#);
+        for response in [r#"{"presence":null,"resources":[]}"#, r#"{"events":[]}"#] {
+            let (mut stream, _) = listener.accept().expect("connection should arrive");
+            tx.send(read_http_request_without_body(&mut stream))
+                .expect("request should send");
+            write_http_response(&mut stream, response);
+        }
     });
-
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
-    write_runtime_file(temp_root, &runtime).expect("runtime file should write");
+    write_global_runtime_file(&paths, &runtime).expect("runtime should write");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
-        .arg("current")
-        .current_dir(temp_root)
-        .env_clear()
-        .output()
-        .expect("stateful current should run");
+    for command in ["current", "events"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_stateful"))
+            .arg(command)
+            .current_dir(temp_root)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").expect("PATH should be set"))
+            .env("STATEFUL_HOME", &paths.home)
+            .output()
+            .expect("stateful query should run");
+        assert!(
+            output.status.success(),
+            "stateful {command} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
-    assert!(
-        output.status.success(),
-        "stateful current failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("\"resources\":[]"));
+    for (request, route) in [
+        (
+            rx.recv_timeout(Duration::from_secs(1))
+                .expect("current request should arrive"),
+            "/v2/current?",
+        ),
+        (
+            rx.recv_timeout(Duration::from_secs(1))
+                .expect("events request should arrive"),
+            "/v2/events?",
+        ),
+    ] {
+        assert!(request.contains(route), "request: {request}");
+        for identity_field in [
+            format!("repo_id={}", identity.repo_id),
+            format!("worktree_id={}", identity.worktree_id),
+            format!("root={}", identity.root.replace('/', "%2F")),
+            format!("branch={}", identity.branch),
+        ] {
+            assert!(
+                request.contains(&identity_field),
+                "missing {identity_field} from {request}"
+            );
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -172,6 +223,32 @@ fn remote_runtime_with_pid_zero_accepts_matching_identity_capabilities() {
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "shared", 0);
 
     assert!(stateful_cli::runtime_has_required_identity(&runtime));
+}
+
+#[test]
+fn runtime_status_includes_server_workspace_identity_and_version() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener addr should load");
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("connection should arrive");
+        let request = read_http_request_without_body(&mut stream);
+        assert!(request.contains("GET /v2/runtime/identity?"));
+        write_http_response(
+            &mut stream,
+            r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"enforcement","workspace_id":"server-workspace","workspace_version":17,"capabilities":["presence"]}"#,
+        );
+    });
+
+    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
+    let status = serde_json::to_value(runtime_status(&runtime).expect("status should load"))
+        .expect("status should serialize");
+
+    assert_eq!(status["protocol_version"], "stateful.v2");
+    assert_eq!(status["journal_schema_version"], 2);
+    assert_eq!(status["coordination_mode"], "enforcement");
+    assert_eq!(status["workspace_id"], "server-workspace");
+    assert_eq!(status["workspace_version"], 17);
+    assert_eq!(status["capabilities"], serde_json::json!(["presence"]));
 }
 
 #[test]
@@ -377,70 +454,69 @@ fn get_json_sends_bearer_token_without_body() {
 }
 
 #[test]
-fn declare_reservation_via_http_posts_expected_payload() {
+fn declare_reservation_via_http_posts_one_task_envelope_and_returns_its_identity() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
     let (tx, rx) = mpsc::channel();
 
     thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("handshake connection should arrive");
-        let handshake = read_http_request_without_body(&mut stream);
-        assert!(handshake.contains("GET /v2/runtime/identity?"));
-        write_v2_runtime_identity(&mut stream);
-        let (mut stream, _) = listener.accept().expect("connection should arrive");
-        let request = read_http_request(&mut stream);
-        tx.send(request).expect("request should send to test");
-        write_http_response(&mut stream, r#"{"reservation_id":"reservation-123"}"#);
+        for reservation_id in ["reservation-123", "reservation-456"] {
+            let (mut stream, _) = listener.accept().expect("handshake connection should arrive");
+            let handshake = read_http_request_without_body(&mut stream);
+            assert!(handshake.contains("GET /v2/runtime/identity?"));
+            write_v2_runtime_identity(&mut stream);
+
+            let (mut stream, _) = listener.accept().expect("declaration connection should arrive");
+            tx.send(read_http_request(&mut stream))
+                .expect("request should send to test");
+            write_http_response(
+                &mut stream,
+                &format!(r#"{{"reservation_id":"{reservation_id}"}}"#),
+            );
+        }
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
-
-    let before_request = OffsetDateTime::now_utc();
     let response = declare_reservation_via_http(
         &runtime,
         ReservationDeclareArgs {
+            request_id: uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000100")
+                .expect("request id should parse"),
             agent_id: "s1".to_string(),
             workspace_id: "w1".to_string(),
             purpose: "Fix auth validation behavior.".to_string(),
-            files_planned: vec!["src/auth.ts".to_string()],
+            files_planned: vec![
+                "./src/auth.ts".to_string(),
+                "src/api.rs".to_string(),
+                "src/generated/".to_string(),
+            ],
             identity: None,
         },
     )
     .expect("reservation declaration should post");
-    assert_eq!(response.body, r#"{"reservation_id":"reservation-123"}"#);
 
+    assert_eq!(response.body, r#"{"reservation_id":"reservation-123"}"#);
     let request = rx.recv().expect("captured request should arrive");
+    assert!(
+        rx.recv_timeout(Duration::from_millis(100)).is_err(),
+        "a task declaration must send exactly one envelope"
+    );
     assert!(request.contains("POST /v2/reservation/declare HTTP/1.1"));
     let body = request_json_body(&request);
     assert_eq!(body["protocol_version"], "stateful.v2");
-    assert!(uuid::Uuid::parse_str(body["request_id"].as_str().expect("request id")).is_ok());
-    let observed_at = body["observed_at"]
-        .as_str()
-        .expect("observed_at should be a string");
-    assert_ne!(
-        observed_at, runtime.started_at,
-        "observed_at should describe the request, not the runtime start"
-    );
-    let observed_at = OffsetDateTime::parse(observed_at, &Rfc3339)
-        .expect("observed_at should be an RFC3339 timestamp");
-    let after_request = OffsetDateTime::now_utc();
-    assert!(observed_at >= before_request);
-    assert!(observed_at <= after_request);
+    assert_eq!(body["request_id"], "00000000-0000-4000-8000-000000000100");
     assert_eq!(body["agent"]["agent_id"], "s1");
-    assert_eq!(body["agent"]["actor_id"], "s1");
-    assert_eq!(body["agent"]["actor_type"], "agent");
     assert_eq!(body["workspace"]["workspace_id"], "w1");
-    assert_eq!(body["workspace"]["repo_id"], "unknown");
-    assert_eq!(body["workspace"]["worktree_id"], "unknown");
-    assert_eq!(body["workspace"]["root"], "unknown");
-    assert_eq!(body["workspace"]["branch"], "unknown");
     assert_eq!(body["source"]["kind"], "cli");
     assert_eq!(body["source"]["event"], "reservation_declare");
-    assert_eq!(body["source"]["source_ref"], "stateful-cli");
     assert_eq!(
         body["payload"],
         serde_json::json!({
-            "relative_path": "src/auth.ts",
+            "scopes": [
+                {"kind": "file", "path": "src/auth.ts"},
+                {"kind": "file", "path": "src/api.rs"},
+                {"kind": "directory", "path": "src/generated/"}
+            ],
             "action": "write",
             "purpose": "Fix auth validation behavior."
         })
@@ -469,6 +545,8 @@ fn claim_reservation_via_http_posts_expected_payload() {
     claim_reservation_via_http(
         &runtime,
         ReservationClaimArgs {
+            request_id: uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000103")
+                .expect("request id should parse"),
             agent_id: "s1".to_string(),
             workspace_id: "w1".to_string(),
             wait_id: "wait-1".to_string(),
@@ -487,6 +565,7 @@ fn claim_reservation_via_http_posts_expected_payload() {
     assert_eq!(body["source"]["kind"], "cli");
     assert_eq!(body["source"]["event"], "reservation_claim");
     assert_eq!(body["source"]["source_ref"], "stateful-cli");
+    assert_eq!(body["request_id"], "00000000-0000-4000-8000-000000000103");
     assert_eq!(
         body["payload"],
         serde_json::json!({
@@ -519,7 +598,8 @@ fn request_reservation_via_http_posts_expected_payload() {
         ReservationRequestArgs {
             agent_id: "s1".to_string(),
             workspace_id: "w1".to_string(),
-            request_id: "request-1".to_string(),
+            request_id: uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000101")
+                .expect("request id should parse"),
             reservation_id: None,
             action: "write_file".to_string(),
             path: "src/auth.ts".to_string(),
@@ -540,6 +620,7 @@ fn request_reservation_via_http_posts_expected_payload() {
     assert_eq!(body["source"]["kind"], "cli");
     assert_eq!(body["source"]["event"], "reservation_request");
     assert_eq!(body["source"]["source_ref"], "stateful-cli");
+    assert_eq!(body["request_id"], "00000000-0000-4000-8000-000000000101");
     assert_eq!(
         body["payload"],
         serde_json::json!({
@@ -575,7 +656,9 @@ fn cancel_reservation_via_http_posts_expected_payload() {
         ReservationCancelArgs {
             agent_id: "s1".to_string(),
             workspace_id: "w1".to_string(),
-            request_id: "request-1".to_string(),
+            request_id: uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000102")
+                .expect("request id should parse"),
+            wait_id: "wait-123".to_string(),
             identity: None,
         },
     )
@@ -590,10 +673,11 @@ fn cancel_reservation_via_http_posts_expected_payload() {
     assert_eq!(body["source"]["kind"], "cli");
     assert_eq!(body["source"]["event"], "reservation_cancel");
     assert_eq!(body["source"]["source_ref"], "stateful-cli");
+    assert_eq!(body["request_id"], "00000000-0000-4000-8000-000000000102");
     assert_eq!(
         body["payload"],
         serde_json::json!({
-            "wait_id": "request-1"
+            "wait_id": "wait-123"
         })
     );
 }
@@ -618,6 +702,8 @@ fn runtime_post_wraps_typed_payload_in_v2_envelope() {
     declare_reservation_via_http(
         &runtime,
         ReservationDeclareArgs {
+            request_id: uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000104")
+                .expect("request id should parse"),
             agent_id: "s1".to_string(),
             workspace_id: "w1".to_string(),
             purpose: "Fix auth validation behavior.".to_string(),
@@ -683,6 +769,8 @@ fn unsupported_runtime_protocol_fails_before_mutation() {
     let error = declare_reservation_via_http(
         &runtime,
         ReservationDeclareArgs {
+            request_id: uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000105")
+                .expect("request id should parse"),
             agent_id: "s1".to_string(),
             workspace_id: "w1".to_string(),
             purpose: "Fix auth validation behavior.".to_string(),

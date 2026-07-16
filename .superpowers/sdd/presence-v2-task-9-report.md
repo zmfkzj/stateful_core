@@ -1,29 +1,26 @@
-### Task 9: Cut CLI, Runtime, Outbox, Watcher, and Doctor to V2
+### Task 9: CLI V2 request identity repair
 
-**Status:** Task 9 implementation complete; full package verification remains blocked by intentionally out-of-scope V1 hook tests.
+**Status:** Complete for the CLI/runtime/lifecycle scope. Server-side PID proof remains separately owned.
 
 #### RED evidence
 
-- `stateful sandbox run --fs build --network disabled --write-dir v2-cli-red --command 'cargo test -p stateful-cli --test runtime --test outbox --test server_lifecycle --test cli'` exited 101 before the migration: V1 reservation requests, legacy outbox records, and enforcement defaults violated the new contracts.
-- The focused RED checks observed the required failures: `runtime_post_wraps_typed_payload_in_v2_envelope`, `runtime_get_serializes_full_query_identity`, `unsupported_runtime_protocol_fails_before_mutation`, `recovery_outbox_preserves_original_request_id_and_retries_idempotently`, and `server_start_and_install_default_to_awareness` all failed against V1/default behavior. The watcher V2 test could not compile until the server/store journal diagnostic API was exposed.
+- `stateful sandbox run --fs build --network enabled --write-dir task9-cli-red-runtime --command 'cargo test -p stateful-cli --test runtime'` exited 101: **20 passed, 5 failed**. The failures proved regenerated request IDs for request/cancel, a per-file declaration returning the last reservation identity, missing workspace status fields, and `current` using unknown repo identity.
+- `stateful sandbox run --fs build --network enabled --write-dir task9-cli-red-lifecycle --command 'cargo test -p stateful-cli --test server_lifecycle'` exited 101: **20 passed, 2 failed**. The failures proved restart discarded `enforcement` mode and evaluated a non-HTTP runtime as remote before refusing its scheme.
+- `stateful sandbox run --fs build --network enabled --write-dir task9-cli-red-directory --command 'cargo test -p stateful-cli --test runtime declare_reservation_via_http_posts_one_task_envelope_and_returns_its_identity'` exited 101: **0 passed, 1 failed**. The declaration incorrectly collapsed a planned `src/generated/` directory scope into a file scope.
 
 #### Implementation
 
-- Centralized CLI V2 request/query construction, flattened full-identity queries, response/error decoding, and runtime identity/schema/capability handshake checks in `runtime.rs`.
-- Migrated runtime reservation calls, current/events/resume/human commands, and watcher observation to `/v2/*` envelopes with fresh UUIDs.
-- Made outbox persistence retain the serialized original `RequestEnvelope`, route, request UUID, and attempt metadata; replay sends the stored bytes unchanged.
-- Set CLI/server/install lifecycle defaults to awareness, retaining explicit enforcement.
-- Added sanitized journal diagnostics (size, rows, event types, time range, threshold warning) without mutation, VACUUM, or payload output. Journal inspection lives in `stateful-store`.
-- Removed redundant lifecycle double-probing: a V2 identity/capability health check now performs one handshake.
+- Reservation declare now sends one V2 envelope with all normalized file and directory scopes, preserves its caller UUID, and returns that single server response.
+- Reservation claim/request/cancel and their protocol-body helpers retain supplied caller UUIDs; cancellation carries its server wait ID separately from its envelope UUID.
+- `current` and `events` reuse enabled-repository discovery when available, producing complete repo/worktree/root/branch query identity.
+- Runtime status includes server workspace ID and workspace version while preserving the V2 schema/mode/capability handshake.
+- Runtime files retain coordination mode; restart derives host, port, token, workspace, and mode from that runtime, and rejects unsupported schemes before PID handling.
 
 #### GREEN evidence
 
-- `cargo test -p stateful-cli --test runtime`: **24 passed**.
-- `cargo test -p stateful-cli --test outbox`: **16 passed**.
-- `cargo test -p stateful-cli --test server_lifecycle`: **21 passed**.
-- `cargo test -p stateful-cli --test cli`: **56 passed**.
-- `cargo test -p stateful-cli`: CLI unit tests (**123 passed**) and Task 9 integration suites passed; package verification then failed in `tests/hook.rs` (**42 failures**) because the intentionally untouched Task 10/11 V1 hook/OMP clients and assertions still target `/v1/*`.
+- `stateful sandbox run --fs build --network enabled --write-dir task9-cli-final --command 'cargo test -p stateful-cli --test runtime --test cli --test server_lifecycle'`: **runtime 25 passed; cli 56 passed; server_lifecycle 22 passed**.
 
 #### Concerns
 
-- Task 10+ hook, OMP, VS Code, benchmark, and documentation behavior was not changed. Their V1 test failures prevent a fully green `stateful-cli` package suite until the subsequent hook migration is applied.
+- No endpoint-to-PID proof was added; server ownership covers that separately.
+- Hooks, install/OMP, watcher/outbox, documentation, benchmarks, and server integration tests were intentionally untouched.

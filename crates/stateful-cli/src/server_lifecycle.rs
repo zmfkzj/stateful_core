@@ -185,10 +185,10 @@ pub fn stop_server(paths: &GlobalPaths) -> anyhow::Result<()> {
 pub fn restart_server(paths: &GlobalPaths) -> anyhow::Result<ServerRuntime> {
     let runtime = read_runtime_file(paths)?
         .ok_or_else(|| anyhow::anyhow!("no stateful server runtime file found to restart"))?;
+    let options = server_start_options_from_runtime(&runtime)?;
     if runtime.pid == 0 {
         return Err(remote_runtime_cannot_be_killed(&runtime));
     }
-    let options = server_start_options_from_runtime(&runtime)?;
     stop_server(paths)?;
     ensure_server_with_options(paths, options)
 }
@@ -209,7 +209,7 @@ pub fn server_start_options_from_runtime(
         port,
         token: Some(runtime.token.clone()),
         workspace_id: runtime.workspace_id.clone(),
-        coordination_mode: "awareness".to_string(),
+        coordination_mode: runtime.coordination_mode.clone(),
     })
 }
 
@@ -412,6 +412,7 @@ fn ensure_runtime_matches_options(
     if runtime.base_url == expected_base_url
         && token_matches
         && runtime.workspace_id == options.workspace_id
+        && runtime.coordination_mode == options.coordination_mode
     {
         return Ok(());
     }
