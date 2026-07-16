@@ -29,6 +29,31 @@ async fn get_queries_reject_missing_identity() {
 }
 
 #[tokio::test]
+async fn v1_query_envelopes_are_unsupported_on_every_v2_get_route() {
+    for (path, request_id) in [
+        ("/v2/current", "00000000-0000-4000-8000-00000000c101"),
+        ("/v2/events", "00000000-0000-4000-8000-00000000c102"),
+        ("/v2/notifications/stream", "00000000-0000-4000-8000-00000000c103"),
+        ("/v2/runtime/identity", "00000000-0000-4000-8000-00000000c104"),
+    ] {
+        let mut request = support::query_get(path, "agent-1", request_id, "workspace-1");
+        *request.uri_mut() = request
+            .uri()
+            .to_string()
+            .replace("protocol_version=stateful.v2", "protocol_version=stateful.v1")
+            .parse()
+            .expect("valid V1 query URI");
+        let response = app().oneshot(request).await.expect("query responds");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        assert_eq!(
+            response_json(response).await["error"]["code"],
+            "unsupported_protocol",
+            "{path}",
+        );
+    }
+}
+
+#[tokio::test]
 async fn duplicate_mutation_returns_identical_frozen_response() {
     let request = envelope(json!({"first_prompt": "work"}));
     let app = app();
@@ -90,7 +115,7 @@ async fn empty_activity_finalize_uses_the_idempotent_fallback_handoff_path() {
 async fn typed_write_recovery_replays_an_outcome_unknown_result() {
     let before = fingerprint_reader(std::io::Cursor::new(b"before")).expect("before fingerprint");
     let changed = fingerprint_reader(std::io::Cursor::new(b"changed")).expect("changed fingerprint");
-    let start_request = serde_json::from_value::<RequestEnvelope<WriteIntentStart>>(envelope(json!({
+    let start_request = serde_json::from_value::<RequestEnvelope<WriteIntentStart>>(envelope_for("agent-1", "00000000-0000-4000-8000-00000000f002", json!({
         "operation_id": "write-1",
         "action": "write_file",
         "targets": [{"path": "src/lib.rs", "before": before}],

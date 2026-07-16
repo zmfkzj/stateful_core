@@ -1,11 +1,11 @@
 use crate::{
     CommandOutcome, CommandPlan, CurrentAggregate, Store, StoreError, StoreResult,
     ReservationRecord, WaitRecord,
-    reservations::{append_grant_for_path, expired_optional, normalized_scope, record_from_current, reservation_event, scope_path, scopes_conflict, timestamp, typed_records, wait_event},
+    reservations::{append_grant_for_path, coordination_warning_event, expired_optional, normalized_scope, overlap_warning, record_from_current, reservation_event, scope_path, scopes_conflict, timestamp, typed_records, wait_event},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use stateful_core::{ClaimEvent, EventData, EventPayload, NewEvent, RequestEnvelope, ReservationEvent, WaitEvent};
+use stateful_core::{ClaimEvent, Decision, EventData, EventPayload, NewEvent, RequestEnvelope, ReservationEvent, WaitEvent};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -61,11 +61,33 @@ pub struct ClaimBatchAcquireResult {
     pub already_held: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimAcquireResponse {
+    #[serde(flatten)]
+    pub claims: ClaimBatchAcquireResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<Decision>,
+}
+
 impl Store {
     pub fn acquire_claim(
         &self,
         request: &RequestEnvelope<ClaimAcquire>,
     ) -> StoreResult<CommandOutcome<ClaimBatchAcquireResult>> {
+        self.acquire_claim_with_mode(request, false).map(|outcome| CommandOutcome {
+            response: outcome.response.claims,
+            http_status: outcome.http_status,
+            first_event_seq: outcome.first_event_seq,
+            last_event_seq: outcome.last_event_seq,
+            duplicate: outcome.duplicate,
+        })
+    }
+
+    pub fn acquire_claim_with_mode(
+        &self,
+        request: &RequestEnvelope<ClaimAcquire>,
+        awareness: bool,
+    ) -> StoreResult<CommandOutcome<ClaimAcquireResponse>> {
         let now = self.clock.now();
         let payload = request.payload.clone();
         self.execute_command(request, "claim.acquire", |reader| {
@@ -92,21 +114,34 @@ impl Store {
             }) {
                 return Err(StoreError::ClaimConflict);
             }
+            if let Some(path) = normalized.iter().find(|path| *path == "tmp" || *path == "tmp/") {
+                return Err(StoreError::InvalidClaimPath(path.clone()));
+            }
             let existing = typed_records::<ClaimRecord>(reader, CurrentAggregate::Claim, &request.workspace.workspace_id)?;
-            for path in &normalized {
-                if path == "tmp" || path == "tmp/" {
-                    return Err(StoreError::InvalidClaimPath(path.clone()));
-                }
-                if existing.iter().any(|claim| {
+            let conflict = normalized.iter().any(|path| {
+                existing.iter().any(|claim| {
                     claim.status == "active"
                         && !expired_optional(claim.expires_at.as_deref(), now)
                         && claim.agent_id != request.agent.agent_id
                         && scopes_conflict(&claim.relative_path, path)
-                }) {
-                    return Err(StoreError::ClaimConflict);
-                }
+                })
+            });
+            if conflict && !awareness {
+                return Err(StoreError::ClaimConflict);
             }
+            let decision = conflict.then(overlap_warning);
             let mut events = Vec::new();
+            if let Some(decision) = &decision {
+                events.push(coordination_warning_event(
+                    request,
+                    0,
+                    now,
+                    &reservation.reservation_id,
+                    &reservation.action,
+                    &normalized,
+                    decision,
+                )?);
+            }
             let mut claims = Vec::new();
             let mut acquired = 0;
             let mut already_held = 0;
@@ -154,7 +189,10 @@ impl Store {
             }
             Ok(CommandPlan {
                 events,
-                response: ClaimBatchAcquireResult { claims, acquired, already_held },
+                response: ClaimAcquireResponse {
+                    claims: ClaimBatchAcquireResult { claims, acquired, already_held },
+                    decision,
+                },
                 http_status: 200,
             })
         })

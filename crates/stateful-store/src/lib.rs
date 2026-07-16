@@ -16,7 +16,7 @@ mod schema;
 mod write_fences;
 mod write_intents;
 pub use activity::{ActivityFinalization, ActivityStart};
-pub use claims::{ClaimAcquire, ClaimBatchAcquireResult, ClaimObservation, ClaimPath, ClaimRelease, ClaimRecord};
+pub use claims::{ClaimAcquire, ClaimAcquireResponse, ClaimBatchAcquireResult, ClaimObservation, ClaimPath, ClaimRelease, ClaimRecord};
 pub use clock::{Clock, FixedClock, MutableClock, SystemClock};
 pub use context_delivery::{
     ContextAcknowledgement, ContextAcknowledgementResult, ContextDeliveryRecord, ContextRender,
@@ -39,13 +39,13 @@ pub use presence::{
     PresenceRegistration, PresenceResourceUpdate, PresenceToolResult, PresenceToolStart,
 };
 pub use reservations::{
-    ReservationDeclaration, ReservationHeartbeat, ReservationRecord, ReservationRelease,
-    WaitCancellation, WaitGrant, WaitRecord, WaitRequest,
+    ReservationDeclaration, ReservationDeclarationResponse, ReservationHeartbeat, ReservationRecord,
+    ReservationRelease, WaitCancellation, WaitGrant, WaitRecord, WaitRequest,
 };
 pub use stateful_core::PresenceRecord;
 pub use stateful_core::{ReadObservationRecord, ResourceVersion, WriteIntentRecord};
 pub use write_fences::{WriteFenceAcquire, WriteFenceRecord, WriteFenceRelease};
-pub use write_intents::WriteIntentStartResult;
+pub use write_intents::{AuthorizeResponse, WriteIntentStartResult};
 
 use rusqlite::Connection;
 use serde_json::Value;

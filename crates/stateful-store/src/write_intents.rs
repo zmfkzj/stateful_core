@@ -27,6 +27,13 @@ pub struct WriteIntentStartResult {
     pub decision: Option<Decision>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum AuthorizeResponse {
+    Authorized(WriteIntentStartResult),
+    Denied(Decision),
+}
+
 impl Store {
     pub fn start_write_intent(
         &self,
@@ -57,6 +64,47 @@ impl Store {
         )
     }
 
+    pub fn record_authorization<T: serde::Serialize>(
+        &self,
+        request: &RequestEnvelope<T>,
+        payload: WriteIntentStart,
+        decision: Decision,
+        authorized_journal_sequence: u64,
+    ) -> StoreResult<CommandOutcome<AuthorizeResponse>> {
+        let now = self.clock.now();
+        self.execute_command(request, "server.authorize", |reader| {
+            if decision.decision == DecisionKind::Deny {
+                return Ok(CommandPlan {
+                    events: vec![authorization_decision_event(
+                        request,
+                        0,
+                        now,
+                        &payload.operation_id,
+                        &payload.action,
+                        &payload.targets,
+                        &decision,
+                        AuthorizationEvent::Denied,
+                    )?],
+                    response: AuthorizeResponse::Denied(decision),
+                    http_status: 403,
+                });
+            }
+            let plan = Self::start_write_intent_plan(
+                reader,
+                request,
+                payload,
+                Some(decision),
+                now,
+                Some(authorized_journal_sequence),
+            )?;
+            Ok(CommandPlan {
+                events: plan.events,
+                response: AuthorizeResponse::Authorized(plan.response),
+                http_status: plan.http_status,
+            })
+        })
+    }
+
     fn start_write_intent_for<T: serde::Serialize>(
         &self,
         request: &RequestEnvelope<T>,
@@ -67,74 +115,72 @@ impl Store {
     ) -> StoreResult<CommandOutcome<WriteIntentStartResult>> {
         let now = self.clock.now();
         self.execute_command(request, route_kind, |reader| {
-            if payload.operation_id.trim().is_empty() || payload.action.trim().is_empty() {
-                return Err(StoreError::InvalidWriteIntent);
-            }
-            if let Some(sequence) = authorized_journal_sequence
-                && reader.workspace_journal_sequence(&request.workspace.workspace_id)? != sequence
-            {
-                return Err(StoreError::StaleAuthorization);
-            }
-            let targets = normalize_targets(payload.targets)?;
-            let existing_fences = typed_records::<WriteFenceRecord>(
+            Self::start_write_intent_plan(
                 reader,
-                CurrentAggregate::WriteFence,
-                &request.workspace.workspace_id,
-            )?;
-            for target in &targets {
-                if let Some(fence) = existing_fences.iter().find(|fence| {
-                    fence.status == "active"
-                        && !expired(&fence.expires_at, now)
-                        && !fence.is_owned_by(&request.agent)
-                        && scopes_conflict(&fence.relative_path, &target.path)
-                }) {
-                    return Err(StoreError::WriteFenceConflict {
-                        path: target.path.clone(),
-                        owner_agent_id: fence.agent_id.clone(),
-                    });
-                }
-            }
-            if typed_records::<WriteIntentRecord>(
-                reader,
-                CurrentAggregate::WriteIntent,
-                &request.workspace.workspace_id,
-            )?
-            .iter()
-            .any(|intent| {
-                intent.status.blocks_writes()
-                    && intent.targets.iter().any(|existing| {
-                        targets.iter().any(|target| scopes_conflict(&existing.path, &target.path))
-                    })
-            }) {
-                return Err(StoreError::InvalidWriteIntent);
-            }
+                request,
+                payload,
+                decision,
+                now,
+                authorized_journal_sequence,
+            )
+        })
+    }
 
-            let intent_id = Uuid::new_v4().to_string();
-            let fences = targets
-                .iter()
-                .map(|target| Ok(WriteFenceRecord {
-                    fence_id: Uuid::new_v4().to_string(),
-                    agent_id: request.agent.agent_id.clone(),
-                    actor_id: request.agent.actor_id.clone(),
-                    actor_type: request.agent.actor_type.clone(),
-                    owner_id: request.agent.owner_id.clone(),
-                    parent_agent_id: request.agent.parent_agent_id.clone(),
-                    parent_actor_id: request.agent.parent_actor_id.clone(),
-                    initiating_actor_known: true,
-                    workspace_id: request.workspace.workspace_id.clone(),
-                    relative_path: target.path.clone(),
-                    action: payload.action.clone(),
-                    status: "active".into(),
-                    acquired_at: timestamp(now)?,
-                    expires_at: timestamp(now + WRITE_FENCE_TTL)?,
-                    released_at: None,
-                    origin_event_seq: 0,
-                }))
-                .collect::<StoreResult<Vec<_>>>()?;
-            let intent = WriteIntentRecord {
-                intent_id: intent_id.clone(),
-                operation_id: payload.operation_id,
-                workspace_id: request.workspace.workspace_id.clone(),
+    fn start_write_intent_plan<T: serde::Serialize>(
+        reader: &dyn crate::ProjectionReader,
+        request: &RequestEnvelope<T>,
+        payload: WriteIntentStart,
+        decision: Option<Decision>,
+        now: OffsetDateTime,
+        authorized_journal_sequence: Option<u64>,
+    ) -> StoreResult<CommandPlan<WriteIntentStartResult>> {
+        if payload.operation_id.trim().is_empty() || payload.action.trim().is_empty() {
+            return Err(StoreError::InvalidWriteIntent);
+        }
+        if let Some(sequence) = authorized_journal_sequence
+            && reader.workspace_journal_sequence(&request.workspace.workspace_id)? != sequence
+        {
+            return Err(StoreError::StaleAuthorization);
+        }
+        let targets = normalize_targets(payload.targets)?;
+        let existing_fences = typed_records::<WriteFenceRecord>(
+            reader,
+            CurrentAggregate::WriteFence,
+            &request.workspace.workspace_id,
+        )?;
+        for target in &targets {
+            if let Some(fence) = existing_fences.iter().find(|fence| {
+                fence.status == "active"
+                    && !expired(&fence.expires_at, now)
+                    && !fence.is_owned_by(&request.agent)
+                    && scopes_conflict(&fence.relative_path, &target.path)
+            }) {
+                return Err(StoreError::WriteFenceConflict {
+                    path: target.path.clone(),
+                    owner_agent_id: fence.agent_id.clone(),
+                });
+            }
+        }
+        if typed_records::<WriteIntentRecord>(
+            reader,
+            CurrentAggregate::WriteIntent,
+            &request.workspace.workspace_id,
+        )?
+        .iter()
+        .any(|intent| {
+            intent.status.blocks_writes()
+                && intent.targets.iter().any(|existing| {
+                    targets.iter().any(|target| scopes_conflict(&existing.path, &target.path))
+                })
+        }) {
+            return Err(StoreError::InvalidWriteIntent);
+        }
+
+        let intent_id = Uuid::new_v4().to_string();
+        let fences = targets
+            .iter()
+            .map(|target| Ok(WriteFenceRecord {
+                fence_id: Uuid::new_v4().to_string(),
                 agent_id: request.agent.agent_id.clone(),
                 actor_id: request.agent.actor_id.clone(),
                 actor_type: request.agent.actor_type.clone(),
@@ -142,63 +188,83 @@ impl Store {
                 parent_agent_id: request.agent.parent_agent_id.clone(),
                 parent_actor_id: request.agent.parent_actor_id.clone(),
                 initiating_actor_known: true,
-                action: payload.action,
-                targets,
-                fence_ids: fences.iter().map(|fence| fence.fence_id.clone()).collect(),
-                status: WriteIntentStatus::Started,
-                started_at: now,
-                completed_at: None,
-                failure_code: None,
+                workspace_id: request.workspace.workspace_id.clone(),
+                relative_path: target.path.clone(),
+                action: payload.action.clone(),
+                status: "active".into(),
+                acquired_at: timestamp(now)?,
+                expires_at: timestamp(now + WRITE_FENCE_TTL)?,
+                released_at: None,
                 origin_event_seq: 0,
-            };
-            let (mut events, mut presence) =
-                lifecycle_presence_for_resource_update(reader, request, now)?;
-            if decision.as_ref().is_some_and(|decision| decision.decision == DecisionKind::Warn) {
-                events.push(authorization_warned_event(
-                    request,
-                    events.len() as u32,
-                    now,
-                    &intent,
-                    decision.as_ref().expect("warning decision exists"),
-                )?);
-            }
-            events.push(intent_event(
+            }))
+            .collect::<StoreResult<Vec<_>>>()?;
+        let intent = WriteIntentRecord {
+            intent_id: intent_id.clone(),
+            operation_id: payload.operation_id,
+            workspace_id: request.workspace.workspace_id.clone(),
+            agent_id: request.agent.agent_id.clone(),
+            actor_id: request.agent.actor_id.clone(),
+            actor_type: request.agent.actor_type.clone(),
+            owner_id: request.agent.owner_id.clone(),
+            parent_agent_id: request.agent.parent_agent_id.clone(),
+            parent_actor_id: request.agent.parent_actor_id.clone(),
+            initiating_actor_known: true,
+            action: payload.action,
+            targets,
+            fence_ids: fences.iter().map(|fence| fence.fence_id.clone()).collect(),
+            status: WriteIntentStatus::Started,
+            started_at: now,
+            completed_at: None,
+            failure_code: None,
+            origin_event_seq: 0,
+        };
+        let (mut events, mut presence) =
+            lifecycle_presence_for_resource_update(reader, request, now)?;
+        if decision.as_ref().is_some_and(|decision| decision.decision == DecisionKind::Warn) {
+            events.push(authorization_warned_event(
                 request,
                 events.len() as u32,
                 now,
-                WriteIntentEvent::Started,
                 &intent,
-                &[],
+                decision.as_ref().expect("warning decision exists"),
             )?);
-            for target in &intent.targets {
-                events.push(resource_update_event(
-                    reader,
-                    request,
-                    now,
-                    events.len() as u32,
-                    &mut presence,
-                    &target.path,
-                    PresenceResourceRelation::Planned,
-                )?);
-            }
-            for fence in &fences {
-                events.push(fence_event(
-                    request,
-                    events.len() as u32,
-                    now,
-                    WriteFenceEvent::Acquired,
-                    fence,
-                )?);
-            }
-            Ok(CommandPlan {
-                events,
-                response: WriteIntentStartResult {
-                    intent_id,
-                    fence_ids: intent.fence_ids,
-                    decision,
-                },
-                http_status: 200,
-            })
+        }
+        events.push(intent_event(
+            request,
+            events.len() as u32,
+            now,
+            WriteIntentEvent::Started,
+            &intent,
+            &[],
+        )?);
+        for target in &intent.targets {
+            events.push(resource_update_event(
+                reader,
+                request,
+                now,
+                events.len() as u32,
+                &mut presence,
+                &target.path,
+                PresenceResourceRelation::Planned,
+            )?);
+        }
+        for fence in &fences {
+            events.push(fence_event(
+                request,
+                events.len() as u32,
+                now,
+                WriteFenceEvent::Acquired,
+                fence,
+            )?);
+        }
+        Ok(CommandPlan {
+            events,
+            response: WriteIntentStartResult {
+                intent_id,
+                fence_ids: intent.fence_ids,
+                decision,
+            },
+            http_status: 200,
         })
     }
 
@@ -652,6 +718,34 @@ fn intent_event<T>(
         .map_err(StoreError::from)
 }
 
+fn authorization_decision_event<T>(
+    request: &RequestEnvelope<T>,
+    ordinal: u32,
+    now: OffsetDateTime,
+    operation_id: &str,
+    action: &str,
+    targets: &[WriteTarget],
+    decision: &Decision,
+    variant: fn(EventData) -> AuthorizationEvent,
+) -> StoreResult<NewEvent> {
+    let mut data = EventData::new(operation_id);
+    data.data = json!({
+        "decision": &decision.decision,
+        "reason_code": &decision.reason_code,
+        "message": &decision.message,
+        "required_next_action": &decision.required_next_action,
+        "action": action,
+        "targets": targets,
+    });
+    NewEvent::new(
+        request.request_id,
+        ordinal,
+        now,
+        EventPayload::Authorization(variant(data)),
+    )
+    .map_err(StoreError::from)
+}
+
 fn authorization_warned_event<T>(
     request: &RequestEnvelope<T>,
     ordinal: u32,
@@ -659,20 +753,14 @@ fn authorization_warned_event<T>(
     intent: &WriteIntentRecord,
     decision: &Decision,
 ) -> StoreResult<NewEvent> {
-    let mut data = EventData::new(&intent.operation_id);
-    data.data = json!({
-        "decision": &decision.decision,
-        "reason_code": &decision.reason_code,
-        "message": &decision.message,
-        "required_next_action": &decision.required_next_action,
-        "action": &intent.action,
-        "targets": &intent.targets,
-    });
-    NewEvent::new(
-        request.request_id,
+    authorization_decision_event(
+        request,
         ordinal,
         now,
-        EventPayload::Authorization(AuthorizationEvent::Warned(data)),
+        &intent.operation_id,
+        &intent.action,
+        &intent.targets,
+        decision,
+        AuthorizationEvent::Warned,
     )
-    .map_err(StoreError::from)
 }

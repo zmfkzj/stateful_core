@@ -779,6 +779,46 @@ fn warned_authorization_audits_its_reason_before_intent_and_fence_events() {
 }
 
 #[test]
+fn projector_failure_rolls_back_denied_authorization_audit_and_receipt() {
+    let mut store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    store.fail_projector_on_event_for_tests(1);
+    let authorization = request("agent-1", ());
+    let payload = WriteIntentStart {
+        operation_id: "write-1".into(),
+        action: "write_file".into(),
+        targets: vec![WriteTarget { path: "src/lib.rs".into(), before: fingerprint(b"before") }],
+    };
+    let error = store
+        .record_authorization(
+            &authorization,
+            payload.clone(),
+            Decision::deny("missing_claim", "A claim is required.", "Acquire the claim."),
+            0,
+        )
+        .expect_err("projector failure rejects the denial transaction");
+    assert!(matches!(error, stateful_store::StoreError::ProjectorFailure));
+    assert_eq!(store.journal_event_count().expect("journal count"), 0);
+    assert_eq!(store.command_receipt_count().expect("receipt count"), 0);
+
+    store.fail_projector_on_event_for_tests(0);
+    store
+        .record_authorization(
+            &authorization,
+            payload,
+            Decision::deny("missing_claim", "A claim is required.", "Acquire the claim."),
+            0,
+        )
+        .expect("retry commits the denied authorization");
+    assert_eq!(store.command_receipt_count().expect("receipt count"), 1);
+    assert_eq!(
+        store
+            .journal_event_types_for_request(authorization.request_id)
+            .expect("denial audit"),
+        vec!["authorization.denied"],
+    );
+}
+
+#[test]
 fn stale_authorization_snapshot_from_a_second_connection_creates_no_intent_or_fence() {
     let temporary = tempfile::tempdir().expect("temporary database directory creates");
     let database = temporary.path().join("write-intent.sqlite");
@@ -1369,7 +1409,7 @@ fn non_context_heartbeat_invalidates_authorization_journal_sequence() {
         .expect_err("heartbeat interleaving must stale the authorization");
     assert!(matches!(error, stateful_store::StoreError::StaleAuthorization));
     assert_eq!(first.journal_event_count().expect("journal count loads"), before);
-    assert_eq!(first.command_receipt_count().expect("receipt count loads"), 2);
+    assert_eq!(first.command_receipt_count().expect("receipt count loads"), 3);
     assert!(first
         .active_write_intent("workspace-1", "src/authorization-sequence.rs")
         .expect("intent query succeeds")

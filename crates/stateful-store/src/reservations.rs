@@ -7,8 +7,9 @@ use crate::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
 use stateful_core::{
-    ClaimEvent, EventData, EventPayload, NewEvent, NotificationEvent, RecoveryEvent, RequestEnvelope,
-    ReservationEvent, ReservationScope, WaitEvent, normalize_relative_path,
+    AuthorizationEvent, ClaimEvent, Decision, DecisionKind, EventData, EventPayload, NewEvent,
+    NotificationEvent, RecoveryEvent, RequestEnvelope, ReservationEvent, ReservationScope,
+    WaitEvent, normalize_relative_path,
 };
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
@@ -74,6 +75,14 @@ pub struct ReservationRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReservationDeclarationResponse {
+    #[serde(flatten)]
+    pub reservation: ReservationRecord,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<Decision>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WaitRecord {
     pub wait_id: String,
     pub request_id: String,
@@ -99,6 +108,20 @@ impl Store {
         &self,
         request: &RequestEnvelope<ReservationDeclaration>,
     ) -> StoreResult<CommandOutcome<ReservationRecord>> {
+        self.declare_reservation_with_mode(request, false).map(|outcome| CommandOutcome {
+            response: outcome.response.reservation,
+            http_status: outcome.http_status,
+            first_event_seq: outcome.first_event_seq,
+            last_event_seq: outcome.last_event_seq,
+            duplicate: outcome.duplicate,
+        })
+    }
+
+    pub fn declare_reservation_with_mode(
+        &self,
+        request: &RequestEnvelope<ReservationDeclaration>,
+        awareness: bool,
+    ) -> StoreResult<CommandOutcome<ReservationDeclarationResponse>> {
         let now = self.clock.now();
         let payload = request.payload.clone();
         self.execute_command(request, "reservation.declare", |reader| {
@@ -109,14 +132,15 @@ impl Store {
                 CurrentAggregate::Reservation,
                 &request.workspace.workspace_id,
             )?;
-            if active.iter().any(|reservation| {
+            let conflict = active.iter().any(|reservation| {
                 reservation.status == "active"
                     && !expired_optional(reservation.expires_at.as_deref(), now)
                     && reservation.agent_id != request.agent.agent_id
                     && reservation.scopes.iter().any(|existing| {
                         scopes.iter().any(|scope| scopes_conflict(&scope_path(existing), &scope_path(scope)))
                     })
-            }) {
+            });
+            if conflict && !awareness {
                 return Err(StoreError::ReservationOwnerMismatch);
             }
             let reservation = reservation_record(
@@ -129,9 +153,29 @@ impl Store {
                 None,
                 RESERVATION_TTL,
             );
+            let decision = conflict.then(overlap_warning);
+            let mut events = Vec::new();
+            if let Some(decision) = &decision {
+                events.push(coordination_warning_event(
+                    request,
+                    0,
+                    now,
+                    &reservation.reservation_id,
+                    &reservation.action,
+                    &reservation.scopes,
+                    decision,
+                )?);
+            }
+            events.push(reservation_event(
+                request,
+                events.len() as u32,
+                now,
+                ReservationEvent::Declared,
+                &reservation,
+            )?);
             Ok(CommandPlan {
-                events: vec![reservation_event(request, 0, now, ReservationEvent::Declared, &reservation)?],
-                response: reservation,
+                events,
+                response: ReservationDeclarationResponse { reservation, decision },
                 http_status: 200,
             })
         })
@@ -633,6 +677,44 @@ pub(crate) fn scopes_conflict(left: &str, right: &str) -> bool {
         (false, true) => left.starts_with(&format!("{right}/")),
         (true, true) => left == right || left.starts_with(&format!("{right}/")) || right.starts_with(&format!("{left}/")),
     }
+}
+
+pub(crate) fn overlap_warning() -> Decision {
+    Decision {
+        decision: DecisionKind::Warn,
+        reason_code: "coordination_conflict".into(),
+        message: "The requested coordination scope overlaps an active record.".into(),
+        required_next_action: Some(
+            "Warned in awareness mode: coordinate with the active owner before writing.".into(),
+        ),
+    }
+}
+
+pub(crate) fn coordination_warning_event<T: Serialize, U: Serialize>(
+    request: &RequestEnvelope<T>,
+    ordinal: u32,
+    now: OffsetDateTime,
+    aggregate_id: &str,
+    action: &str,
+    targets: &U,
+    decision: &Decision,
+) -> StoreResult<NewEvent> {
+    let mut data = EventData::new(aggregate_id);
+    data.data = json!({
+        "decision": &decision.decision,
+        "reason_code": &decision.reason_code,
+        "message": &decision.message,
+        "required_next_action": &decision.required_next_action,
+        "action": action,
+        "targets": targets,
+    });
+    NewEvent::new(
+        request.request_id,
+        ordinal,
+        now,
+        EventPayload::Authorization(AuthorizationEvent::Warned(data)),
+    )
+    .map_err(StoreError::from)
 }
 
 pub(crate) fn timestamp(value: OffsetDateTime) -> StoreResult<String> {

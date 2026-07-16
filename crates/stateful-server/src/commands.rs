@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use stateful_core::{
     AuthorizationInput, ContentFingerprint, Decision, DecisionKind, FreshnessMode, ObservationFreshness,
-    PolicyState, QueryEnvelope, RequestEnvelope, ThinSafetyState, V2Error, WriteIntentStart,
-    WriteTarget, authorize_action, evaluate_thin_safety, normalize_relative_path,
+    PolicyState, QueryEnvelope, ReadObservationStatus, RequestEnvelope, ThinSafetyState,
+    V2Error, WriteIntentStart, WriteTarget, authorize_action, evaluate_thin_safety,
+    normalize_relative_path,
 };
 use stateful_store::{NotificationAcknowledgement, PresenceRegistration, Store, StoreError};
 use std::{convert::Infallible, time::Duration};
@@ -144,7 +145,8 @@ pub(crate) async fn activity_finalize(
 }
 
 pub(crate) async fn reservation_declare(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
-    command(config, body, |store, request| store.declare_reservation(request))
+    let awareness = config.coordination_mode == CoordinationMode::Awareness;
+    command(config, body, move |store, request| store.declare_reservation_with_mode(request, awareness))
 }
 
 pub(crate) async fn reservation_request(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
@@ -160,7 +162,8 @@ pub(crate) async fn reservation_cancel(State(config): State<ServerConfig>, proto
 }
 
 pub(crate) async fn claim_acquire(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
-    command(config, body, |store, request| store.acquire_claim(request))
+    let awareness = config.coordination_mode == CoordinationMode::Awareness;
+    command(config, body, move |store, request| store.acquire_claim_with_mode(request, awareness))
 }
 
 pub(crate) async fn claim_release(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
@@ -186,7 +189,7 @@ pub(crate) async fn authorize(State(config): State<ServerConfig>, protocol::V2Js
     };
     let decision = match authorize_request(&mut store, config.coordination_mode, &request) {
         Ok(decision) => decision,
-        Err(response) => return response,
+        Err(error) => return protocol::store_error_response(&request_id, error),
     };
     let write_payload = WriteIntentStart {
         operation_id: request.payload.operation_id.clone(),
@@ -195,7 +198,7 @@ pub(crate) async fn authorize(State(config): State<ServerConfig>, protocol::V2Js
     };
     protocol::command_response(
         &request_id,
-        store.start_write_intent_authorized(
+        store.record_authorization(
             &request,
             write_payload,
             decision,
@@ -503,30 +506,29 @@ fn authorize_request(
     store: &mut Store,
     mode: CoordinationMode,
     request: &RequestEnvelope<AuthorizePayload>,
-) -> Result<Decision, Response> {
-    let request_id = request.request_id.to_string();
+) -> Result<Decision, StoreError> {
+    if let Some(decision) = invalid_write_action(&request.payload) {
+        return Ok(decision);
+    }
     let freshness_mode = match mode {
         CoordinationMode::Awareness => FreshnessMode::Awareness,
         CoordinationMode::Enforcement => FreshnessMode::Enforcement,
     };
     let mut result = Decision::allow("authorized", "Action is authorized.");
     for target in &request.payload.targets {
-        let safety = thin_safety_state(store, request, target)
-            .map_err(|error| protocol::store_error_response(&request_id, error))?;
-        let decision = evaluate_thin_safety(safety, freshness_mode);
+        let decision = evaluate_thin_safety(thin_safety_state(store, request, target)?, freshness_mode);
         if decision.decision == DecisionKind::Deny {
-            return Err((StatusCode::FORBIDDEN, Json(decision)).into_response());
+            return Ok(decision);
         }
         if decision.decision == DecisionKind::Warn {
             result = decision;
         }
     }
 
-    let decision = authorization_decision(store, request)
-        .map_err(|error| protocol::store_error_response(&request_id, error))?;
+    let decision = authorization_decision(store, request)?;
     if decision.decision == DecisionKind::Deny {
         if mode == CoordinationMode::Enforcement {
-            return Err((StatusCode::FORBIDDEN, Json(decision)).into_response());
+            return Ok(decision);
         }
         if result.decision == DecisionKind::Warn {
             return Ok(result);
@@ -542,6 +544,24 @@ fn authorize_request(
         result = decision;
     }
     Ok(result)
+}
+
+fn invalid_write_action(payload: &AuthorizePayload) -> Option<Decision> {
+    (payload.operation_id.trim().is_empty()
+        || payload.action.trim().is_empty()
+        || payload.targets.is_empty()
+        || !matches!(
+            (payload.action.as_str(), payload.targets.len()),
+            ("write_file" | "write_directory" | "delete_file", _)
+                | ("rename_file" | "move_file", 2)
+        ))
+    .then(|| {
+        Decision::deny(
+            "invalid_write_action",
+            "Write action requires an operation, action, and at least one target.",
+            "Provide a supported action with its required target paths.",
+        )
+    })
 }
 
 fn thin_safety_state(
@@ -575,9 +595,10 @@ fn thin_safety_state(
         &target.path,
     )? {
         None => ObservationFreshness::Missing,
-        Some(record) if !record.is_stable() => ObservationFreshness::Unstable,
+        Some(record) if record.status == ReadObservationStatus::Expired => ObservationFreshness::Expired,
+        Some(record) if !record.is_stable() || !target.before.is_complete_exact() => ObservationFreshness::Missing,
         Some(record) if !record.is_fresh_at(store.now()) => ObservationFreshness::Expired,
-        Some(record) if !target.before.is_complete_exact() || record.after.as_ref() != Some(&target.before) => ObservationFreshness::Changed,
+        Some(record) if record.after.as_ref() != Some(&target.before) => ObservationFreshness::Changed,
         Some(record) => match store.resource_version(&request.workspace.workspace_id, &target.path)? {
             Some(version) if version.version != record.resource_version => ObservationFreshness::Changed,
             _ => ObservationFreshness::Stable,
@@ -593,6 +614,9 @@ fn thin_safety_state(
 }
 
 fn authorization_decision(store: &mut Store, request: &RequestEnvelope<AuthorizePayload>) -> Result<Decision, StoreError> {
+    if let Some(decision) = invalid_write_action(&request.payload) {
+        return Ok(decision);
+    }
     let Some(reservation_id) = request.payload.reservation_id.as_deref() else {
         return Ok(Decision::deny(
             "missing_reservation",
@@ -615,13 +639,6 @@ fn authorization_decision(store: &mut Store, request: &RequestEnvelope<Authorize
         && let Some(phase) = presence.phase
     {
         state = state.with_presence_phase(phase);
-    }
-    if request.payload.targets.is_empty() {
-        return Ok(Decision::deny(
-            "invalid_write_action",
-            "Write action requires at least one target.",
-            "Provide the target paths for the supported action.",
-        ));
     }
     for target in &request.payload.targets {
         let claimed = store.active_claims_for_path(&request.workspace.workspace_id, &target.path)?

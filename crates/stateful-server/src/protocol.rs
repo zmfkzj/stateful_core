@@ -84,6 +84,13 @@ pub(crate) fn parse_query<T: DeserializeOwned>(raw: Option<String>) -> Result<Qu
         }
     }
     let request_id = parameters.get("request_id").and_then(Value::as_str).map(str::to_owned);
+    if parameters.get("protocol_version").and_then(Value::as_str) == Some("stateful.v1") {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            request_id.as_deref(),
+            V2Error::new("unsupported_protocol", "Only protocol_version stateful.v2 is supported."),
+        ));
+    }
     let request = serde_json::from_value::<QueryEnvelope<T>>(Value::Object(parameters)).map_err(|_| {
         error_response(
             StatusCode::BAD_REQUEST,
