@@ -45,7 +45,7 @@ pub(crate) fn lazy_current_state_events<T>(
             continue;
         }
         let fallback_request = request_for_agent(&unit_request, &presence);
-        let plan = fallback_plan(&fallback_request, reader, now, events.len() as u32)?;
+        let plan = fallback_plan(&fallback_request, reader, now, "ttl", events.len() as u32)?;
         events.extend(plan.events);
     }
     Ok(events)
@@ -66,7 +66,7 @@ impl Store {
             }
             let presence = reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?;
             let handoff = explicit_handoff_record(request, presence.as_ref(), now);
-            let events = finalization_events(request, &handoff, 0)?;
+            let events = finalization_events(request, &handoff, None, 0)?;
             Ok(CommandPlan { events, response: handoff, http_status: 200 })
         })
     }
@@ -77,7 +77,7 @@ impl Store {
     ) -> StoreResult<CommandOutcome<Option<HandoffRecord>>> {
         let now = self.clock.now();
         self.execute_command(request, "presence.stop", |reader| {
-            fallback_plan(request, reader, now, 0)
+            fallback_plan(request, reader, now, "stop", 0)
         })
     }
 
@@ -94,7 +94,8 @@ impl Store {
                     continue;
                 }
                 let fallback_request = request_for_agent(request, &presence);
-                let plan = fallback_plan(&fallback_request, reader, now, events.len() as u32)?;
+                let plan =
+                    fallback_plan(&fallback_request, reader, now, "ttl", events.len() as u32)?;
                 if plan.response.is_some() {
                     expired.push(presence.agent_id);
                     events.extend(plan.events);
@@ -308,6 +309,7 @@ fn fallback_plan(
     request: &RequestEnvelope<()>,
     reader: &dyn ProjectionReader,
     now: OffsetDateTime,
+    fallback_cause: &'static str,
     ordinal: u32,
 ) -> StoreResult<CommandPlan<Option<HandoffRecord>>> {
     if let Some(existing) = reader.handoff(&request.workspace.workspace_id, &request.agent.agent_id)?
@@ -325,7 +327,7 @@ fn fallback_plan(
     };
     let resources = reader.presence_resources(&request.workspace.workspace_id, &request.agent.agent_id)?;
     let handoff = fallback_handoff_record(request, &presence, resources, now);
-    let events = finalization_events(request, &handoff, ordinal)?;
+    let events = finalization_events(request, &handoff, Some(fallback_cause), ordinal)?;
     Ok(CommandPlan { events, response: Some(handoff), http_status: 200 })
 }
 
@@ -416,11 +418,15 @@ fn fallback_handoff_record(
 fn finalization_events<T>(
     request: &RequestEnvelope<T>,
     handoff: &HandoffRecord,
+    fallback_cause: Option<&str>,
     ordinal: u32,
 ) -> StoreResult<Vec<NewEvent>> {
     let now = handoff.finalized_at;
     let mut handoff_data = EventData::new(&handoff.agent_id);
-    handoff_data.data = json!({"handoff": handoff});
+    handoff_data.data = match fallback_cause {
+        Some(cause) => json!({"handoff": handoff, "fallback_cause": cause}),
+        None => json!({"handoff": handoff}),
+    };
     let mut events = vec![NewEvent::new(
         request.request_id,
         ordinal,

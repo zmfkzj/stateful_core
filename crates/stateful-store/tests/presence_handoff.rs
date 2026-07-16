@@ -324,6 +324,87 @@ fn duplicate_heartbeat_response_remains_frozen_after_ttl() {
 }
 
 #[test]
+fn fallback_events_persist_stop_and_ttl_causes_independent_of_source_ref() {
+    let temp = TempDir::new().expect("temp directory should create");
+    let path = temp.path().join("state.db");
+    let clock = MutableClock::new(NOW);
+    let mut store =
+        Store::open_with_clock(&path, clock.clone()).expect("persistent store should open");
+
+    store
+        .register_presence(&register_request(
+            Uuid::new_v4(),
+            "stop-agent",
+            "stop-actor",
+            ActorType::Agent,
+            None,
+        ))
+        .expect("stop presence should register");
+    let mut stop = request(
+        Uuid::new_v4(),
+        "stop-agent",
+        "stop-actor",
+        ActorType::Agent,
+        (),
+    );
+    stop.source.source_ref = "presence.expire".into();
+    store
+        .stop_presence(&stop)
+        .expect("stop fallback should persist");
+
+    store
+        .register_presence(&register_request(
+            Uuid::new_v4(),
+            "ttl-agent",
+            "ttl-actor",
+            ActorType::Agent,
+            None,
+        ))
+        .expect("ttl presence should register");
+    clock.advance(Duration::minutes(16));
+    let mut expire = request(
+        Uuid::new_v4(),
+        "ttl-agent",
+        "ttl-actor",
+        ActorType::Agent,
+        (),
+    );
+    expire.source.source_ref = "presence.stop".into();
+    store
+        .expire_stale_presences(&expire)
+        .expect("ttl fallback should persist");
+    drop(store);
+
+    let connection = rusqlite::Connection::open(path).expect("journal should reopen");
+    let mut statement = connection
+        .prepare(
+            "SELECT aggregate_id, json_extract(payload_json, '$.event.data.data.fallback_cause')
+             FROM journal_events
+             WHERE event_type = 'handoff.finalized'
+             ORDER BY aggregate_id",
+        )
+        .expect("fallback query should prepare");
+    let causes = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        })
+        .expect("fallback query should run")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("fallback causes should load");
+
+    assert_eq!(
+        causes,
+        vec![
+            ("stop-agent".into(), Some("stop".into())),
+            ("ttl-agent".into(), Some("ttl".into())),
+        ],
+    );
+}
+
+#[test]
 fn stale_heartbeat_reopens_beside_an_existing_live_handoff() {
     let clock = MutableClock::new(NOW);
     let mut store = Store::open_in_memory_with_clock(clock.clone()).expect("store should open");

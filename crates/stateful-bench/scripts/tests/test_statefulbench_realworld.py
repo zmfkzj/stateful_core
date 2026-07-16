@@ -3055,6 +3055,10 @@ class RealWorldRunnerTests(unittest.TestCase):
             }
             return subprocess.CompletedProcess([], 0, versions.get(argv, ""), "")
 
+        def diagnostics(container, phase):
+            events.append(("snapshot", phase))
+            return self.container_diagnostics(container, phase)
+
         def launch(_container, _arm_dir, agent_id, _prompt, _cfg, _env):
             return type("Handle", (), {"agent_id": agent_id, "started_monotonic": 0.0})()
 
@@ -3099,7 +3103,7 @@ class RealWorldRunnerTests(unittest.TestCase):
             container_post_checks=mock.Mock(
                 return_value=(True, True, [{"key": f"task-{index}", "ok": True} for index in range(10)])
             ),
-            container_diagnostics=self.container_diagnostics,
+            container_diagnostics=diagnostics,
             container_inspect=mock.Mock(
                 return_value={
                     "id": "container-1",
@@ -3118,6 +3122,10 @@ class RealWorldRunnerTests(unittest.TestCase):
         self.assertEqual(events.count(("prepare", False)), 1)
         self.assertEqual(events.count(("prepare", True)), 1)
         self.assertLess(events.index(("git", "init")), events.index(("prepare", True)))
+        self.assertLess(
+            events.index(("prepare", True)),
+            events.index(("snapshot", "initialized")),
+        )
 
     def test_runner_requires_a_docker_runtime_for_live_execution(self) -> None:
         archive_loader = mock.Mock(side_effect=AssertionError("host execution must not start"))
@@ -3920,6 +3928,27 @@ class RealWorldReportingTests(unittest.TestCase):
         self.assertEqual(result_path.read_text(encoding="utf-8"), previous_result)
         self.assertEqual(
             (out_dir / "summary.json").read_text(encoding="utf-8"), previous_summary
+        )
+
+    def test_fresh_output_preflight_rejects_nonempty_root_without_scheduled_rows(
+        self,
+    ) -> None:
+        out_dir = self.root / "out"
+        out_dir.mkdir()
+        previous_summary = '{"private":"prior-summary"}\n'
+        (out_dir / "summary.json").write_text(previous_summary, encoding="utf-8")
+
+        with self.assertRaisesRegex(FileExistsError, "already exists"):
+            self.mod._require_fresh_run_result_directories(
+                out_dir,
+                (self.repositories[0],),
+                ["sequential"],
+                1,
+            )
+
+        self.assertEqual(
+            (out_dir / "summary.json").read_text(encoding="utf-8"),
+            previous_summary,
         )
 
     def test_run_persists_summary_and_prints_each_two_repository_arm_row(self) -> None:

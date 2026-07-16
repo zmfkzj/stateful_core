@@ -1792,12 +1792,8 @@ def _create_and_write_run_result(out_dir: Path, result: dict) -> None:
 def _require_fresh_run_result_directories(
     out_dir: Path, repositories: tuple[dict, ...], arms: list[str], trials: int
 ) -> None:
-    for repository in repositories:
-        for arm in arms:
-            for trial in range(1, trials + 1):
-                result_dir = _run_result_directory(out_dir, repository["key"], arm, trial)
-                if result_dir.exists():
-                    raise FileExistsError(f"run output directory already exists: {result_dir}")
+    if out_dir.exists():
+        raise FileExistsError(f"run output directory already exists: {out_dir}")
 
 
 def _append_stage_cleanup_error(result: dict, error: str) -> None:
@@ -2183,7 +2179,8 @@ def _run_container_repo_arm(
             if credential is not None:
                 shutil.rmtree(credential.parent)
         inspect_summary = container_inspect(container)
-        snapshot("initialized")
+        if arm != "parallel-on":
+            snapshot("initialized")
         container_repo = _prepare_container_repository(
             repo, container, common_env, artifacts, artifact_dir, execute=container_exec
         )
@@ -2197,6 +2194,7 @@ def _run_container_repo_arm(
                 omp_binary=cfg.omp_bin,
                 stateful_binary=cfg.stateful_binary or "/usr/local/bin/stateful",
             )
+            snapshot("initialized")
         cfg.usage_from_log = _LITE.usage_from_log
         versions = _capture_tool_provenance(
             lambda *command: container_exec(

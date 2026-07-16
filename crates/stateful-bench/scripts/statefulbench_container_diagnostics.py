@@ -294,7 +294,7 @@ def _coordination_metrics(
     rows = list(
         connection.execute(
             """
-            SELECT aggregate_id, event_type, occurred_at, payload_json, agent_id, source_ref
+            SELECT aggregate_id, event_type, occurred_at, payload_json, agent_id
             FROM journal_events ORDER BY event_seq
             """
         )
@@ -312,7 +312,7 @@ def _coordination_metrics(
     previous_writers: dict[str, str] = {}
     cross_agent_overwrites = 0
 
-    for aggregate_id, event_type, occurred_at, payload_json, agent_id, source_ref in rows:
+    for aggregate_id, event_type, occurred_at, payload_json, agent_id in rows:
         category = (
             event_type
             if isinstance(event_type, str) and event_type in _V2_JOURNAL_EVENT_TYPES
@@ -335,12 +335,11 @@ def _coordination_metrics(
                 if isinstance(status, str) and status in _V2_HANDOFF_STATUSES:
                     handoff_statuses[status] = handoff_statuses.get(status, 0) + 1
                 if handoff.get("explicit") is False:
-                    if isinstance(source_ref, str) and "stop" in source_ref:
-                        handoff_statuses.setdefault("_fallback_stop", 0)
-                        handoff_statuses["_fallback_stop"] += 1
-                    else:
-                        handoff_statuses.setdefault("_fallback_ttl", 0)
-                        handoff_statuses["_fallback_ttl"] += 1
+                    fallback_cause = data.get("fallback_cause")
+                    if fallback_cause not in {"stop", "ttl"}:
+                        return None
+                    key = f"_fallback_{fallback_cause}"
+                    handoff_statuses[key] = handoff_statuses.get(key, 0) + 1
 
         if category == "notification.created":
             notification = data.get("notification")
@@ -411,7 +410,7 @@ def _coordination_metrics(
     prompt_utf8_bytes = 0
     prompt_unicode_scalars = 0
     prompt_items = 0
-    for _aggregate_id, event_type, _occurred_at, payload_json, _agent_id, _source_ref in rows:
+    for _aggregate_id, event_type, _occurred_at, payload_json, _agent_id in rows:
         if event_type != "context.delivery_created":
             continue
         delivery = _event_data(payload_json).get("context_delivery")
@@ -443,7 +442,7 @@ def _coordination_metrics(
         "handoffs": {
             "explicit": sum(
                 isinstance(handoff, dict) and handoff.get("explicit") is True
-                for _aggregate_id, event_type, _occurred_at, payload_json, _agent_id, _source_ref in rows
+                for _aggregate_id, event_type, _occurred_at, payload_json, _agent_id in rows
                 if event_type == "handoff.finalized"
                 for handoff in (_event_data(payload_json).get("handoff"),)
             ),

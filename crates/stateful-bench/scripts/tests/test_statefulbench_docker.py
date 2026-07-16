@@ -1492,8 +1492,36 @@ class V2DiagnosticContractTests(unittest.TestCase):
             ("agent-one", "presence.finalized", payload({})),
             ("agent-two", "presence.expired", payload({})),
             ("handoff-one", "handoff.finalized", payload({"handoff": {"explicit": True, "status": "customer_secret"}})),
-            ("handoff-two", "handoff.finalized", payload({"handoff": {"explicit": False, "status": "unknown"}})),
-            ("handoff-three", "handoff.finalized", payload({"handoff": {"explicit": False, "status": "unknown"}})),
+            (
+                "handoff-two",
+                "handoff.finalized",
+                payload(
+                    {
+                        "handoff": {"explicit": False, "status": "unknown"},
+                        "fallback_cause": "stop",
+                    }
+                ),
+            ),
+            (
+                "handoff-three",
+                "handoff.finalized",
+                payload(
+                    {
+                        "handoff": {"explicit": False, "status": "unknown"},
+                        "fallback_cause": "stop",
+                    }
+                ),
+            ),
+            (
+                "handoff-four",
+                "handoff.finalized",
+                payload(
+                    {
+                        "handoff": {"explicit": False, "status": "unknown"},
+                        "fallback_cause": "ttl",
+                    }
+                ),
+            ),
             ("read-one", "read_observation.started", payload({})),
             ("read-one", "read_observation.stabilized", payload({})),
             ("read-two", "read_observation.unstable", payload({})),
@@ -1551,7 +1579,9 @@ class V2DiagnosticContractTests(unittest.TestCase):
                     f"2026-07-16T00:00:{index:02d}Z",
                     body,
                     "agent-private",
-                    "presence.stop" if aggregate_id == "handoff-two" else "presence.expire",
+                    "presence.stop"
+                    if aggregate_id == "handoff-four"
+                    else "presence.expire",
                 )
                 for index, (aggregate_id, event_type, body) in enumerate(rows, start=1)
             ],
@@ -1587,7 +1617,7 @@ class V2DiagnosticContractTests(unittest.TestCase):
         self.assertEqual(metrics["journal"]["by_event_type"], dict(sorted(metrics["journal"]["by_event_type"].items())))
         self.assertEqual(metrics["presence"], {"registered": 1, "expired": 1, "finalized": 1, "peak_active": 1})
         self.assertEqual(metrics["handoffs"]["explicit"], 1)
-        self.assertEqual(metrics["handoffs"]["fallback_stop"], 1)
+        self.assertEqual(metrics["handoffs"]["fallback_stop"], 2)
         self.assertEqual(metrics["handoffs"]["fallback_ttl"], 1)
         self.assertEqual(metrics["read_observations"], {"started": 1, "stable": 1, "unstable": 1, "aborted": 1, "invalidated": 1})
         self.assertEqual(metrics["context"]["versions"], 3)
