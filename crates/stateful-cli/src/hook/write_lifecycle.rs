@@ -373,27 +373,48 @@ fn replay_pending_at(runtime: &ServerRuntime, path: &Path, repo_root: &Path) -> 
             crate::replay_v2_request(runtime, "/v2/write/complete", request)?;
         } else {
             if intent.recovery_request.is_none() {
-                let mut request: stateful_core::RequestEnvelope<serde_json::Value> =
+                let authorization: stateful_core::RequestEnvelope<serde_json::Value> =
                     serde_json::from_str(&intent.authorization_request)?;
+                let recovery_root = PathBuf::from(&authorization.workspace.root);
+                let recovery_root = if recovery_root.is_absolute() {
+                    recovery_root
+                } else {
+                    repo_root.to_path_buf()
+                };
+                let mut request = authorization.clone();
                 request.request_id = uuid::Uuid::new_v4();
                 request.payload = json!({
                     "intent_id": intent.intent_id.as_deref().ok_or_else(|| anyhow::anyhow!("pending authorization has no intent ID"))?,
-                    "operation_id": request.payload.get("operation_id").cloned(),
                     "actual_fingerprints": intent.targets.iter().map(|path| {
                         Ok(json!({
                             "path": path,
-                            "fingerprint": stateful_core::fingerprint_path(&repo_root.join(path))?,
+                            "fingerprint": stateful_core::fingerprint_path(&recovery_root.join(path))?,
                         }))
                     }).collect::<anyhow::Result<Vec<_>>>()?,
                 });
                 intent.recovery_request = Some(serde_json::to_string(&request)?);
                 save_pending_at(path, &intent)?;
             }
-            crate::replay_v2_request(
+            let response = crate::replay_v2_request(
                 runtime,
                 "/v2/write/recover",
                 intent.recovery_request.as_deref().expect("recovery request was saved"),
             )?;
+            let recovered: serde_json::Value = serde_json::from_str(&response.body)?;
+            let operation_id = recovered
+                .get("operation_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("write recovery response had no operation ID"))?;
+            let authorization: stateful_core::RequestEnvelope<serde_json::Value> =
+                serde_json::from_str(&intent.authorization_request)?;
+            let expected_operation_id = authorization
+                .payload
+                .get("operation_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("pending authorization has no operation ID"))?;
+            if operation_id != expected_operation_id {
+                anyhow::bail!("write recovery operation ID did not match pending authorization");
+            }
         }
         intent.completion_request = None;
         intent.recovery_request = None;
@@ -692,6 +713,57 @@ mod tests {
     }
 
     #[test]
+    fn recovery_fingerprints_targets_from_the_authorized_repository_root() {
+        let temp = tempfile::tempdir().expect("temp dir should create");
+        let paths = GlobalPaths::new(temp.path().join("home"));
+        let repo_a = temp.path().join("repo-a");
+        let repo_b = temp.path().join("repo-b");
+        fs::create_dir_all(&repo_a).expect("repo A should create");
+        fs::create_dir_all(&repo_b).expect("repo B should create");
+        fs::write(repo_a.join("target.txt"), "repo A").expect("repo A target should write");
+        fs::write(repo_b.join("target.txt"), "repo B").expect("repo B target should write");
+        let (runtime, requests) = fake_server([
+            Some(AUTHORIZED),
+            Some(r#"{"intent_id":"intent-1","operation_id":"operation-a"}"#),
+        ]);
+        let identity = RepoIdentity {
+            repo_id: "repo-a".to_string(),
+            worktree_id: "worktree-a".to_string(),
+            root: repo_a.to_string_lossy().into_owned(),
+            branch: "main".to_string(),
+        };
+        authorize(
+            &paths,
+            &runtime,
+            "agent-1",
+            "workspace-1",
+            Some(&identity),
+            None,
+            None,
+            "operation-a",
+            "write_file",
+            vec![(
+                "target.txt".to_string(),
+                stateful_core::ContentFingerprint::missing(),
+            )],
+            None,
+            Vec::new(),
+            &SOURCE,
+        )
+        .expect("authorization should persist its intent");
+        let _authorize = requests.recv().expect("authorization should arrive");
+
+        replay_pending(&paths, &runtime, &repo_b).expect("recovery should use captured root");
+        let recovery = request_body(&requests.recv().expect("recovery should arrive"));
+        assert_eq!(
+            recovery["payload"]["actual_fingerprints"][0]["fingerprint"],
+            serde_json::to_value(stateful_core::fingerprint_path(&repo_a.join("target.txt")).expect("repo A fingerprint should load"))
+                .expect("fingerprint should serialize")
+        );
+        assert!(!pending_path(&paths, "agent-1", "operation-a").exists());
+    }
+
+    #[test]
     fn recovery_without_completion_replays_all_frozen_claim_releases() {
         let temp = tempfile::tempdir().expect("temp dir should create");
         let paths = GlobalPaths::new(temp.path().join("home"));
@@ -700,7 +772,7 @@ mod tests {
         fs::write(repo_root.join("target.txt"), "after").expect("target should write");
         let (runtime, requests) = fake_server([
             Some(AUTHORIZED),
-            Some(r#"{"status":"recovered"}"#),
+            Some(r#"{"intent_id":"intent-1","operation_id":"operation-1"}"#),
             Some(r#"{"status":"ok"}"#),
             None,
             Some(r#"{"status":"ok"}"#),

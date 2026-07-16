@@ -1108,6 +1108,7 @@ fn pre_write_returns_intent_and_post_success_commits_it() {
     assert!(body["payload"]["post_fingerprints"][0][1]["sha256"].is_string());
 }
 
+
 #[test]
 fn denied_v2_write_intent_completes_the_exact_started_intent_as_failed() {
     let temp = tempfile::tempdir().expect("temp dir should create");

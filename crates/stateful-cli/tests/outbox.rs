@@ -456,7 +456,7 @@ fn sync_outbox_requeues_only_unsent_records_after_failure() {
     let error = sync_outbox_with_runtime(&paths, &runtime)
         .expect_err("outbox sync should fail on server error");
 
-    assert!(error.to_string().contains("stateful.v2 request"));
+    assert!(error.to_string().contains("outbox sync failed with HTTP 500"));
     let remaining = fs::read_to_string(&outbox_file).expect("failed record should remain pending");
     assert!(!remaining.contains("\"outbox_id\":\"outbox-1\""));
     assert!(remaining.contains("\"outbox_id\":\"outbox-2\""));
@@ -469,11 +469,13 @@ fn sync_outbox_discards_deterministic_client_rejections() {
     fs::create_dir_all(&paths.outbox_dir).expect("outbox dir should be creatable");
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
+    let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let (mut stream, _request) = accept_v2_request(&listener);
-        let body = r#"{"status":"error","message":"invalid lifecycle payload"}"#;
+        let (mut stream, request) = accept_v2_request(&listener);
+        tx.send(request).expect("request should send to test");
+        let body = r#"{"protocol_version":"stateful.v2","request_id":"018f1a33-e3c1-7000-b2a6-000000000001","error":{"code":"not_found","message":"missing"}}"#;
         let response = format!(
-            "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\n\r\n{}",
+            "HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\n\r\n{}",
             body.len(),
             body
         );
@@ -484,6 +486,13 @@ fn sync_outbox_discards_deterministic_client_rejections() {
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
     let outbox_file = paths.outbox_dir.join("s1.jsonl");
     write_pending_records(&outbox_file, &[("outbox-rejected", "s1", "w1", 1)]);
+    let frozen = serde_json::from_str::<serde_json::Value>(
+        &fs::read_to_string(&outbox_file).expect("outbox should read"),
+    )
+    .expect("outbox record should parse")["request_envelope"]
+        .as_str()
+        .expect("frozen request should be a string")
+        .to_string();
 
     assert_eq!(
         sync_outbox_with_runtime(&paths, &runtime)
@@ -493,6 +502,14 @@ fn sync_outbox_discards_deterministic_client_rejections() {
     assert!(
         !outbox_file.exists(),
         "a deterministic client rejection must be removed rather than replayed forever"
+    );
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(2))
+            .expect("client rejection request should arrive")
+            .split_once("\r\n\r\n")
+            .expect("request should contain a body")
+            .1,
+        frozen
     );
 }
 

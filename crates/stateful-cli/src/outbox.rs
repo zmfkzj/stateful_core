@@ -98,20 +98,18 @@ pub fn sync_outbox_with_runtime(
 
         for index in 0..records.len() {
             let record = &records[index].record;
-            let response = match replay_v2_request(
-                runtime,
-                &record.route,
+            let response = match stateful_core::RequestEnvelope::<Value>::from_json(
                 &record.request_envelope,
             ) {
+                Ok(request) if exact_envelope_json(&request)? == record.request_envelope => {
+                    crate::post_v2_raw(runtime, &record.route, &request)
+                }
+                Ok(_) => replay_v2_request(runtime, &record.route, &record.request_envelope),
+                Err(error) => Err(anyhow::anyhow!(error)),
+            };
+            let response = match response {
                 Ok(response) => response,
                 Err(error) => {
-                    if replay_error_status(&error).is_some_and(is_deterministic_client_rejection) {
-                        let _lock = acquire_outbox_lock(&outbox_dir)?;
-                        requeue_pending_records(&path, &records[index + 1..])?;
-                        fs::remove_file(&claimed_path)?;
-                        active_claim.finish();
-                        continue 'pending_files;
-                    }
                     let _lock = acquire_outbox_lock(&outbox_dir)?;
                     let pending = increment_attempts(&records[index..]);
                     requeue_pending_records(&path, &pending)?;
@@ -155,13 +153,6 @@ fn is_deterministic_client_rejection(status_code: u16) -> bool {
     (400..500).contains(&status_code) && !matches!(status_code, 408 | 429)
 }
 
-fn replay_error_status(error: &anyhow::Error) -> Option<u16> {
-    error
-        .to_string()
-        .rsplit_once("HTTP ")
-        .and_then(|(_, suffix)| suffix.split_whitespace().next())
-        .and_then(|status| status.parse().ok())
-}
 
 pub(crate) fn queue_session_heartbeat_outbox(
     paths: &GlobalPaths,
@@ -212,6 +203,10 @@ pub(crate) fn queue_session_heartbeat_outbox(
     Ok(())
 }
 
+pub(crate) fn exact_envelope_json(request: &RequestEnvelope<Value>) -> anyhow::Result<String> {
+    Ok(serde_json::to_value(request)?.to_string())
+}
+
 pub(crate) fn queue_exact_envelope(
     paths: &GlobalPaths,
     route: &str,
@@ -229,7 +224,7 @@ pub(crate) fn queue_exact_envelope(
         "sequence": next_sequence(&outbox_dir, &stem)?,
         "route": route,
         "request_id": request.request_id.to_string(),
-        "request_envelope": serde_json::to_string(request)?,
+        "request_envelope": exact_envelope_json(request)?,
         "attempts": 0,
         "sync_status": "pending"
     });

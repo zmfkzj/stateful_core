@@ -29,8 +29,8 @@ const OMP_WRITE_LIFECYCLE: write_lifecycle::LifecycleSource = write_lifecycle::L
 };
 
 use crate::outbox::{
-    acknowledge_exact_envelope, queue_exact_envelope, queue_session_heartbeat_outbox,
-    sync_outbox_with_runtime,
+    acknowledge_exact_envelope, exact_envelope_json, queue_exact_envelope,
+    queue_session_heartbeat_outbox, sync_outbox_with_runtime,
 };
 use crate::sandbox::{
     SandboxFsProfile, parse_sandbox_process_find_bash_invocation,
@@ -167,7 +167,9 @@ fn run_omp_hook(command: HookCommand) -> anyhow::Result<()> {
     }
     let runtime = discover_runtime_with_global(&repo_root, &paths)?;
     let identity = repo_identity_for_enabled_repo(&paths, &repo_root).ok();
-    if let Err(error) = write_lifecycle::replay_pending(&paths, &runtime, &repo_root) {
+    if !matches!(command, HookCommand::PostToolUse)
+        && let Err(error) = write_lifecycle::replay_pending(&paths, &runtime, &repo_root)
+    {
         eprintln!("stateful OMP write lifecycle replay warning: {error}");
     }
     if let Err(error) = sync_outbox_with_runtime(&paths, &runtime) {
@@ -209,6 +211,11 @@ fn run_omp_hook(command: HookCommand) -> anyhow::Result<()> {
         HookCommand::UserPromptSubmit => {
             anyhow::bail!("OMP hook user-prompt-submit is not supported");
         }
+    }
+    if matches!(command, HookCommand::PostToolUse)
+        && let Err(error) = write_lifecycle::replay_pending(&paths, &runtime, &repo_root)
+    {
+        eprintln!("stateful OMP write lifecycle replay warning: {error}");
     }
     Ok(())
 }
@@ -1127,39 +1134,60 @@ fn post_omp_post_tool_use_event(
         .map(runtime_tool_name_leaf)
         .unwrap_or_default();
     if tool_name.eq_ignore_ascii_case("read") {
-        record_omp_read_complete(input, runtime, repo_root, identity)?;
-        return post_omp_presence_heartbeat(runtime, input, identity);
-    }
-    if let (Some(repo_root), Some(operation_id)) = (repo_root, input.metadata.operation_id())
-        && (tool_name.eq_ignore_ascii_case("write")
-            || tool_name.eq_ignore_ascii_case("edit")
-            || tool_name.eq_ignore_ascii_case("bash")
-            || tool_name.eq_ignore_ascii_case("python"))
-    {
-        let paths = GlobalPaths::from_env()?;
-        write_lifecycle::complete(
-            &paths,
+        return finish_omp_post_tool(
             runtime,
-            &input.agent_id,
-            &input
-                .workspace_id
-                .clone()
-                .unwrap_or_else(|| effective_workspace_id(runtime, identity)),
+            input,
             identity,
-            input.omp_agent_id.as_deref(),
-            input.parent_agent_id.as_deref(),
-            repo_root,
-            operation_id,
-            input.metadata.failed(),
-            &OMP_WRITE_LIFECYCLE,
-        )?;
+            record_omp_read_complete(input, runtime, repo_root, identity),
+        );
     }
-    if tool_name.eq_ignore_ascii_case("bash")
-        && let Some(command) = testing_command(&input.tool_input)
-    {
-        post_omp_testing_result(runtime, input, identity, command)?;
+    let auxiliary = (|| {
+        if let (Some(repo_root), Some(operation_id)) = (repo_root, input.metadata.operation_id())
+            && (tool_name.eq_ignore_ascii_case("write")
+                || tool_name.eq_ignore_ascii_case("edit")
+                || tool_name.eq_ignore_ascii_case("bash")
+                || tool_name.eq_ignore_ascii_case("python"))
+        {
+            let paths = GlobalPaths::from_env()?;
+            write_lifecycle::complete(
+                &paths,
+                runtime,
+                &input.agent_id,
+                &input
+                    .workspace_id
+                    .clone()
+                    .unwrap_or_else(|| effective_workspace_id(runtime, identity)),
+                identity,
+                input.omp_agent_id.as_deref(),
+                input.parent_agent_id.as_deref(),
+                repo_root,
+                operation_id,
+                input.metadata.failed(),
+                &OMP_WRITE_LIFECYCLE,
+            )?;
+        }
+        if tool_name.eq_ignore_ascii_case("bash")
+            && let Some(command) = testing_command(&input.tool_input)
+        {
+            post_omp_testing_result(runtime, input, identity, command)?;
+        }
+        Ok(())
+    })();
+    finish_omp_post_tool(runtime, input, identity, auxiliary)
+}
+
+fn finish_omp_post_tool(
+    runtime: &ServerRuntime,
+    input: &OmpSessionEventInput,
+    identity: Option<&RepoIdentity>,
+    auxiliary: anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let heartbeat = post_omp_presence_heartbeat(runtime, input, identity);
+    match (auxiliary, heartbeat) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
     }
-    post_omp_presence_heartbeat(runtime, input, identity)
 }
 
 fn post_omp_presence_heartbeat(
@@ -1225,7 +1253,6 @@ fn record_omp_read_complete(
                 "tool_name": "read",
                 "outcome": classification,
                 "summary": input.metadata.result_summary(),
-                "result_metadata": input.result_metadata,
             }),
         )?;
         set_omp_lineage(
@@ -1834,14 +1861,15 @@ fn post_durable_read_start(
     failed_completion: &stateful_core::RequestEnvelope<serde_json::Value>,
 ) -> anyhow::Result<()> {
     let paths = GlobalPaths::from_env()?;
-    let serialized = serde_json::to_string(request)?;
+    let serialized = exact_envelope_json(request)?;
     queue_exact_envelope(&paths, "/v2/read/start", request)?;
+    queue_exact_envelope(&paths, "/v2/read/complete", failed_completion)?;
     match crate::replay_v2_request(runtime, "/v2/read/start", &serialized) {
-        Ok(_) => acknowledge_exact_envelope(&paths, request),
-        Err(error) => {
-            queue_exact_envelope(&paths, "/v2/read/complete", failed_completion)?;
-            Err(error)
+        Ok(_) => {
+            acknowledge_exact_envelope(&paths, request)?;
+            acknowledge_exact_envelope(&paths, failed_completion)
         }
+        Err(error) => Err(error),
     }
 }
 
@@ -1851,7 +1879,7 @@ fn post_durable_v2(
     request: &stateful_core::RequestEnvelope<serde_json::Value>,
 ) -> anyhow::Result<()> {
     let paths = GlobalPaths::from_env()?;
-    let serialized = serde_json::to_string(request)?;
+    let serialized = exact_envelope_json(request)?;
     queue_exact_envelope(&paths, route, request)?;
     crate::replay_v2_request(runtime, route, &serialized)?;
     acknowledge_exact_envelope(&paths, request)
@@ -1865,7 +1893,9 @@ fn testing_command(tool_input: &serde_json::Value) -> Option<String> {
     let words = split_simple_command_words(&command).ok()?;
     let canonical = match words.as_slice() {
         [command, subcommand, ..] if command == "cargo" && subcommand == "test" => "cargo test",
-        [command, subcommand, ..] if command == "cargo" && subcommand == "nextest" => {
+        [command, subcommand, action, ..]
+            if command == "cargo" && subcommand == "nextest" && action == "run" =>
+        {
             "cargo nextest"
         }
         [command, ..] if command == "pytest" => "pytest",
@@ -3679,6 +3709,10 @@ mod tests {
         assert_eq!(
             testing_command(&json!({ "command": "stateful sandbox run --fs build --network enabled --write-dir target --command 'cargo nextest run'" })),
             Some("cargo nextest".to_string())
+        );
+        assert_eq!(
+            testing_command(&json!({ "command": "cargo nextest list" })),
+            None
         );
         assert_eq!(
             testing_command(&json!({ "command": "stateful sandbox run --fs build --network enabled --write-dir target --command 'npm test -- --runInBand'" })),
