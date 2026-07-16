@@ -2662,6 +2662,25 @@ class RealWorldRunnerTests(unittest.TestCase):
         result["coordination_metrics"]["journal"]["bytes_growth"] = 99
         self.assertEqual(aggregate["journal"]["bytes_growth"], 0)
 
+    def test_coordination_metrics_allow_wait_status_projection_to_change_across_phases(self) -> None:
+        def diagnostics(container, phase):
+            snapshot = self.container_diagnostics(container, phase)
+            statuses = snapshot["databases"][".stateful/state.db"]["coordination_metrics"]["waits"][
+                "by_final_status"
+            ]
+            if phase == "after-tasks":
+                statuses["granted"] = 1
+            elif phase == "after-final":
+                statuses["completed"] = 1
+            return snapshot
+
+        result = self.run_container_with_diagnostics("parallel-on", diagnostics)
+
+        self.assertTrue(result["cleared"], result)
+        self.assertEqual(
+            result["coordination_metrics"]["waits"]["by_final_status"], {"completed": 1}
+        )
+
     def test_coordination_metrics_are_null_for_off_arms(self) -> None:
         result = self.run_container_with_diagnostics(
             "parallel-off", self.container_diagnostics

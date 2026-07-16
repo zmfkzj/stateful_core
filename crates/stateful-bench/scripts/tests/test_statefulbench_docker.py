@@ -1578,5 +1578,62 @@ class V2DiagnosticContractTests(unittest.TestCase):
             "2026-07-16T00:00:01Z",
         ):
             self.assertNotIn(private_value, encoded)
+    def test_v2_snapshot_excludes_unknown_notification_kind(self) -> None:
+        import sqlite3
+
+        database = self.home / ".stateful" / "state.db"
+        database.parent.mkdir()
+        connection = sqlite3.connect(database)
+        connection.executescript(
+            """
+            CREATE TABLE journal_events (
+                event_seq INTEGER PRIMARY KEY,
+                aggregate_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                source_ref TEXT NOT NULL
+            );
+            CREATE TABLE presence_current (payload_json TEXT);
+            CREATE TABLE handoff_current (payload_json TEXT);
+            CREATE TABLE read_observation_current (payload_json TEXT);
+            CREATE TABLE wait_current (payload_json TEXT);
+            CREATE TABLE context_delivery_current (payload_json TEXT);
+            CREATE TABLE workspace_version (version INTEGER);
+            CREATE TABLE notification_current (payload_json TEXT);
+            """
+        )
+        connection.executemany(
+            "INSERT INTO journal_events VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    1,
+                    "notification-known",
+                    "notification.created",
+                    "2026-07-16T00:00:01Z",
+                    json.dumps({"event": {"data": {"data": {"notification": {"kind": "scope_overlap"}}}}}),
+                    "agent",
+                    "source",
+                ),
+                (
+                    2,
+                    "notification-secret",
+                    "notification.created",
+                    "2026-07-16T00:00:02Z",
+                    json.dumps({"event": {"data": {"data": {"notification": {"kind": "customer_secret"}}}}}),
+                    "agent",
+                    "source",
+                ),
+            ],
+        )
+        connection.commit()
+        connection.close()
+
+        snapshot = self.diagnostics.snapshot_home(self.home)
+        metrics = snapshot["databases"][".stateful/state.db"]["coordination_metrics"]
+
+        self.assertEqual(metrics["notifications"]["by_kind"], {"scope_overlap": 1})
+
 if __name__ == "__main__":
     unittest.main()

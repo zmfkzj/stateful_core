@@ -28,6 +28,11 @@ _V2_TABLES = {
     "workspace_version",
     "notification_current",
 }
+_V2_NOTIFICATION_KINDS = {
+    "context_invalidated",
+    "reservation_granted",
+    "scope_overlap",
+}
 _CATEGORY = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)?")
 
 
@@ -291,7 +296,7 @@ def _coordination_metrics(
             notification = data.get("notification")
             if isinstance(notification, dict):
                 kind = _safe_category(notification.get("kind"))
-                if kind is not None:
+                if kind in _V2_NOTIFICATION_KINDS:
                     notification_kinds[kind] = notification_kinds.get(kind, 0) + 1
                     if kind == "reservation_granted":
                         grants.append((notification.get("payload"), occurred_at))

@@ -1331,7 +1331,12 @@ def _metric_counters(value: object, prefix: str = "") -> dict[str, int]:
     counters: dict[str, int] = {}
     for key, item in value.items():
         label = f"{prefix}.{key}" if prefix else key
-        if label in {"journal.bytes_start", "journal.bytes_end", "journal.bytes_growth"}:
+        if label in {
+            "journal.bytes_start",
+            "journal.bytes_end",
+            "journal.bytes_growth",
+            "waits.by_final_status",
+        }:
             continue
         if type(item) is int:
             counters[label] = item
