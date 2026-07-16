@@ -4,6 +4,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     str::FromStr,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use stateful_core::{ActorType, SourceKind};
 
@@ -1276,9 +1277,83 @@ fn doctor_journal_threshold_bytes() -> u64 {
         .unwrap_or(DEFAULT_DOCTOR_JOURNAL_THRESHOLD_BYTES)
 }
 
+const DOCTOR_JOURNAL_BASELINE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct DoctorJournalBaseline {
+    observed_at_unix_seconds: u64,
+    footprint_bytes: u64,
+}
+
+fn doctor_journal_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut file_name = path.file_name().unwrap_or_default().to_os_string();
+    file_name.push(suffix);
+    path.with_file_name(file_name)
+}
+
+fn doctor_journal_footprint_bytes(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
+        .saturating_add(
+            std::fs::metadata(doctor_journal_sidecar_path(path, "-wal"))
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+        )
+}
+
+fn doctor_journal_baseline_path(path: &Path) -> PathBuf {
+    doctor_journal_sidecar_path(path, ".doctor-baseline.json")
+}
+
+fn doctor_journal_baseline_is_recent(baseline: &DoctorJournalBaseline, now: SystemTime) -> bool {
+    UNIX_EPOCH
+        .checked_add(Duration::from_secs(baseline.observed_at_unix_seconds))
+        .and_then(|observed_at| now.duration_since(observed_at).ok())
+        .is_some_and(|age| age <= DOCTOR_JOURNAL_BASELINE_MAX_AGE)
+}
+
+fn write_doctor_journal_baseline(path: &Path, baseline: &DoctorJournalBaseline) -> bool {
+    let Ok(contents) = serde_json::to_vec(baseline) else {
+        return false;
+    };
+    let temp_path = doctor_journal_sidecar_path(
+        path,
+        &format!(".{}.tmp", uuid::Uuid::new_v4()),
+    );
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
+        file.write_all(&contents)?;
+        file.sync_all()?;
+        std::fs::rename(&temp_path, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temp_path);
+        return false;
+    }
+    true
+}
+
 fn doctor_journal_diagnostics(path: &Path) -> DoctorJournalDiagnostics {
     let threshold_bytes = doctor_journal_threshold_bytes();
-    let size_bytes = std::fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0);
+    let size_bytes = doctor_journal_footprint_bytes(path);
+    let baseline_path = doctor_journal_baseline_path(path);
+    let now = SystemTime::now();
+    let baseline = std::fs::read(&baseline_path)
+        .ok()
+        .and_then(|contents| serde_json::from_slice::<DoctorJournalBaseline>(&contents).ok())
+        .filter(|baseline| doctor_journal_baseline_is_recent(baseline, now));
+    let has_recent_baseline = baseline.is_some();
+    let (growth_bytes, growth_status) = match baseline {
+        Some(baseline) => (
+            size_bytes.saturating_sub(baseline.footprint_bytes),
+            "measured".to_string(),
+        ),
+        None => (0, "baseline_captured".to_string()),
+    };
     let default = DoctorJournalDiagnostics {
         available: false,
         size_bytes,
@@ -1288,25 +1363,36 @@ fn doctor_journal_diagnostics(path: &Path) -> DoctorJournalDiagnostics {
             earliest: None,
             latest: None,
         },
-        growth_bytes: 0,
-        growth_status: "baseline_unavailable".to_string(),
+        growth_bytes,
+        growth_status,
         threshold_bytes,
         warning: size_bytes >= threshold_bytes,
     };
-    let Ok(journal) = stateful_store::inspect_journal(path) else {
-        return default;
-    };
-    DoctorJournalDiagnostics {
-        available: true,
-        size_bytes,
-        rows: journal.rows,
-        event_types: journal.event_types,
-        time_range: DoctorJournalTimeRange {
-            earliest: journal.earliest,
-            latest: journal.latest,
+    let mut report = match stateful_store::inspect_journal(path) {
+        Ok(journal) => DoctorJournalDiagnostics {
+            available: true,
+            rows: journal.rows,
+            event_types: journal.event_types,
+            time_range: DoctorJournalTimeRange {
+                earliest: journal.earliest,
+                latest: journal.latest,
+            },
+            ..default
         },
-        ..default
+        Err(_) => default,
+    };
+    let observed_at_unix_seconds = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let baseline_written = write_doctor_journal_baseline(
+        &baseline_path,
+        &DoctorJournalBaseline {
+            observed_at_unix_seconds,
+            footprint_bytes: size_bytes,
+        },
+    );
+    if !has_recent_baseline && !baseline_written {
+        report.growth_status = "baseline_write_failed".to_string();
     }
+    report
 }
 
 fn doctor_runtime_diagnostics(paths: &GlobalPaths) -> DoctorRuntimeDiagnostics {
