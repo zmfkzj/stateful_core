@@ -383,9 +383,11 @@ pub(crate) fn presence_for_resource_update<T>(
     request: &RequestEnvelope<T>,
     now: OffsetDateTime,
 ) -> StoreResult<PresenceRecord> {
-    Ok(reader
-        .presence(&request.workspace.workspace_id, &request.agent.agent_id)?
-        .unwrap_or_else(|| register_record(request, None, None, now)))
+    let presence = reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?;
+    if let Some(presence) = &presence {
+        crate::handoff::ensure_presence_owner(request, presence)?;
+    }
+    Ok(presence.unwrap_or_else(|| register_record(request, None, None, now)))
 }
 
 pub(crate) fn resource_update_event<T>(

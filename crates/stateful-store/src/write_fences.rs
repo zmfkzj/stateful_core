@@ -45,6 +45,8 @@ pub struct WriteFenceRecord {
     pub parent_agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_actor_id: Option<String>,
+    #[serde(default)]
+    pub initiating_actor_known: bool,
     pub workspace_id: String,
     pub relative_path: String,
     pub action: String,
@@ -58,8 +60,9 @@ pub struct WriteFenceRecord {
 }
 
 impl WriteFenceRecord {
-    fn is_owned_by(&self, agent: &AgentIdentity) -> bool {
-        self.agent_id == agent.agent_id
+    pub(crate) fn is_owned_by(&self, agent: &AgentIdentity) -> bool {
+        self.initiating_actor_known
+            && self.agent_id == agent.agent_id
             && self.actor_id == agent.actor_id
             && self.actor_type == agent.actor_type
             && self.owner_id == agent.owner_id
@@ -133,6 +136,7 @@ impl Store {
                     owner_id: request.agent.owner_id.clone(),
                     parent_agent_id: request.agent.parent_agent_id.clone(),
                     parent_actor_id: request.agent.parent_actor_id.clone(),
+                    initiating_actor_known: true,
                     workspace_id: request.workspace.workspace_id.clone(),
                     relative_path: path,
                     action: payload.action.clone(),

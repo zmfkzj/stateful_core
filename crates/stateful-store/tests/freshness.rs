@@ -4,7 +4,10 @@ use stateful_core::{
     RequestEnvelope, SourceKind, SourceRef, WorkspaceIdentity,
     WriteIntentCompletion, WriteIntentStart, WriteIntentStatus, WriteTarget,
 };
-use stateful_store::{ActivityFinalization, ActivityStart, FixedClock, Store, WriteFenceRelease};
+use stateful_store::{
+    ActivityFinalization, ActivityStart, FixedClock, PresenceRegistration, Store, WriteFenceAcquire,
+    WriteFenceRelease,
+};
 use time::{Duration, macros::datetime, OffsetDateTime};
 use uuid::Uuid;
 
@@ -48,6 +51,24 @@ fn request_as<T: serde::Serialize>(agent_id: &str, actor_id: &str, payload: T) -
         payload,
     )
     .expect("test request should be valid")
+}
+
+fn unknown_request<T: serde::Serialize>(payload: T) -> RequestEnvelope<T> {
+    let mut request = request_as("agent-1", "unknown", payload);
+    request.agent.actor_type = ActorType::Unknown;
+    request
+}
+
+fn strip_current_attribution(path: &std::path::Path, table: &str, aggregate_id: &str) {
+    let connection = rusqlite::Connection::open(path).expect("projection connection opens");
+    connection
+        .execute(
+            &format!(
+                "UPDATE {table} SET payload_json = json_remove(payload_json, '$.actor_id', '$.actor_type', '$.owner_id', '$.parent_agent_id', '$.parent_actor_id', '$.initiating_actor_known') WHERE aggregate_id = ?1"
+            ),
+            [aggregate_id],
+        )
+        .expect("legacy attribution is removed from projection");
 }
 
 fn start_read(store: &Store, agent_id: &str, operation_id: &str, path: &str, before: ContentFingerprint) {
@@ -1129,4 +1150,180 @@ fn session_finalization_invalidates_its_stable_observations() {
         .read_observation("workspace-1", "agent-1", "src/lib.rs")
         .expect("observation reads")
         .is_none());
+}
+
+#[test]
+fn legacy_write_intent_attribution_is_never_actionable_by_unknown_actor() {
+    let temporary = tempfile::tempdir().expect("temporary database directory");
+    let database = temporary.path().join("legacy-intent.sqlite");
+    let store = Store::open_with_clock(&database, FixedClock::new(NOW)).expect("store opens");
+    let before = fingerprint(b"before");
+
+    let complete = store
+        .start_write_intent(&request(
+            "agent-1",
+            WriteIntentStart {
+                operation_id: "complete".into(),
+                action: "write_file".into(),
+                targets: vec![WriteTarget { path: "src/complete.rs".into(), before: before.clone() }],
+            },
+        ))
+        .expect("intent starts")
+        .response;
+    strip_current_attribution(&database, "write_intent_current", &complete.intent_id);
+    let journal_count = store.journal_event_count().expect("journal count loads");
+    let error = store
+        .complete_write_intent(&unknown_request(WriteIntentCompletion::committed(
+            complete.intent_id.clone(),
+            vec![("src/complete.rs".into(), fingerprint(b"after"))],
+        )))
+        .expect_err("legacy intent must not be completable by a sentinel actor");
+    assert!(matches!(error, stateful_store::StoreError::WriteIntentOwnerMismatch));
+    assert_eq!(store.journal_event_count().expect("journal count loads"), journal_count);
+
+    let recover = store
+        .start_write_intent(&request(
+            "agent-1",
+            WriteIntentStart {
+                operation_id: "recover".into(),
+                action: "write_file".into(),
+                targets: vec![WriteTarget { path: "src/recover.rs".into(), before: before.clone() }],
+            },
+        ))
+        .expect("intent starts")
+        .response;
+    strip_current_attribution(&database, "write_intent_current", &recover.intent_id);
+    let journal_count = store.journal_event_count().expect("journal count loads");
+    let error = store
+        .recover_write_intent(&unknown_request((
+            recover.intent_id.clone(),
+            vec![("src/recover.rs".into(), fingerprint(b"after"))],
+        )))
+        .expect_err("legacy intent must not be recoverable by a sentinel actor");
+    assert!(matches!(error, stateful_store::StoreError::WriteIntentOwnerMismatch));
+    assert_eq!(store.journal_event_count().expect("journal count loads"), journal_count);
+
+    let reconcile = store
+        .start_write_intent(&request(
+            "agent-1",
+            WriteIntentStart {
+                operation_id: "reconcile".into(),
+                action: "write_file".into(),
+                targets: vec![WriteTarget { path: "src/reconcile.rs".into(), before: before.clone() }],
+            },
+        ))
+        .expect("intent starts")
+        .response;
+    store
+        .recover_write_intent(&request(
+            "agent-1",
+            (
+                reconcile.intent_id.clone(),
+                vec![("src/reconcile.rs".into(), fingerprint(b"after"))],
+            ),
+        ))
+        .expect("owner records unknown outcome");
+    strip_current_attribution(&database, "write_intent_current", &reconcile.intent_id);
+    let journal_count = store.journal_event_count().expect("journal count loads");
+    let error = store
+        .reconcile_write_intent(&unknown_request(reconcile.intent_id))
+        .expect_err("legacy intent must not be reconcilable by a sentinel actor");
+    assert!(matches!(error, stateful_store::StoreError::WriteIntentOwnerMismatch));
+    assert_eq!(store.journal_event_count().expect("journal count loads"), journal_count);
+}
+
+#[test]
+fn legacy_write_fence_attribution_is_never_actionable_by_unknown_actor() {
+    let temporary = tempfile::tempdir().expect("temporary database directory");
+    let database = temporary.path().join("legacy-fence.sqlite");
+    let store = Store::open_with_clock(&database, FixedClock::new(NOW)).expect("store opens");
+
+    let acquired = store
+        .acquire_write_fences(&request(
+            "agent-1",
+            WriteFenceAcquire {
+                paths: vec!["src/fence.rs".into()],
+                action: "write_file".into(),
+            },
+        ))
+        .expect("fence acquires")
+        .response;
+    let fence_id = acquired.fences[0].fence_id.clone();
+    strip_current_attribution(&database, "write_fence_current", &fence_id);
+    let journal_count = store.journal_event_count().expect("journal count loads");
+    let error = store
+        .acquire_write_fences(&unknown_request(WriteFenceAcquire {
+            paths: vec!["src/fence.rs".into()],
+            action: "write_file".into(),
+        }))
+        .expect_err("legacy fence must not be renewable by a sentinel actor");
+    assert!(matches!(error, stateful_store::StoreError::ClaimOwnerMismatch));
+    assert_eq!(store.journal_event_count().expect("journal count loads"), journal_count);
+
+    let error = store
+        .release_write_fences(&unknown_request(WriteFenceRelease {
+            fence_ids: vec![fence_id],
+        }))
+        .expect_err("legacy fence must not be releasable by a sentinel actor");
+    assert!(matches!(error, stateful_store::StoreError::ClaimOwnerMismatch));
+    assert_eq!(store.journal_event_count().expect("journal count loads"), journal_count);
+}
+
+#[test]
+fn existing_presence_rejects_same_agent_different_actor_read_and_write_lifecycles() {
+    let mut store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    store
+        .register_presence(&request(
+            "agent-1",
+            PresenceRegistration {
+                first_prompt: None,
+            },
+        ))
+        .expect("presence registers");
+    let content = fingerprint(b"content");
+    store
+        .start_read_observation(&request_as(
+            "agent-1",
+            "actor-other",
+            ReadObservationStart {
+                operation_id: "read-other".into(),
+                path: "src/read.rs".into(),
+                before: content.clone(),
+            },
+        ))
+        .expect("read start journals before completion");
+    let journal_count = store.journal_event_count().expect("journal count loads");
+    let error = store
+        .complete_read_observation(&request_as(
+            "agent-1",
+            "actor-other",
+            ReadCompletion {
+                operation_id: "read-other".into(),
+                path: "src/read.rs".into(),
+                classification: ReadClassification::Exact,
+                after: Some(content.clone()),
+                semantic_marker: None,
+            },
+        ))
+        .expect_err("other actor cannot update existing presence through a read");
+    assert!(matches!(error, stateful_store::StoreError::ReservationOwnerMismatch));
+    assert_eq!(store.journal_event_count().expect("journal count loads"), journal_count);
+    assert!(store
+        .presence_resources_for_request(&request("agent-1", ()), "agent-1")
+        .expect("presence resources load")
+        .is_empty());
+
+    let error = store
+        .start_write_intent(&request_as(
+            "agent-1",
+            "actor-other",
+            WriteIntentStart {
+                operation_id: "write-other".into(),
+                action: "write_file".into(),
+                targets: vec![WriteTarget { path: "src/write.rs".into(), before: content }],
+            },
+        ))
+        .expect_err("other actor cannot update existing presence through a write");
+    assert!(matches!(error, stateful_store::StoreError::ReservationOwnerMismatch));
+    assert_eq!(store.journal_event_count().expect("journal count loads"), journal_count);
 }

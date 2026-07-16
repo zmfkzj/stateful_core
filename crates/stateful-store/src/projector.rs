@@ -1,7 +1,7 @@
 use crate::{StoreError, StoreResult, journal::JournalEvent, schema};
 use rusqlite::{Connection, params};
 use stateful_core::{
-    ActorType, AuthorizationEvent, ClaimEvent, ContextEvent, EventData, EventPayload, HandoffEvent,
+    ActorType, AgentIdentity, AuthorizationEvent, ClaimEvent, ContextEvent, EventData, EventPayload, HandoffEvent,
     HandoffRecord, HandoffStatus, HumanAcknowledgementEvent, HumanObservationEvent, MigrationEvent,
     NotificationEvent, PresenceEvent, PresenceRecord, PresenceResource, ReadObservationEvent,
     ReadObservationRecord, RecoveryEvent, ReservationEvent, ResourceVersion, WaitEvent,
@@ -53,8 +53,8 @@ impl<'a> Projector<'a> {
             }
             return Ok(());
         }
-        if let Some(agent_id) = cleanup_agent_id(event) {
-            self.apply_coordination_cleanup(event, agent_id)?;
+        if let Some((agent_id, actor)) = cleanup_identity(event) {
+            self.apply_coordination_cleanup(event, &agent_id, actor.as_ref())?;
             if event.stored.affects_context() {
                 self.apply_workspace_version(event)?;
             }
@@ -448,7 +448,12 @@ impl<'a> Projector<'a> {
         }
     }
 
-    fn apply_coordination_cleanup(&self, event: &JournalEvent, agent_id: &str) -> StoreResult<()> {
+    fn apply_coordination_cleanup(
+        &self,
+        event: &JournalEvent,
+        agent_id: &str,
+        actor: Option<&AgentIdentity>,
+    ) -> StoreResult<()> {
         for table in [
             "reservation_current",
             "claim_current",
@@ -456,14 +461,42 @@ impl<'a> Projector<'a> {
             "write_fence_current",
         ] {
             let table = format!("{}{}", self.prefix, table);
-            self.connection.execute(
-                &format!(
-                    "DELETE FROM {table}
-                     WHERE workspace_id = ?1
-                       AND json_extract(payload_json, '$.agent_id') = ?2"
-                ),
-                params![event.workspace_id, agent_id],
-            )?;
+            if let Some(actor) = actor {
+                let actor_type = serde_json::to_value(&actor.actor_type)?
+                    .as_str()
+                    .expect("actor type serializes as a string")
+                    .to_owned();
+                self.connection.execute(
+                    &format!(
+                        "DELETE FROM {table}
+                         WHERE workspace_id = ?1
+                           AND json_extract(payload_json, '$.agent_id') = ?2
+                           AND json_extract(payload_json, '$.actor_id') = ?3
+                           AND json_extract(payload_json, '$.actor_type') = ?4
+                           AND json_extract(payload_json, '$.owner_id') IS ?5
+                           AND json_extract(payload_json, '$.parent_agent_id') IS ?6
+                           AND json_extract(payload_json, '$.parent_actor_id') IS ?7"
+                    ),
+                    params![
+                        event.workspace_id,
+                        agent_id,
+                        actor.actor_id,
+                        actor_type,
+                        actor.owner_id,
+                        actor.parent_agent_id,
+                        actor.parent_actor_id,
+                    ],
+                )?;
+            } else {
+                self.connection.execute(
+                    &format!(
+                        "DELETE FROM {table}
+                         WHERE workspace_id = ?1
+                           AND json_extract(payload_json, '$.agent_id') = ?2"
+                    ),
+                    params![event.workspace_id, agent_id],
+                )?;
+            }
         }
         Ok(())
     }
@@ -749,7 +782,7 @@ fn handoff_resource_key(agent_id: &str, relative_path: &str) -> String {
     format!("{agent_id}\u{1}{relative_path}")
 }
 
-fn cleanup_agent_id(event: &JournalEvent) -> Option<&str> {
+fn cleanup_identity(event: &JournalEvent) -> Option<(String, Option<AgentIdentity>)> {
     let data = match event.stored.payload() {
         EventPayload::Reservation(ReservationEvent::Released(data))
         | EventPayload::Claim(ClaimEvent::Released(data))
@@ -757,10 +790,18 @@ fn cleanup_agent_id(event: &JournalEvent) -> Option<&str> {
         | EventPayload::WriteFence(WriteFenceEvent::Released(data)) => data,
         _ => return None,
     };
-    data.data.get("cleanup")
+    data.data
+        .get("cleanup")
         .and_then(serde_json::Value::as_bool)
         .filter(|cleanup| *cleanup)
-        .map(|_| data.aggregate_id.as_str())
+        .map(|_| {
+            let actor = data
+                .data
+                .get("actor")
+                .cloned()
+                .and_then(|actor| serde_json::from_value(actor).ok());
+            (data.aggregate_id.clone(), actor)
+        })
 }
 
 fn migration_seed_projection_table(event: &JournalEvent) -> Option<&'static str> {

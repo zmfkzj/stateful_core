@@ -193,6 +193,8 @@ pub struct WriteIntentRecord {
     pub parent_agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_actor_id: Option<String>,
+    #[serde(default)]
+    pub initiating_actor_known: bool,
     pub action: String,
     pub targets: Vec<WriteTarget>,
     pub fence_ids: Vec<String>,
@@ -208,7 +210,8 @@ pub struct WriteIntentRecord {
 
 impl WriteIntentRecord {
     pub fn is_owned_by(&self, agent: &AgentIdentity) -> bool {
-        self.agent_id == agent.agent_id
+        self.initiating_actor_known
+            && self.agent_id == agent.agent_id
             && self.actor_id == agent.actor_id
             && self.actor_type == agent.actor_type
             && self.owner_id == agent.owner_id

@@ -6,7 +6,7 @@ use stateful_core::{
 use stateful_store::{
     ActivityFinalization, ActivityStart, Clock, FixedClock, PresenceRegistration,
     PresenceResourceUpdate, PresenceToolResult, PresenceToolStart, ReservationDeclaration, Store,
-    WaitRequest,
+    WaitRequest, WriteFenceAcquire,
 };
 use tempfile::TempDir;
 use std::sync::{Arc, Mutex};
@@ -1024,4 +1024,56 @@ fn activity_start_rejects_changed_identity_for_live_or_retained_presence() {
         handoff(&mut retained_store, "agent-1").expect("handoff should remain").actor_id,
         "actor-1",
     );
+}
+
+#[test]
+fn finalization_keeps_same_agent_fence_owned_by_a_different_actor() {
+    let mut store = store();
+    store
+        .register_presence(&register_request(
+            Uuid::new_v4(),
+            "agent-1",
+            "presence-owner",
+            ActorType::Agent,
+            None,
+        ))
+        .expect("presence registers");
+    store
+        .start_activity(&request(
+            Uuid::new_v4(),
+            "agent-1",
+            "presence-owner",
+            ActorType::Agent,
+            ActivityStart {
+                phase: PresencePhase::Editing,
+            },
+        ))
+        .expect("owner activity starts");
+    store
+        .acquire_write_fences(&request(
+            Uuid::new_v4(),
+            "agent-1",
+            "fence-owner",
+            ActorType::Agent,
+            WriteFenceAcquire {
+                paths: vec!["src/held.rs".into()],
+                action: "write_file".into(),
+            },
+        ))
+        .expect("other actor fence acquires");
+
+    store
+        .finalize_activity(&request(
+            Uuid::new_v4(),
+            "agent-1",
+            "presence-owner",
+            ActorType::Agent,
+            ActivityFinalization {},
+        ))
+        .expect("presence finalizes");
+
+    assert!(store
+        .active_write_fence("workspace-1", "src/held.rs")
+        .expect("fence loads")
+        .is_some());
 }

@@ -625,7 +625,7 @@ pub(crate) fn presence_finalization_events<T>(
         }
     }
     for mut fence in typed_records::<WriteFenceRecord>(reader, CurrentAggregate::WriteFence, workspace_id)? {
-        if fence.agent_id == agent_id && fence.status == "active" {
+        if fence.status == "active" && fence.is_owned_by(&request.agent) {
             fence.status = "released".into();
             fence.released_at = Some(crate::reservations::timestamp(now)?);
             events.push(fence_event(
@@ -639,7 +639,7 @@ pub(crate) fn presence_finalization_events<T>(
     }
     if events.len() == 1 {
         let mut cleanup_data = EventData::new(agent_id);
-        cleanup_data.data = json!({"agent_id": agent_id, "cleanup": true});
+        cleanup_data.data = json!({"agent_id": agent_id, "cleanup": true, "actor": request.agent});
         for payload in [
             EventPayload::Reservation(ReservationEvent::Released(cleanup_data.clone())),
             EventPayload::Claim(ClaimEvent::Released(cleanup_data.clone())),

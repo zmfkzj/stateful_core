@@ -180,13 +180,13 @@ pub(crate) async fn authorize(State(config): State<ServerConfig>, protocol::V2Js
     if let Err(error) = store.run_maintenance() {
         return protocol::store_error_response(&request_id, error);
     }
-    let decision = match authorize_request(&mut store, config.coordination_mode, &request) {
-        Ok(decision) => decision,
-        Err(response) => return response,
-    };
     let authorization_workspace_version = match store.workspace_version(&request.workspace.workspace_id) {
         Ok(version) => version,
         Err(error) => return protocol::store_error_response(&request_id, error),
+    };
+    let decision = match authorize_request(&mut store, config.coordination_mode, &request) {
+        Ok(decision) => decision,
+        Err(response) => return response,
     };
     let write_payload = WriteIntentStart {
         operation_id: request.payload.operation_id.clone(),
