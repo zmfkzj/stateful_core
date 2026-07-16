@@ -57,41 +57,6 @@ function renderConflictMessages(response) {
   return messages.length ? messages : ['Stateful reports possible save conflicts.'];
 }
 
-function makeEnvelope(runtime, repoRoot, payload, event, sourceKind = 'ide') {
-  const workspaceId = runtime.workspaceId;
-  const agentId = `${sourceKind}-${workspaceId}`;
-  return {
-    protocol_version: 'stateful.v1',
-    request_id: crypto.randomUUID(),
-    observed_at: new Date().toISOString(),
-    agent: {
-      agent_id: agentId,
-      actor_id: agentId,
-      actor_type: 'human',
-    },
-    workspace: {
-      root: repoRoot || '',
-      workspace_id: workspaceId,
-      repo_id: '',
-      worktree_id: '',
-      branch: '',
-    },
-    source: {
-      kind: sourceKind,
-      event,
-      source_ref: 'stateful.vscode',
-    },
-    payload,
-  };
-}
-
-
-function saveCheckBody(runtime, relativePath) {
-  return {
-    workspace_id: runtime.workspaceId,
-    paths: [relativePath],
-  };
-}
 async function postJson(runtime, endpointPath, body, timeoutMs = 5000) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -118,22 +83,11 @@ async function postJson(runtime, endpointPath, body, timeoutMs = 5000) {
   }
 }
 
-async function postStateful(runtime, endpointPath, repoRoot, payload, event, timeoutMs, sourceKind = 'ide') {
-  return postJson(
-    runtime,
-    endpointPath,
-    makeEnvelope(runtime, repoRoot, payload, event, sourceKind),
-    timeoutMs,
-  );
-}
 
 module.exports = {
   contentHash,
-  makeEnvelope,
   postJson,
-  postStateful,
   readRuntimeFile,
-  saveCheckBody,
   renderConflictMessages,
   runtimeFilePath,
   sha256Hex,
