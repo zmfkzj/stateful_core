@@ -54,7 +54,7 @@ Independent corrective re-review found no Critical, Important, or Minor findings
 ## Commit / push
 
 Implementation commit `ea15822` (`fix: freeze rejections and preserve migration terminals`) was pushed to `origin/presence-first-event-journal-v2`.
-Corrective receipt validation and terminal-repair commit `18d2eae` (`fix: validate frozen receipts and repair terminal projections`) is ready to push on the same branch.
+Corrective receipt validation and terminal-repair commit `18d2eae` (`fix: validate frozen receipts and repair terminal projections`) was pushed to the same branch.
 
 ## Concerns
 
