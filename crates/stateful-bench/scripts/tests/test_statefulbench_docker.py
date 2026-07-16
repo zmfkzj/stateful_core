@@ -53,7 +53,7 @@ class DockerRuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.platform, "linux/arm64")
         self.assertTrue(Path(runtime.binary).is_absolute())
 
-    def test_inspect_runtime_rejects_image_platform_that_differs_from_server(self) -> None:
+    def test_inspect_runtime_accepts_arm64_image_on_non_arm_daemon(self) -> None:
         image = subprocess.CompletedProcess(
             ["docker"],
             0,
@@ -76,7 +76,36 @@ class DockerRuntimeTests(unittest.TestCase):
             self.assertEqual(command[1:3], ["image", "inspect"])
             return image
 
-        with self.assertRaisesRegex(RuntimeError, "platform"):
+        runtime = self.mod.inspect_runtime(
+            "docker", "statefulbench-realworld:local", runner=runner
+        )
+        self.assertEqual(runtime.platform, "linux/arm64")
+        self.assertEqual(runtime.server_platform, "linux/amd64")
+
+    def test_inspect_runtime_rejects_amd64_image_even_on_amd64_daemon(self) -> None:
+        image = subprocess.CompletedProcess(
+            ["docker"],
+            0,
+            stdout=json.dumps(
+                [
+                    {
+                        "Id": "sha256:amd64",
+                        "RepoDigests": ["statefulbench@sha256:amd64"],
+                        "Os": "linux",
+                        "Architecture": "amd64",
+                    }
+                ]
+            ),
+            stderr="",
+        )
+
+        def runner(command, **_kwargs):
+            if command[1:3] == ["version", "--format"]:
+                return subprocess.CompletedProcess(command, 0, "linux/amd64\n", "")
+            self.assertEqual(command[1:3], ["image", "inspect"])
+            return image
+
+        with self.assertRaisesRegex(RuntimeError, "linux/arm64"):
             self.mod.inspect_runtime("docker", "statefulbench-realworld:local", runner=runner)
 
     def test_inspect_runtime_fails_closed_on_missing_daemon_or_non_linux_image(self) -> None:

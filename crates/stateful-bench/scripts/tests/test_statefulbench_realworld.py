@@ -1752,6 +1752,28 @@ class QualificationTests(unittest.TestCase):
 
         self.assertEqual(runtime.image_id, "sha256:fixture")
 
+    def test_inner_qualification_accepts_arm64_image_on_non_arm_daemon(self) -> None:
+        environment = {
+            "STATEFULBENCH_IMAGE_ID": "sha256:fixture",
+            "STATEFULBENCH_IMAGE_PLATFORM": "linux/arm64",
+            "STATEFULBENCH_SERVER_PLATFORM": "linux/amd64",
+            "STATEFULBENCH_IMAGE_REPO_DIGESTS": "[]",
+        }
+        with (
+            mock.patch.dict(self.mod.os.environ, environment, clear=False),
+            mock.patch.object(Path, "is_file", return_value=True),
+        ):
+            runtime = self.mod._inner_qualification_runtime(
+                "statefulbench-realworld:local",
+                "docker",
+                Path("/benchmark/datasets/statefulbench-realworld/manifest.json"),
+                Path("/cache"),
+            )
+
+        self.assertEqual(runtime.platform, "linux/arm64")
+        self.assertEqual(runtime.server_platform, "linux/amd64")
+
+
     def test_inner_qualification_rejects_environment_staging_sentinel(self) -> None:
         environment = {
             "STATEFULBENCH_STAGED_DATASET": "1",
@@ -2351,7 +2373,7 @@ class RealWorldRunnerTests(unittest.TestCase):
 
         return launch
 
-    def run_arm(self, arm, events, **kwargs):
+    def run_arm(self, arm, events, *, trial=1, **kwargs):
         suite_ok = kwargs.pop("suite_ok", True)
         evaluator = kwargs.pop("evaluator", lambda *_: True)
         suite = kwargs.pop("suite", lambda *_: suite_ok)
@@ -2362,7 +2384,7 @@ class RealWorldRunnerTests(unittest.TestCase):
             self.root / "cache",
             self.root / "out",
             arm,
-            self.mod.RunConfig(tasks=10, stateful_binary="/tmp/stateful"),
+            self.mod.RunConfig(tasks=10, trial=trial, stateful_binary="/tmp/stateful"),
             launch=self.fake_launch(events, **kwargs.pop("launch_kwargs", {})),
             workspace_factory=self.workspace,
             archive_loader=lambda *_: self.root / "archive.tar.gz",
@@ -2372,7 +2394,9 @@ class RealWorldRunnerTests(unittest.TestCase):
             **kwargs,
         )
 
-    def run_container_with_diagnostics(self, arm, diagnostics):
+    def run_container_with_diagnostics(
+        self, arm, diagnostics, *, trial=1, post_checks=None, remove=None
+    ):
         runtime = self.mod._DOCKER.DockerRuntime(
             binary="/docker",
             image="statefulbench-realworld:local",
@@ -2437,6 +2461,7 @@ class RealWorldRunnerTests(unittest.TestCase):
             arm,
             self.mod.RunConfig(
                 tasks=10,
+                trial=trial,
                 stateful_binary="/usr/local/bin/stateful",
                 omp_bin="/usr/local/bin/omp",
             ),
@@ -2450,17 +2475,21 @@ class RealWorldRunnerTests(unittest.TestCase):
                     "PI_CODING_AGENT_DIR": "/home/stateful/.omp/profiles/stateful/agent",
                 }
             ),
-            arm_container_remove=mock.Mock(),
+            arm_container_remove=mock.Mock() if remove is None else remove,
             container_exec=execute,
             container_agent_launch=launch,
             container_agent_wait=wait,
             container_evaluator_inject=mock.Mock(),
-            container_post_checks=mock.Mock(
-                return_value=(
-                    True,
-                    True,
-                    [{"key": f"task-{index}", "ok": True} for index in range(10)],
+            container_post_checks=(
+                mock.Mock(
+                    return_value=(
+                        True,
+                        True,
+                        [{"key": f"task-{index}", "ok": True} for index in range(10)],
+                    )
                 )
+                if post_checks is None
+                else post_checks
             ),
             container_diagnostics=diagnostics,
             container_inspect=mock.Mock(
@@ -2654,7 +2683,8 @@ class RealWorldRunnerTests(unittest.TestCase):
             [result],
             "2026-07-13T00:00:00Z",
         )
-        self.assertEqual(summary["results"][0]["qualification"], admitted_identity)
+        self.assertNotIn("results", summary)
+        self.assertNotIn("qualification", summary["arms"][0])
 
     def test_coordination_metrics_assemble_parallel_on_phase_deltas_without_mutating_diagnostics(self) -> None:
         captured = {}
@@ -2686,7 +2716,7 @@ class RealWorldRunnerTests(unittest.TestCase):
             ]
             if phase == "after-tasks":
                 statuses["claimable"] = 1
-            elif phase == "after-final":
+            elif phase in {"after-final", "after-grading", "before-remove"}:
                 statuses["claimed"] = 1
             return snapshot
 
@@ -2732,6 +2762,161 @@ class RealWorldRunnerTests(unittest.TestCase):
         self.assertFalse(result["cleared"])
         self.assertIsNone(result["coordination_metrics"])
         self.assertEqual(result["error"], "coordination unmeasured grants is invalid")
+
+    def test_post_execution_failures_never_publish_parallel_on_metrics(self) -> None:
+        def invalid_diagnostics(container, phase):
+            snapshot = self.container_diagnostics(container, phase)
+            if phase == "after-grading":
+                snapshot["databases"][".stateful/state.db"]["integrity"] = "malformed"
+            return snapshot
+
+        cases = (
+            (
+                "post-suite",
+                mock.Mock(return_value=(True, False, [])),
+                None,
+                self.container_diagnostics,
+            ),
+            (
+                "evaluator",
+                mock.Mock(return_value=(False, True, [])),
+                None,
+                self.container_diagnostics,
+            ),
+            (
+                "container",
+                mock.Mock(return_value=(True, True, [])),
+                mock.Mock(side_effect=RuntimeError("container removal failed")),
+                self.container_diagnostics,
+            ),
+            (
+                "diagnostic",
+                mock.Mock(return_value=(True, True, [])),
+                None,
+                invalid_diagnostics,
+            ),
+        )
+
+        for trial, (name, post_checks, remove, diagnostics) in enumerate(cases, start=1):
+            with self.subTest(failure=name):
+                result = self.run_container_with_diagnostics(
+                    "parallel-on",
+                    diagnostics,
+                    trial=trial,
+                    post_checks=post_checks,
+                    remove=remove,
+                )
+
+            self.assertFalse(result["cleared"])
+            self.assertIsNone(result["coordination_metrics"])
+
+    def test_after_grading_and_before_remove_metrics_must_not_decrease(self) -> None:
+        for phase in ("after-grading", "before-remove"):
+            with self.subTest(phase=phase):
+                def diagnostics(container, current_phase):
+                    snapshot = self.container_diagnostics(container, current_phase)
+                    if current_phase == phase:
+                        snapshot["databases"][".stateful/state.db"][
+                            "coordination_metrics"
+                        ]["context"]["renders"] = 0
+                    return snapshot
+
+                result = self.run_container_with_diagnostics(
+                    "parallel-on", diagnostics, trial=2 if phase == "before-remove" else 1
+                )
+
+            self.assertFalse(result["cleared"])
+            self.assertIsNone(result["coordination_metrics"])
+            self.assertIn("decreased", result["error"])
+
+    def test_late_phase_journal_bytes_must_not_decrease(self) -> None:
+        for phase in ("after-grading", "before-remove"):
+            with self.subTest(phase=phase):
+                def diagnostics(container, current_phase):
+                    snapshot = self.container_diagnostics(container, current_phase)
+                    if current_phase == phase:
+                        journal = snapshot["databases"][".stateful/state.db"][
+                            "coordination_metrics"
+                        ]["journal"]
+                        journal.update({"bytes_start": 29, "bytes_end": 29, "bytes_growth": 0})
+                    return snapshot
+
+                result = self.run_container_with_diagnostics(
+                    "parallel-on", diagnostics, trial=2 if phase == "before-remove" else 1
+                )
+
+            self.assertFalse(result["cleared"])
+            self.assertIsNone(result["coordination_metrics"])
+            self.assertIn("journal bytes decreased", result["error"])
+
+    def test_after_grading_and_before_remove_metrics_must_be_well_formed(self) -> None:
+        for phase in ("after-grading", "before-remove"):
+            with self.subTest(phase=phase):
+                def diagnostics(container, current_phase):
+                    snapshot = self.container_diagnostics(container, current_phase)
+                    if current_phase == phase:
+                        snapshot["databases"][".stateful/state.db"][
+                            "coordination_metrics"
+                        ]["waits"]["unmeasured_grants"] = True
+                    return snapshot
+
+                result = self.run_container_with_diagnostics(
+                    "parallel-on", diagnostics, trial=2 if phase == "before-remove" else 1
+                )
+
+            self.assertFalse(result["cleared"])
+            self.assertIsNone(result["coordination_metrics"])
+            self.assertIn("unmeasured grants", result["error"])
+
+    def test_final_coordination_metrics_use_before_remove_snapshot(self) -> None:
+        def diagnostics(container, phase):
+            snapshot = self.container_diagnostics(container, phase)
+            if phase == "before-remove":
+                metrics = snapshot["databases"][".stateful/state.db"]["coordination_metrics"]
+                metrics["journal"].update({"bytes_start": 40, "bytes_end": 40})
+                metrics["context"]["renders"] = 4
+            return snapshot
+
+        result = self.run_container_with_diagnostics("parallel-on", diagnostics)
+
+        self.assertTrue(result["cleared"], result)
+        self.assertEqual(result["coordination_metrics"]["journal"]["bytes_end"], 40)
+        self.assertEqual(result["coordination_metrics"]["context"]["renders"], 4)
+
+    def test_existing_row_directory_is_rejected_before_row_execution(self) -> None:
+        row_dir = self.root / "out" / "fixture" / "parallel-on" / "trial-1"
+        row_dir.mkdir(parents=True)
+        archive_loader = mock.Mock(return_value=self.root / "archive.tar.gz")
+        container_start = mock.Mock(side_effect=RuntimeError("container must not start"))
+        runtime = self.mod._DOCKER.DockerRuntime(
+            binary="/docker",
+            image="statefulbench-realworld:local",
+            image_id="sha256:fixture",
+            repo_digests=(),
+            platform="linux/arm64",
+        )
+
+        with self.assertRaises(FileExistsError):
+            self.mod.run_repo_arm(
+                self.repo,
+                self.corpus,
+                self.dataset,
+                self.root / "cache",
+                self.root / "out",
+                "parallel-on",
+                self.mod.RunConfig(
+                    tasks=10,
+                    stateful_binary="/usr/local/bin/stateful",
+                    omp_bin="/usr/local/bin/omp",
+                ),
+                runtime=runtime,
+                archive_loader=archive_loader,
+                arm_container_start=container_start,
+            )
+
+        archive_loader.assert_not_called()
+        container_start.assert_not_called()
+        self.assertFalse((row_dir / "artifacts").exists())
 
 
     def test_container_cleanup_error_blocks_final_and_grading(self) -> None:
@@ -3122,6 +3307,7 @@ class RealWorldRunnerTests(unittest.TestCase):
         agent_failed = self.run_arm(
             "parallel-off",
             agent_events,
+            trial=2,
             launch_kwargs={"exit_codes": {"task-5": 1}},
         )
 
@@ -3132,7 +3318,7 @@ class RealWorldRunnerTests(unittest.TestCase):
         self.assertEqual(len(agent_failed["agents"]), 11)
 
 
-    def test_failure_summary_derives_exact_agent_and_status_causes(self) -> None:
+    def test_private_failure_reason_derives_exact_agent_and_status_causes(self) -> None:
         cases = (
             (
                 "nonzero",
@@ -3166,37 +3352,12 @@ class RealWorldRunnerTests(unittest.TestCase):
                 "upstream suite failed",
             ),
         )
-        repository = {
-            "key": "fixture",
-            "commit": "0" * 40,
-            "archive_sha256": "0" * 64,
-        }
-        for name, kwargs, expected in cases:
+        for trial, (name, kwargs, expected) in enumerate(cases, start=1):
             with self.subTest(name=name), mock.patch.object(self.mod.os, "killpg"):
-                result = self.run_arm("parallel-off", [], **kwargs)
-                summary = self.mod.build_run_summary(
-                    [repository],
-                    ["parallel-off"],
-                    1,
-                    "model",
-                    "thinking",
-                    [result],
-                    "2026-07-12T00:00:00Z",
-                )
+                result = self.run_arm("parallel-off", [], trial=trial, **kwargs)
 
             self.assertIsNone(result["error"])
-            self.assertEqual(summary["arms"][0]["error"], expected)
-            self.assertEqual(
-                summary["aggregates"][0]["failures"],
-                [
-                    {
-                        "repo": "fixture",
-                        "arm": "parallel-off",
-                        "trial": 1,
-                        "error": expected,
-                    }
-                ],
-            )
+            self.assertEqual(self.mod._failure_reason(result), expected)
             if name in {"nonzero", "timeout"}:
                 failed = result["agents"][5]
                 self.assertEqual(failed["agent_id"], "task-5")
@@ -3522,6 +3683,18 @@ class RealWorldReportingTests(unittest.TestCase):
             "coordination_metrics": coordination_metrics,
         }
 
+    def persisted_runner(self, results):
+        iterator = iter(results)
+
+        def run(*args, **_kwargs):
+            result = next(iterator)
+            self.mod._create_run_result_directory(
+                args[4], result["repository"], result["arm"], result["trial"]
+            )
+            return result
+
+        return run
+
     @staticmethod
     def admitted_receipt() -> tuple[dict, dict]:
         identity = {
@@ -3542,6 +3715,80 @@ class RealWorldReportingTests(unittest.TestCase):
             },
         }
         return {**identity, "qualified": True}, identity
+
+    def test_summary_exposes_only_sanitized_rows_and_locked_metrics(self) -> None:
+        result = {
+            **self.result(
+                "alpha",
+                "parallel-on",
+                1,
+                coordination_metrics=RealWorldRunnerTests.coordination_aggregate(
+                    "before-remove"
+                ),
+            ),
+            "error": "private failure message",
+            "agents": [{"agent_id": "agent-secret", "message": "private prompt"}],
+            "artifacts": {"suite": {"stdout": "artifacts/private-output.log"}},
+            "runtime": {
+                "image_id": "sha256:private-image",
+                "server_platform": "linux/arm64",
+                "versions": {"stateful": "private-version"},
+            },
+            "container": {
+                "id": "container-secret",
+                "inspect": {"state": {"pid": 4242, "started_at": "2026-07-16T00:00:00Z"}},
+            },
+            "diagnostics": {
+                "phase_timestamps": {"before-remove": 42.0},
+                "agent_identities": {
+                    "agent-secret": {
+                        "home": "/private/home",
+                        "profile": "/private/profile",
+                    }
+                },
+            },
+        }
+
+        summary = self.mod.build_run_summary(
+            self.repositories[:1],
+            ["parallel-on"],
+            1,
+            "private-model",
+            "private-thinking",
+            [result],
+            "2026-07-16T00:00:00Z",
+        )
+
+        self.assertEqual(set(summary), {"arms", "aggregates"})
+        self.assertEqual(
+            set(summary["arms"][0]),
+            {
+                "repo",
+                "arm",
+                "trial",
+                "cleared",
+                "wall_time_s",
+                "tokens",
+                "tool_calls",
+                "coordination_metrics",
+            },
+        )
+        serialized = json.dumps(summary, sort_keys=True)
+        for private_value in (
+            "private failure message",
+            "agent-secret",
+            "private prompt",
+            "private-output.log",
+            "private-image",
+            "container-secret",
+            "4242",
+            "2026-07-16T00:00:00Z",
+            "/private/home",
+            "/private/profile",
+            "private-model",
+            "private-thinking",
+        ):
+            self.assertNotIn(private_value, serialized)
 
     def test_summary_directly_sums_two_repository_rows_and_retains_exact_failures(self) -> None:
         rows = [
@@ -3575,10 +3822,6 @@ class RealWorldReportingTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            summary["repositories"][0],
-            {"key": "alpha", "source_sha": "a" * 40, "archive_sha256": "b" * 64},
-        )
-        self.assertEqual(
             summary["arms"][3],
             {
                 "repo": "alpha",
@@ -3588,7 +3831,6 @@ class RealWorldReportingTests(unittest.TestCase):
                 "wall_time_s": 4.0,
                 "tokens": 40,
                 "tool_calls": 5,
-                "error": "final agent exited 1",
                 "coordination_metrics": None,
             },
         )
@@ -3598,18 +3840,9 @@ class RealWorldReportingTests(unittest.TestCase):
         self.assertEqual(alpha_sequential["row_count"], 2)
         self.assertEqual(alpha_sequential["cleared_count"], 2)
         self.assertEqual(alpha_sequential["wall_time_s"], 3.75)
-        self.assertEqual(alpha_sequential["tasks_wall_time_s"], 1.875)
-        self.assertEqual(alpha_sequential["final_wall_time_s"], 0.9375)
         self.assertEqual(alpha_sequential["tokens"], 30)
         self.assertEqual(alpha_sequential["tool_calls"], 5)
-        self.assertEqual(
-            summary["aggregates"][1]["failures"],
-            [{"repo": "alpha", "arm": "parallel-off", "trial": 2, "error": "final agent exited 1"}],
-        )
-        self.assertEqual(summary["model"], "model")
-        self.assertEqual(summary["thinking"], "thinking")
-        self.assertEqual(summary["trials"], 2)
-        self.assertEqual(summary["generated_at"], "2026-07-12T00:00:00Z")
+        self.assertEqual(set(summary), {"arms", "aggregates"})
 
 
 
@@ -3638,9 +3871,55 @@ class RealWorldReportingTests(unittest.TestCase):
         self.assertEqual(missing["wall_time_s"], 0.0)
         self.assertEqual(missing["tokens"], 0)
         self.assertEqual(missing["tool_calls"], 0)
+
+    def test_main_rejects_existing_row_without_mutating_prior_evidence(self) -> None:
+        out_dir = self.root / "out"
+        result_path = out_dir / "alpha" / "sequential" / "trial-1" / "results.json"
+        result_path.parent.mkdir(parents=True)
+        previous_result = '{"private":"prior-evidence"}\n'
+        previous_summary = '{"private":"prior-summary"}\n'
+        result_path.write_text(previous_result, encoding="utf-8")
+        (out_dir / "summary.json").write_text(previous_summary, encoding="utf-8")
+        run_result = self.result("alpha", "sequential", 1)
+
+        with (
+            mock.patch.object(self.mod, "load_manifest", return_value={}),
+            mock.patch.object(
+                self.mod, "repo_entries", return_value=(self.repositories[0],)
+            ),
+            mock.patch.object(
+                self.mod._DOCKER, "inspect_runtime", return_value=mock.Mock()
+            ) as inspect_runtime,
+            mock.patch.object(self.mod, "run_repo_arm", return_value=run_result) as run_arm,
+            mock.patch.object(
+                self.mod, "_staged_dataset_tree", side_effect=contextlib.nullcontext
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            with self.assertRaisesRegex(FileExistsError, "already exists"):
+                self.mod.main(
+                    [
+                        "run",
+                        "--manifest",
+                        str(self.root / "manifest.json"),
+                        "--cache",
+                        str(self.root / "cache"),
+                        "--out",
+                        str(out_dir),
+                        "--repos",
+                        "alpha",
+                        "--arms",
+                        "sequential",
+                        "--docker-image",
+                        "statefulbench-realworld:local",
+                    ]
+                )
+
+        inspect_runtime.assert_not_called()
+        run_arm.assert_not_called()
+        self.assertEqual(result_path.read_text(encoding="utf-8"), previous_result)
         self.assertEqual(
-            missing["failures"],
-            [{"repo": "bravo", "arm": "parallel-off", "trial": 1, "error": "missing result"}],
+            (out_dir / "summary.json").read_text(encoding="utf-8"), previous_summary
         )
 
     def test_run_persists_summary_and_prints_each_two_repository_arm_row(self) -> None:
@@ -3672,7 +3951,7 @@ class RealWorldReportingTests(unittest.TestCase):
                 side_effect=lambda path: {"repository": path.stem},
             ),
             mock.patch.object(self.mod, "_corpus_matches_repository", return_value=True),
-            mock.patch.object(self.mod, "run_repo_arm", side_effect=lambda *_args, **_kwargs: next(results)),
+            mock.patch.object(self.mod, "run_repo_arm", side_effect=self.persisted_runner(results)),
             mock.patch.object(self.mod.time, "strftime", return_value="2026-07-12T00:00:00Z"),
             mock.patch.object(self.mod._DOCKER, "inspect_runtime", return_value=mock.Mock()),
             mock.patch.object(
@@ -3714,20 +3993,9 @@ class RealWorldReportingTests(unittest.TestCase):
 
         self.assertEqual(status, 1)
         summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
-        self.assertEqual(summary["model"], "model")
-        self.assertEqual(summary["thinking"], "thinking")
-        self.assertEqual(summary["trials"], 1)
-        self.assertEqual(
-            summary["repositories"],
-            [
-                {"key": "alpha", "source_sha": "a" * 40, "archive_sha256": "b" * 64},
-                {"key": "bravo", "source_sha": "c" * 40, "archive_sha256": "d" * 64},
-            ],
-        )
-        self.assertEqual(
-            summary["aggregates"][3]["failures"],
-            [{"repo": "bravo", "arm": "parallel-off", "trial": 1, "error": "repository setup failed"}],
-        )
+        self.assertEqual(set(summary), {"arms", "aggregates"})
+        self.assertEqual(summary["aggregates"][3]["cleared_count"], 0)
+        self.assertIsNone(summary["aggregates"][3]["coordination_metrics"])
         table = stdout.getvalue()
         self.assertIn("| repository | arm | trial | cleared |", table)
         self.assertIn("| bravo | parallel-off | 1 | False | 4.000 | 14 | 5 | repository setup failed |", table)
@@ -3787,7 +4055,9 @@ class RealWorldReportingTests(unittest.TestCase):
                     mock.patch.object(
                         self.mod, "_staged_graded_inputs", side_effect=staged_inputs
                     ),
-                    mock.patch.object(self.mod, "run_repo_arm", side_effect=results),
+                    mock.patch.object(
+                        self.mod, "run_repo_arm", side_effect=self.persisted_runner(results)
+                    ),
                     mock.patch.object(
                         self.mod, "_empty_run_result", wraps=self.mod._empty_run_result
                     ) as empty_run,
@@ -3814,13 +4084,6 @@ class RealWorldReportingTests(unittest.TestCase):
                 self.assertEqual(empty_run.call_count, 0)
                 summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
                 scheduled = [("alpha", arm, 1) for arm in arms]
-                self.assertEqual(
-                    [
-                        (result["repository"], result["arm"], result["trial"])
-                        for result in summary["results"]
-                    ],
-                    scheduled,
-                )
                 self.assertEqual(
                     [
                         (row["repo"], row["arm"], row["trial"])
@@ -3926,20 +4189,19 @@ class RealWorldReportingTests(unittest.TestCase):
                     )
 
                 self.assertEqual(status, 1)
+                summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
                 self.assertEqual(
                     run_arm.call_count, 0 if name == "pre-arm-staging" else len(arms)
                 )
                 self.assertEqual(empty_run.call_count, len(arms))
-                summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
-                self.assertEqual(len(summary["results"]), len(arms))
-                for row in summary["results"]:
-                    self.assertEqual(row["qualification"], identity)
+                self.assertEqual(len(summary["arms"]), len(arms))
+                for row in summary["arms"]:
                     self.assertFalse(row["cleared"])
-                    self.assertEqual(row["agents"], [])
+                    self.assertNotIn("qualification", row)
                     persisted = json.loads(
                         (
                             out_dir
-                            / row["repository"]
+                            / row["repo"]
                             / row["arm"]
                             / f"trial-{row['trial']}"
                             / "results.json"
@@ -4031,7 +4293,9 @@ class RealWorldReportingTests(unittest.TestCase):
                 "_staged_graded_inputs",
                 side_effect=lambda *_args: contextlib.nullcontext(self.root / "staged"),
             ),
-            mock.patch.object(self.mod, "run_repo_arm", side_effect=results),
+            mock.patch.object(
+                self.mod, "run_repo_arm", side_effect=self.persisted_runner(results)
+            ),
             mock.patch.object(self.mod, "_write_run_result", side_effect=record_write),
             contextlib.redirect_stdout(io.StringIO()),
             contextlib.redirect_stderr(io.StringIO()),
@@ -4055,7 +4319,7 @@ class RealWorldReportingTests(unittest.TestCase):
 
         self.assertEqual(status, 1)
         summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
-        self.assertEqual(len(summary["results"]), len(retained))
+        self.assertEqual(len(summary["arms"]), len(retained))
         for original in retained:
             key = (
                 original["repository"],
@@ -4077,26 +4341,16 @@ class RealWorldReportingTests(unittest.TestCase):
             self.assertEqual(rewritten[1]["qualification"], identity)
             self.assertIsNone(rewritten[1]["coordination_metrics"])
             summary_row = next(
-                result
-                for result in summary["results"]
-                if (result["repository"], result["arm"], result["trial"]) == key
+                row
+                for row in summary["arms"]
+                if (row["repo"], row["arm"], row["trial"]) == key
             )
-            self.assertEqual(summary_row, rewritten[1])
-        self.assertTrue(
-            all(
-                aggregate["comparison_error"] == "dataset stage cleanup failed"
-                for aggregate in summary["aggregates"]
-            )
-        )
-        self.assertTrue(
-            all(
-                "tokens" not in aggregate and "wall_time_s" not in aggregate
-                for aggregate in summary["aggregates"]
-            )
-        )
+            self.assertFalse(summary_row["cleared"])
+            self.assertIsNone(summary_row["coordination_metrics"])
 
     def test_result_write_is_atomic_and_preserves_prior_valid_json(self) -> None:
         result = self.result("alpha", "sequential", 1, tokens=1)
+        self.mod._create_run_result_directory(self.root, "alpha", "sequential", 1)
         self.mod._write_run_result(self.root, result)
         target = self.root / "alpha" / "sequential" / "trial-1" / "results.json"
         self.assertEqual(json.loads(target.read_text(encoding="utf-8")), result)
@@ -4205,7 +4459,8 @@ class RealWorldDiagnosticsReportingTests(unittest.TestCase):
             [result],
             "2026-07-13T00:00:00Z",
         )
-        self.assertEqual(summary["results"][0]["diagnostics"]["snapshots"]["after-final"], "runtime/diagnostics/after-final.json")
+        self.assertNotIn("diagnostics", summary["arms"][0])
+        self.assertNotIn("runtime/diagnostics/after-final.json", json.dumps(summary))
 
     def test_mixed_runtime_provenance_excludes_aggregate_but_retains_rows(self) -> None:
         first = {
@@ -4233,11 +4488,8 @@ class RealWorldDiagnosticsReportingTests(unittest.TestCase):
             "2026-07-13T00:00:00Z",
         )
 
-        self.assertEqual(summary["results"], [first, second])
-        self.assertEqual(
-            summary["aggregates"][0]["comparison_error"],
-            "mixed Docker runtime provenance",
-        )
+        self.assertNotIn("runtime", summary["arms"][0])
+        self.assertIsNone(summary["aggregates"][0]["coordination_metrics"])
 
     def test_mixed_tool_provenance_excludes_aggregate(self) -> None:
         first = {
@@ -4276,10 +4528,7 @@ class RealWorldDiagnosticsReportingTests(unittest.TestCase):
             "2026-07-13T00:00:00Z",
         )
 
-        self.assertEqual(
-            summary["aggregates"][0]["comparison_error"],
-            "mixed Docker runtime provenance",
-        )
+        self.assertIsNone(summary["aggregates"][0]["coordination_metrics"])
 
     def test_invalid_shared_home_evidence_is_not_gradeable(self) -> None:
         evidence = {
@@ -4382,9 +4631,12 @@ class V2RunnerMetricContractTests(unittest.TestCase):
         snapshots = {
             phase: {"databases": {"state.db": {"coordination_metrics": metrics}}}
             for phase, metrics in (
+                ("initialized", before),
                 ("before-tasks", before),
                 ("after-tasks", after_tasks),
                 ("after-final", after_final),
+                ("after-grading", after_final),
+                ("before-remove", after_final),
             )
         }
 

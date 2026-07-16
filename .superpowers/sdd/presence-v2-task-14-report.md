@@ -27,8 +27,7 @@ An unrestricted `unittest discover` invocation found five unrelated modules requ
 ## V2 metric and sanitization evidence
 
 - `V2DiagnosticContractTests.test_v2_snapshot_emits_only_locked_value_free_metrics` constructs a V2 journal/projection SQLite snapshot, asserts every locked field, sorted categories, lifecycle and wait counters, and checks that private agent IDs, paths, payload text, timestamps, messages, and operation IDs are absent from the complete serialized snapshot.
-- `V2RunnerMetricContractTests.test_parallel_on_rows_require_complete_v2_phase_metrics` requires the exact locked object for before-tasks, after-tasks, and after-final; missing a field raises and makes the on-arm row uncleared.
-- `V2RunnerMetricContractTests.test_aggregate_nulls_uncleared_rows_and_weights_wait_means` proves totals/count-based wait means and null aggregate metrics for an uncleared scheduled trial.
+- `V2RunnerMetricContractTests.test_parallel_on_rows_require_complete_v2_phase_metrics` requires the exact locked object for every diagnostic phase from `initialized` through `before-remove`; missing or non-monotonic evidence makes the on-arm row uncleared.
 - Docker runtime preparation removes `$STATEFUL_HOME` for every arm and starts parallel-on with `stateful server start --coordination-mode awareness`; the associated test asserts both calls.
 - Sequential and parallel-off rows retain `coordination_metrics: null`.
 
@@ -55,21 +54,32 @@ No model-backed benchmark was launched. `git status --short` showed no changes u
 
 Steps 1–4 are evidenced above. Steps 5–7 require a running Docker daemon and must be rerun in sequence with one inspected `linux/arm64` image before this task can be declared fully qualified. Step 8 remains pending that gate.
 
-## Independent review finding
+## P1 admission finding closure
 
-- **Allowlist every published metric category (P1).** `_safe_category`
-  currently accepts any regex-shaped journal event, handoff status,
-  authorization reason, or wait status, and the runner normalization accepts
-  the same arbitrary keys. A value such as `customer_secret` can therefore
-  escape through `journal.by_event_type` into published output. Extraction
-  must emit only contract-enumerated categories, normalization must reject
-  unknown keys, and privacy tests must cover unknown non-notification
-  categories.
+1. **Late failures leaked on-arm metrics.** Metrics were assembled before post-suite, evaluator, diagnostic, and container-removal admission. The final admission decision now precedes metric serialization; every uncleared row receives `coordination_metrics: null`.
+2. **Daemon architecture admitted amd64 images.** `inspect_runtime` and inner qualification both require the inspected image itself to be exactly `linux/arm64`; a `linux/amd64` daemon is retained only as private provenance and is not an admission substitute.
+3. **Row reruns reused evidence.** A run-level preflight rejects every scheduled existing `repo/arm/trial` directory before Docker inspection, corpus/receipt loading, prompts, artifacts, or runtime execution. The runner creates new rows atomically with `exist_ok=False`, and writers only update rows they own.
+4. **Late diagnostic snapshots were ignored.** All six required snapshots are normalized and checked monotonically, including journal bytes; `before-remove` supplies the published final metrics.
+5. **Published summaries carried raw private results.** `summary.json` now contains only sanitized report rows and locked aggregate metrics. Raw agents, artifacts, container/runtime evidence, qualification identity, diagnostics, and messages remain only in per-row `results.json`.
 
-### P1 resolution
+### RED
 
-- **Root cause:** extraction and normalization treated a regex match as category authorization. The closed V2 journal/handoff enums and the metric-specific notification, authorization, and wait-status contracts were not enforced at either boundary.
-- **Fix:** both scripts now use immutable per-map V2 allowlists. Extraction drops unknown journal event types, handoff statuses, authorization reasons, notification kinds, and wait statuses; normalization rejects unknown keys for each corresponding map before publishing or aggregation. The locked object shape, sorted maps, integer checks, weighted wait means, off-arm nulls, and incomplete-row clearing are unchanged.
-- **RED:** `stateful sandbox run --fs build --network enabled --write-dir task14-red --command 'python3 -m unittest crates.stateful-bench.scripts.tests.test_statefulbench_realworld.RealWorldRunnerTests.test_coordination_metrics_reject_unknown_category_keys crates.stateful-bench.scripts.tests.test_statefulbench_docker.V2DiagnosticContractTests.test_v2_snapshot_emits_only_locked_value_free_metrics'` ran 2 tests and failed 7 assertions: all six normalization maps accepted `customer_secret`, and extraction emitted unknown authorization categories.
-- **GREEN:** `stateful sandbox run --fs build --network enabled --write-dir task14-green-rerun --command 'python3 -m unittest crates.stateful-bench.scripts.tests.test_statefulbench_realworld.RealWorldRunnerTests crates.stateful-bench.scripts.tests.test_statefulbench_docker.V2DiagnosticContractTests'` ran 27 tests in 0.731s: `OK`.
-- **Residual blocker:** Docker qualification remains blocked by the missing `/Users/arthur/.colima/default/docker.sock`; no Docker image identity, qualification receipt, or E2E result was fabricated.
+- `stateful sandbox run --fs build --network disabled --write-dir benchmark-admission-red-realworld --command 'python3 -m unittest discover -s crates/stateful-bench/scripts/tests -t crates/stateful-bench/scripts -p test_statefulbench_realworld.py -v'`
+  - 133 tests; 6 expected regression failures.
+- `stateful sandbox run --fs build --network disabled --write-dir benchmark-admission-red-docker --command 'python3 -m unittest discover -s crates/stateful-bench/scripts/tests -t crates/stateful-bench/scripts -p test_statefulbench_docker.py -v'`
+  - 47 tests; 1 expected regression failure and 1 opt-in Docker E2E skip.
+- `stateful sandbox run --fs build --network disabled --write-dir benchmark-admission-red-existing-row-main --command 'python3 -m unittest discover -s crates/stateful-bench/scripts/tests -t crates/stateful-bench/scripts -p test_statefulbench_realworld.py -v'`
+  - 134 tests; the new main-path collision regression failed as expected while the intermediate explicit-row-ownership refactor also exposed 7 writer-contract errors.
+- `stateful sandbox run --fs build --network disabled --write-dir benchmark-admission-red-review-gaps --command 'python3 crates/stateful-bench/scripts/tests/test_statefulbench_realworld.py QualificationTests.test_inner_qualification_accepts_arm64_image_on_non_arm_daemon RealWorldRunnerTests.test_late_phase_journal_bytes_must_not_decrease'`
+  - 2 focused tests; 1 expected error and 1 expected failure.
+- `stateful sandbox run --fs build --network disabled --write-dir benchmark-admission-red-journal-regression --command 'python3 crates/stateful-bench/scripts/tests/test_statefulbench_realworld.py RealWorldRunnerTests.test_late_phase_journal_bytes_must_not_decrease'`
+  - 1 focused test; 1 expected failure after preserving a well-formed decreasing journal snapshot.
+
+### GREEN
+
+- `stateful sandbox run --fs build --network disabled --write-dir benchmark-admission-green-realworld-final2 --command 'python3 -m unittest discover -s crates/stateful-bench/scripts/tests -t crates/stateful-bench/scripts -p test_statefulbench_realworld.py -v'`
+  - 136 tests passed.
+- `stateful sandbox run --fs build --network disabled --write-dir benchmark-admission-green-docker-final2 --command 'python3 -m unittest discover -s crates/stateful-bench/scripts/tests -t crates/stateful-bench/scripts -p test_statefulbench_docker.py -v'`
+  - 47 tests passed; 1 opt-in Docker E2E skipped.
+
+Docker qualification receipts and the immutable-image E2E still await parent execution. No receipt, image identity, or Docker result was fabricated.

@@ -104,10 +104,8 @@ def inspect_runtime(
         raise RuntimeError("Docker image must resolve to exactly one Linux image")
     row = rows[0]
     platform = f"{row['Os']}/{row['Architecture']}"
-    if platform != server_platform:
-        raise RuntimeError(
-            f"Docker image platform {platform} does not match Docker server platform {server_platform}"
-        )
+    if platform != "linux/arm64":
+        raise RuntimeError(f"Docker image platform must be linux/arm64, got {platform}")
     return DockerRuntime(
         binary=binary,
         image=image,

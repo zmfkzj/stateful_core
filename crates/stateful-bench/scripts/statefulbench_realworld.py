@@ -1348,6 +1348,8 @@ def _metric_counters(value: object, prefix: str = "") -> dict[str, int]:
 def _require_monotonic_metrics(before: dict, after: dict) -> None:
     before_counters = _metric_counters(before)
     after_counters = _metric_counters(after)
+    if after["journal"]["bytes_end"] < before["journal"]["bytes_end"]:
+        raise ValueError("coordination journal bytes decreased across phases")
     if any(after_counters.get(key, 0) < value for key, value in before_counters.items()):
         raise ValueError("coordination counters decreased across phases")
 
@@ -1360,16 +1362,17 @@ def _build_coordination_metrics(
         return None
     if type(snapshots) is not dict:
         raise ValueError("coordination diagnostics are invalid")
-    before_tasks = _coordination_snapshot_metrics(snapshots.get("before-tasks"), "before-tasks")
-    after_tasks = _coordination_snapshot_metrics(snapshots.get("after-tasks"), "after-tasks")
-    after_final = _coordination_snapshot_metrics(snapshots.get("after-final"), "after-final")
-    _require_monotonic_metrics(before_tasks, after_tasks)
-    _require_monotonic_metrics(after_tasks, after_final)
-    start = before_tasks["journal"]["bytes_end"]
-    end = after_final["journal"]["bytes_end"]
+    phase_metrics = [
+        _coordination_snapshot_metrics(snapshots.get(phase), phase)
+        for phase in _DOCKER.DIAGNOSTIC_PHASES
+    ]
+    for before, after in zip(phase_metrics, phase_metrics[1:]):
+        _require_monotonic_metrics(before, after)
+    start = phase_metrics[0]["journal"]["bytes_end"]
+    end = phase_metrics[-1]["journal"]["bytes_end"]
     if end < start:
         raise ValueError("coordination journal bytes decreased across phases")
-    metrics = copy.deepcopy(after_final)
+    metrics = copy.deepcopy(phase_metrics[-1])
     metrics["journal"].update(
         {"bytes_start": start, "bytes_end": end, "bytes_growth": end - start}
     )
@@ -1758,19 +1761,48 @@ def load_qualification_receipt(
     return receipt
 
 
+def _run_result_directory(out_dir: Path, repository: str, arm: str, trial: int) -> Path:
+    return out_dir / repository / arm / f"trial-{trial}"
+
+
+def _create_run_result_directory(
+    out_dir: Path, repository: str, arm: str, trial: int
+) -> Path:
+    result_dir = _run_result_directory(out_dir, repository, arm, trial)
+    result_dir.mkdir(parents=True, exist_ok=False)
+    return result_dir
+
+
 def _write_run_result(out_dir: Path, result: dict) -> None:
-    result_dir = (
-        out_dir
-        / result["repository"]
-        / result["arm"]
-        / f"trial-{result['trial']}"
+    result_dir = _run_result_directory(
+        out_dir, result["repository"], result["arm"], result["trial"]
     )
-    result_dir.mkdir(parents=True, exist_ok=True)
+    if not result_dir.is_dir():
+        raise FileNotFoundError(result_dir)
     _write_json_atomically(result_dir / "results.json", result)
+
+
+def _create_and_write_run_result(out_dir: Path, result: dict) -> None:
+    _create_run_result_directory(
+        out_dir, result["repository"], result["arm"], result["trial"]
+    )
+    _write_run_result(out_dir, result)
+
+
+def _require_fresh_run_result_directories(
+    out_dir: Path, repositories: tuple[dict, ...], arms: list[str], trials: int
+) -> None:
+    for repository in repositories:
+        for arm in arms:
+            for trial in range(1, trials + 1):
+                result_dir = _run_result_directory(out_dir, repository["key"], arm, trial)
+                if result_dir.exists():
+                    raise FileExistsError(f"run output directory already exists: {result_dir}")
 
 
 def _append_stage_cleanup_error(result: dict, error: str) -> None:
     result["cleared"] = False
+    result["coordination_metrics"] = None
     result["error"] = (
         error if result.get("error") is None else f"{result['error']}; {error}"
     )
@@ -1786,21 +1818,21 @@ def _downgrade_stage_cleanup_run(arguments, error: str) -> None:
     summary_path = arguments.out / "summary.json"
     try:
         previous = json.loads(summary_path.read_text(encoding="utf-8"))
-        previous_results = previous["results"]
-        if type(previous_results) is not list:
+        previous_rows = previous["arms"]
+        if type(previous_rows) is not list:
             return
     except (OSError, KeyError, TypeError, json.JSONDecodeError):
         return
     results = []
-    for previous_result in previous_results:
-        if type(previous_result) is not dict:
+    for previous_row in previous_rows:
+        if type(previous_row) is not dict:
             continue
         try:
             path = (
                 arguments.out
-                / previous_result["repository"]
-                / previous_result["arm"]
-                / f"trial-{previous_result['trial']}"
+                / previous_row["repo"]
+                / previous_row["arm"]
+                / f"trial-{previous_row['trial']}"
                 / "results.json"
             )
             result = json.loads(path.read_text(encoding="utf-8"))
@@ -1808,70 +1840,30 @@ def _downgrade_stage_cleanup_run(arguments, error: str) -> None:
             continue
         if type(result) is not dict:
             continue
-        result.setdefault("coordination_metrics", None)
         _append_stage_cleanup_error(result, error)
         _write_run_result(arguments.out, result)
         results.append(result)
     if not results:
         return
-    scheduled = []
-    for aggregate in previous.get("aggregates", []):
+    scheduled = [
+        (aggregate["repo"], aggregate["arm"])
+        for aggregate in previous.get("aggregates", [])
         if (
             type(aggregate) is dict
             and type(aggregate.get("repo")) is str
             and type(aggregate.get("arm")) is str
-        ):
-            scheduled.append((aggregate["repo"], aggregate["arm"]))
+        )
+    ]
     if not scheduled:
         scheduled = list(
             dict.fromkeys((result["repository"], result["arm"]) for result in results)
         )
-    trials = previous.get("trials")
-    aggregates = []
-    for repository, arm in scheduled:
-        matching = [
-            result
-            for result in results
-            if result["repository"] == repository and result["arm"] == arm
-        ]
-        failures = [
-            {
-                "repo": row["repo"],
-                "arm": row["arm"],
-                "trial": row["trial"],
-                "error": row["error"],
-            }
-            for row in map(_report_row, matching)
-            if not row["cleared"]
-        ]
-        if type(trials) is int:
-            present = {result["trial"] for result in matching}
-            failures.extend(
-                {
-                    "repo": repository,
-                    "arm": arm,
-                    "trial": trial,
-                    "error": "missing result",
-                }
-                for trial in range(1, trials + 1)
-                if trial not in present
-            )
-        aggregates.append(
-            {
-                "repo": repository,
-                "arm": arm,
-                "row_count": len(matching),
-                "failures": failures,
-                "comparison_error": error,
-                "coordination_metrics": None,
-            }
-        )
-    summary = {
-        **previous,
-        "arms": [_report_row(result) for result in results],
-        "results": results,
-        "aggregates": aggregates,
-    }
+    repositories = tuple(
+        {"key": repository} for repository in dict.fromkeys(repository for repository, _ in scheduled)
+    )
+    arms = list(dict.fromkeys(arm for _, arm in scheduled))
+    trials = max(result["trial"] for result in results)
+    summary = build_run_summary(repositories, arms, trials, "", "", results, "")
     _write_json_atomically(summary_path, summary)
 
 
@@ -2109,9 +2101,9 @@ def _run_container_repo_arm(
     container_inspect=_DOCKER.inspect_arm_container,
 ) -> dict:
     trial = cfg.trial
-    arm_dir = out_dir / repo["key"] / arm / f"trial-{trial}"
+    arm_dir = _create_run_result_directory(out_dir, repo["key"], arm, trial)
     artifact_dir = arm_dir / "artifacts"
-    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifact_dir.mkdir(exist_ok=True)
     artifacts: dict[str, dict[str, str]] = {}
     tasks, final_prompt = _runner_prompts(corpus, arm_dir)
     agents: list[dict] = []
@@ -2126,7 +2118,6 @@ def _run_container_repo_arm(
     upstream_suite_ok = False
     error: str | None = None
     coordination_metrics: dict | None = None
-    coordination_metrics_failed = False
     container: _DOCKER.ArmContainer | None = None
     container_removed = False
     row_started = time.monotonic()
@@ -2288,11 +2279,6 @@ def _run_container_repo_arm(
         )
         if evidence_error is not None:
             raise RuntimeError(evidence_error)
-        try:
-            coordination_metrics = _build_coordination_metrics(arm, snapshots, agents)
-        except ValueError:
-            coordination_metrics_failed = True
-            raise
         evaluators_ok, upstream_suite_ok, evaluator_results = container_post_checks(
             repo,
             corpus,
@@ -2351,10 +2337,7 @@ def _run_container_repo_arm(
         getattr(container, "container_id", "") if container is not None else "",
         {task["key"] for task, _ in tasks} | {"final"},
     )
-    if (
-        set(snapshots) != set(_DOCKER.DIAGNOSTIC_PHASES)
-        and not coordination_metrics_failed
-    ):
+    if set(snapshots) != set(_DOCKER.DIAGNOSTIC_PHASES):
         diagnostic_error = diagnostic_error or "missing shared HOME evidence"
     for snapshot_value in snapshots.values():
         classification = _DIAGNOSTICS.classify_runtime_failure(None, snapshot_value)
@@ -2367,18 +2350,27 @@ def _run_container_repo_arm(
         if diagnostic_error in {"sqlite_locked", "sqlite_malformed", "sqlite_unavailable"}
         else _DIAGNOSTICS.classify_runtime_failure(error, snapshots.get("after-final"))
     )
+    cleared = (
+        error is None
+        and post_suite_ok
+        and container_removed
+        and diagnostic_error is None
+        and len(agents) == len(tasks) + 1
+        and all(record["exit_code"] == 0 and not record["timed_out"] for record in agents)
+    )
+    if cleared:
+        try:
+            coordination_metrics = _build_coordination_metrics(arm, snapshots, agents)
+        except ValueError as exc:
+            error = str(exc)
+            cleared = False
+    if not cleared:
+        coordination_metrics = None
     result = {
         "repository": repo["key"],
         "arm": arm,
         "trial": trial,
-        "cleared": (
-            error is None
-            and post_suite_ok
-            and container_removed
-            and diagnostic_error is None
-            and len(agents) == len(tasks) + 1
-            and all(record["exit_code"] == 0 and not record["timed_out"] for record in agents)
-        ),
+        "cleared": cleared,
         "error": error,
         "arm_wall_time_s": arm_wall_time_s,
         "tasks_wall_time_s": tasks_wall_time_s,
@@ -2493,6 +2485,7 @@ def run_repo_arm(
             container_diagnostics=container_diagnostics,
             container_inspect=container_inspect,
         )
+    arm_dir = _create_run_result_directory(out_dir, repo["key"], arm, trial)
     if launch is None:
         result = _empty_run_result(
             repo,
@@ -2516,9 +2509,8 @@ def run_repo_arm(
         _write_run_result(out_dir, result)
         return result
 
-    arm_dir = out_dir / repo["key"] / arm / f"trial-{trial}"
     artifact_dir = arm_dir / "artifacts"
-    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifact_dir.mkdir(exist_ok=True)
     artifacts: dict[str, dict[str, str]] = {}
     tasks, final_prompt = _runner_prompts(corpus, arm_dir)
     agents: list[dict] = []
@@ -2737,7 +2729,7 @@ def run_repo_arm(
 
 
 def _failure_reason(result: dict) -> str | None:
-    if result["error"] is not None:
+    if result.get("error") is not None:
         return result["error"]
     failures = []
     for record in result.get("agents", []):
@@ -2763,16 +2755,24 @@ def _failure_reason(result: dict) -> str | None:
 
 
 def _report_row(result: dict) -> dict:
+    cleared = result["cleared"] is True
+    coordination_metrics = None
+    if cleared and result["arm"] == "parallel-on":
+        try:
+            coordination_metrics = _normalized_coordination_metrics(
+                result.get("coordination_metrics")
+            )
+        except ValueError:
+            cleared = False
     return {
         "repo": result["repository"],
         "arm": result["arm"],
         "trial": result["trial"],
-        "cleared": result["cleared"],
+        "cleared": cleared,
         "wall_time_s": result["arm_wall_time_s"],
         "tokens": result["total_tokens"],
         "tool_calls": result["total_tool_calls"],
-        "error": _failure_reason(result),
-        "coordination_metrics": result.get("coordination_metrics"),
+        "coordination_metrics": coordination_metrics,
     }
 
 _V2_JOURNAL_EVENT_TYPES = frozenset(
@@ -3133,6 +3133,7 @@ def build_run_summary(
     results: list[dict],
     generated_at: str,
 ) -> dict:
+    del model, thinking, generated_at
     rows = [_report_row(result) for result in results]
     aggregates = []
     for repository in repositories:
@@ -3141,27 +3142,6 @@ def build_run_summary(
             matching = [
                 row for row in rows if row["repo"] == key and row["arm"] == arm
             ]
-            failures = [
-                {
-                    "repo": row["repo"],
-                    "arm": row["arm"],
-                    "trial": row["trial"],
-                    "error": row["error"],
-                }
-                for row in matching
-                if not row["cleared"]
-            ]
-            present_trials = {row["trial"] for row in matching}
-            failures.extend(
-                {
-                    "repo": key,
-                    "arm": arm,
-                    "trial": trial,
-                    "error": "missing result",
-                }
-                for trial in range(1, trials + 1)
-                if trial not in present_trials
-            )
             original_rows = [
                 result
                 for result in results
@@ -3176,18 +3156,6 @@ def build_run_summary(
                 )
                 for result in original_rows
             }
-            if len(provenances) > 1:
-                aggregates.append(
-                    {
-                        "repo": key,
-                        "arm": arm,
-                        "row_count": len(matching),
-                        "failures": failures,
-                        "comparison_error": "mixed Docker runtime provenance",
-                        "coordination_metrics": None,
-                    }
-                )
-                continue
             aggregates.append(
                 {
                     "repo": key,
@@ -3195,37 +3163,16 @@ def build_run_summary(
                     "row_count": len(matching),
                     "cleared_count": sum(row["cleared"] for row in matching),
                     "wall_time_s": sum(row["wall_time_s"] for row in matching),
-                    "tasks_wall_time_s": sum(
-                        result["tasks_wall_time_s"] for result in original_rows
-                    ),
-                    "final_wall_time_s": sum(
-                        result["final_wall_time_s"] for result in original_rows
-                    ),
                     "tokens": sum(row["tokens"] for row in matching),
                     "tool_calls": sum(row["tool_calls"] for row in matching),
-                    "coordination_metrics": _aggregate_coordination_metrics(
-                        arm, original_rows, trials
+                    "coordination_metrics": (
+                        None
+                        if len(provenances) > 1
+                        else _aggregate_coordination_metrics(arm, matching, trials)
                     ),
-                    "failures": failures,
                 }
             )
-    return {
-        "model": model,
-        "thinking": thinking,
-        "trials": trials,
-        "repositories": [
-            {
-                "key": repository["key"],
-                "source_sha": repository["commit"],
-                "archive_sha256": repository["archive_sha256"],
-            }
-            for repository in repositories
-        ],
-        "generated_at": generated_at,
-        "arms": rows,
-        "results": results,
-        "aggregates": aggregates,
-    }
+    return {"arms": rows, "aggregates": aggregates}
 
 
 def _table(results: list[dict]) -> str:
@@ -3233,8 +3180,10 @@ def _table(results: list[dict]) -> str:
         "| repository | arm | trial | cleared | wall_time_s | tokens | tool_calls | error |",
         "| --- | --- | ---: | --- | ---: | ---: | ---: | --- |",
     ]
-    for row in map(_report_row, results):
-        error = "" if row["error"] is None else re.sub(r"\r\n?|\n", r"\\n", str(row["error"])).replace("|", "\\|")
+    for result in results:
+        row = _report_row(result)
+        failure = _failure_reason(result)
+        error = "" if failure is None else re.sub(r"\r\n?|\n", r"\\n", failure).replace("|", "\\|")
         lines.append(
             "| {repo} | {arm} | {trial} | {cleared} | {wall:.3f} | {tokens} | {tools} | {error} |".format(
                 repo=row["repo"],
@@ -3274,10 +3223,10 @@ def _inner_qualification_runtime(
     server_platform = os.environ.get("STATEFULBENCH_SERVER_PLATFORM")
     if not image_id or not image_id.startswith("sha256:"):
         raise ValueError("inner qualification requires inspected image ID provenance")
-    if not platform or not platform.startswith("linux/"):
-        raise ValueError("inner qualification requires inspected Linux platform provenance")
-    if server_platform != platform:
-        raise ValueError("inner qualification requires matching Docker server platform provenance")
+    if platform != "linux/arm64":
+        raise ValueError("inner qualification requires inspected linux/arm64 image provenance")
+    if not server_platform or not server_platform.startswith("linux/"):
+        raise ValueError("inner qualification requires Docker server platform provenance")
     try:
         repo_digests = json.loads(os.environ.get("STATEFULBENCH_IMAGE_REPO_DIGESTS", "[]"))
     except json.JSONDecodeError as error:
@@ -3393,10 +3342,6 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--trials must be at least 1")
         if arguments.timeout_s < 1:
             parser.error("--timeout-s must be at least 1")
-        try:
-            runtime = _DOCKER.inspect_runtime(arguments.docker_bin, arguments.docker_image)
-        except (RuntimeError, ValueError) as error:
-            parser.error(str(error))
     else:
         try:
             runtime = _inner_qualification_runtime(
@@ -3422,6 +3367,13 @@ def main(argv: list[str] | None = None) -> int:
         selected = repositories
 
     if arguments.command == "run":
+        _require_fresh_run_result_directories(
+            arguments.out, selected, arguments.arms, arguments.trials
+        )
+        try:
+            runtime = _DOCKER.inspect_runtime(arguments.docker_bin, arguments.docker_image)
+        except (RuntimeError, ValueError) as error:
+            parser.error(str(error))
         if (
             arguments.omp_bin != "/usr/local/bin/omp"
             or arguments.stateful_binary != "/usr/local/bin/stateful"
@@ -3478,6 +3430,8 @@ def main(argv: list[str] | None = None) -> int:
                                     qualification_receipt=receipts[repo["key"]],
                                     credential_seed=_seed_shared_credential,
                                 )
+                            except FileExistsError:
+                                raise
                             except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
                                 result = _empty_run_result(
                                     repo,
@@ -3486,18 +3440,17 @@ def main(argv: list[str] | None = None) -> int:
                                     str(error),
                                     _qualification_row_identity(receipts[repo["key"]]),
                                 )
-                            _write_run_result(arguments.out, result)
+                                _create_and_write_run_result(arguments.out, result)
+                            else:
+                                _write_run_result(arguments.out, result)
                             repo_results.append(result)
                             results.append(result)
+            except FileExistsError:
+                raise
             except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
                 if repo_results:
                     for result in repo_results:
-                        result["cleared"] = False
-                        result["error"] = (
-                            str(error)
-                            if result["error"] is None
-                            else f"{result['error']}; {error}"
-                        )
+                        _append_stage_cleanup_error(result, str(error))
                         _write_run_result(arguments.out, result)
                 else:
                     for trial in range(1, arguments.trials + 1):
@@ -3509,7 +3462,7 @@ def main(argv: list[str] | None = None) -> int:
                                 str(error),
                                 _qualification_row_identity(receipts[repo["key"]]),
                             )
-                            _write_run_result(arguments.out, result)
+                            _create_and_write_run_result(arguments.out, result)
                             results.append(result)
         summary = build_run_summary(
             selected,
