@@ -18,7 +18,12 @@
 ## Review repair RED/GREEN
 - RED: `cargo test -p stateful-store --test freshness` compiled and ran 26 tests; the three new regression tests failed before the repair: legacy sentinel identity could complete/renew, and a same-agent different actor could project read/write presence state. `cargo test -p stateful-store --test presence_handoff finalization_keeps_same_agent_fence_owned_by_a_different_actor` also failed: finalization released the other actor's fence.
 - GREEN: `cargo test -p stateful-store --test freshness` — 26 passed; `cargo test -p stateful-store --test presence_handoff` — 30 passed; `cargo test -p stateful-server --test v2_coordination` — 4 passed.
-- Repair: persisted `initiating_actor_known` distinguishes legacy missing attribution from a real `ActorType::Unknown` initiator. Intent and fence mutations reject legacy records. Presence resource updates check full actor lineage before planning. Finalization and generic cleanup use the finalizing actor lineage, preserving another actor's same-agent fence. The server captures the workspace version immediately after maintenance and before policy/thin-safety evaluation, so its transaction check rejects an interleaving change.
+- Repair: persisted `initiating_actor_known` distinguishes legacy missing attribution from a real `ActorType::Unknown` initiator. Intent and fence mutations reject legacy records. Presence resource updates check full actor lineage before planning. Finalization and write-fence cleanup use the finalizing actor lineage, preserving another actor's same-agent fence. The server captures the workspace version immediately after maintenance and before policy/thin-safety evaluation, so its transaction check rejects an interleaving change.
+
+## Re-review repair RED/GREEN
+- RED: the new journal-sequence test did not compile before the API existed; it then proves a two-connection heartbeat interleaving rejects the stale authorization without receipt, intent, or fence writes.
+- GREEN: `cargo test -p stateful-store --test freshness` — 28 passed; `cargo test -p stateful-store --test presence_handoff` — 30 passed; `cargo test -p stateful-server --test v2_coordination` — 4 passed.
+- Repair: authorization captures and rechecks the workspace's `MAX(journal_events.event_seq)`, including non-context heartbeats, without adding a table. Lifecycle resource updates prepend lazy finalization/fallback events and require full ownership of either live presence or a retained handoff before implicit presence creation. Cleanup keeps reservation/claim/wait deletion agent-scoped for terminal projection rows while retaining lineage-scoped write-fence cleanup.
 
 ## Event and transaction review
 - Exact stable reads append `read_observation.stabilized` then `presence.resources_updated(Read)`; structural, failed, and unstable completions append no read relation. The resource projector writes the presence row's origin from that real resource event sequence.
@@ -29,6 +34,7 @@
 ## Commit and push
 - Implementation commit: `8ecdf01` (`fix: atomically project write lifecycle presence`).
 - Review repair commit: `0b2f937` (`fix: preserve write freshness ownership`).
+- Re-review repair commit: `24e2837` (`fix: bind lifecycle resources to journal state`).
 - This implementation commit and the following report commit are pushed together.
 
 ## Concerns
