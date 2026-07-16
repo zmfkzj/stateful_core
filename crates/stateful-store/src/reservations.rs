@@ -207,10 +207,7 @@ impl Store {
         let now = self.clock.now();
         let payload = request.payload.clone();
         self.execute_command(request, "wait.request", |reader| {
-            let mut relative_path = normalized_scope(&payload.relative_path)?;
-            if payload.action == "write_directory" && !relative_path.ends_with('/') {
-                relative_path.push('/');
-            }
+            let relative_path = normalized_wait_relative_path(&payload.relative_path, &payload.action)?;
             let purpose = required_purpose(&payload.purpose)?;
             let waits = typed_records::<WaitRecord>(reader, CurrentAggregate::Wait, &request.workspace.workspace_id)?;
             if let Some(existing) = waits.into_iter().find(|wait| {
@@ -350,7 +347,11 @@ impl Store {
 
     pub fn wait(&self, workspace_id: &str, wait_id: &str) -> StoreResult<Option<WaitRecord>> {
         self.current_records(CurrentAggregate::Wait, workspace_id)?.into_iter()
-            .map(record_from_current::<WaitRecord>)
+            .map(|record| {
+                let mut wait = record_from_current::<WaitRecord>(record)?;
+                normalize_wait(&mut wait)?;
+                Ok(wait)
+            })
             .collect::<StoreResult<Vec<_>>>()?
             .into_iter()
             .find(|record| record.wait_id == wait_id)
@@ -430,6 +431,9 @@ pub(crate) fn append_grant_for_path<T>(
     };
 
     let mut waits = typed_records::<WaitRecord>(reader, CurrentAggregate::Wait, workspace_id)?;
+    for wait in &mut waits {
+        normalize_wait(wait)?;
+    }
     waits.sort_by(|left, right| {
         left.requested_at.cmp(&right.requested_at)
             .then_with(|| left.origin_event_seq.cmp(&right.origin_event_seq))
@@ -567,6 +571,20 @@ pub(crate) fn normalized_scope(value: &str) -> StoreResult<String> {
     }
     Ok(if value.ends_with('/') { format!("{}/", normalized.trim_end_matches('/')) } else { normalized })
 }
+
+fn normalize_wait(wait: &mut WaitRecord) -> StoreResult<()> {
+    wait.relative_path = normalized_wait_relative_path(&wait.relative_path, &wait.action)?;
+    Ok(())
+}
+
+fn normalized_wait_relative_path(relative_path: &str, action: &str) -> StoreResult<String> {
+    let mut relative_path = normalized_scope(relative_path)?;
+    if action == "write_directory" && !relative_path.ends_with('/') {
+        relative_path.push('/');
+    }
+    Ok(relative_path)
+}
+
 pub(crate) fn normalized_reservation_scopes(scopes: &[ReservationScope]) -> StoreResult<Vec<ReservationScope>> {
     if scopes.is_empty() {
         return Err(StoreError::MissingScope);
