@@ -1,7 +1,7 @@
 # Final Closure Task 6 Report
 
 ## Status
-- Implementation commit: `1a1c9fa` (`Fix durable CLI hook lifecycles`).
+- Implementation commit: `ecc6734` (`Fix durable CLI hook lifecycles`).
 - Push: implementation and this report commit pushed to `origin/presence-first-event-journal-v2`.
 
 ## RED/GREEN
@@ -13,7 +13,7 @@
 - RED: `cargo test -p stateful-cli --test outbox sync_outbox_discards_deterministic_client_rejections` showed deterministic HTTP 400 records replayed forever.
 - GREEN: `cargo test -p stateful-cli --test hook` — 148 passed.
 - GREEN: `cargo test -p stateful-cli --test outbox` — 17 passed.
-- GREEN: `cargo test -p stateful-cli hook::write_lifecycle::tests` — 4 passed.
+- GREEN: `cargo test -p stateful-cli hook::write_lifecycle::tests` — 5 passed.
 
 ## State-machine invariants
 - Durable read start, read complete, and activity finalize serialize once, queue before first send, and use those same bytes and request UUIDs for first delivery and replay.
