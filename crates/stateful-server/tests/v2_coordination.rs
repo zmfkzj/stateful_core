@@ -48,6 +48,36 @@ async fn every_v2_route_executes_a_real_store_flow() {
     .await;
     successful_post(
         &app,
+        "/v2/human/observe",
+        envelope_for("agent-2", "00000000-0000-4000-8000-00000000d110", json!({
+            "relative_path": "src/lib.rs", "kind": "save", "confidence": "high",
+            "source": "watcher", "summary": "human save"
+        })),
+    )
+    .await;
+    let reservation = successful_post(
+        &app,
+        "/v2/reservation/declare",
+        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d105", json!({
+            "scopes": [{"kind": "file", "path": "src/lib.rs"}],
+            "action": "write_file",
+            "purpose": "Update the module."
+        })),
+    )
+    .await;
+    let reservation_id = reservation["reservation_id"].as_str().expect("reservation id");
+    let claims = successful_post(
+        &app,
+        "/v2/claim/acquire",
+        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d106", json!({
+            "reservation_id": reservation_id,
+            "paths": [{"relative_path": "src/lib.rs", "observation": {"exists": false}}]
+        })),
+    )
+    .await;
+    let claim_id = claims["claims"][0]["claim_id"].as_str().expect("claim id");
+    successful_post(
+        &app,
         "/v2/read/start",
         envelope_for("agent-1", "00000000-0000-4000-8000-00000000d103", json!({
             "operation_id": "read-1", "path": "src/lib.rs", "before": {"exists": false, "byte_len": 0}
@@ -63,15 +93,6 @@ async fn every_v2_route_executes_a_real_store_flow() {
         })),
     )
     .await;
-    successful_post(
-        &app,
-        "/v2/human/observe",
-        envelope_for("agent-2", "00000000-0000-4000-8000-00000000d110", json!({
-            "relative_path": "src/lib.rs", "kind": "save", "confidence": "high",
-            "source": "watcher", "summary": "human save"
-        })),
-    )
-    .await;
     let save_check = successful_post(
         &app,
         "/v2/human/save-check",
@@ -83,30 +104,11 @@ async fn every_v2_route_executes_a_real_store_flow() {
         &app,
         "/v2/reconcile/ack",
         envelope_for("agent-1", "00000000-0000-4000-8000-00000000d112", json!({
-            "decision": "adopt", "files_reread": ["src/lib.rs"], "human_change_summary": "adopted"
+            "reservation_id": reservation_id, "decision": "adopt", "files_reread": ["src/lib.rs"], "human_change_summary": "adopted"
         })),
     )
     .await;
 
-    let reservation = successful_post(
-        &app,
-        "/v2/reservation/declare",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d105", json!({
-            "relative_path": "src/lib.rs", "action": "write_file", "purpose": "Update the module."
-        })),
-    )
-    .await;
-    let reservation_id = reservation["reservation_id"].as_str().expect("reservation id");
-    let claims = successful_post(
-        &app,
-        "/v2/claim/acquire",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d106", json!({
-            "reservation_id": reservation_id,
-            "paths": [{"relative_path": "src/lib.rs", "observation": {"exists": false}}]
-        })),
-    )
-    .await;
-    let claim_id = claims["claims"][0]["claim_id"].as_str().expect("claim id");
     let intent = successful_post(
         &app,
         "/v2/authorize",
