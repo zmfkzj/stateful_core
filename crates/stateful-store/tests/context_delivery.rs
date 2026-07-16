@@ -1403,6 +1403,79 @@ fn cursor_zero_context_includes_migrated_items_in_event_order_and_honors_filters
 }
 
 #[test]
+fn migrated_multi_scope_reservation_refreshed_later_is_delivered_once_per_scope() {
+    let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    let request_id = Uuid::new_v4();
+    let owner = request("agent-peer", request_id, ());
+    let reservation = serde_json::json!({
+        "reservation_id": "reservation-multi",
+        "agent_id": "agent-peer",
+        "workspace_id": "workspace-1",
+        "scopes": [
+            {"kind": "file", "path": "src/alpha.rs"},
+            {"kind": "file", "path": "src/beta.rs"}
+        ],
+        "action": "write_file",
+        "purpose": "Coordinate refreshed work.",
+        "status": "active"
+    });
+    let mut refreshed = EventData::new("reservation-multi");
+    refreshed.data = serde_json::json!({"reservation": reservation});
+    store
+        .execute_command(&owner, "test.migration_refresh_context", |_| {
+            Ok(CommandPlan {
+                events: vec![
+                    NewEvent::new(
+                        request_id,
+                        0,
+                        NOW,
+                        EventPayload::Migration(MigrationEvent::ReservationSnapshotSeeded(migration_seed(
+                            "reservation-multi",
+                            "reservation",
+                            serde_json::json!({
+                                "reservation_id": "reservation-multi",
+                                "agent_id": "agent-peer",
+                                "workspace_id": "workspace-1",
+                                "scopes": [
+                                    {"kind": "file", "path": "src/alpha.rs"},
+                                    {"kind": "file", "path": "src/beta.rs"}
+                                ],
+                                "action": "write_file",
+                                "purpose": "Coordinate refreshed work.",
+                                "status": "active"
+                            }),
+                        ))),
+                    )
+                    .expect("reservation seed builds"),
+                    NewEvent::new(
+                        request_id,
+                        1,
+                        NOW,
+                        EventPayload::Reservation(ReservationEvent::Refreshed(refreshed)),
+                    )
+                    .expect("reservation refresh builds"),
+                ],
+                response: (),
+                http_status: 200,
+            })
+        })
+        .expect("seed and refresh commit");
+
+    let delta = store
+        .render_context(&request(
+            "reader",
+            Uuid::new_v4(),
+            ContextRender { mode: RenderMode::Brief, resource: None },
+        ))
+        .expect("cursor-zero context renders")
+        .response;
+    assert_eq!(
+        delta.items.iter().map(|item| item.resource.as_str()).collect::<Vec<_>>(),
+        vec!["src/alpha.rs", "src/beta.rs"],
+    );
+}
+
+#[test]
 fn only_high_confidence_write_observations_are_hard_context_blocks() {
     let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
     for (path, kind, confidence) in [

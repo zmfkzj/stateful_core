@@ -539,8 +539,13 @@ fn changed_current_items(
         }
     }
     items.sort_by_key(|(sequence, _)| *sequence);
-    items.dedup();
-    Ok(items.into_iter().map(|(_, item)| item).collect())
+    let mut deduplicated = Vec::with_capacity(items.len());
+    for item in items {
+        if !deduplicated.contains(&item) {
+            deduplicated.push(item);
+        }
+    }
+    Ok(deduplicated.into_iter().map(|(_, item)| item).collect())
 }
 
 fn append_migrated_current_items(
