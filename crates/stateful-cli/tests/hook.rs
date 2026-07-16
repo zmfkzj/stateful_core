@@ -227,7 +227,7 @@ fn first_prompt_captures_goal_and_later_prompts_deliver_only_new_versions() {
 }
 
 #[test]
-fn full_successful_read_posts_start_and_complete_with_one_operation_id() {
+fn normal_read_posts_structural_completion_with_one_operation_id() {
     let temp = tempfile::tempdir().expect("temp dir should create");
     let paths = GlobalPaths::new(temp.path().join("home"));
     let repo_root = temp.path().join("repo");
@@ -300,11 +300,8 @@ fn full_successful_read_posts_start_and_complete_with_one_operation_id() {
     assert!(complete.contains("POST /v2/read/complete HTTP/1.1"));
     let complete_body = request_json_body(&complete);
     assert_eq!(complete_body["payload"]["operation_id"], "read-call-1");
-    assert_eq!(complete_body["payload"]["classification"], "exact");
-    assert_eq!(
-        complete_body["payload"]["after"]["sha256"],
-        start_body["payload"]["before"]["sha256"]
-    );
+    assert_eq!(complete_body["payload"]["classification"], "structural_summary");
+    assert!(complete_body["payload"].get("after").is_none());
 }
 
 #[test]

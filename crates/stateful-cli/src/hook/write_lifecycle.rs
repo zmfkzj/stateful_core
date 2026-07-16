@@ -11,12 +11,17 @@ use crate::{GlobalPaths, RepoIdentity, ServerRuntime};
 
 #[derive(Debug, Deserialize, Serialize)]
 struct PendingIntent {
-    intent_id: String,
+    #[serde(default)]
+    intent_id: Option<String>,
+    #[serde(default)]
+    authorization_request: String,
     targets: Vec<String>,
     #[serde(default)]
     claim_ids: Vec<String>,
     #[serde(default)]
     completion_request: Option<String>,
+    #[serde(default)]
+    recovery_request: Option<String>,
     #[serde(default)]
     completed: bool,
     #[serde(default)]
@@ -106,7 +111,23 @@ pub(crate) fn authorize(
         request.agent.actor_id = actor_id.to_string();
     }
     request.agent.parent_agent_id = parent_agent_id.map(str::to_string);
-    let response = crate::post_v2_raw(runtime, "/v2/authorize", &request)?;
+    let authorization_request = serde_json::to_string(&request)?;
+    let mut pending = load_pending(paths, agent_id, operation_id)?.unwrap_or(PendingIntent {
+        intent_id: None,
+        authorization_request: authorization_request.clone(),
+        targets: targets.iter().map(|(path, _)| path.clone()).collect(),
+        claim_ids,
+        completion_request: None,
+        recovery_request: None,
+        release_requests: Vec::new(),
+        completed: false,
+    });
+    if pending.authorization_request.is_empty() {
+        pending.authorization_request = authorization_request;
+    }
+    save_pending(paths, agent_id, operation_id, &pending)?;
+
+    let response = crate::replay_v2_request(runtime, "/v2/authorize", &pending.authorization_request)?;
     if !(200..300).contains(&response.status_code) {
         if let Ok(decision) = serde_json::from_str::<Decision>(&response.body) {
             return Err(AuthorizationDenied { decision }.into());
@@ -121,19 +142,8 @@ pub(crate) fn authorize(
         intent_id,
         decision,
     } = serde_json::from_str(&response.body)?;
-    save_pending(
-        paths,
-        agent_id,
-        operation_id,
-        &PendingIntent {
-            intent_id,
-            targets: targets.into_iter().map(|(path, _)| path).collect(),
-            claim_ids,
-            completion_request: None,
-            release_requests: Vec::new(),
-            completed: false,
-        },
-    )?;
+    pending.intent_id = Some(intent_id);
+    save_pending(paths, agent_id, operation_id, &pending)?;
     Ok(Authorization { decision })
 }
 
@@ -193,7 +203,7 @@ pub(crate) fn complete(
                 source.complete_ref,
                 None,
                 json!({
-                    "intent_id": intent.intent_id,
+                    "intent_id": intent.intent_id.as_deref().ok_or_else(|| anyhow::anyhow!("write authorization is pending recovery"))?,
                     "outcome": outcome,
                     "post_fingerprints": post_fingerprints,
                     "failure_code": failed.then_some("tool_failed"),
@@ -259,7 +269,11 @@ pub(crate) fn complete(
     Ok(true)
 }
 
-pub(crate) fn replay_pending(paths: &GlobalPaths, runtime: &ServerRuntime) -> anyhow::Result<()> {
+pub(crate) fn replay_pending(
+    paths: &GlobalPaths,
+    runtime: &ServerRuntime,
+    repo_root: &Path,
+) -> anyhow::Result<()> {
     let root = paths.runtime_dir.join("write-intents");
     let agents = match fs::read_dir(&root) {
         Ok(agents) => agents,
@@ -297,7 +311,7 @@ pub(crate) fn replay_pending(paths: &GlobalPaths, runtime: &ServerRuntime) -> an
             if path.extension().is_none_or(|extension| extension != "json") {
                 continue;
             }
-            if let Err(error) = replay_pending_at(runtime, &path) {
+            if let Err(error) = replay_pending_at(runtime, &path, repo_root) {
                 failure.get_or_insert(error);
             }
         }
@@ -305,14 +319,46 @@ pub(crate) fn replay_pending(paths: &GlobalPaths, runtime: &ServerRuntime) -> an
     failure.map_or(Ok(()), Err)
 }
 
-fn replay_pending_at(runtime: &ServerRuntime, path: &Path) -> anyhow::Result<()> {
+fn replay_pending_at(runtime: &ServerRuntime, path: &Path, repo_root: &Path) -> anyhow::Result<()> {
     let mut intent: PendingIntent = serde_json::from_slice(&fs::read(path)?)?;
+    if intent.intent_id.is_none() {
+        let response = crate::replay_v2_request(runtime, "/v2/authorize", &intent.authorization_request)?;
+        if !(200..300).contains(&response.status_code) {
+            anyhow::bail!("pending authorization replay failed with HTTP {}", response.status_code);
+        }
+        let response: IntentResponse = serde_json::from_str(&response.body)?;
+        intent.intent_id = Some(response.intent_id);
+        save_pending_at(path, &intent)?;
+    }
     if !intent.completed {
-        let Some(request) = intent.completion_request.as_deref() else {
-            return Ok(());
-        };
-        crate::replay_v2_request(runtime, "/v2/write/complete", request)?;
+        if let Some(request) = intent.completion_request.as_deref() {
+            crate::replay_v2_request(runtime, "/v2/write/complete", request)?;
+        } else {
+            if intent.recovery_request.is_none() {
+                let mut request: stateful_core::RequestEnvelope<serde_json::Value> =
+                    serde_json::from_str(&intent.authorization_request)?;
+                request.request_id = uuid::Uuid::new_v4();
+                request.payload = json!({
+                    "intent_id": intent.intent_id.as_deref().ok_or_else(|| anyhow::anyhow!("pending authorization has no intent ID"))?,
+                    "operation_id": request.payload.get("operation_id").cloned(),
+                    "actual_fingerprints": intent.targets.iter().map(|path| {
+                        Ok(json!({
+                            "path": path,
+                            "fingerprint": stateful_core::fingerprint_path(&repo_root.join(path))?,
+                        }))
+                    }).collect::<anyhow::Result<Vec<_>>>()?,
+                });
+                intent.recovery_request = Some(serde_json::to_string(&request)?);
+                save_pending_at(path, &intent)?;
+            }
+            crate::replay_v2_request(
+                runtime,
+                "/v2/write/recover",
+                intent.recovery_request.as_deref().expect("recovery request was saved"),
+            )?;
+        }
         intent.completion_request = None;
+        intent.recovery_request = None;
         intent.completed = true;
         save_pending_at(path, &intent)?;
     }
@@ -338,7 +384,21 @@ fn save_pending(
 }
 
 fn save_pending_at(path: &Path, intent: &PendingIntent) -> anyhow::Result<()> {
-    fs::write(path, serde_json::to_vec(intent)?)?;
+    let parent = path.parent().ok_or_else(|| anyhow::anyhow!("pending path has no parent"))?;
+    let temporary = parent.join(format!(
+        ".{}.tmp-{}",
+        path.file_name().and_then(|name| name.to_str()).unwrap_or("pending"),
+        uuid::Uuid::new_v4()
+    ));
+    let mut file = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)?;
+    use std::io::Write;
+    file.write_all(&serde_json::to_vec(intent)?)?;
+    file.sync_all()?;
+    fs::rename(&temporary, path)?;
+    fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 
@@ -447,7 +507,8 @@ mod tests {
         assert_eq!(initial["payload"]["intent_id"], "intent-1");
         assert!(pending_path(&paths, "agent-1", "operation-1").exists());
 
-        replay_pending(&paths, &runtime).expect("later lifecycle should replay completion");
+        replay_pending(&paths, &runtime, &repo_root)
+            .expect("later lifecycle should replay completion");
         let replay = request_body(&requests.recv().expect("replayed completion should arrive"));
         assert_eq!(replay, initial, "replay must retain the original request UUID");
         assert!(!pending_path(&paths, "agent-1", "operation-1").exists());
@@ -522,7 +583,8 @@ mod tests {
             "only the second frozen release should remain pending"
         );
 
-        replay_pending(&paths, &runtime).expect("later lifecycle should replay second release");
+        replay_pending(&paths, &runtime, &repo_root)
+            .expect("later lifecycle should replay second release");
         let replay = request_body(&requests.recv().expect("replayed release should arrive"));
         assert_eq!(replay, second_release, "claim release replay must retain its request UUID");
         assert!(!pending_path(&paths, "agent-1", "operation-1").exists());

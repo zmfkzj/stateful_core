@@ -28,7 +28,7 @@ const OMP_WRITE_LIFECYCLE: write_lifecycle::LifecycleSource = write_lifecycle::L
     complete_ref: "hook:omp_post_tool_use",
 };
 
-use crate::outbox::queue_session_heartbeat_outbox;
+use crate::outbox::{queue_exact_envelope, queue_session_heartbeat_outbox};
 use crate::sandbox::{
     SandboxFsProfile, parse_sandbox_process_find_bash_invocation,
     parse_sandbox_run_bash_invocation, validate_process_find_request,
@@ -164,7 +164,7 @@ fn run_omp_hook(command: HookCommand) -> anyhow::Result<()> {
     }
     let runtime = discover_runtime_with_global(&repo_root, &paths)?;
     let identity = repo_identity_for_enabled_repo(&paths, &repo_root).ok();
-    if let Err(error) = write_lifecycle::replay_pending(&paths, &runtime) {
+    if let Err(error) = write_lifecycle::replay_pending(&paths, &runtime, &repo_root) {
         eprintln!("stateful OMP write lifecycle replay warning: {error}");
     }
 
@@ -296,7 +296,10 @@ fn handle_omp_pre_tool_use_with_identity(
     let input: OmpPreToolUseInput = serde_json::from_str(input)?;
     input.validate()?;
     if runtime_tool_name_leaf(&input.tool_name).eq_ignore_ascii_case("read") {
-        let _ = record_omp_read_start(&input, runtime, repo_root, cwd, identity);
+        record_omp_read_start(&input, runtime, repo_root, cwd, identity)?;
+    }
+    if is_testing_command(&input.tool_input) {
+        post_omp_testing_start(&input, runtime, identity)?;
     }
     let global_paths = GlobalPaths::from_env().ok();
     match omp_pre_tool_action(&input, repo_root, cwd, global_paths.as_ref())? {
@@ -348,7 +351,7 @@ fn record_omp_read_start(
         input.omp_agent_id.as_deref(),
         input.parent_agent_id.as_deref(),
     );
-    crate::post_v2(runtime, "/v2/read/start", &request)?;
+    post_durable_v2(runtime, "/v2/read/start", &request)?;
     Ok(())
 }
 
@@ -1111,6 +1114,9 @@ fn post_omp_post_tool_use_event(
             &OMP_WRITE_LIFECYCLE,
         )?;
     }
+    if is_testing_command(&input.tool_input) {
+        post_omp_testing_result(runtime, input, identity)?;
+    }
     post_omp_presence_heartbeat(runtime, input, identity)
 }
 
@@ -1160,11 +1166,7 @@ fn record_omp_read_complete(
         .workspace_id
         .clone()
         .unwrap_or_else(|| effective_workspace_id(runtime, identity));
-    let classification = if input.exact_read_candidate {
-        observation::classification(&input.metadata)
-    } else {
-        stateful_core::ReadClassification::StructuralSummary
-    };
+    let classification = read_classification(&input.tool_input, &input.metadata);
     let update = if classification != stateful_core::ReadClassification::Exact {
         let mut request = crate::v2_request_envelope(
             uuid::Uuid::new_v4(),
@@ -1232,10 +1234,7 @@ fn record_omp_read_complete(
         input.omp_agent_id.as_deref(),
         input.parent_agent_id.as_deref(),
     );
-    crate::post_v2(runtime, "/v2/read/complete", &request)?;
-    if let Some(update) = update {
-        crate::post_v2(runtime, "/v2/presence/update", &update)?;
-    }
+    post_durable_v2(runtime, "/v2/read/complete", &request)?;
     Ok(())
 }
 
@@ -1265,7 +1264,7 @@ fn post_omp_activity_finalize(
         input.omp_agent_id.as_deref(),
         input.parent_agent_id.as_deref(),
     );
-    crate::post_v2(runtime, "/v2/activity/finalize", &request)?;
+    post_durable_v2(runtime, "/v2/activity/finalize", &request)?;
     Ok(())
 }
 
@@ -1305,7 +1304,7 @@ fn handle_session_start_context_in_repo(
     };
     let runtime = discover_runtime_with_global(&repo_root, &paths)?;
     let identity = repo_identity(&paths, &repo_root)?;
-    if let Err(error) = write_lifecycle::replay_pending(&paths, &runtime) {
+    if let Err(error) = write_lifecycle::replay_pending(&paths, &runtime, &repo_root) {
         eprintln!("stateful write lifecycle replay warning: {error}");
     }
     handle_session_start_with_runtime(input, &runtime, Some(&identity))
@@ -1421,9 +1420,14 @@ fn handle_post_tool_use_with_runtime(
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<()> {
     let input: SessionEventInput = serde_json::from_str(input)?;
-    let tool_name = input.tool_name.as_deref().unwrap_or_default();
+    let tool_name = input
+        .tool_name
+        .as_deref()
+        .map(runtime_tool_name_leaf)
+        .unwrap_or_default();
     if tool_name.eq_ignore_ascii_case("read") {
-        return record_read_complete(&input, runtime, repo_root, identity);
+        record_read_complete(&input, runtime, repo_root, identity)?;
+        return post_codex_presence_heartbeat(runtime, &input, identity);
     }
     if matches!(
         runtime_tool_name_leaf(tool_name)
@@ -1450,7 +1454,10 @@ fn handle_post_tool_use_with_runtime(
             &CODEX_WRITE_LIFECYCLE,
         )?;
     }
-    Ok(())
+    if is_testing_command(&input.tool_input) {
+        post_codex_testing_result(runtime, &input, identity)?;
+    }
+    post_codex_presence_heartbeat(runtime, &input, identity)
 }
 
 fn handle_user_prompt_submit_with_runtime(
@@ -1516,12 +1523,7 @@ fn handle_stop_with_runtime(
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<()> {
     let input: SessionEventInput = serde_json::from_str(input)?;
-    let handoff = input.explicit_handoff().unwrap_or_else(|| {
-        json!({
-            "status": "unknown",
-            "summary": "Codex session ended without an explicit handoff.",
-        })
-    });
+    let handoff = input.explicit_handoff().unwrap_or(serde_json::Value::Null);
     let request = crate::v2_request_envelope(
         uuid::Uuid::new_v4(),
         input.stateful_agent_id().to_string(),
@@ -1534,7 +1536,7 @@ fn handle_stop_with_runtime(
         None,
         handoff,
     )?;
-    crate::post_v2(runtime, "/v2/activity/finalize", &request)?;
+    post_durable_v2(runtime, "/v2/activity/finalize", &request)?;
     Ok(())
 }
 
@@ -1547,17 +1549,49 @@ fn read_target(
     repo_root: &Path,
     cwd: Option<&Path>,
 ) -> anyhow::Result<Option<String>> {
-    let Some(path) = tool_input
+    let Some(path) = read_input_path(tool_input) else {
+        return Ok(None);
+    };
+    normalize_file_tool_target(read_selector_target(path).0, Some(repo_root), cwd)
+}
+
+fn read_input_path(tool_input: &serde_json::Value) -> Option<&str> {
+    tool_input
         .get("file_path")
         .or_else(|| tool_input.get("path"))
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|path| !path.is_empty())
-    else {
-        return Ok(None);
-    };
-    let path = path.strip_suffix(":raw").unwrap_or(path);
-    normalize_file_tool_target(path, Some(repo_root), cwd)
+}
+
+fn read_selector_target(path: &str) -> (&str, bool) {
+    let path = path.trim();
+    if let Some((target, suffix)) = path.split_once(":raw") {
+        return (target, suffix.is_empty());
+    }
+    if let Some((target, selector)) = path.rsplit_once(':')
+        && selector.starts_with(|character: char| character.is_ascii_digit())
+    {
+        return (target, false);
+    }
+    (path, false)
+}
+
+fn read_classification(
+    tool_input: &serde_json::Value,
+    metadata: &input::ToolMetadata,
+) -> stateful_core::ReadClassification {
+    let classification = observation::classification(metadata);
+    if classification == stateful_core::ReadClassification::Exact
+        && (!read_input_path(tool_input).is_some_and(|path| read_selector_target(path).1)
+            || ["offset", "limit", "start_line", "end_line", "line_start", "line_end"]
+                .iter()
+                .any(|key| tool_input.get(*key).is_some_and(|value| !value.is_null())))
+    {
+        stateful_core::ReadClassification::StructuralSummary
+    } else {
+        classification
+    }
 }
 
 fn record_read_start(
@@ -1592,7 +1626,7 @@ fn record_read_start(
             "before": before,
         }),
     )?;
-    crate::post_v2(runtime, "/v2/read/start", &request)?;
+    post_durable_v2(runtime, "/v2/read/start", &request)?;
     Ok(())
 }
 
@@ -1608,7 +1642,7 @@ fn record_read_complete(
     let Some(path) = read_target(&input.tool_input, repo_root, input.cwd.as_deref())? else {
         return Ok(());
     };
-    let classification = observation::classification(&input.metadata);
+    let classification = read_classification(&input.tool_input, &input.metadata);
     let workspace_id = effective_workspace_id(runtime, identity);
     let update = if classification != stateful_core::ReadClassification::Exact {
         Some(crate::v2_request_envelope(
@@ -1658,10 +1692,146 @@ fn record_read_complete(
         input.tool_name.clone(),
         payload,
     )?;
-    crate::post_v2(runtime, "/v2/read/complete", &request)?;
+    post_durable_v2(runtime, "/v2/read/complete", &request)?;
     if let Some(update) = update {
         crate::post_v2(runtime, "/v2/presence/update", &update)?;
     }
+    Ok(())
+}
+
+fn post_codex_presence_heartbeat(
+    runtime: &ServerRuntime,
+    input: &SessionEventInput,
+    identity: Option<&RepoIdentity>,
+) -> anyhow::Result<()> {
+    let request = crate::v2_request_envelope(
+        uuid::Uuid::new_v4(),
+        input.stateful_agent_id().to_string(),
+        effective_workspace_id(runtime, identity),
+        identity.cloned(),
+        stateful_core::ActorType::Agent,
+        stateful_core::SourceKind::Hook,
+        "codex_post_tool_use",
+        "hook:codex_post_tool_use",
+        input.tool_name.clone(),
+        json!({ "kind": "heartbeat" }),
+    )?;
+    crate::post_v2(runtime, "/v2/presence/update", &request)?;
+    Ok(())
+}
+
+fn post_durable_v2(
+    runtime: &ServerRuntime,
+    route: &str,
+    request: &stateful_core::RequestEnvelope<serde_json::Value>,
+) -> anyhow::Result<()> {
+    queue_exact_envelope(&GlobalPaths::from_env()?, route, request)?;
+    crate::post_v2(runtime, route, request)?;
+    Ok(())
+}
+
+fn is_testing_command(tool_input: &serde_json::Value) -> bool {
+    tool_input
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|command| {
+            ["cargo test", "pytest", "python -m pytest", "go test"]
+                .iter()
+                .any(|test| command.contains(test))
+        })
+}
+
+fn post_codex_testing_start(
+    input: &PreToolUseInput,
+    runtime: &ServerRuntime,
+    identity: Option<&RepoIdentity>,
+) -> anyhow::Result<()> {
+    post_testing_presence(
+        runtime,
+        input.stateful_agent_id(),
+        &effective_workspace_id(runtime, identity),
+        identity,
+        input.tool_name.clone(),
+        None,
+    )
+}
+
+fn post_codex_testing_result(
+    runtime: &ServerRuntime,
+    input: &SessionEventInput,
+    identity: Option<&RepoIdentity>,
+) -> anyhow::Result<()> {
+    post_testing_presence(
+        runtime,
+        input.stateful_agent_id(),
+        &effective_workspace_id(runtime, identity),
+        identity,
+        input.tool_name.clone().unwrap_or_else(|| "Bash".to_string()),
+        Some(!input.metadata.failed()),
+    )
+}
+
+fn post_omp_testing_start(
+    input: &OmpPreToolUseInput,
+    runtime: Option<&ServerRuntime>,
+    identity: Option<&RepoIdentity>,
+) -> anyhow::Result<()> {
+    let Some(runtime) = runtime else {
+        return Ok(());
+    };
+    post_testing_presence(
+        runtime,
+        &input.agent_id,
+        &input.workspace_id.clone().unwrap_or_else(|| effective_workspace_id(runtime, identity)),
+        identity,
+        input.tool_name.clone(),
+        None,
+    )
+}
+
+fn post_omp_testing_result(
+    runtime: &ServerRuntime,
+    input: &OmpSessionEventInput,
+    identity: Option<&RepoIdentity>,
+) -> anyhow::Result<()> {
+    post_testing_presence(
+        runtime,
+        &input.agent_id,
+        &input.workspace_id.clone().unwrap_or_else(|| effective_workspace_id(runtime, identity)),
+        identity,
+        input.tool_name.clone().unwrap_or_else(|| "bash".to_string()),
+        Some(!input.metadata.failed()),
+    )
+}
+
+fn post_testing_presence(
+    runtime: &ServerRuntime,
+    agent_id: &str,
+    workspace_id: &str,
+    identity: Option<&RepoIdentity>,
+    tool_name: String,
+    succeeded: Option<bool>,
+) -> anyhow::Result<()> {
+    let request = crate::v2_request_envelope(
+        uuid::Uuid::new_v4(),
+        agent_id.to_string(),
+        workspace_id.to_string(),
+        identity.cloned(),
+        stateful_core::ActorType::Agent,
+        stateful_core::SourceKind::Hook,
+        "hook_testing",
+        "hook:post_tool_use",
+        Some(tool_name.clone()),
+        match succeeded {
+            None => json!({ "kind": "tool_start", "tool_name": tool_name }),
+            Some(succeeded) => json!({
+                "kind": "tool_result",
+                "tool_name": tool_name,
+                "outcome": if succeeded { "succeeded" } else { "failed" },
+            }),
+        },
+    )?;
+    crate::post_v2(runtime, "/v2/presence/update", &request)?;
     Ok(())
 }
 
@@ -1683,12 +1853,21 @@ fn handle_pre_tool_use_with_runtime(
             .as_ref()
             .and_then(|paths| repo_identity_for_enabled_repo(paths, repo_root).ok())
     });
+    if is_testing_command(&input.tool_input)
+        && let Some(runtime) = runtime
+    {
+        post_codex_testing_start(&input, runtime, identity.as_ref())?;
+    }
 
     let tool_name = runtime_tool_name_leaf(&input.tool_name);
     match tool_name {
         tool_name if tool_name.eq_ignore_ascii_case("read") => {
-            let _ = record_read_start(&input, runtime, repo_root, cwd, identity.as_ref());
-            Ok(HookOutcome::Allow)
+            match record_read_start(&input, runtime, repo_root, cwd, identity.as_ref()) {
+                Ok(()) => Ok(HookOutcome::Allow),
+                Err(error) => Ok(HookOutcome::Deny {
+                    reason: format!("stateful read lifecycle start failed: {error}"),
+                }),
+            }
         }
         tool_name if tool_name.eq_ignore_ascii_case("bash") => authorize_bash(&input),
         tool_name if tool_name.eq_ignore_ascii_case("apply_patch") => {
@@ -2610,6 +2789,17 @@ fn authorize_targets(
             ),
         });
     };
+    if targets
+        .first()
+        .is_some_and(|first| targets.iter().any(|target| target.action != first.action))
+    {
+        return Ok(HookOutcome::Deny {
+            reason: format!(
+                "{} mixes write actions; split the operation into one action per patch",
+                input.tool_name
+            ),
+        });
+    }
     if targets.is_empty() {
         return Ok(HookOutcome::Allow);
     }
@@ -3005,8 +3195,6 @@ pub struct OmpSessionEventInput {
     prompt: Option<String>,
     #[serde(flatten)]
     metadata: input::ToolMetadata,
-    #[serde(default)]
-    exact_read_candidate: bool,
     #[serde(default)]
     result_metadata: serde_json::Value,
     #[serde(default)]

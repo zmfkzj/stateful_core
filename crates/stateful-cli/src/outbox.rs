@@ -186,6 +186,33 @@ pub(crate) fn queue_session_heartbeat_outbox(
     Ok(())
 }
 
+pub(crate) fn queue_exact_envelope(
+    paths: &GlobalPaths,
+    route: &str,
+    request: &RequestEnvelope<Value>,
+) -> anyhow::Result<()> {
+    let outbox_dir = ensure_trusted_outbox_dir(paths)?;
+    let _lock = acquire_outbox_lock(&outbox_dir)?;
+    recover_claimed_outbox_files(&outbox_dir)?;
+    let stem = safe_file_stem(&request.agent.agent_id);
+    let path = outbox_dir.join(format!("{stem}.jsonl"));
+    let record = json!({
+        "outbox_id": uuid::Uuid::new_v4().to_string(),
+        "agent_id": request.agent.agent_id,
+        "workspace_id": request.workspace.workspace_id,
+        "sequence": next_sequence(&outbox_dir, &stem)?,
+        "route": route,
+        "request_id": request.request_id.to_string(),
+        "request_envelope": serde_json::to_string(request)?,
+        "attempts": 0,
+        "sync_status": "pending"
+    });
+    let mut file = open_plain_outbox_append(&path, "outbox file")?;
+    writeln!(file, "{record}")?;
+    file.sync_all()?;
+    Ok(())
+}
+
 
 fn safe_file_stem(value: &str) -> String {
     value.replace(['/', '\\'], "_")
@@ -637,7 +664,8 @@ fn read_pending_records(path: &Path) -> anyhow::Result<Vec<PendingOutboxRecord>>
             && request.request_id.to_string() == record.request_id
             && request.agent.agent_id == record.agent_id
             && request.workspace.workspace_id == record.workspace_id
-            && request.payload.get("outbox_id").and_then(Value::as_str) == Some(&record.outbox_id)
+            && (record.route != "/v2/outbox/sync"
+                || request.payload.get("outbox_id").and_then(Value::as_str) == Some(&record.outbox_id))
         {
             records.push(PendingOutboxRecord { record, raw });
         }
