@@ -27,6 +27,13 @@ impl Store {
         let phase = request.payload.phase;
         self.execute_command(request, "activity.start", |reader| {
             let existing = reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?;
+            if let Some(presence) = &existing {
+                crate::handoff::ensure_presence_owner(request, presence)?;
+            } else if let Some(handoff) = reader.handoff(&request.workspace.workspace_id, &request.agent.agent_id)?
+                && handoff.expires_at > now
+            {
+                crate::handoff::ensure_handoff_owner(request, &handoff)?;
+            }
             let mut activity = register_record(request, existing, None, now);
             activity.phase = Some(phase);
             let event = presence_event(request, 0, now, PresenceEvent::PhaseUpdated, activity.clone(), false)?;

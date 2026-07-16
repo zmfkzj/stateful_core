@@ -4,8 +4,9 @@ use stateful_core::{
     WriteIntentStatus, WriteTarget,
 };
 use stateful_store::{
-    ActivityFinalization, Clock, FixedClock, PresenceRegistration, PresenceResourceUpdate,
-    PresenceToolResult, PresenceToolStart, ReservationDeclaration, Store, WaitRequest,
+    ActivityFinalization, ActivityStart, Clock, FixedClock, PresenceRegistration,
+    PresenceResourceUpdate, PresenceToolResult, PresenceToolStart, ReservationDeclaration, Store,
+    WaitRequest,
 };
 use tempfile::TempDir;
 use std::sync::{Arc, Mutex};
@@ -973,4 +974,54 @@ fn re_registration_cannot_change_identity_while_a_relevant_handoff_is_retained()
         .is_err());
 
     assert_eq!(store.journal_event_count().expect("journal should count"), before);
+}
+
+#[test]
+fn activity_start_rejects_changed_identity_for_live_or_retained_presence() {
+    let mut live_store = store();
+    live_store
+        .register_presence(&register_request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, None))
+        .expect("presence should register");
+    let before_live = live_store.journal_event_count().expect("journal should count");
+
+    assert!(live_store
+        .start_activity(&request(
+            Uuid::new_v4(),
+            "agent-1",
+            "different-actor",
+            ActorType::Agent,
+            ActivityStart { phase: PresencePhase::Editing },
+        ))
+        .is_err());
+
+    assert_eq!(live_store.journal_event_count().expect("journal should count"), before_live);
+    assert_eq!(presence(&mut live_store, "agent-1").expect("presence should remain").actor_id, "actor-1");
+
+    let mut retained_store = store();
+    retained_store
+        .register_presence(&register_request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, None))
+        .expect("presence should register");
+    retained_store
+        .stop_presence(&request(Uuid::new_v4(), "agent-1", "actor-1", ActorType::Agent, ()))
+        .expect("presence should stop");
+    let before_retained = retained_store.journal_event_count().expect("journal should count");
+
+    assert!(retained_store
+        .start_activity(&request(
+            Uuid::new_v4(),
+            "agent-1",
+            "different-actor",
+            ActorType::Agent,
+            ActivityStart { phase: PresencePhase::Editing },
+        ))
+        .is_err());
+
+    assert_eq!(
+        retained_store.journal_event_count().expect("journal should count"),
+        before_retained,
+    );
+    assert_eq!(
+        handoff(&mut retained_store, "agent-1").expect("handoff should remain").actor_id,
+        "actor-1",
+    );
 }
