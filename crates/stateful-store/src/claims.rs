@@ -1,7 +1,7 @@
 use crate::{
     CommandOutcome, CommandPlan, CurrentAggregate, Store, StoreError, StoreResult,
     ReservationRecord, WaitRecord,
-    reservations::{append_grant_for_path, expired, normalized_scope, record_from_current, reservation_event, scopes_conflict, timestamp, typed_records, wait_event},
+    reservations::{append_grant_for_path, expired_optional, normalized_scope, record_from_current, reservation_event, scope_path, scopes_conflict, timestamp, typed_records, wait_event},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -46,7 +46,8 @@ pub struct ClaimRecord {
     pub action: String,
     pub status: String,
     pub acquired_at: String,
-    pub expires_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observation: Option<ClaimObservation>,
     #[serde(default)]
@@ -76,12 +77,12 @@ impl Store {
                 .ok_or(StoreError::MissingReservation)?;
             if reservation.agent_id != request.agent.agent_id
                 || reservation.status != "active"
-                || expired(&reservation.expires_at, now)
+                || expired_optional(reservation.expires_at.as_deref(), now)
             {
                 return Err(StoreError::MissingReservation);
             }
             let normalized = payload.paths.iter().map(|path| normalized_scope(&path.relative_path)).collect::<StoreResult<Vec<_>>>()?;
-            if normalized.iter().any(|path| !scope_covers(&reservation.relative_path, path)) {
+            if normalized.iter().any(|path| !reservation.scopes.iter().any(|scope| scope_covers(&scope_path(scope), path))) {
                 return Err(StoreError::MissingReservation);
             }
             if normalized.iter().enumerate().any(|(index, path)| {
@@ -98,7 +99,7 @@ impl Store {
                 }
                 if existing.iter().any(|claim| {
                     claim.status == "active"
-                        && !expired(&claim.expires_at, now)
+                        && !expired_optional(claim.expires_at.as_deref(), now)
                         && claim.agent_id != request.agent.agent_id
                         && scopes_conflict(&claim.relative_path, path)
                 }) {
@@ -112,14 +113,14 @@ impl Store {
             for (input, relative_path) in payload.paths.iter().zip(normalized) {
                 if let Some(mut claim) = existing.iter().find(|claim| {
                     claim.status == "active"
-                        && !expired(&claim.expires_at, now)
+                        && !expired_optional(claim.expires_at.as_deref(), now)
                         && claim.agent_id == request.agent.agent_id
                         && claim.relative_path == relative_path
                 }).cloned() {
                     already_held += 1;
                     if claim.observation != input.observation {
                         claim.observation = input.observation.clone();
-                        claim.expires_at = timestamp(now + CLAIM_TTL)?;
+                        claim.expires_at = Some(timestamp(now + CLAIM_TTL)?);
                         events.push(claim_event(request, events.len() as u32, now, ClaimEvent::ObservationRefreshed, &claim)?);
                     }
                     claims.push(claim);
@@ -134,7 +135,7 @@ impl Store {
                     action: reservation.action.clone(),
                     status: "active".into(),
                     acquired_at: timestamp(now)?,
-                    expires_at: timestamp(now + CLAIM_TTL)?,
+                    expires_at: Some(timestamp(now + CLAIM_TTL)?),
                     observation: input.observation.clone(),
                     origin_event_seq: 0,
                 };
@@ -188,7 +189,7 @@ impl Store {
                 other.claim_id != claim.claim_id
                     && other.reservation_id == claim.reservation_id
                     && other.status == "active"
-                    && !expired(&other.expires_at, now)
+                    && !expired_optional(other.expires_at.as_deref(), now)
             });
             if has_active_sibling {
                 return Ok(CommandPlan { events, response: claim, http_status: 200 });
@@ -211,17 +212,19 @@ impl Store {
                     ReservationEvent::Released,
                     &reservation,
                 )?);
-                append_grant_for_path(
-                    request,
-                    reader,
-                    now,
-                    &reservation.workspace_id,
-                    &reservation.relative_path,
-                    std::slice::from_ref(&reservation.reservation_id),
-                    &[],
-                    true,
-                    &mut events,
-                )?;
+                for scope in &reservation.scopes {
+                    append_grant_for_path(
+                        request,
+                        reader,
+                        now,
+                        &reservation.workspace_id,
+                        &scope_path(scope),
+                        std::slice::from_ref(&reservation.reservation_id),
+                        &[],
+                        true,
+                        &mut events,
+                    )?;
+                }
             }
             Ok(CommandPlan { events, response: claim, http_status: 200 })
         })
@@ -236,7 +239,7 @@ impl Store {
             let mut events = Vec::new();
             let mut expired_claims = Vec::new();
             for mut claim in typed_records::<ClaimRecord>(reader, CurrentAggregate::Claim, &request.workspace.workspace_id)? {
-                if claim.status == "active" && expired(&claim.expires_at, now) {
+                if claim.status == "active" && expired_optional(claim.expires_at.as_deref(), now) {
                     claim.status = "expired".into();
                     expired_claims.push(claim.claim_id.clone());
                     events.push(claim_event(request, events.len() as u32, now, ClaimEvent::Expired, &claim)?);
@@ -264,7 +267,7 @@ impl Store {
             .map(record_from_current::<ClaimRecord>)
             .collect::<StoreResult<Vec<_>>>()?
             .into_iter()
-            .filter(|claim| claim.status == "active" && !expired(&claim.expires_at, now) && claim.relative_path == path)
+            .filter(|claim| claim.status == "active" && !expired_optional(claim.expires_at.as_deref(), now) && claim.relative_path == path)
             .collect();
         Ok(claims)
     }

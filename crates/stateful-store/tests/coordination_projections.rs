@@ -306,11 +306,7 @@ fn reservation_request(request_id: Uuid) -> RequestEnvelope<ReservationDeclarati
         base.agent,
         base.workspace,
         base.source,
-        ReservationDeclaration {
-            relative_path: "src/lib.rs".into(),
-            action: "write_file".into(),
-            purpose: "Refactor the projector.".into(),
-        },
+        ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file("src/lib.rs")], action: "write_file".into(), purpose: "Refactor the projector.".into() },
     )
     .expect("reservation request should be valid")
 }

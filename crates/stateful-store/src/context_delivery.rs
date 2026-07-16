@@ -541,11 +541,32 @@ fn changed_current_items(
                 }
             }
             _ => {
-                if let Some(aggregate) = aggregate_for_kind(kind) {
-                    if let Some(record) = reader.aggregate_records(aggregate, workspace_id)?
+                if let Some(aggregate) = aggregate_for_kind(kind)
+                    && let Some(record) = reader
+                        .aggregate_records(aggregate, workspace_id)?
                         .into_iter()
                         .find(|record| record.aggregate_id == *aggregate_id)
-                        && let Some(item) = item_from_current(kind, record, workspace_id, target_agent_id, resource_filter)
+                {
+                    if kind == "reservation" {
+                        for relative_path in reservation_scope_paths(&record.payload) {
+                            let mut scoped_record = record.clone();
+                            scoped_record
+                                .payload
+                                .as_object_mut()
+                                .expect("projected reservation is an object")
+                                .insert("relative_path".into(), Value::String(relative_path));
+                            if let Some(item) = item_from_current(
+                                kind,
+                                scoped_record,
+                                workspace_id,
+                                target_agent_id,
+                                resource_filter,
+                            ) {
+                                items.push(item);
+                            }
+                        }
+                    } else if let Some(item) =
+                        item_from_current(kind, record, workspace_id, target_agent_id, resource_filter)
                     {
                         items.push(item);
                     }
@@ -587,6 +608,7 @@ fn item_from_current(
     if !resource_relevant(resource_filter, resource) {
         return None;
     }
+
     let agent_id = value.get("agent_id").and_then(Value::as_str);
     let purpose = value.get("purpose").and_then(Value::as_str).unwrap_or("Coordinate with related work.");
     let (item_kind, severity, summary, next_action) = match kind {
@@ -655,6 +677,23 @@ fn item_from_current(
     }
     Some(item)
 }
+fn reservation_scope_paths(value: &Value) -> Vec<String> {
+    value
+        .get("scopes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|scope| {
+            let path = scope.get("path")?.as_str()?;
+            Some(if scope.get("kind").and_then(Value::as_str) == Some("directory") {
+                format!("{path}/")
+            } else {
+                path.into()
+            })
+        })
+        .collect()
+}
+
 
 fn resource_relevant(resource_filter: Option<&str>, resource: &str) -> bool {
     let Some(filter) = resource_filter.filter(|filter| !filter.is_empty()) else {

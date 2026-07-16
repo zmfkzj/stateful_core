@@ -3,7 +3,7 @@ use crate::{
     WaitRecord, WriteFenceRecord,
     claims::claim_event,
     presence::{presence_event, register_record},
-    reservations::{append_grant_for_path, reservation_event, typed_records, wait_event},
+    reservations::{append_grant_for_path, reservation_event, scope_path, typed_records, wait_event},
     write_fences::fence_event,
 };
 use serde::{Deserialize, Serialize};
@@ -91,17 +91,19 @@ impl Store {
                 }
             }
             for reservation in released_reservations {
-                append_grant_for_path(
-                    request,
-                    reader,
-                    now,
-                    workspace_id,
-                    &reservation.relative_path,
-                    &released_reservation_ids,
-                    &cancelled_wait_ids,
-                    true,
-                    &mut events,
-                )?;
+                for scope in &reservation.scopes {
+                    append_grant_for_path(
+                        request,
+                        reader,
+                        now,
+                        workspace_id,
+                        &scope_path(scope),
+                        &released_reservation_ids,
+                        &cancelled_wait_ids,
+                        true,
+                        &mut events,
+                    )?;
+                }
             }
             Ok(CommandPlan {
                 events,

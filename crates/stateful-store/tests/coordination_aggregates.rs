@@ -1,8 +1,8 @@
 use serde::Serialize;
 use serde_json::json;
 use stateful_core::{
-    ActorType, AgentIdentity, ReconciliationDecision, RequestEnvelope, SourceKind, SourceRef,
-    WorkspaceIdentity,
+    ActorType, AgentIdentity, ReconciliationDecision, RequestEnvelope, ReservationScope, SourceKind,
+    SourceRef, WorkspaceIdentity,
 };
 use stateful_store::{
     ActivityFinalization, ActivityStart, ClaimAcquire, ClaimPath, Clock, DeliveryAttempt, FixedClock,
@@ -57,7 +57,15 @@ fn request<T: Serialize>(agent_id: &str, request_id: Uuid, payload: T) -> Reques
 }
 
 fn declaration(path: &str) -> ReservationDeclaration {
-    ReservationDeclaration { relative_path: path.into(), action: "write_file".into(), purpose: "Refactor the projector.".into() }
+    ReservationDeclaration {
+        scopes: vec![if path.ends_with('/') {
+            ReservationScope::directory(path)
+        } else {
+            ReservationScope::file(path)
+        }],
+        action: "write_file".into(),
+        purpose: "Refactor the projector.".into(),
+    }
 }
 
 #[test]
@@ -570,16 +578,24 @@ fn empty_adopt_and_reapply_acks_are_journaled_without_clearing_observations() {
         confidence: HumanObservationConfidence::High, source: "watcher".into(),
         summary: "human save".into(), observed_at: None,
     })).expect("observation records");
+    let reservation = store
+        .declare_reservation(&request("agent-1", Uuid::new_v4(), declaration("src/a.rs")))
+        .expect("reservation declares")
+        .response;
     let before = store.journal_event_count().expect("journal count");
 
     let acknowledgement = request("agent-1", Uuid::new_v4(), ReconciliationAckInput {
-        decision: ReconciliationDecision::Adopt, files_reread: Vec::new(),
+        reservation_id: Some(reservation.reservation_id.clone()),
+        decision: ReconciliationDecision::Adopt,
+        files_reread: Vec::new(),
         human_change_summary: "No files were reread.".into(),
     });
     let adopted = store.acknowledge_human_reconciliation(&acknowledgement)
         .expect("empty Adopt acknowledgement journals");
     let reapply_acknowledgement = request("agent-1", Uuid::new_v4(), ReconciliationAckInput {
-        decision: ReconciliationDecision::Reapply, files_reread: Vec::new(),
+        reservation_id: Some(reservation.reservation_id),
+        decision: ReconciliationDecision::Reapply,
+        files_reread: Vec::new(),
         human_change_summary: "Reapply has no reread files.".into(),
     });
     let reapplied = store.acknowledge_human_reconciliation(&reapply_acknowledgement)
@@ -621,18 +637,13 @@ fn nonclearing_and_unmatched_human_acks_are_persistent_and_replayable() {
         confidence: HumanObservationConfidence::High, source: "watcher".into(),
         summary: "human save".into(), observed_at: None,
     })).expect("observation records");
-    let ask_user = store.acknowledge_human_reconciliation(&request("agent-1", Uuid::new_v4(), ReconciliationAckInput {
-        decision: ReconciliationDecision::AskUser, files_reread: vec!["src/a.rs".into()],
-        human_change_summary: "Need confirmation.".into(),
-    })).expect("nonclearing acknowledgement journals");
-    let abandon = store.acknowledge_human_reconciliation(&request("agent-1", Uuid::new_v4(), ReconciliationAckInput {
-        decision: ReconciliationDecision::Abandon, files_reread: vec!["src/a.rs".into()],
-        human_change_summary: "Abandon the change.".into(),
-    })).expect("Abandon acknowledgement journals");
-    let unmatched = store.acknowledge_human_reconciliation(&request("agent-1", Uuid::new_v4(), ReconciliationAckInput {
-        decision: ReconciliationDecision::Reapply, files_reread: vec!["src/missing.rs".into()],
-        human_change_summary: "No matching observation.".into(),
-    })).expect("unmatched acknowledgement journals");
+    let reapply_reservation = store
+        .declare_reservation(&request("agent-1", Uuid::new_v4(), declaration("src/missing.rs")))
+        .expect("reapply reservation declares")
+        .response;
+    let ask_user = store.acknowledge_human_reconciliation(&request("agent-1", Uuid::new_v4(), ReconciliationAckInput { reservation_id: None, decision: ReconciliationDecision::AskUser, files_reread: vec!["src/a.rs".into()], human_change_summary: "Need confirmation.".into() })).expect("nonclearing acknowledgement journals");
+    let abandon = store.acknowledge_human_reconciliation(&request("agent-1", Uuid::new_v4(), ReconciliationAckInput { reservation_id: None, decision: ReconciliationDecision::Abandon, files_reread: vec!["src/a.rs".into()], human_change_summary: "Abandon the change.".into() })).expect("Abandon acknowledgement journals");
+    let unmatched = store.acknowledge_human_reconciliation(&request("agent-1", Uuid::new_v4(), ReconciliationAckInput { reservation_id: Some(reapply_reservation.reservation_id), decision: ReconciliationDecision::Reapply, files_reread: Vec::new(), human_change_summary: "No matching observation.".into() })).expect("unmatched acknowledgement journals");
 
     assert_eq!(ask_user.response, 0);
     assert_eq!(abandon.response, 0);
@@ -653,7 +664,7 @@ fn nonclearing_and_unmatched_human_acks_are_persistent_and_replayable() {
     let unmatched_record = acknowledgements.iter()
         .find(|record| record.decision == ReconciliationDecision::Reapply)
         .expect("unmatched acknowledgement persists");
-    assert_eq!(unmatched_record.files_reread, vec!["src/missing.rs".to_string()]);
+    assert!(unmatched_record.files_reread.is_empty());
     assert_eq!(unmatched_record.human_change_summary, "No matching observation.");
     assert_eq!(
         store.unreconciled_human_observations("workspace-1", &["src/a.rs".into()])

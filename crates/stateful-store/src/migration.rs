@@ -7,7 +7,7 @@ use crate::{
 };
 use rusqlite::{Connection, OptionalExtension, backup::Backup, params};
 use serde_json::{Map, Value, json};
-use stateful_core::{EventData, EventPayload, MigrationEvent, NewEvent, LEGACY_MIGRATION_NAMESPACE};
+use stateful_core::{EventData, EventPayload, MigrationEvent, NewEvent, ReservationScope, LEGACY_MIGRATION_NAMESPACE};
 use std::{collections::BTreeMap, fs::{self, File}, path::{Path, PathBuf}, time::Duration};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
@@ -421,45 +421,80 @@ fn latest_activity(values: &[(String, String, Option<String>)]) -> StoreResult<O
 }
 
 fn append_reservation_seeds(connection: &Connection, contexts: &BTreeMap<String, Metadata>, pending: &mut Vec<PendingEvent>) -> StoreResult<()> {
+    let mut claim_scopes = BTreeMap::<(String, String), Vec<ReservationScope>>::new();
+    let mut claims = connection.prepare(
+        "SELECT workspace_id, reservation_id, relative_path, action FROM claims
+         WHERE reservation_id IS NOT NULL AND relative_path IS NOT NULL
+         ORDER BY workspace_id, reservation_id, claim_id",
+    )?;
+    for row in claims.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })? {
+        let (workspace_id, reservation_id, relative_path, action) = row?;
+        let scope = if action == "write_directory" || relative_path.ends_with('/') {
+            ReservationScope::directory(relative_path)
+        } else {
+            ReservationScope::file(relative_path)
+        };
+        claim_scopes
+            .entry((workspace_id, reservation_id))
+            .or_default()
+            .push(scope);
+    }
+
     let mut statement = connection.prepare("SELECT reservation_id, agent_id, workspace_id, purpose, scopes_json, status, declared_at, expires_at FROM reservations ORDER BY workspace_id, reservation_id")?;
     for row in statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?, row.get::<_, Option<String>>(7)?)))? {
         let (reservation_id, agent_id, workspace_id, purpose, scopes_json, status, declared_at, expires_at) = row?;
-        let scopes = serde_json::from_str::<Value>(&scopes_json)?;
-        let scope = scopes.as_array().and_then(|scopes| scopes.first());
-        let relative_path = scope
-            .and_then(|scope| scope.get("path"))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        let action = if scope
-            .and_then(|scope| scope.get("kind"))
-            .and_then(Value::as_str)
-            == Some("directory")
-        {
+        let mut scopes = serde_json::from_str::<Vec<ReservationScope>>(&scopes_json)
+            .map_err(|error| StoreError::MigrationValidation(format!("legacy reservation {reservation_id} scopes are invalid: {error}")))?;
+        scopes.extend(
+            claim_scopes
+                .remove(&(workspace_id.clone(), reservation_id.clone()))
+                .unwrap_or_default(),
+        );
+        scopes.sort_by_key(migration_scope_key);
+        scopes.dedup_by(|left, right| migration_scope_key(left) == migration_scope_key(right));
+        if scopes.is_empty() {
+            return Err(StoreError::MigrationValidation(format!(
+                "legacy reservation {reservation_id} has no scopes"
+            )));
+        }
+        let action = if matches!(scopes[0], ReservationScope::Directory(_)) {
             "write_directory"
         } else {
             "write_file"
         };
-        let max_expires_at = expires_at.clone().unwrap_or_else(|| declared_at.clone());
         pending.push(PendingEvent {
             payload: EventPayload::Migration(MigrationEvent::ReservationSnapshotSeeded(seed_data("reservation", &reservation_id, json!({
                 "reservation_id": reservation_id,
                 "agent_id": agent_id,
                 "workspace_id": workspace_id,
-                "relative_path": relative_path,
+                "scopes": scopes,
                 "action": action,
                 "purpose": purpose,
                 "status": status,
                 "declared_at": declared_at,
                 "expires_at": expires_at,
-                "max_expires_at": max_expires_at,
+                "max_expires_at": expires_at,
                 "wait_id": null,
-                "scopes": scopes,
             })))),
             occurred_at: declared_at,
             metadata: metadata(&workspace_id, &agent_id, None, None, None, None, contexts),
         });
     }
     Ok(())
+}
+
+fn migration_scope_key(scope: &ReservationScope) -> String {
+    match scope {
+        ReservationScope::File(path) => format!("file:{path}"),
+        ReservationScope::Directory(path) => format!("directory:{path}"),
+    }
 }
 
 fn append_claim_seeds(connection: &Connection, now: &str, contexts: &BTreeMap<String, Metadata>, pending: &mut Vec<PendingEvent>) -> StoreResult<()> {
@@ -475,7 +510,7 @@ fn append_claim_seeds(connection: &Connection, now: &str, contexts: &BTreeMap<St
             status.as_str()
         };
         let legacy_base_observation = json!({"exists": observed_exists, "content_hash": observed_content_hash.clone()});
-        let expires_at = expires_at.unwrap_or_else(|| now.into());
+        let occurred_at = expires_at.clone().unwrap_or_else(|| now.into());
         let reservation_id = reservation_id.unwrap_or_else(|| format!("legacy-reservation-{claim_id}"));
         let relative_path = relative_path.unwrap_or_else(|| "unknown".into());
         let observation = observed_exists.map(|exists| json!({
@@ -496,7 +531,7 @@ fn append_claim_seeds(connection: &Connection, now: &str, contexts: &BTreeMap<St
                 "observation": observation,
                 "legacy_base_observation": legacy_base_observation,
             })))),
-            occurred_at: expires_at.clone(),
+            occurred_at,
             metadata: metadata(&workspace_id, &agent_id, repo_id, None, None, None, contexts),
         });
     }

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use stateful_core::{
     AuthorizationInput, Decision, DecisionKind, FreshnessMode, ObservationFreshness, PolicyState,
-    QueryEnvelope, RequestEnvelope, ReservationScope, ThinSafetyState,
+    QueryEnvelope, RequestEnvelope, ThinSafetyState,
     V2Error, WriteIntentStart, WriteTarget, authorize_action, evaluate_thin_safety,
     normalize_relative_path,
 };
@@ -562,22 +562,15 @@ fn authorization_decision(store: &mut Store, request: &RequestEnvelope<Authorize
     };
     let reservation = store.reservation(&request.workspace.workspace_id, reservation_id)?;
     let Some(reservation) = reservation.filter(|reservation| {
-        reservation.agent_id == request.agent.agent_id
-            && reservation.status == "active"
-            && reservation.action == request.payload.action
+        reservation.agent_id == request.agent.agent_id && reservation.status == "active"
     }) else {
         return Ok(Decision::deny(
             "missing_reservation",
-            "The supplied reservation is not active for this agent and action.",
-            "Declare an active reservation for the requested action.",
+            "The supplied reservation is not active for this agent.",
+            "Declare an active reservation before writing.",
         ));
     };
-    let scope = if reservation.relative_path.ends_with('/') {
-        ReservationScope::directory(reservation.relative_path.clone())
-    } else {
-        ReservationScope::file(reservation.relative_path.clone())
-    };
-    let mut state = PolicyState::default().with_active_reservation_scopes(vec![scope]);
+    let mut state = PolicyState::default().with_active_reservation_scopes(reservation.scopes.clone());
     if let Some(presence) = store.presence_for_request(&retarget(request, ()), &request.agent.agent_id)?
         && let Some(phase) = presence.phase
     {

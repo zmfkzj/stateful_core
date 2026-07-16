@@ -108,11 +108,7 @@ fn render_redelivers_until_matching_cumulative_ack() {
         .declare_reservation(&request(
             "agent-1",
             Uuid::new_v4(),
-            ReservationDeclaration {
-                relative_path: "src/lib.rs".into(),
-                action: "write_file".into(),
-                purpose: "Update the library.".into(),
-            },
+            ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file("src/lib.rs")], action: "write_file".into(), purpose: "Update the library.".into() },
         ))
         .expect("state change succeeds");
 
@@ -166,11 +162,7 @@ fn acknowledgements_are_cumulative_and_isolated_per_agent() {
             .declare_reservation(&request(
                 "agent-1",
                 Uuid::new_v4(),
-                ReservationDeclaration {
-                    relative_path: relative_path.into(),
-                    action: "write_file".into(),
-                    purpose: "Update source.".into(),
-                },
+                ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file(relative_path)], action: "write_file".into(), purpose: "Update source.".into() },
             ))
             .expect("state change succeeds");
         let _ = store
@@ -250,11 +242,7 @@ fn newer_delivery_keeps_sent_payload_immutable_and_coalesces_one_unread_notifica
         .declare_reservation(&request(
             "agent-1",
             Uuid::new_v4(),
-            ReservationDeclaration {
-                relative_path: "src/one.rs".into(),
-                action: "write_file".into(),
-                purpose: "First change.".into(),
-            },
+            ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file("src/one.rs")], action: "write_file".into(), purpose: "First change.".into() },
         ))
         .expect("first state succeeds");
     let first = store
@@ -269,11 +257,7 @@ fn newer_delivery_keeps_sent_payload_immutable_and_coalesces_one_unread_notifica
         .declare_reservation(&request(
             "agent-1",
             Uuid::new_v4(),
-            ReservationDeclaration {
-                relative_path: "src/two.rs".into(),
-                action: "write_file".into(),
-                purpose: "Second change.".into(),
-            },
+            ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file("src/two.rs")], action: "write_file".into(), purpose: "Second change.".into() },
         ))
         .expect("second state succeeds");
     let second = store
@@ -311,11 +295,7 @@ fn irrelevant_final_state_still_delivers_an_empty_delta_until_acknowledged() {
         .declare_reservation(&request(
             "agent-1",
             Uuid::new_v4(),
-            ReservationDeclaration {
-                relative_path: "src/transient.rs".into(),
-                action: "write_file".into(),
-                purpose: "Temporary work.".into(),
-            },
+            ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file("src/transient.rs")], action: "write_file".into(), purpose: "Temporary work.".into() },
         ))
         .expect("reservation succeeds")
         .response;
@@ -367,11 +347,7 @@ fn acknowledgements_require_bound_sequence_and_are_idempotent() {
         .declare_reservation(&request(
             "agent-1",
             Uuid::new_v4(),
-            ReservationDeclaration {
-                relative_path: "src/ack.rs".into(),
-                action: "write_file".into(),
-                purpose: "Ack test.".into(),
-            },
+            ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file("src/ack.rs")], action: "write_file".into(), purpose: "Ack test.".into() },
         ))
         .expect("state change succeeds");
     let delta = store
@@ -416,11 +392,7 @@ fn deliveries_expire_to_replayable_dead_letters_after_twenty_four_hours() {
         .declare_reservation(&request(
             "agent-1",
             Uuid::new_v4(),
-            ReservationDeclaration {
-                relative_path: "src/expiry.rs".into(),
-                action: "write_file".into(),
-                purpose: "Expiry test.".into(),
-            },
+            ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file("src/expiry.rs")], action: "write_file".into(), purpose: "Expiry test.".into() },
         ))
         .expect("state change succeeds");
     let delta = store
@@ -467,11 +439,7 @@ fn overflow_uses_an_exact_summary_after_twenty_and_dead_letters_after_sixty_four
             .declare_reservation(&request(
                 "agent-1",
                 Uuid::new_v4(),
-                ReservationDeclaration {
-                    relative_path: format!("src/{index}.rs"),
-                    action: "write_file".into(),
-                    purpose: "Overflow test.".into(),
-                },
+                ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file(format!("src/{index}.rs"))], action: "write_file".into(), purpose: "Overflow test.".into() },
             ))
             .expect("state change succeeds");
         let delta = store
@@ -526,11 +494,7 @@ fn dead_letter_acknowledgement_keeps_the_persisted_cursor() {
         .declare_reservation(&request(
             "agent-1",
             Uuid::new_v4(),
-            ReservationDeclaration {
-                relative_path: "src/dead.rs".into(),
-                action: "write_file".into(),
-                purpose: "Dead letter test.".into(),
-            },
+            ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file("src/dead.rs")], action: "write_file".into(), purpose: "Dead letter test.".into() },
         ))
         .expect("state change succeeds");
     let delta = store
@@ -569,11 +533,7 @@ fn claimable_wait_is_actionable_and_own_coordination_is_active_scope() {
         .declare_reservation(&request(
             "agent-1",
             Uuid::new_v4(),
-            ReservationDeclaration {
-                relative_path: "src/granted.rs".into(),
-                action: "write_file".into(),
-                purpose: "Current owner.".into(),
-            },
+            ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file("src/granted.rs")], action: "write_file".into(), purpose: "Current owner.".into() },
         ))
         .expect("reservation succeeds")
         .response;
@@ -827,11 +787,7 @@ fn same_agent_context_deliveries_and_cursors_are_isolated_by_workspace() {
                 workspace_id,
                 "owner",
                 Uuid::new_v4(),
-                ReservationDeclaration {
-                    relative_path: "src/shared.rs".into(),
-                    action: "write_file".into(),
-                    purpose: "State change.".into(),
-                },
+                ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file("src/shared.rs")], action: "write_file".into(), purpose: "State change.".into() },
             ))
             .expect("state change succeeds");
     }
@@ -942,11 +898,7 @@ fn resource_filter_keeps_only_relevant_presence_handoff_and_coordination_state()
             .declare_reservation(&request(
                 "owner",
                 Uuid::new_v4(),
-                ReservationDeclaration {
-                    relative_path: path.into(),
-                    action: "write_file".into(),
-                    purpose: "Coordinate state.".into(),
-                },
+                ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file(path)], action: "write_file".into(), purpose: "Coordinate state.".into() },
             ))
             .expect("reservation declares");
     }
@@ -1032,11 +984,7 @@ fn reconnect_replays_pending_delivery_then_persists_the_ack_cursor() {
             .declare_reservation(&request(
                 "owner",
                 Uuid::new_v4(),
-                ReservationDeclaration {
-                    relative_path: "src/reconnect.rs".into(),
-                    action: "write_file".into(),
-                    purpose: "Reconnect state.".into(),
-                },
+                ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file("src/reconnect.rs")], action: "write_file".into(), purpose: "Reconnect state.".into() },
             ))
             .expect("state change succeeds");
         store

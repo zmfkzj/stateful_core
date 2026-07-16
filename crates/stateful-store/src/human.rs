@@ -1,5 +1,5 @@
 use crate::{
-    CommandOutcome, CommandPlan, CurrentAggregate, Store, StoreError, StoreResult,
+    CommandOutcome, CommandPlan, CurrentAggregate, ReservationRecord, Store, StoreError, StoreResult,
     reservations::{expired, normalized_scope, record_from_current, timestamp, typed_records},
     write_fences::active_fence_owner,
 };
@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use stateful_core::{
     EventData, EventPayload, HumanAcknowledgementEvent, HumanObservationEvent,
-    ReconciliationDecision, RequestEnvelope,
+    ReadObservationRecord, ReconciliationDecision, RequestEnvelope, ReservationScope, V2Error,
 };
 use std::str::FromStr;
 use time::{Duration, OffsetDateTime};
@@ -66,6 +66,8 @@ pub struct HumanObservationInput {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReconciliationAckInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reservation_id: Option<String>,
     pub decision: ReconciliationDecision,
     pub files_reread: Vec<String>,
     pub human_change_summary: String,
@@ -98,6 +100,8 @@ pub struct HumanObservationRecord {
 pub struct HumanReconciliationAcknowledgementRecord {
     pub acknowledgement_id: String,
     pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reservation_id: Option<String>,
     pub decision: ReconciliationDecision,
     pub files_reread: Vec<String>,
     pub human_change_summary: String,
@@ -160,9 +164,92 @@ impl Store {
             let paths = payload.files_reread.iter()
                 .map(|path| normalized_scope(path))
                 .collect::<StoreResult<Vec<_>>>()?;
+            if payload.decision.clears_human_write_block() {
+                let reservation_id = payload.reservation_id.as_deref().ok_or_else(|| reconciliation_error(
+                    "missing_reservation",
+                    "Adopt and reapply reconciliation require an active reservation.",
+                    "Declare or provide the active reservation before acknowledging the human change.",
+                ))?;
+                let reservation = typed_records::<ReservationRecord>(
+                    reader,
+                    CurrentAggregate::Reservation,
+                    &request.workspace.workspace_id,
+                )?
+                .into_iter()
+                .find(|reservation| reservation.reservation_id == reservation_id)
+                .ok_or_else(|| reconciliation_error(
+                    "missing_reservation",
+                    "The supplied reservation does not exist in this workspace.",
+                    "Provide an active reservation owned by the acknowledging agent.",
+                ))?;
+                if reservation.agent_id != request.agent.agent_id {
+                    return Err(reconciliation_error(
+                        "reservation_owner_mismatch",
+                        "The supplied reservation belongs to another agent.",
+                        "Use an active reservation owned by the acknowledging agent.",
+                    ));
+                }
+                if reservation.status != "active"
+                    || reservation.expires_at.as_deref().is_some_and(|expires_at| expired(expires_at, now))
+                {
+                    return Err(reconciliation_error(
+                        "missing_reservation",
+                        "The supplied reservation is not active.",
+                        "Declare or refresh an active reservation before acknowledging the human change.",
+                    ));
+                }
+                let rereads = typed_records::<ReadObservationRecord>(
+                    reader,
+                    CurrentAggregate::ReadObservation,
+                    &request.workspace.workspace_id,
+                )?;
+                let human_writes = typed_records::<HumanObservationRecord>(
+                    reader,
+                    CurrentAggregate::HumanObservation,
+                    &request.workspace.workspace_id,
+                )?
+                .into_iter()
+                .filter(|observation| {
+                    observation.status == "pending"
+                        && observation.kind.is_write()
+                        && observation.confidence == HumanObservationConfidence::High
+                })
+                .collect::<Vec<_>>();
+                for path in &paths {
+                    if !reservation.scopes.iter().any(|scope| {
+                        matches!(scope, ReservationScope::File(scope_path) if scope_path == path)
+                    }) {
+                        return Err(reconciliation_error(
+                            "scope_mismatch",
+                            "Each reread file requires an exact active file reservation scope.",
+                            "Declare exact file scopes for every reread path.",
+                        ));
+                    }
+                    let reread = rereads.iter().find(|reread| {
+                        reread.agent_id == request.agent.agent_id && reread.path == *path
+                    }).ok_or_else(|| reconciliation_error(
+                        "missing_read_provenance",
+                        "Each reconciled human write requires a fresh exact reread.",
+                        "Read the exact file completely before acknowledging the human change.",
+                    ))?;
+                    if !reread.is_fresh_at(now)
+                        || human_writes.iter().any(|observation| {
+                            observation.relative_path == *path
+                                && reread.origin_event_seq <= observation.origin_event_seq
+                        })
+                    {
+                        return Err(reconciliation_error(
+                            "stale_observation",
+                            "The supplied reread is stale, inexact, or predates the human change.",
+                            "Perform a fresh complete exact reread after the human change before acknowledging it.",
+                        ));
+                    }
+                }
+            }
             let acknowledgement = HumanReconciliationAcknowledgementRecord {
                 acknowledgement_id: request.request_id.to_string(),
                 workspace_id: request.workspace.workspace_id.clone(),
+                reservation_id: payload.reservation_id.clone(),
                 decision: payload.decision,
                 files_reread: paths.clone(),
                 human_change_summary: payload.human_change_summary.clone(),
@@ -263,6 +350,12 @@ impl Store {
             .map(record_from_current::<HumanReconciliationAcknowledgementRecord>)
             .collect()
     }
+}
+
+fn reconciliation_error(code: &'static str, message: &'static str, next_action: &'static str) -> StoreError {
+    V2Error::new(code, message)
+        .with_required_next_action(next_action)
+        .into()
 }
 
 fn observation_event<T>(
