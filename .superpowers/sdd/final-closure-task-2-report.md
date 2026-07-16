@@ -25,6 +25,11 @@
 - GREEN at final repair: `cargo test -p stateful-store --test freshness` — 29 passed; `cargo test -p stateful-store --test presence_handoff` — 31 passed; `cargo test -p stateful-server --test v2_coordination` — 4 passed.
 - Repair: authorization captures and rechecks the workspace's `MAX(journal_events.event_seq)`, including non-context heartbeats, without adding a table. Lifecycle resource updates prepend lazy finalization/fallback events and require full ownership of either live presence or a retained handoff before implicit presence creation. Cleanup keeps reservation/claim/wait deletion agent-scoped for terminal projection rows while retaining lineage-scoped write-fence cleanup.
 
+## Final warning audit repair
+- RED: `warned_authorization_audits_its_reason_before_intent_and_fence_events` failed because persisted warning payloads nested `reason_code` under `decision`.
+- GREEN: `cargo test -p stateful-store --test freshness` — 29 passed; `cargo test -p stateful-server --test v2_coordination` — 4 passed.
+- Repair: `authorization.warned` now persists top-level `decision`, `reason_code`, `message`, `required_next_action`, `action`, and `targets`, matching the canonical authorization diagnostics shape.
+
 ## Event and transaction review
 - Exact stable reads append `read_observation.stabilized` then `presence.resources_updated(Read)`; structural, failed, and unstable completions append no read relation. The resource projector writes the presence row's origin from that real resource event sequence.
 - Intent start orders `authorization.warned` (when applicable), `write_intent.started`, one `ResourcesUpdated(Planned)` per normalized target, then fences. Commit orders the intent result, peer invalidations, one `ResourcesUpdated(Changed)` per target, `presence.tool_completed`, then releases. Receipt lookup still precedes planning, preserving frozen duplicate responses and event sequences.
@@ -36,6 +41,7 @@
 - Review repair commit: `0b2f937` (`fix: preserve write freshness ownership`).
 - Re-review repair commit: `24e2837` (`fix: bind lifecycle resources to journal state`).
 - Final ownership repair commit: `cb0b11a` (`fix: enforce fence ownership boundaries`).
+- Final warning audit commit: `9cc610d` (`fix: flatten authorization warning audit`).
 - This implementation commit and the following report commit are pushed together.
 
 ## Concerns
