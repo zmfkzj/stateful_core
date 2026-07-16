@@ -41,3 +41,90 @@
 #### Concerns
 
 - Existing Task 9 regressions were attempted: CLI passed **60/60**; runtime had **24 passed, 2 failed** in PID-identity assertions; standalone lifecycle had **22 passed, 1 failed** in mismatched-identity signaling. [INFERENCE] These failures are outside the changed files and journal diagnostic path; the disabled-network attempt also blocked all listener-binding runtime tests.
+
+# Task 9 V2 CLI Cutover Report
+
+## Status
+
+Complete pending independent review. CLI runtime traffic, lifecycle hooks, outbox replay, watcher reconciliation, server discovery, and installed OMP integration use the locked `stateful.v2` protocol only.
+
+## Implementation
+
+- Added typed V2 POST/GET helpers with complete agent/workspace/source identity, request UUID validation, runtime identity/capability handshakes, and structured V2 error decoding.
+- Migrated CLI command paths and server lifecycle discovery to `/v2/*`; unsupported runtimes fail before mutation.
+- Split hook support into input, observation, delivery, and write-lifecycle modules; successful writes now persist start/completion identity and post-write fingerprints, while unresolved writes remain recoverable.
+- Migrated OMP/Codex lifecycle events, context rendering/acknowledgement, reservation/claim flows, outbox replay, watcher human-write observation/reconciliation, sandbox authorization, commit authorization, and LAN join checks.
+- Defaulted server/install operation to awareness mode while preserving explicit enforcement mode.
+- Updated the installed OMP extension and its install assertions for V2 notification streaming, reservation delivery, request identity, and context acknowledgement.
+- Removed every active `/v1/*` and `stateful.v1` marker from `crates/stateful-cli/src`.
+
+## Verification
+
+- `cargo test -p stateful-cli` — all CLI unit, integration, and doc tests passed: 121 library tests plus 60 CLI, 136 hook, 29 install, 13 LAN, 16 outbox, 27 runtime, 23 server-lifecycle, one real two-session TCP/replay test, and the remaining suites.
+- `cargo test -p stateful-server` — all 47 V2 server integration tests passed.
+- `cargo clippy -p stateful-cli --all-targets --no-deps -- -D warnings` — passed.
+- Scoped `rustfmt --check` over every Task 9 modified Rust file — passed.
+- `grep` over `crates/stateful-cli/src` for `/v1/` and `stateful.v1` — no matches.
+
+## Repository-Wide Gate Note
+
+`cargo fmt --check` and dependency-inclusive CLI clippy still expose pre-existing Task 1–8 cleanup outside the Task 9 diff: unformatted committed files across core/store/server/unchanged CLI tests, plus two core clippy findings. These belong to the plan's Task 12 full-workspace gate and do not affect the verified Task 9 behavior.
+
+## Independent review findings to fix
+
+All eight findings are blocking for Task 9:
+
+1. **Replay failed write completions instead of heartbeats (P1).** If
+   `/v2/write/complete` fails after the worktree changed, persist and replay the
+   original completion/recovery request with its request and operation IDs.
+   Queuing only `/v2/outbox/sync` leaves the write fence unresolved.
+2. **Complete non-exact read operations (P2).** Every `/v2/read/start` must get a
+   matching `/v2/read/complete`, including partial, truncated, and failed reads,
+   so `read_operation_current` is cleared without creating a stable baseline.
+3. **Authorize heterogeneous patch operations separately (P2).** Mixed
+   write/delete/move patch targets must not inherit the first target's action.
+   Split them into valid authorization/write-intent lifecycles or reject them
+   before execution with explicit split guidance.
+4. **Finalize already authorized sandbox intents on setup errors (P1).** Once a
+   multi-target sandbox authorization returns an operation ID, every later
+   authorization or writable-path setup failure must complete all accumulated
+   intents as failed in both internal and external target paths.
+5. **Finalize denied or unlaunchable benchmark intents (P1).** A benchmark
+   denial with an intent ID, writable-path preparation failure, or cwd
+   resolution failure must complete the captured intent as failed.
+6. **Complete commit intents after the commit runs (P1).** Preserve lifecycle
+   contexts through temporary-index setup and Git execution. Complete as
+   committed only after success, and as failed on every error path.
+7. **Retain claim-release recovery state until every claim is released (P1).**
+   Persist a completed-but-releases-pending lifecycle state and replay
+   unfinished claim releases idempotently; do not delete the only recovery
+   record before releases succeed.
+8. **Strip the OMP `:raw` selector before recording reads (P1).** Exact OMP reads
+   must fingerprint and post lifecycle events for the underlying file
+   (`src/lib.rs`), never the synthetic selector (`src/lib.rs:raw`).
+
+## Review-finding closure
+
+1. Fixed: failed write completions persist and replay the original V2 request and operation IDs.
+2. Fixed: partial/truncated reads complete without establishing a stable baseline.
+3. Fixed: OMP rejects heterogeneous patch actions before authorization with split guidance.
+4. Fixed: internal and external sandbox setup failures complete accumulated intents as failed.
+5. Fixed: denied benchmark intents and failures before launch complete as failed.
+6. Fixed: commit write lifecycles are retained through temporary-index and Git execution, then complete according to the Git result.
+7. Fixed: completed intents retain claim-release recovery requests until every release replays.
+8. Fixed: OMP removes `:raw` before lifecycle fingerprinting and read events.
+
+### Focused RED/GREEN evidence
+
+- RED `cargo test -p stateful-cli --lib write_lifecycle::tests::retries_failed_write_completion_with_the_original_request_and_operation_ids`: 0 passed, 1 failed; GREEN `stateful sandbox run --fs build --network enabled --write-dir task9-review-green-lifecycle-recovery --command 'cargo test -p stateful-cli --lib write_lifecycle::tests::'`: 2 passed.
+- RED `cargo test -p stateful-cli --test hook partial_or_truncated_read_completes_without_baseline`: 0 passed, 1 failed; GREEN `stateful sandbox run --fs build --network enabled --write-dir task9-review-green-read-complete-final --command 'cargo test -p stateful-cli --test hook partial_or_truncated_read_completes_without_baseline'`: 1 passed.
+- RED mixed OMP patch authorization: 0 passed, 1 failed; GREEN `stateful sandbox run --fs build --network enabled --write-dir task9-review-green-mixed-action --command 'cargo test -p stateful-cli --test hook omp_edit_rejects_mixed_patch_actions_before_authorization'`: 1 passed.
+- RED sandbox setup cleanup: 0 passed, 2 failed; GREEN `stateful sandbox run --fs build --network enabled --write-dir task9-review-green-sandbox-cleanup --command 'cargo test -p stateful-cli --lib setup_failure_completes_authorized_intents'`: 2 passed.
+- RED benchmark denied intent: 0 passed, 1 failed; GREEN `stateful sandbox run --fs build --network enabled --write-dir task9-review-green-benchmark-denial-final2 --command 'cargo test -p stateful-cli --lib denied_benchmark_intent_completes_as_failed'`: 1 passed.
+- GREEN commit lifecycle build/execution check: `stateful sandbox run --fs build --network enabled --write-dir task9-review-green-commit-lifecycle-build --command 'cargo test -p stateful-cli --test commit structured_commit_authorizes_deleted_files_as_delete_file'`: 1 passed.
+- RED OMP `:raw`: 0 passed, 1 failed; GREEN `stateful sandbox run --fs build --network enabled --write-dir task9-review-green-raw-selector-final --command 'cargo test -p stateful-cli --test hook omp_raw_reads_use_the_underlying_file_for_lifecycle_fingerprints'`: 1 passed.
+
+Changed files: `crates/stateful-cli/src/hook.rs`, `src/hook/write_lifecycle.rs`, `src/sandbox.rs`, `src/codex_benchmark.rs`, `src/commit.rs`, `tests/hook.rs`, and this report.
+
+Residual concern: commit lifecycle ordering is covered by the focused existing commit execution test; no live V2 transport fixture was added for it.
+- Final affected binaries: `stateful sandbox run --fs build --network enabled --write-dir task9-review-final-lib --command 'cargo test -p stateful-cli --lib'`: 126 passed; `stateful sandbox run --fs build --network enabled --write-dir task9-review-final-hook --command 'cargo test -p stateful-cli --test hook'`: 138 passed.

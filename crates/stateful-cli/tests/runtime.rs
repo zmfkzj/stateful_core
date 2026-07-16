@@ -829,6 +829,42 @@ fn unsupported_runtime_protocol_fails_before_mutation() {
     assert!(request.contains("GET /v2/runtime/identity?"));
     assert!(!request.starts_with("POST "), "mutation must not be posted");
 }
+
+#[test]
+fn missing_runtime_capability_fails_before_mutation() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener address should load");
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("connection should arrive");
+        let request = read_http_request_without_body(&mut stream);
+        tx.send(request).expect("request should send to test");
+        write_http_response(
+            &mut stream,
+            r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":42,"workspace_id":"w1","workspace_version":1,"capabilities":[]}"#,
+        );
+    });
+
+    let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
+    let error = declare_reservation_via_http(
+        &runtime,
+        ReservationDeclareArgs {
+            request_id: uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000106")
+                .expect("request id should parse"),
+            agent_id: "s1".to_string(),
+            workspace_id: "w1".to_string(),
+            purpose: "Fix auth validation behavior.".to_string(),
+            files_planned: vec!["src/auth.ts".to_string()],
+            identity: None,
+        },
+    )
+    .expect_err("missing runtime capability must reject the mutation");
+    assert!(error.to_string().contains("presence"));
+
+    let request = rx.recv().expect("handshake request should arrive");
+    assert!(request.contains("GET /v2/runtime/identity?"));
+    assert!(!request.starts_with("POST "), "mutation must not be posted");
+}
 fn request_json_body(request: &str) -> serde_json::Value {
     let (_, body) = request
         .split_once("\r\n\r\n")

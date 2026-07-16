@@ -100,7 +100,12 @@ fn install_yes_creates_global_files_and_database() {
     assert_eq!(registry, RepoRegistry::default());
 
     let store = stateful_store::Store::open(&fixture.paths.state_db).expect("store should open");
-    assert_eq!(store.journal_event_count().expect("event count should load"), 0);
+    assert_eq!(
+        store
+            .journal_event_count()
+            .expect("event count should load"),
+        0
+    );
 }
 
 #[test]
@@ -137,7 +142,12 @@ fn install_codex_yes_creates_global_files_and_merges_codex_config() {
     assert_eq!(registry, RepoRegistry::default());
 
     let store = stateful_store::Store::open(&fixture.paths.state_db).expect("store should open");
-    assert_eq!(store.journal_event_count().expect("event count should load"), 0);
+    assert_eq!(
+        store
+            .journal_event_count()
+            .expect("event count should load"),
+        0
+    );
 
     let first_config = fs::read_to_string(&fixture.codex_config).expect("codex config should read");
     assert!(first_config.contains("# stateful-core-global-install"));
@@ -356,7 +366,7 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
     assert!(extension.contains("validateOmpLinePatchBases"));
     assert!(extension.contains("line === \"*** Begin Patch\""));
     assert!(extension.contains("import { spawnSync } from \"node:child_process\""));
-    assert!(extension.contains("import { createHash } from \"node:crypto\""));
+    assert!(extension.contains("import { createHash, randomUUID } from \"node:crypto\""));
     assert!(extension.contains(
         "import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from \"node:fs\""
     ));
@@ -368,11 +378,11 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
     );
     assert!(extension.contains("process.env.HOME"));
     assert!(extension.contains(".omp/profiles/stateful/agent/config.yml"));
-    assert!(extension.contains("function startReservationStream(pi, stream)"));
-    assert!(extension.contains("/v1/notifications/stream?agent_id="));
-    assert!(extension.contains("let reservationStreamLastEventId = \"\";"));
+    assert!(extension.contains("function startContextStream(pi, stream)"));
+    assert!(extension.contains("/v2/notifications/stream?"));
+    assert!(extension.contains("let contextStreamLastEventId = \"\";"));
     assert!(extension.contains("if (line.startsWith(\"id:\")) id = line.slice(3).trim();"));
-    assert!(extension.contains("headers[\"last-event-id\"] = reservationStreamLastEventId;"));
+    assert!(extension.contains("headers[\"last-event-id\"] = contextStreamLastEventId;"));
     assert!(extension.contains("customType: \"stateful_reservation_ready\""));
     assert!(extension.contains("function notificationTargetsStreamAgent(notification, stream)"));
     assert!(
@@ -380,14 +390,13 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
             .contains("if (!notificationTargetsStreamAgent(notification, stream)) return true;")
     );
     assert!(extension.contains("return false;"));
-    assert!(extension.contains(
-        "deliverReservationNotification(pi, JSON.parse(data.join(\"\\n\")), stream) && id"
-    ));
+    assert!(extension.contains("processContextNotification(pi, notification, stream, event)"));
+    assert!(extension.contains("if (id) contextStreamLastEventId = id;"));
     assert!(extension.contains("purpose: \" + purpose.trim()"));
     assert!(extension.contains("const purpose = payload.purpose"));
     assert!(extension.contains("typeof purpose === \"string\" && purpose.trim().length > 0"));
-    assert!(extension.contains("startReservationStream(pi, result?.notifications_stream)"));
-    assert!(extension.contains("stopReservationStream();"));
+    assert!(extension.contains("startContextStream(pi, stream)"));
+    assert!(extension.contains("stopContextStream();"));
     assert!(extension.contains("ctx.ui.confirm"));
     assert!(extension.contains("const externalBashGrants = new Map()"));
     assert!(extension.contains("function externalGrantDescriptor(params)"));

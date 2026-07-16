@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeSet,
     ffi::OsStr,
     fs,
     io::{self, Read},
@@ -9,6 +8,25 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use stateful_core::normalize_relative_path;
+mod delivery;
+mod input;
+mod observation;
+pub(crate) mod write_lifecycle;
+
+const CODEX_WRITE_LIFECYCLE: write_lifecycle::LifecycleSource = write_lifecycle::LifecycleSource {
+    source_kind: stateful_core::SourceKind::Hook,
+    start_event: "codex_write_start",
+    start_ref: "hook:codex_pre_tool_use",
+    complete_event: "codex_write_complete",
+    complete_ref: "hook:codex_post_tool_use",
+};
+const OMP_WRITE_LIFECYCLE: write_lifecycle::LifecycleSource = write_lifecycle::LifecycleSource {
+    source_kind: stateful_core::SourceKind::Hook,
+    start_event: "omp_write_start",
+    start_ref: "hook:omp_pre_tool_use",
+    complete_event: "omp_write_complete",
+    complete_ref: "hook:omp_post_tool_use",
+};
 
 use crate::outbox::queue_session_heartbeat_outbox;
 use crate::sandbox::{
@@ -21,11 +39,10 @@ use crate::shell_command::{
     first_word_is_env_assignment, reject_outer_shell_syntax, split_simple_command_words,
 };
 use crate::{
-    GlobalPaths, HookCommand, HookRuntime, ProtocolEnvelopeArgs, RepoGate, RepoIdentity,
-    ServerRuntime, discover_runtime_with_global, effective_workspace_id_for_repo, ensure_server,
-    get_json, post_json, protocol_envelope, record_unclassified_tool_for_repo, repo_gate,
-    repo_identity_for_enabled_repo, runtime_env_override_is_configured,
-    tool_allowed_for_enabled_repo,
+    GlobalPaths, HookCommand, HookRuntime, RepoGate, RepoIdentity, ServerRuntime,
+    discover_runtime_with_global, effective_workspace_id_for_repo, ensure_server,
+    record_unclassified_tool_for_repo, repo_gate, repo_identity_for_enabled_repo,
+    runtime_env_override_is_configured, tool_allowed_for_enabled_repo,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,13 +195,7 @@ fn run_omp_hook(command: HookCommand) -> anyhow::Result<()> {
         HookCommand::Stop => {
             let input: OmpSessionEventInput = serde_json::from_str(&input)?;
             input.validate()?;
-            post_omp_session_event(
-                &runtime,
-                "/v1/activity/finalize",
-                "omp_stop",
-                &input,
-                identity.as_ref(),
-            )?;
+            post_omp_activity_finalize(&runtime, &input, identity.as_ref())?;
         }
         HookCommand::UserPromptSubmit => {
             anyhow::bail!("OMP hook user-prompt-submit is not supported");
@@ -198,8 +209,10 @@ fn run_codex_hook(command: HookCommand) -> anyhow::Result<()> {
         HookCommand::SessionStart => {
             let mut input = String::new();
             io::stdin().read_to_string(&mut input)?;
-            if let Err(error) = handle_session_start_in_repo(&input, hook_start_dir(&input)?) {
-                eprintln!("stateful session-start warning: {error}");
+            match handle_session_start_context_in_repo(&input, hook_start_dir(&input)?) {
+                Ok(prompt_text) if !prompt_text.is_empty() => println!("{prompt_text}"),
+                Ok(_) => {}
+                Err(error) => eprintln!("stateful session-start warning: {error}"),
             }
         }
         HookCommand::PostToolUse => {
@@ -279,6 +292,9 @@ fn handle_omp_pre_tool_use_with_identity(
 ) -> anyhow::Result<OmpHookOutcome> {
     let input: OmpPreToolUseInput = serde_json::from_str(input)?;
     input.validate()?;
+    if runtime_tool_name_leaf(&input.tool_name).eq_ignore_ascii_case("read") {
+        let _ = record_omp_read_start(&input, runtime, repo_root, cwd, identity);
+    }
     let global_paths = GlobalPaths::from_env().ok();
     match omp_pre_tool_action(&input, repo_root, cwd, global_paths.as_ref())? {
         OmpPreToolAction::Allow => Ok(OmpHookOutcome::Allow),
@@ -287,6 +303,50 @@ fn handle_omp_pre_tool_use_with_identity(
             authorize_omp_targets(&input, runtime, repo_root, cwd, identity, targets)
         }
     }
+}
+
+fn record_omp_read_start(
+    input: &OmpPreToolUseInput,
+    runtime: Option<&ServerRuntime>,
+    repo_root: Option<&Path>,
+    cwd: Option<&Path>,
+    identity: Option<&RepoIdentity>,
+) -> anyhow::Result<()> {
+    let (Some(runtime), Some(repo_root), Some(operation_id)) =
+        (runtime, repo_root, input.metadata.operation_id())
+    else {
+        return Ok(());
+    };
+    let Some(path) = read_target(&input.tool_input, repo_root, cwd)? else {
+        return Ok(());
+    };
+    let mut request = crate::v2_request_envelope(
+        uuid::Uuid::new_v4(),
+        input.agent_id.clone(),
+        input
+            .workspace_id
+            .clone()
+            .unwrap_or_else(|| effective_workspace_id(runtime, identity)),
+        identity.cloned(),
+        stateful_core::ActorType::Agent,
+        stateful_core::SourceKind::Hook,
+        "omp_read_start",
+        "hook:omp_pre_tool_use",
+        Some(input.tool_name.clone()),
+        json!({
+            "operation_id": operation_id,
+            "path": path,
+            "before": observation::fingerprint(repo_root, &path)?,
+        }),
+    )?;
+    set_omp_lineage(
+        &mut request,
+        &input.agent_id,
+        input.omp_agent_id.as_deref(),
+        input.parent_agent_id.as_deref(),
+    );
+    crate::post_v2(runtime, "/v2/read/start", &request)?;
+    Ok(())
 }
 
 enum OmpPreToolAction {
@@ -460,49 +520,6 @@ fn omp_process_find_action(command: &str) -> Option<OmpPreToolAction> {
     Some(OmpPreToolAction::Allow)
 }
 
-fn omp_hook_authorize_purpose(
-    input: &OmpPreToolUseInput,
-    runtime: &ServerRuntime,
-    target: &PatchTarget,
-    workspace_id: &str,
-) -> Option<String> {
-    let response = get_json(runtime, "/v1/current").ok()?;
-    if !(200..300).contains(&response.status_code) {
-        return None;
-    }
-    let body: serde_json::Value = serde_json::from_str(&response.body).ok()?;
-    let items = body.get("items")?.as_array()?;
-    let mut fallback = None;
-    for item in items {
-        let matches_intent = item.get("kind").and_then(serde_json::Value::as_str)
-            == Some("reservation")
-            && item.get("freshness").and_then(serde_json::Value::as_str) == Some("live")
-            && item.get("agent_id").and_then(serde_json::Value::as_str)
-                == Some(input.agent_id.as_str())
-            && item.get("workspace_id").and_then(serde_json::Value::as_str) == Some(workspace_id);
-        if !matches_intent {
-            continue;
-        }
-        let Some(purpose) = item
-            .get("purpose")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|purpose| !purpose.is_empty())
-            .map(str::to_string)
-        else {
-            continue;
-        };
-        if item.get("resource").and_then(serde_json::Value::as_str) == Some(target.path.as_str()) {
-            return Some(purpose);
-        }
-        if fallback.is_none() {
-            fallback = Some(purpose);
-        }
-    }
-
-    fallback
-}
-
 fn authorize_omp_targets(
     input: &OmpPreToolUseInput,
     runtime: Option<&ServerRuntime>,
@@ -515,101 +532,132 @@ fn authorize_omp_targets(
         return Ok(outcome);
     }
 
-    let Some(targets) = normalize_targets(targets, repo_root, cwd)? else {
+    let Some(repo_root) = repo_root else {
+        return Ok(OmpHookOutcome::Block {
+            reason: format!("{} writes require an enabled repository", input.tool_name),
+        });
+    };
+    let Some(targets) = normalize_targets(targets, Some(repo_root), cwd)? else {
         return Ok(OmpHookOutcome::Block {
             reason: format!("{} target is outside the enabled repo", input.tool_name),
         });
     };
-
+    if targets.is_empty() {
+        return Ok(OmpHookOutcome::Allow);
+    }
+    if targets.iter().any(|target| target.action != targets[0].action) {
+        return Ok(OmpHookOutcome::Block {
+            reason: format!(
+                "{} mixes write actions; split the operation into one action per patch",
+                input.tool_name
+            ),
+        });
+    }
     let Some(runtime) = runtime else {
-        let reason = format!(
-            "{} writes require a reachable stateful server, task reservation exact file scope, and a same-reservation file claim",
-            input.tool_name
-        );
-        return Ok(OmpHookOutcome::Block { reason });
+        return Ok(OmpHookOutcome::Block {
+            reason: format!(
+                "{} writes require a reachable stateful.v2 server",
+                input.tool_name
+            ),
+        });
+    };
+    let Some(operation_id) = input.metadata.operation_id() else {
+        return Ok(OmpHookOutcome::Block {
+            reason: format!(
+                "{} writes require an operation ID for stateful.v2 authorization",
+                input.tool_name
+            ),
+        });
     };
 
+    let mut fingerprints = Vec::with_capacity(targets.len() * 2);
+    for target in &targets {
+        fingerprints.push((
+            target.path.clone(),
+            stateful_core::fingerprint_path(&repo_root.join(&target.path))?,
+        ));
+        if let Some(new_path) = &target.new_path {
+            fingerprints.push((
+                new_path.clone(),
+                stateful_core::fingerprint_path(&repo_root.join(new_path))?,
+            ));
+        }
+    }
+    let paths = GlobalPaths::from_env()?;
     let workspace_id = input
         .workspace_id
         .clone()
         .unwrap_or_else(|| effective_workspace_id(runtime, identity));
+    let purpose = format!("Authorize OMP {}.", input.tool_name);
     let mut reservation_id = input.reservation_id().map(str::to_string);
-    let mut auto_declared = false;
-    let mut auto_claimed_paths = BTreeSet::new();
-    let mut warnings = Vec::new();
+    let mut claim_ids = Vec::new();
+    let mut retried = false;
 
-    'authorize: loop {
-        for target in &targets {
-            let purpose = omp_hook_authorize_purpose(input, runtime, target, &workspace_id)
-                .unwrap_or_else(|| format!("Queue OMP {} for {}.", input.tool_name, target.path));
-            let decision = match post_omp_authorize_target(
-                input,
-                runtime,
-                repo_root,
-                identity,
-                target,
-                &workspace_id,
-                reservation_id.as_deref(),
-                &purpose,
-            ) {
-                Ok(decision) => decision,
-                Err(outcome) => {
-                    release_omp_auto_claims(runtime, input, &workspace_id, &auto_claimed_paths);
-                    return Ok(outcome);
-                }
-            };
-            if decision.decision == "warn" {
-                warnings.push(authorization_warning_message(&decision));
-                continue;
-            }
-            if decision.decision != "allow" {
-                if !auto_declared
-                    && reservation_id.is_none()
-                    && should_auto_declare_omp_tool_reservation(input, &decision, &targets)
-                {
-                    reservation_id = Some(
-                        match declare_and_claim_omp_pre_tool_reservation(
-                            input,
-                            runtime,
-                            identity,
-                            &workspace_id,
-                            &targets,
-                            &purpose,
-                        ) {
-                            Ok(reservation_id) => reservation_id,
-                            Err(outcome) => return Ok(outcome),
-                        },
-                    );
-                    auto_claimed_paths = targets.iter().map(|target| target.path.clone()).collect();
-                    auto_declared = true;
-                    continue 'authorize;
-                }
-
-                let reason = if let Some(repo_root) = repo_root {
-                    if repeated_denial_seen(
-                        repo_root,
-                        &input.agent_id,
-                        &target.path,
-                        &decision.reason_code,
-                    ) {
-                        repeated_denial_reason(&target.path)
-                    } else {
-                        authorization_denial_reason(decision)
+    loop {
+        match write_lifecycle::authorize(
+            &paths,
+            runtime,
+            &input.agent_id,
+            &workspace_id,
+            identity,
+            input.omp_agent_id.as_deref(),
+            input.parent_agent_id.as_deref(),
+            operation_id,
+            targets[0].action,
+            fingerprints.clone(),
+            reservation_id.as_deref(),
+            claim_ids.clone(),
+            &OMP_WRITE_LIFECYCLE,
+        ) {
+            Ok(authorization) => {
+                return Ok(match authorization.decision {
+                    Some(decision) if decision.decision == stateful_core::DecisionKind::Warn => {
+                        OmpHookOutcome::Warn {
+                            message: format!("stateful warning: {}", decision.message),
+                        }
                     }
-                } else {
-                    authorization_denial_reason(decision)
-                };
-                release_omp_auto_claims(runtime, input, &workspace_id, &auto_claimed_paths);
-                return Ok(OmpHookOutcome::Block { reason });
+                    Some(decision) if decision.decision == stateful_core::DecisionKind::Deny => {
+                        release_omp_claims(runtime, input, &workspace_id, identity, &claim_ids);
+                        OmpHookOutcome::Block {
+                            reason: format!("{}: {}", decision.reason_code, decision.message),
+                        }
+                    }
+                    _ => OmpHookOutcome::Allow,
+                });
+            }
+            Err(error)
+                if !retried
+                    && reservation_id.is_none()
+                    && should_auto_declare_omp_tool_reservation(
+                        input,
+                        &error.to_string(),
+                        &targets,
+                    ) =>
+            {
+                match declare_and_claim_omp_pre_tool_reservation(
+                    input,
+                    runtime,
+                    identity,
+                    &workspace_id,
+                    &targets,
+                    &fingerprints,
+                    &purpose,
+                ) {
+                    Ok((declared_id, acquired_claim_ids)) => {
+                        reservation_id = Some(declared_id);
+                        claim_ids = acquired_claim_ids;
+                        retried = true;
+                    }
+                    Err(outcome) => return Ok(outcome),
+                }
+            }
+            Err(error) => {
+                release_omp_claims(runtime, input, &workspace_id, identity, &claim_ids);
+                return Ok(OmpHookOutcome::Block {
+                    reason: format!("stateful.v2 write authorization failed: {error}"),
+                });
             }
         }
-
-        if warnings.is_empty() {
-            return Ok(OmpHookOutcome::Allow);
-        }
-        return Ok(OmpHookOutcome::Warn {
-            message: warnings.join("\n"),
-        });
     }
 }
 
@@ -691,141 +739,27 @@ fn omp_external_target_display(path: &str, cwd: Option<&Path>) -> String {
         .to_string()
 }
 
-fn release_omp_auto_claims(
-    runtime: &ServerRuntime,
-    input: &OmpPreToolUseInput,
-    workspace_id: &str,
-    paths: &BTreeSet<String>,
-) {
-    if !paths.is_empty() {
-        release_pre_tool_authorized_claims(runtime, &input.agent_id, workspace_id, paths);
-    }
-}
-
-fn authorization_payload_for_target(
-    target: &PatchTarget,
-    repo_root: Option<&Path>,
-    purpose: Option<&str>,
-    reservation_id: Option<&str>,
-    queue_on_conflict: bool,
-) -> serde_json::Value {
-    let mut payload = json!({
-        "action": target.action,
-        "path": target.path,
-    });
-    let base_observations = [Some(target.path.as_str()), target.new_path.as_deref()]
-        .into_iter()
-        .flatten()
-        .filter_map(|path| base_observation_for_target(repo_root, path))
-        .collect::<Vec<_>>();
-    if !base_observations.is_empty() {
-        payload["base_observations"] = json!(base_observations);
-    }
-    if queue_on_conflict {
-        payload["queue_on_conflict"] = json!(true);
-    }
-    if let Some(purpose) = purpose {
-        payload["purpose"] = json!(purpose);
-    }
-    if let Some(new_path) = &target.new_path {
-        payload["old_path"] = json!(target.path);
-        payload["new_path"] = json!(new_path);
-    }
-    if let Some(reservation_id) = reservation_id {
-        payload["reservation_id"] = json!(reservation_id);
-    }
-    payload
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "authorization envelope carries hook context"
-)]
-fn authorization_request_body(
-    runtime: &ServerRuntime,
+fn set_omp_lineage<T>(
+    request: &mut stateful_core::RequestEnvelope<T>,
     agent_id: &str,
-    workspace_id: &str,
-    identity: Option<&RepoIdentity>,
-    event: &'static str,
-    source_ref: &'static str,
-    tool_name: &str,
-    payload: serde_json::Value,
-) -> serde_json::Value {
-    protocol_envelope(ProtocolEnvelopeArgs {
-        runtime,
-        request_id: uuid::Uuid::new_v4().to_string(),
-        agent_id: agent_id.to_string(),
-        workspace_id: workspace_id.to_string(),
-        identity: identity.cloned(),
-        source_kind: "hook",
-        event,
-        source_ref,
-        source_tool_name: Some(tool_name),
-        payload,
-    })
-}
-
-fn post_authorize_decision(
-    runtime: &ServerRuntime,
-    body: &serde_json::Value,
-) -> Result<AuthorizeDecision, String> {
-    let response = post_json(runtime, "/v1/authorize", body)
-        .map_err(|error| authorization_unavailable_reason(&error))?;
-
-    if !(200..300).contains(&response.status_code) {
-        return Err(format!(
-            "stateful authorization failed with HTTP {}: {}",
-            response.status_code, response.body
-        ));
-    }
-
-    serde_json::from_str(&response.body).map_err(|error| authorization_unavailable_reason(&error))
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "OMP authorization payload needs request context"
-)]
-fn post_omp_authorize_target(
-    input: &OmpPreToolUseInput,
-    runtime: &ServerRuntime,
-    repo_root: Option<&Path>,
-    identity: Option<&RepoIdentity>,
-    target: &PatchTarget,
-    workspace_id: &str,
-    reservation_id: Option<&str>,
-    purpose: &str,
-) -> Result<AuthorizeDecision, OmpHookOutcome> {
-    let payload =
-        authorization_payload_for_target(target, repo_root, Some(purpose), reservation_id, true);
-    let mut body = authorization_request_body(
-        runtime,
-        &input.agent_id,
-        workspace_id,
-        identity,
-        "omp_pre_tool_use",
-        "hook:omp_pre_tool_use",
-        &input.tool_name,
-        payload,
-    );
-    body["metadata"] = input.audit_metadata();
-
-    post_authorize_decision(runtime, &body).map_err(|reason| OmpHookOutcome::Block { reason })
+    actor_id: Option<&str>,
+    parent_agent_id: Option<&str>,
+) {
+    request.agent.actor_id = actor_id.unwrap_or(agent_id).to_string();
+    request.agent.parent_agent_id = parent_agent_id.map(str::to_string);
 }
 
 fn should_auto_declare_omp_tool_reservation(
     input: &OmpPreToolUseInput,
-    decision: &AuthorizeDecision,
+    error: &str,
     targets: &[PatchTarget],
 ) -> bool {
     matches!(
         runtime_tool_name_leaf(&input.tool_name),
         tool_name if tool_name.eq_ignore_ascii_case("edit")
             || tool_name.eq_ignore_ascii_case("write")
-    ) && matches!(
-        decision.reason_code.as_str(),
-        "missing_reservation" | "scope_mismatch"
-    ) && targets.iter().all(|target| target.action == "write_file")
+    ) && (error.contains("missing_reservation") || error.contains("scope_mismatch"))
+        && targets.iter().all(|target| target.action == "write_file")
 }
 
 fn declare_and_claim_omp_pre_tool_reservation(
@@ -834,46 +768,46 @@ fn declare_and_claim_omp_pre_tool_reservation(
     identity: Option<&RepoIdentity>,
     workspace_id: &str,
     targets: &[PatchTarget],
+    fingerprints: &[(String, stateful_core::ContentFingerprint)],
     purpose: &str,
-) -> Result<String, OmpHookOutcome> {
-    let files_planned = targets
-        .iter()
-        .map(|target| target.path.clone())
-        .collect::<Vec<_>>();
-    let mut body = protocol_envelope(ProtocolEnvelopeArgs {
-        runtime,
-        request_id: uuid::Uuid::new_v4().to_string(),
-        agent_id: input.agent_id.clone(),
-        workspace_id: workspace_id.to_string(),
-        identity: identity.cloned(),
-        source_kind: "hook",
-        event: "reservation_declare",
-        source_ref: "hook:omp_pre_tool_use",
-        source_tool_name: Some(input.tool_name.as_str()),
-        payload: json!({
+) -> Result<(String, Vec<String>), OmpHookOutcome> {
+    let mut request = crate::v2_request_envelope(
+        uuid::Uuid::new_v4(),
+        input.agent_id.clone(),
+        workspace_id.to_string(),
+        identity.cloned(),
+        stateful_core::ActorType::Agent,
+        stateful_core::SourceKind::Hook,
+        "reservation_declare",
+        "hook:omp_pre_tool_use",
+        Some(input.tool_name.clone()),
+        json!({
+            "scopes": targets
+                .iter()
+                .map(|target| stateful_core::ReservationScope::file(&target.path))
+                .collect::<Vec<_>>(),
+            "action": "write",
             "purpose": purpose,
-            "files_planned": files_planned,
         }),
-    });
-    body["metadata"] = input.audit_metadata();
-
-    let response = post_json(runtime, "/v1/reservation/declare", &body).map_err(|error| {
-        OmpHookOutcome::Block {
-            reason: authorization_unavailable_reason(&error),
-        }
+    )
+    .map_err(|error| OmpHookOutcome::Block {
+        reason: error.to_string(),
     })?;
-    if !(200..300).contains(&response.status_code) {
-        return Err(OmpHookOutcome::Block {
-            reason: format!(
-                "stateful reservation declaration failed with HTTP {}: {}",
-                response.status_code, response.body
-            ),
-        });
-    }
-
+    set_omp_lineage(
+        &mut request,
+        &input.agent_id,
+        input.omp_agent_id.as_deref(),
+        input.parent_agent_id.as_deref(),
+    );
+    let response =
+        crate::post_v2(runtime, "/v2/reservation/declare", &request).map_err(|error| {
+            OmpHookOutcome::Block {
+                reason: format!("stateful reservation declaration failed: {error}"),
+            }
+        })?;
     let body: serde_json::Value =
         serde_json::from_str(&response.body).map_err(|error| OmpHookOutcome::Block {
-            reason: authorization_unavailable_reason(&error),
+            reason: format!("invalid stateful reservation response: {error}"),
         })?;
     let reservation_id = body
         .get("reservation_id")
@@ -885,30 +819,95 @@ fn declare_and_claim_omp_pre_tool_reservation(
                 .to_string(),
         })?;
 
-    let response = post_json(
-        runtime,
-        "/v1/claim/acquire",
-        &json!({
-            "agent_id": input.agent_id.clone(),
-            "workspace_id": workspace_id,
-            "reservation_id": reservation_id.clone(),
-            "paths": files_planned,
-            "root": identity.map(|identity| identity.root.as_str()).unwrap_or(""),
+    let mut request = crate::v2_request_envelope(
+        uuid::Uuid::new_v4(),
+        input.agent_id.clone(),
+        workspace_id.to_string(),
+        identity.cloned(),
+        stateful_core::ActorType::Agent,
+        stateful_core::SourceKind::Hook,
+        "claim_acquire",
+        "hook:omp_pre_tool_use",
+        Some(input.tool_name.clone()),
+        json!({
+            "reservation_id": reservation_id,
+            "paths": fingerprints
+                .iter()
+                .map(|(path, before)| json!({
+                    "relative_path": path,
+                    "observation": {
+                        "exists": before.exists,
+                        "content_hash": before.sha256,
+                    },
+                }))
+                .collect::<Vec<_>>(),
         }),
     )
     .map_err(|error| OmpHookOutcome::Block {
-        reason: authorization_unavailable_reason(&error),
+        reason: error.to_string(),
     })?;
-    if !(200..300).contains(&response.status_code) {
+    set_omp_lineage(
+        &mut request,
+        &input.agent_id,
+        input.omp_agent_id.as_deref(),
+        input.parent_agent_id.as_deref(),
+    );
+    let response = crate::post_v2(runtime, "/v2/claim/acquire", &request).map_err(|error| {
+        OmpHookOutcome::Block {
+            reason: format!("stateful claim acquisition failed: {error}"),
+        }
+    })?;
+    let body: serde_json::Value =
+        serde_json::from_str(&response.body).map_err(|error| OmpHookOutcome::Block {
+            reason: format!("invalid stateful claim response: {error}"),
+        })?;
+    let claim_ids = body
+        .get("claims")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|claim| claim.get("claim_id").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if claim_ids.is_empty() {
         return Err(OmpHookOutcome::Block {
-            reason: format!(
-                "stateful claim acquire failed with HTTP {}: {}",
-                response.status_code, response.body
-            ),
+            reason: "stateful claim acquisition response did not include claims".to_string(),
         });
     }
 
-    Ok(reservation_id)
+    Ok((reservation_id, claim_ids))
+}
+
+fn release_omp_claims(
+    runtime: &ServerRuntime,
+    input: &OmpPreToolUseInput,
+    workspace_id: &str,
+    identity: Option<&RepoIdentity>,
+    claim_ids: &[String],
+) {
+    for claim_id in claim_ids {
+        let Ok(mut request) = crate::v2_request_envelope(
+            uuid::Uuid::new_v4(),
+            input.agent_id.clone(),
+            workspace_id.to_string(),
+            identity.cloned(),
+            stateful_core::ActorType::Agent,
+            stateful_core::SourceKind::Hook,
+            "claim_release",
+            "hook:omp_pre_tool_use",
+            Some(input.tool_name.clone()),
+            json!({ "claim_id": claim_id }),
+        ) else {
+            continue;
+        };
+        set_omp_lineage(
+            &mut request,
+            &input.agent_id,
+            input.omp_agent_id.as_deref(),
+            input.parent_agent_id.as_deref(),
+        );
+        let _ = crate::post_v2(runtime, "/v2/claim/release", &request);
+    }
 }
 
 fn extract_omp_edit_targets(input: &serde_json::Value) -> Vec<PatchTarget> {
@@ -959,21 +958,14 @@ pub fn handle_omp_session_start_with_runtime(
 ) -> anyhow::Result<OmpSessionStartOutput> {
     let input: OmpSessionEventInput = serde_json::from_str(input)?;
     input.validate()?;
-    let workspace_id = input
-        .workspace_id
-        .clone()
-        .unwrap_or_else(|| effective_workspace_id(runtime, None));
-    post_omp_session_event(
-        runtime,
-        "/v1/session/register",
-        "omp_session_start",
-        &input,
-        None,
-    )?;
+    post_omp_presence_registration(runtime, &input, None)?;
     Ok(omp_session_start_output(
         runtime,
         &input.agent_id,
-        workspace_id,
+        input
+            .workspace_id
+            .clone()
+            .unwrap_or_else(|| effective_workspace_id(runtime, None)),
     ))
 }
 
@@ -984,22 +976,45 @@ fn handle_omp_session_start_with_identity(
 ) -> anyhow::Result<OmpSessionStartOutput> {
     let input: OmpSessionEventInput = serde_json::from_str(input)?;
     input.validate()?;
+    post_omp_presence_registration(runtime, &input, identity)?;
+    Ok(omp_session_start_output(
+        runtime,
+        &input.agent_id,
+        input
+            .workspace_id
+            .clone()
+            .unwrap_or_else(|| effective_workspace_id(runtime, identity)),
+    ))
+}
+
+fn post_omp_presence_registration(
+    runtime: &ServerRuntime,
+    input: &OmpSessionEventInput,
+    identity: Option<&RepoIdentity>,
+) -> anyhow::Result<()> {
     let workspace_id = input
         .workspace_id
         .clone()
         .unwrap_or_else(|| effective_workspace_id(runtime, identity));
-    post_omp_session_event(
-        runtime,
-        "/v1/session/register",
-        "omp_session_start",
-        &input,
-        identity,
-    )?;
-    Ok(omp_session_start_output(
-        runtime,
-        &input.agent_id,
+    let mut request = crate::v2_request_envelope(
+        uuid::Uuid::new_v4(),
+        input.agent_id.clone(),
         workspace_id,
-    ))
+        identity.cloned(),
+        stateful_core::ActorType::Agent,
+        stateful_core::SourceKind::Hook,
+        "omp_session_start",
+        "hook:omp_session_start",
+        None,
+        json!({ "first_prompt": input.prompt.as_deref() }),
+    )?;
+    request.agent.actor_id = input
+        .omp_agent_id
+        .clone()
+        .unwrap_or_else(|| input.agent_id.clone());
+    request.agent.parent_agent_id = input.parent_agent_id.clone();
+    crate::post_v2(runtime, "/v2/session/register", &request)?;
+    Ok(())
 }
 
 fn omp_session_start_output(
@@ -1046,147 +1061,186 @@ fn post_omp_post_tool_use_event(
     repo_root: Option<&Path>,
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<()> {
-    post_omp_session_event(
-        runtime,
-        "/v1/session/heartbeat",
-        "omp_post_tool_use",
-        input,
-        identity,
-    )?;
-    refresh_omp_post_tool_claim_observations(input, runtime, repo_root, identity);
-    release_omp_post_tool_claims(input, runtime, repo_root, identity);
+    post_omp_presence_heartbeat(runtime, input, identity)?;
+    let tool_name = input
+        .tool_name
+        .as_deref()
+        .map(runtime_tool_name_leaf)
+        .unwrap_or_default();
+    if tool_name.eq_ignore_ascii_case("read") {
+        return record_omp_read_complete(input, runtime, repo_root, identity);
+    }
+    if let (Some(repo_root), Some(operation_id)) = (repo_root, input.metadata.operation_id())
+        && (tool_name.eq_ignore_ascii_case("write")
+            || tool_name.eq_ignore_ascii_case("edit")
+            || tool_name.eq_ignore_ascii_case("bash")
+            || tool_name.eq_ignore_ascii_case("python"))
+    {
+        let paths = GlobalPaths::from_env()?;
+        write_lifecycle::complete(
+            &paths,
+            runtime,
+            &input.agent_id,
+            &input
+                .workspace_id
+                .clone()
+                .unwrap_or_else(|| effective_workspace_id(runtime, identity)),
+            identity,
+            input.omp_agent_id.as_deref(),
+            input.parent_agent_id.as_deref(),
+            repo_root,
+            operation_id,
+            input.metadata.failed(),
+            &OMP_WRITE_LIFECYCLE,
+        )?;
+    }
     Ok(())
 }
 
-fn refresh_omp_post_tool_claim_observations(
-    input: &OmpSessionEventInput,
+fn post_omp_presence_heartbeat(
     runtime: &ServerRuntime,
-    repo_root: Option<&Path>,
-    identity: Option<&RepoIdentity>,
-) {
-    let Some(identity) = identity else {
-        return;
-    };
-    let Some(repo_root) = repo_root else {
-        return;
-    };
-    let Ok(targets) = omp_post_tool_refresh_targets(input, repo_root) else {
-        return;
-    };
-    let workspace_id = input
-        .workspace_id
-        .clone()
-        .unwrap_or_else(|| effective_workspace_id(runtime, Some(identity)));
-    let paths = target_paths(targets);
-
-    refresh_claim_observations_for_paths(
-        runtime,
-        &input.agent_id,
-        &workspace_id,
-        &identity.root,
-        &paths,
-    );
-}
-
-fn release_omp_post_tool_claims(
-    input: &OmpSessionEventInput,
-    runtime: &ServerRuntime,
-    repo_root: Option<&Path>,
-    identity: Option<&RepoIdentity>,
-) {
-    let Some(identity) = identity else {
-        return;
-    };
-    let Some(repo_root) = repo_root else {
-        return;
-    };
-    let Ok(targets) = omp_post_tool_refresh_targets(input, repo_root) else {
-        return;
-    };
-    let workspace_id = input
-        .workspace_id
-        .clone()
-        .unwrap_or_else(|| effective_workspace_id(runtime, Some(identity)));
-    let paths = target_paths(targets);
-
-    release_claims_for_paths(runtime, &input.agent_id, &workspace_id, &paths);
-}
-
-fn omp_post_tool_refresh_targets(
-    input: &OmpSessionEventInput,
-    repo_root: &Path,
-) -> anyhow::Result<Vec<PatchTarget>> {
-    let cwd = input.cwd.as_deref();
-    let tool_name = input.tool_name.as_deref().map(runtime_tool_name_leaf);
-    let targets = match tool_name {
-        Some(tool_name) if tool_name.eq_ignore_ascii_case("write") => {
-            let Some(path) = input
-                .tool_input
-                .get("path")
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|path| !path.is_empty())
-            else {
-                return Ok(Vec::new());
-            };
-            vec![PatchTarget::write(path)]
-        }
-        Some(tool_name) if tool_name.eq_ignore_ascii_case("edit") => {
-            extract_omp_edit_targets(&input.tool_input)
-        }
-        Some(tool_name)
-            if tool_name.eq_ignore_ascii_case("bash")
-                || tool_name.eq_ignore_ascii_case("python") =>
-        {
-            match input.command().and_then(omp_sandbox_run_action) {
-                Some(OmpPreToolAction::Targets(targets)) => targets,
-                _ => Vec::new(),
-            }
-        }
-        _ => Vec::new(),
-    };
-
-    normalize_targets(targets, Some(repo_root), cwd).map(|targets| targets.unwrap_or_default())
-}
-
-fn post_omp_session_event(
-    runtime: &ServerRuntime,
-    path: &str,
-    event: &str,
     input: &OmpSessionEventInput,
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<()> {
+    let mut request = crate::v2_request_envelope(
+        uuid::Uuid::new_v4(),
+        input.agent_id.clone(),
+        input
+            .workspace_id
+            .clone()
+            .unwrap_or_else(|| effective_workspace_id(runtime, identity)),
+        identity.cloned(),
+        stateful_core::ActorType::Agent,
+        stateful_core::SourceKind::Hook,
+        "omp_post_tool_use",
+        "hook:omp_post_tool_use",
+        input.tool_name.clone(),
+        json!({ "kind": "heartbeat" }),
+    )?;
+    set_omp_lineage(
+        &mut request,
+        &input.agent_id,
+        input.omp_agent_id.as_deref(),
+        input.parent_agent_id.as_deref(),
+    );
+    crate::post_v2(runtime, "/v2/presence/update", &request)?;
+    Ok(())
+}
+
+fn record_omp_read_complete(
+    input: &OmpSessionEventInput,
+    runtime: &ServerRuntime,
+    repo_root: Option<&Path>,
+    identity: Option<&RepoIdentity>,
+) -> anyhow::Result<()> {
+    let Some(repo_root) = repo_root else {
+        return Ok(());
+    };
+    let Some(path) = read_target(&input.tool_input, repo_root, input.cwd.as_deref())? else {
+        return Ok(());
+    };
     let workspace_id = input
         .workspace_id
         .clone()
         .unwrap_or_else(|| effective_workspace_id(runtime, identity));
-    input.validate()?;
-    let mut body = json!({
-        "agent_id": &input.agent_id,
-        "workspace_id": workspace_id,
-        "source": {
-            "kind": "hook",
-            "event": event,
-            "ref": "hook:omp_session",
-            "tool_name": &input.tool_name,
-        },
-        "metadata": input.audit_metadata(),
-    });
-    if let Some(identity) = identity {
-        body["repo_id"] = json!(identity.repo_id);
-        body["worktree_id"] = json!(identity.worktree_id);
-        body["root"] = json!(identity.root);
-        body["branch"] = json!(identity.branch);
-    }
-
-    let response = post_json(runtime, path, &body)?;
-    if !(200..300).contains(&response.status_code) {
-        anyhow::bail!(
-            "OMP session event failed with HTTP {}: {}",
-            response.status_code,
-            response.body
+    let classification = if input.exact_read_candidate {
+        observation::classification(&input.metadata)
+    } else {
+        stateful_core::ReadClassification::StructuralSummary
+    };
+    if classification != stateful_core::ReadClassification::Exact {
+        let mut request = crate::v2_request_envelope(
+            uuid::Uuid::new_v4(),
+            input.agent_id.clone(),
+            workspace_id.clone(),
+            identity.cloned(),
+            stateful_core::ActorType::Agent,
+            stateful_core::SourceKind::Hook,
+            "omp_read_result",
+            "hook:omp_post_tool_use",
+            input.tool_name.clone(),
+            json!({
+                "kind": "tool_result",
+                "tool_name": "read",
+                "outcome": classification,
+                "summary": input.metadata.result_summary(),
+                "result_metadata": input.result_metadata,
+            }),
+        )?;
+        set_omp_lineage(
+            &mut request,
+            &input.agent_id,
+            input.omp_agent_id.as_deref(),
+            input.parent_agent_id.as_deref(),
         );
+        crate::post_v2(runtime, "/v2/presence/update", &request)?;
     }
+    let Some(operation_id) = input.metadata.operation_id() else {
+        return Ok(());
+    };
+    let semantic_marker = input
+        .metadata
+        .result_summary()
+        .map(str::to_string)
+        .or_else(|| (!input.result_metadata.is_null()).then(|| input.result_metadata.to_string()));
+    let mut payload = json!({
+        "operation_id": operation_id,
+        "path": path,
+        "classification": classification,
+        "semantic_marker": semantic_marker,
+    });
+    if classification == stateful_core::ReadClassification::Exact {
+        payload["after"] = serde_json::to_value(observation::fingerprint(repo_root, &path)?)?;
+    }
+    let mut request = crate::v2_request_envelope(
+        uuid::Uuid::new_v4(),
+        input.agent_id.clone(),
+        workspace_id,
+        identity.cloned(),
+        stateful_core::ActorType::Agent,
+        stateful_core::SourceKind::Hook,
+        "omp_read_complete",
+        "hook:omp_post_tool_use",
+        input.tool_name.clone(),
+        payload,
+    )?;
+    set_omp_lineage(
+        &mut request,
+        &input.agent_id,
+        input.omp_agent_id.as_deref(),
+        input.parent_agent_id.as_deref(),
+    );
+    crate::post_v2(runtime, "/v2/read/complete", &request)?;
+    Ok(())
+}
+
+fn post_omp_activity_finalize(
+    runtime: &ServerRuntime,
+    input: &OmpSessionEventInput,
+    identity: Option<&RepoIdentity>,
+) -> anyhow::Result<()> {
+    let mut request = crate::v2_request_envelope(
+        uuid::Uuid::new_v4(),
+        input.agent_id.clone(),
+        input
+            .workspace_id
+            .clone()
+            .unwrap_or_else(|| effective_workspace_id(runtime, identity)),
+        identity.cloned(),
+        stateful_core::ActorType::Agent,
+        stateful_core::SourceKind::Hook,
+        "omp_stop",
+        "hook:omp_stop",
+        input.tool_name.clone(),
+        json!({}),
+    )?;
+    set_omp_lineage(
+        &mut request,
+        &input.agent_id,
+        input.omp_agent_id.as_deref(),
+        input.parent_agent_id.as_deref(),
+    );
+    crate::post_v2(runtime, "/v2/activity/finalize", &request)?;
     Ok(())
 }
 
@@ -1205,6 +1259,14 @@ pub fn handle_session_start_in_repo(
     input: &str,
     repo_root: impl AsRef<Path>,
 ) -> anyhow::Result<()> {
+    let _ = handle_session_start_context_in_repo(input, repo_root)?;
+    Ok(())
+}
+
+fn handle_session_start_context_in_repo(
+    input: &str,
+    repo_root: impl AsRef<Path>,
+) -> anyhow::Result<String> {
     let start = hook_start_dir_or(input, repo_root.as_ref());
     let paths = GlobalPaths::from_env()?;
     let repo_root = match repo_gate(&paths, start)? {
@@ -1214,7 +1276,7 @@ pub fn handle_session_start_in_repo(
             }
             repo_root
         }
-        RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(()),
+        RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(String::new()),
     };
     let runtime = discover_runtime_with_global(&repo_root, &paths)?;
     let identity = repo_identity(&paths, &repo_root)?;
@@ -1271,13 +1333,9 @@ pub fn handle_user_prompt_submit_in_repo(
     };
     let runtime = discover_runtime_with_global(&repo_root, &paths)?;
     let identity = repo_identity(&paths, &repo_root)?;
-    let input: UserPromptSubmitInput = serde_json::from_str(input)?;
-    if user_prompt_context_rendered(&repo_root, input.stateful_agent_id()) {
-        return Ok(String::new());
-    }
-    let prompt_text = handle_user_prompt_submit_with_runtime(&input, &runtime, Some(&identity))?;
-    mark_user_prompt_context_rendered(&repo_root, input.stateful_agent_id());
-    Ok(prompt_text)
+    let input: input::CodexUserPrompt = serde_json::from_str(input)?;
+    input.validate()?;
+    handle_user_prompt_submit_with_runtime(&input, &runtime, Some(&identity))
 }
 
 pub fn handle_stop_in_repo(input: &str, repo_root: impl AsRef<Path>) -> anyhow::Result<()> {
@@ -1301,13 +1359,30 @@ fn handle_session_start_with_runtime(
     input: &str,
     runtime: &ServerRuntime,
     identity: Option<&RepoIdentity>,
-) -> anyhow::Result<()> {
-    let input: SessionStartInput = serde_json::from_str(input)?;
-    post_session_event(
+) -> anyhow::Result<String> {
+    let input: input::CodexSessionStart = serde_json::from_str(input)?;
+    input.validate()?;
+    let workspace_id = effective_workspace_id(runtime, identity);
+    let registration = crate::v2_request_envelope(
+        uuid::Uuid::new_v4(),
+        input.agent_id.clone(),
+        workspace_id.clone(),
+        identity.cloned(),
+        stateful_core::ActorType::Agent,
+        stateful_core::SourceKind::Hook,
+        "codex_session_start",
+        "hook:codex_session_start",
+        None,
+        json!({ "first_prompt": input.first_prompt() }),
+    )?;
+    crate::post_v2(runtime, "/v2/session/register", &registration)?;
+    delivery::render_and_ack_context(
         runtime,
-        "/v1/session/register",
-        input.stateful_agent_id(),
+        &input.agent_id,
+        &workspace_id,
         identity,
+        "codex_session_start",
+        "hook:codex_session_start",
     )
 }
 
@@ -1318,151 +1393,77 @@ fn handle_post_tool_use_with_runtime(
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<()> {
     let input: SessionEventInput = serde_json::from_str(input)?;
-    post_session_event(
-        runtime,
-        "/v1/session/heartbeat",
-        input.stateful_agent_id(),
-        identity,
-    )?;
-    refresh_post_tool_claim_observations(&input, runtime, repo_root, identity);
-    release_post_tool_claims(&input, runtime, repo_root, identity);
+    let tool_name = input.tool_name.as_deref().unwrap_or_default();
+    if tool_name.eq_ignore_ascii_case("read") {
+        return record_read_complete(&input, runtime, repo_root, identity);
+    }
+    if matches!(
+        runtime_tool_name_leaf(tool_name)
+            .to_ascii_lowercase()
+            .as_str(),
+        "write" | "edit" | "apply_patch" | "file_change"
+    ) {
+        let (Some(repo_root), Some(operation_id)) = (repo_root, input.metadata.operation_id())
+        else {
+            return Ok(());
+        };
+        let paths = GlobalPaths::from_env()?;
+        write_lifecycle::complete(
+            &paths,
+            runtime,
+            input.stateful_agent_id(),
+            &effective_workspace_id(runtime, identity),
+            identity,
+            None,
+            None,
+            repo_root,
+            operation_id,
+            input.metadata.failed(),
+            &CODEX_WRITE_LIFECYCLE,
+        )?;
+    }
     Ok(())
 }
 
 fn handle_user_prompt_submit_with_runtime(
-    input: &UserPromptSubmitInput,
+    input: &input::CodexUserPrompt,
     runtime: &ServerRuntime,
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<String> {
-    let prompt_text = render_context_prompt_text(runtime, input.stateful_agent_id(), identity)?;
-    Ok(with_stateful_command_policy_reminder(prompt_text))
-}
-
-fn render_context_prompt_text(
-    runtime: &ServerRuntime,
-    agent_id: &str,
-    identity: Option<&RepoIdentity>,
-) -> anyhow::Result<String> {
-    Ok(render_context_response(runtime, agent_id, identity, None)?.prompt_text)
-}
-
-fn context_render_request_body(
-    runtime: &ServerRuntime,
-    agent_id: &str,
-    identity: Option<&RepoIdentity>,
-    resource: Option<&str>,
-) -> serde_json::Value {
     let workspace_id = effective_workspace_id(runtime, identity);
-    let mut body = json!({
-        "agent_id": agent_id,
-        "workspace_id": workspace_id,
-        "mode": "brief"
-    });
-    if let Some(resource) = resource
-        .map(str::trim)
-        .filter(|resource| !resource.is_empty())
-        && let Some(object) = body.as_object_mut()
+    if let Some(prompt) = input.prompt()
+        && !delivery::presence_has_goal(runtime, &input.agent_id, &workspace_id, identity)?
     {
-        object.insert("resource".to_string(), json!(resource));
+        let update = crate::v2_request_envelope(
+            uuid::Uuid::new_v4(),
+            input.agent_id.clone(),
+            workspace_id.clone(),
+            identity.cloned(),
+            stateful_core::ActorType::Agent,
+            stateful_core::SourceKind::Hook,
+            "codex_first_prompt",
+            "hook:codex_user_prompt",
+            None,
+            json!({
+                "kind": "update",
+                "goal_excerpt": prompt,
+            }),
+        )?;
+        crate::post_v2(runtime, "/v2/presence/update", &update)?;
     }
-    if let Some(identity) = identity
-        && let Some(object) = body.as_object_mut()
-    {
-        object.insert("repo_id".to_string(), json!(&identity.repo_id));
-        object.insert("worktree_id".to_string(), json!(&identity.worktree_id));
-        object.insert("root".to_string(), json!(&identity.root));
-        object.insert("branch".to_string(), json!(&identity.branch));
-    }
-    body
-}
-
-fn render_context_response(
-    runtime: &ServerRuntime,
-    agent_id: &str,
-    identity: Option<&RepoIdentity>,
-    resource: Option<&str>,
-) -> anyhow::Result<ContextRenderResponse> {
-    let body = context_render_request_body(runtime, agent_id, identity, resource);
-    let response = post_json(runtime, "/v1/context/render", &body)?;
-
-    if !(200..300).contains(&response.status_code) {
-        anyhow::bail!(
-            "context render failed with HTTP {}: {}",
-            response.status_code,
-            response.body
-        );
-    }
-
-    let response: ContextRenderResponse = serde_json::from_str(&response.body)?;
-    Ok(response)
-}
-
-fn user_prompt_context_rendered(repo_root: &Path, agent_id: &str) -> bool {
-    user_prompt_context_marker_path(repo_root, agent_id).exists()
-}
-
-fn mark_user_prompt_context_rendered(repo_root: &Path, agent_id: &str) {
-    let path = user_prompt_context_marker_path(repo_root, agent_id);
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let _ = fs::write(path, b"rendered\n");
-}
-
-fn user_prompt_context_marker_path(repo_root: &Path, agent_id: &str) -> PathBuf {
-    repo_root
-        .join(".stateful_core")
-        .join("runtime")
-        .join("prompt_context")
-        .join(format!("{agent_id}.sent"))
-}
-
-fn repeated_denial_marker_path(
-    repo_root: &Path,
-    agent_id: &str,
-    path: &str,
-    reason_code: &str,
-) -> PathBuf {
-    let session_key = marker_component(agent_id);
-    let reason_key = marker_component(reason_code);
-    let path_key = marker_component(path);
-    repo_root
-        .join(".stateful_core")
-        .join("runtime")
-        .join("denials")
-        .join(session_key)
-        .join(format!("{reason_key}-{path_key}.seen"))
-}
-
-fn marker_component(value: &str) -> String {
-    if value.is_empty() {
-        return "_".to_owned();
-    }
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(value.len() * 2);
-    for byte in value.as_bytes() {
-        encoded.push(HEX[(byte >> 4) as usize] as char);
-        encoded.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    encoded
-}
-
-fn repeated_denial_seen(repo_root: &Path, agent_id: &str, path: &str, reason_code: &str) -> bool {
-    let marker = repeated_denial_marker_path(repo_root, agent_id, path, reason_code);
-    let seen = marker.exists();
-    if !seen {
-        if let Some(parent) = marker.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let _ = fs::write(marker, b"seen");
-    }
-    seen
-}
-
-fn repeated_denial_reason(path: &str) -> String {
-    format!(
-        "Repeated denial for {path}. Stop retrying this path. Use one writer: parent/main agent owns the edit; subagents report findings only."
-    )
+    let prompt_text = delivery::render_and_ack_context(
+        runtime,
+        &input.agent_id,
+        &workspace_id,
+        identity,
+        "codex_user_prompt",
+        "hook:codex_user_prompt",
+    )?;
+    Ok(if prompt_text.trim().is_empty() {
+        String::new()
+    } else {
+        with_stateful_command_policy_reminder(prompt_text)
+    })
 }
 
 fn with_stateful_command_policy_reminder(prompt_text: String) -> String {
@@ -1487,125 +1488,146 @@ fn handle_stop_with_runtime(
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<()> {
     let input: SessionEventInput = serde_json::from_str(input)?;
-    post_session_event(
-        runtime,
-        "/v1/activity/finalize",
-        input.stateful_agent_id(),
-        identity,
-    )
-}
-
-fn post_session_event(
-    runtime: &ServerRuntime,
-    path: &str,
-    agent_id: &str,
-    identity: Option<&RepoIdentity>,
-) -> anyhow::Result<()> {
-    let workspace_id = effective_workspace_id(runtime, identity);
-    let mut body = json!({
-        "agent_id": agent_id,
-        "workspace_id": workspace_id,
+    let handoff = input.explicit_handoff().unwrap_or_else(|| {
+        json!({
+            "status": "unknown",
+            "summary": "Codex session ended without an explicit handoff.",
+        })
     });
-    if let Some(identity) = identity {
-        body["repo_id"] = json!(&identity.repo_id);
-        body["worktree_id"] = json!(&identity.worktree_id);
-        body["root"] = json!(&identity.root);
-        body["branch"] = json!(&identity.branch);
-    }
-
-    let response = post_json(runtime, path, &body)?;
-
-    if !(200..300).contains(&response.status_code) {
-        anyhow::bail!(
-            "session event failed with HTTP {}: {}",
-            response.status_code,
-            response.body
-        );
-    }
-
+    let request = crate::v2_request_envelope(
+        uuid::Uuid::new_v4(),
+        input.stateful_agent_id().to_string(),
+        effective_workspace_id(runtime, identity),
+        identity.cloned(),
+        stateful_core::ActorType::Agent,
+        stateful_core::SourceKind::Hook,
+        "codex_stop",
+        "hook:codex_stop",
+        None,
+        handoff,
+    )?;
+    crate::post_v2(runtime, "/v2/activity/finalize", &request)?;
     Ok(())
-}
-
-fn refresh_post_tool_claim_observations(
-    input: &SessionEventInput,
-    runtime: &ServerRuntime,
-    repo_root: Option<&Path>,
-    identity: Option<&RepoIdentity>,
-) {
-    let Some(identity) = identity else {
-        return;
-    };
-    let Some(repo_root) = repo_root else {
-        return;
-    };
-    let Ok(targets) = post_tool_refresh_targets(input, repo_root) else {
-        return;
-    };
-    let workspace_id = effective_workspace_id(runtime, Some(identity));
-    let paths = target_paths(targets);
-
-    refresh_claim_observations_for_paths(
-        runtime,
-        input.stateful_agent_id(),
-        &workspace_id,
-        &identity.root,
-        &paths,
-    );
-}
-
-fn release_post_tool_claims(
-    input: &SessionEventInput,
-    runtime: &ServerRuntime,
-    repo_root: Option<&Path>,
-    identity: Option<&RepoIdentity>,
-) {
-    let Some(identity) = identity else {
-        return;
-    };
-    let Some(repo_root) = repo_root else {
-        return;
-    };
-    let Ok(targets) = post_tool_refresh_targets(input, repo_root) else {
-        return;
-    };
-    let workspace_id = effective_workspace_id(runtime, Some(identity));
-    let paths = target_paths(targets);
-
-    release_claims_for_paths(runtime, input.stateful_agent_id(), &workspace_id, &paths);
-}
-
-fn post_tool_refresh_targets(
-    input: &SessionEventInput,
-    repo_root: &Path,
-) -> anyhow::Result<Vec<PatchTarget>> {
-    let cwd = input.cwd.as_deref();
-    let targets = match input.tool_name.as_deref() {
-        Some("apply_patch") => input
-            .patch_text()
-            .map(extract_apply_patch_write_targets)
-            .unwrap_or_default(),
-        Some("file_change") => extract_file_change_targets(&input.tool_input),
-        Some("Edit") | Some("Write") => {
-            let Some(path) = input
-                .tool_input
-                .get("file_path")
-                .or_else(|| input.tool_input.get("path"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|path| !path.is_empty())
-            else {
-                return Ok(Vec::new());
-            };
-            vec![PatchTarget::write(path)]
-        }
-        _ => Vec::new(),
-    };
-
-    normalize_targets(targets, Some(repo_root), cwd).map(|targets| targets.unwrap_or_default())
 }
 
 fn effective_workspace_id(runtime: &ServerRuntime, identity: Option<&RepoIdentity>) -> String {
     effective_workspace_id_for_repo(&runtime.workspace_id, identity)
+}
+
+fn read_target(
+    tool_input: &serde_json::Value,
+    repo_root: &Path,
+    cwd: Option<&Path>,
+) -> anyhow::Result<Option<String>> {
+    let Some(path) = tool_input
+        .get("file_path")
+        .or_else(|| tool_input.get("path"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return Ok(None);
+    };
+    let path = path.strip_suffix(":raw").unwrap_or(path);
+    normalize_file_tool_target(path, Some(repo_root), cwd)
+}
+
+fn record_read_start(
+    input: &PreToolUseInput,
+    runtime: Option<&ServerRuntime>,
+    repo_root: Option<&Path>,
+    cwd: Option<&Path>,
+    identity: Option<&RepoIdentity>,
+) -> anyhow::Result<()> {
+    let (Some(runtime), Some(repo_root), Some(operation_id)) =
+        (runtime, repo_root, input.metadata.operation_id())
+    else {
+        return Ok(());
+    };
+    let Some(path) = read_target(&input.tool_input, repo_root, cwd)? else {
+        return Ok(());
+    };
+    let before = observation::fingerprint(repo_root, &path)?;
+    let request = crate::v2_request_envelope(
+        uuid::Uuid::new_v4(),
+        input.stateful_agent_id().to_string(),
+        effective_workspace_id(runtime, identity),
+        identity.cloned(),
+        stateful_core::ActorType::Agent,
+        stateful_core::SourceKind::Hook,
+        "codex_read_start",
+        "hook:codex_pre_tool_use",
+        Some(input.tool_name.clone()),
+        json!({
+            "operation_id": operation_id,
+            "path": path,
+            "before": before,
+        }),
+    )?;
+    crate::post_v2(runtime, "/v2/read/start", &request)?;
+    Ok(())
+}
+
+fn record_read_complete(
+    input: &SessionEventInput,
+    runtime: &ServerRuntime,
+    repo_root: Option<&Path>,
+    identity: Option<&RepoIdentity>,
+) -> anyhow::Result<()> {
+    let Some(repo_root) = repo_root else {
+        return Ok(());
+    };
+    let Some(path) = read_target(&input.tool_input, repo_root, input.cwd.as_deref())? else {
+        return Ok(());
+    };
+    let classification = observation::classification(&input.metadata);
+    let workspace_id = effective_workspace_id(runtime, identity);
+    if classification != stateful_core::ReadClassification::Exact {
+        let update = crate::v2_request_envelope(
+            uuid::Uuid::new_v4(),
+            input.stateful_agent_id().to_string(),
+            workspace_id.clone(),
+            identity.cloned(),
+            stateful_core::ActorType::Agent,
+            stateful_core::SourceKind::Hook,
+            "codex_read_result",
+            "hook:codex_post_tool_use",
+            input.tool_name.clone(),
+            json!({
+                "kind": "tool_result",
+                "tool_name": "Read",
+                "outcome": classification,
+                "summary": input.metadata.result_summary(),
+            }),
+        )?;
+        crate::post_v2(runtime, "/v2/presence/update", &update)?;
+    }
+    let Some(operation_id) = input.metadata.operation_id() else {
+        return Ok(());
+    };
+    let mut payload = json!({
+        "operation_id": operation_id,
+        "path": path,
+        "classification": classification,
+        "semantic_marker": input.metadata.result_summary(),
+    });
+    if classification == stateful_core::ReadClassification::Exact {
+        payload["after"] = serde_json::to_value(observation::fingerprint(repo_root, &path)?)?;
+    }
+    let request = crate::v2_request_envelope(
+        uuid::Uuid::new_v4(),
+        input.stateful_agent_id().to_string(),
+        workspace_id,
+        identity.cloned(),
+        stateful_core::ActorType::Agent,
+        stateful_core::SourceKind::Hook,
+        "codex_read_complete",
+        "hook:codex_post_tool_use",
+        input.tool_name.clone(),
+        payload,
+    )?;
+    crate::post_v2(runtime, "/v2/read/complete", &request)?;
+    Ok(())
 }
 
 fn handle_pre_tool_use_with_runtime(
@@ -1629,6 +1651,10 @@ fn handle_pre_tool_use_with_runtime(
 
     let tool_name = runtime_tool_name_leaf(&input.tool_name);
     match tool_name {
+        tool_name if tool_name.eq_ignore_ascii_case("read") => {
+            let _ = record_read_start(&input, runtime, repo_root, cwd, identity.as_ref());
+            Ok(HookOutcome::Allow)
+        }
         tool_name if tool_name.eq_ignore_ascii_case("bash") => authorize_bash(&input),
         tool_name if tool_name.eq_ignore_ascii_case("apply_patch") => {
             authorize_apply_patch(&input, runtime, repo_root, cwd, identity.as_ref())
@@ -2514,49 +2540,6 @@ fn normalize_targets(
     Ok(Some(normalized))
 }
 
-fn hook_authorize_purpose(
-    input: &PreToolUseInput,
-    runtime: &ServerRuntime,
-    target: &PatchTarget,
-    workspace_id: &str,
-) -> Option<String> {
-    let response = get_json(runtime, "/v1/current").ok()?;
-    if !(200..300).contains(&response.status_code) {
-        return None;
-    }
-    let body: serde_json::Value = serde_json::from_str(&response.body).ok()?;
-    let items = body.get("items")?.as_array()?;
-    let mut fallback = None;
-    for item in items {
-        let matches_intent = item.get("kind").and_then(serde_json::Value::as_str)
-            == Some("reservation")
-            && item.get("freshness").and_then(serde_json::Value::as_str) == Some("live")
-            && item.get("agent_id").and_then(serde_json::Value::as_str)
-                == Some(input.stateful_agent_id())
-            && item.get("workspace_id").and_then(serde_json::Value::as_str) == Some(workspace_id);
-        if !matches_intent {
-            continue;
-        }
-        let Some(purpose) = item
-            .get("purpose")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|purpose| !purpose.is_empty())
-            .map(str::to_string)
-        else {
-            continue;
-        };
-        if item.get("resource").and_then(serde_json::Value::as_str) == Some(target.path.as_str()) {
-            return Some(purpose);
-        }
-        if fallback.is_none() {
-            fallback = Some(purpose);
-        }
-    }
-
-    fallback
-}
-
 fn authorize_targets(
     input: &PreToolUseInput,
     runtime: Option<&ServerRuntime>,
@@ -2564,162 +2547,83 @@ fn authorize_targets(
     targets: Vec<PatchTarget>,
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<HookOutcome> {
-    if let Some(repo_root) = repo_root
-        && let Err(error) = shadow_guard::check_paths_for_dependency_shadowing(
-            repo_root,
-            shadow_write_paths(&targets),
-        )
+    let Some(repo_root) = repo_root else {
+        return Ok(HookOutcome::Deny {
+            reason: format!("{} writes require an enabled repository", input.tool_name),
+        });
+    };
+    if let Err(error) =
+        shadow_guard::check_paths_for_dependency_shadowing(repo_root, shadow_write_paths(&targets))
     {
         return Ok(HookOutcome::Deny {
             reason: error.to_string(),
         });
     }
-
     let Some(runtime) = runtime else {
         return Ok(HookOutcome::Deny {
             reason: format!(
-                "{} writes require a reachable stateful server, task reservation exact file scope, and a same-reservation file claim",
+                "{} writes require a reachable stateful.v2 server",
                 input.tool_name
             ),
         });
     };
-
+    let Some(operation_id) = input.metadata.operation_id() else {
+        return Ok(HookOutcome::Deny {
+            reason: format!(
+                "{} writes require an operation ID for stateful.v2 authorization",
+                input.tool_name
+            ),
+        });
+    };
     if targets.is_empty() {
         return Ok(HookOutcome::Allow);
     }
-
-    let workspace_id = effective_workspace_id(runtime, identity);
-    let agent_id = input.stateful_agent_id().to_string();
-    let mut allowed_paths = BTreeSet::new();
-    let mut warnings = Vec::new();
-    for target in targets {
-        let purpose = hook_authorize_purpose(input, runtime, &target, &workspace_id);
-        let payload = authorization_payload_for_target(
-            &target,
-            repo_root,
-            purpose.as_deref(),
-            input.reservation_id(),
-            purpose.is_some(),
-        );
-        let body = authorization_request_body(
-            runtime,
-            &agent_id,
-            &workspace_id,
-            identity,
-            "pre_tool_use",
-            "hook:pre_tool_use",
-            &input.tool_name,
-            payload,
-        );
-        let decision: AuthorizeDecision = match post_authorize_decision(runtime, &body) {
-            Ok(decision) => decision,
-            Err(reason) => {
-                release_pre_tool_authorized_claims(
-                    runtime,
-                    &agent_id,
-                    &workspace_id,
-                    &allowed_paths,
-                );
-                return Ok(HookOutcome::Deny { reason });
-            }
-        };
-        if decision.decision == "warn" {
-            warnings.push(authorization_warning_message(&decision));
-            allowed_paths.insert(target.path.clone());
-            if let Some(new_path) = &target.new_path {
-                allowed_paths.insert(new_path.clone());
-            }
-            continue;
-        }
-        if decision.decision != "allow" {
-            release_pre_tool_authorized_claims(runtime, &agent_id, &workspace_id, &allowed_paths);
-            let reason = if let Some(repo_root) = repo_root {
-                if repeated_denial_seen(repo_root, &agent_id, &target.path, &decision.reason_code) {
-                    repeated_denial_reason(&target.path)
-                } else {
-                    authorization_denial_reason(decision)
-                }
-            } else {
-                authorization_denial_reason(decision)
-            };
-            return Ok(HookOutcome::Deny { reason });
-        }
-        allowed_paths.insert(target.path.clone());
+    let mut fingerprints = Vec::with_capacity(targets.len() * 2);
+    for target in &targets {
+        fingerprints.push((
+            target.path.clone(),
+            stateful_core::fingerprint_path(&repo_root.join(&target.path))?,
+        ));
         if let Some(new_path) = &target.new_path {
-            allowed_paths.insert(new_path.clone());
+            fingerprints.push((
+                new_path.clone(),
+                stateful_core::fingerprint_path(&repo_root.join(new_path))?,
+            ));
         }
     }
-
-    if warnings.is_empty() {
-        Ok(HookOutcome::Allow)
-    } else {
-        Ok(HookOutcome::AllowWithContext {
-            message: warnings.join("\n"),
-        })
-    }
-}
-
-fn release_pre_tool_authorized_claims(
-    runtime: &ServerRuntime,
-    agent_id: &str,
-    workspace_id: &str,
-    paths: &BTreeSet<String>,
-) {
-    release_claims_for_paths(runtime, agent_id, workspace_id, paths);
-}
-
-fn target_paths(targets: Vec<PatchTarget>) -> BTreeSet<String> {
-    let mut paths = BTreeSet::new();
-    for target in targets {
-        paths.insert(target.path);
-        if let Some(new_path) = target.new_path {
-            paths.insert(new_path);
-        }
-    }
-    paths
-}
-
-fn refresh_claim_observations_for_paths(
-    runtime: &ServerRuntime,
-    agent_id: &str,
-    workspace_id: &str,
-    root: &str,
-    paths: &BTreeSet<String>,
-) {
-    for path in paths {
-        let body = json!({
-            "agent_id": agent_id,
-            "workspace_id": workspace_id,
-            "path": path,
-            "root": root,
-        });
-        let Ok(response) = post_json(runtime, "/v1/claim/refresh-observation", &body) else {
-            continue;
-        };
-        if !(200..300).contains(&response.status_code) {
-            continue;
-        }
-    }
-}
-
-fn release_claims_for_paths(
-    runtime: &ServerRuntime,
-    agent_id: &str,
-    workspace_id: &str,
-    paths: &BTreeSet<String>,
-) {
-    for path in paths {
-        let body = json!({
-            "agent_id": agent_id,
-            "workspace_id": workspace_id,
-            "path": path,
-        });
-        let Ok(response) = post_json(runtime, "/v1/claim/release", &body) else {
-            continue;
-        };
-        if !(200..300).contains(&response.status_code) {
-            continue;
-        }
+    let paths = GlobalPaths::from_env()?;
+    let workspace_id = effective_workspace_id(runtime, identity);
+    match write_lifecycle::authorize(
+        &paths,
+        runtime,
+        input.stateful_agent_id(),
+        &workspace_id,
+        identity,
+        None,
+        None,
+        operation_id,
+        targets[0].action,
+        fingerprints,
+        input.reservation_id(),
+        Vec::new(),
+        &CODEX_WRITE_LIFECYCLE,
+    ) {
+        Ok(authorization) => Ok(match authorization.decision {
+            Some(decision) if decision.decision == stateful_core::DecisionKind::Warn => {
+                HookOutcome::AllowWithContext {
+                    message: format!("stateful warning: {}", decision.message),
+                }
+            }
+            Some(decision) if decision.decision == stateful_core::DecisionKind::Deny => {
+                HookOutcome::Deny {
+                    reason: decision.required_next_action.unwrap_or(decision.message),
+                }
+            }
+            _ => HookOutcome::Allow,
+        }),
+        Err(error) => Ok(HookOutcome::Deny {
+            reason: format!("stateful.v2 write authorization failed: {error}"),
+        }),
     }
 }
 
@@ -2729,86 +2633,6 @@ fn shadow_write_paths(targets: &[PatchTarget]) -> impl Iterator<Item = &str> {
         "move_file" => target.new_path.as_deref(),
         _ => None,
     })
-}
-
-fn authorization_unavailable_reason(error: &dyn std::fmt::Display) -> String {
-    format!(
-        "server_unavailable: stateful authorization is unavailable while contacting /v1/authorize: {error}. Writes fail closed. Run `stateful server status`, restart or rejoin the stateful server, then retry after task-level reservation covers the target and acquiring a same-reservation file claim."
-    )
-}
-
-fn authorization_warning_message(decision: &AuthorizeDecision) -> String {
-    format!("stateful warning: {}", decision.message)
-}
-
-fn authorization_denial_reason(decision: AuthorizeDecision) -> String {
-    let reservation_id = decision.reservation_id();
-    let mut reason = decision.required_next_action.unwrap_or(decision.message);
-    if let Some(reservation_id) = reservation_id {
-        if !reason.contains(&reservation_id) {
-            reason.push_str(&format!(" reservation_id {reservation_id}."));
-        }
-    }
-    let Some(wait) = decision.wait else {
-        return reason;
-    };
-
-    if !reason.contains(&wait.wait_id) {
-        let mut wait_details = vec![format!("wait_id {}", wait.wait_id)];
-        if let Some(queue_position) = wait.queue_position {
-            wait_details.push(format!("queue position {queue_position}"));
-        }
-        if let Some(blocking_agent_id) = wait.blocking_agent_id {
-            wait_details.push(format!("blocked by agent {blocking_agent_id}"));
-        }
-        reason.push_str(&format!(" Track {}.", wait_details.join(", ")));
-    }
-    let has_resume_guidance = [
-        "state_notifications_poll",
-        "state_resume_next",
-        "reread",
-        "lazy",
-    ]
-    .iter()
-    .all(|term| reason.contains(term));
-    if !has_resume_guidance {
-        let target = wait.path.as_deref().unwrap_or("the target");
-        reason.push_str(&format!(
-            " Resume by polling state_notifications_poll or state_resume_next for wait_id {}; when reserved, reread {}, then resume the queued lazy operation or retry the authorized write so the write boundary can claim wait_id {}. Only clients that expose state_reservation_claim should claim manually before retrying.",
-            wait.wait_id, target, wait.wait_id
-        ));
-    }
-    reason
-}
-
-pub(crate) fn base_observation_for_target(
-    repo_root: Option<&Path>,
-    relative_path: &str,
-) -> Option<serde_json::Value> {
-    let repo_root = repo_root?;
-    let target_path = repo_root.join(relative_path);
-    match fs::read(&target_path) {
-        Ok(bytes) => Some(json!({
-            "path": relative_path,
-            "exists": true,
-            "content_hash": hook_content_hash(&bytes),
-        })),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(json!({
-            "path": relative_path,
-            "exists": false,
-            "content_hash": null,
-        })),
-        Err(_) => None,
-    }
-}
-
-pub(crate) fn hook_content_hash(bytes: &[u8]) -> String {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("fnv1a64:{hash:016x}")
 }
 
 fn normalize_file_tool_target(
@@ -3087,13 +2911,9 @@ pub struct OmpPreToolUseInput {
     #[serde(default)]
     workspace_id: Option<String>,
     #[serde(default)]
-    cwd: Option<PathBuf>,
-    #[serde(default)]
-    yolo: bool,
-    #[serde(default)]
     reservation_id: Option<String>,
-    #[serde(default)]
-    commit_id: Option<String>,
+    #[serde(flatten)]
+    metadata: input::ToolMetadata,
     tool_name: String,
     #[serde(default)]
     tool_input: serde_json::Value,
@@ -3101,17 +2921,6 @@ pub struct OmpPreToolUseInput {
 impl OmpPreToolUseInput {
     fn validate(&self) -> anyhow::Result<()> {
         validate_agent_id(&self.agent_id, "agent_id")
-    }
-
-    fn audit_metadata(&self) -> serde_json::Value {
-        json!({
-            "runtime": "omp",
-            "parent_agent_id": self.parent_agent_id,
-            "omp_agent_id": self.omp_agent_id,
-            "yolo": self.yolo,
-            "commit_id": self.commit_id,
-            "cwd": self.cwd,
-        })
     }
 
     fn command(&self) -> Option<&str> {
@@ -3145,7 +2954,13 @@ pub struct OmpSessionEventInput {
     #[serde(default)]
     cwd: Option<PathBuf>,
     #[serde(default)]
-    commit_id: Option<String>,
+    prompt: Option<String>,
+    #[serde(flatten)]
+    metadata: input::ToolMetadata,
+    #[serde(default)]
+    exact_read_candidate: bool,
+    #[serde(default)]
+    result_metadata: serde_json::Value,
     #[serde(default)]
     tool_name: Option<String>,
     #[serde(default)]
@@ -3156,27 +2971,14 @@ impl OmpSessionEventInput {
     fn validate(&self) -> anyhow::Result<()> {
         validate_agent_id(&self.agent_id, "agent_id")
     }
-
-    fn audit_metadata(&self) -> serde_json::Value {
-        json!({
-            "runtime": "omp",
-            "parent_agent_id": self.parent_agent_id,
-            "omp_agent_id": self.omp_agent_id,
-            "commit_id": self.commit_id,
-            "cwd": self.cwd,
-            "raw_runtime_payload": self.tool_input,
-        })
-    }
-
-    fn command(&self) -> Option<&str> {
-        self.tool_input.get("command")?.as_str()
-    }
 }
 
 #[derive(Debug, Deserialize)]
 struct PreToolUseInput {
     #[serde(flatten)]
     runtime: RuntimeHookInput,
+    #[serde(flatten)]
+    metadata: input::ToolMetadata,
     #[serde(default)]
     reservation_id: Option<String>,
     tool_name: String,
@@ -3243,60 +3045,13 @@ impl PreToolUseInput {
 }
 
 #[derive(Debug, Deserialize)]
-struct AuthorizeDecision {
-    decision: String,
-    message: String,
-    #[serde(default)]
-    reason_code: String,
-    #[serde(default)]
-    required_next_action: Option<String>,
-    #[serde(default)]
-    wait: Option<AuthorizeWait>,
-    #[serde(default)]
-    reservation: Option<AuthorizeReservation>,
-}
-
-impl AuthorizeDecision {
-    fn reservation_id(&self) -> Option<String> {
-        self.wait
-            .as_ref()
-            .and_then(|wait| wait.reservation_id.clone())
-            .or_else(|| {
-                self.reservation
-                    .as_ref()
-                    .map(|reservation| reservation.reservation_id.clone())
-            })
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct AuthorizeWait {
-    wait_id: String,
-    #[serde(default)]
-    reservation_id: Option<String>,
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    queue_position: Option<u64>,
-    #[serde(default, rename = "blocking_agent_id", alias = "blocking_agent_id")]
-    blocking_agent_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AuthorizeReservation {
-    reservation_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct SessionStartInput {
-    #[serde(flatten)]
-    runtime: RuntimeHookInput,
-}
-
-#[derive(Debug, Deserialize)]
 struct SessionEventInput {
     #[serde(flatten)]
     runtime: RuntimeHookInput,
+    #[serde(flatten)]
+    metadata: input::ToolMetadata,
+    #[serde(default)]
+    handoff: Option<serde_json::Value>,
     #[serde(default)]
     cwd: Option<PathBuf>,
     #[serde(default)]
@@ -3305,39 +3060,16 @@ struct SessionEventInput {
     tool_input: serde_json::Value,
 }
 
-#[derive(Debug, Deserialize)]
-struct UserPromptSubmitInput {
-    #[serde(flatten)]
-    runtime: RuntimeHookInput,
-}
-
-#[derive(Debug, Deserialize)]
-struct ContextRenderResponse {
-    prompt_text: String,
-}
-
-impl SessionStartInput {
-    fn stateful_agent_id(&self) -> &str {
-        self.runtime.stateful_agent_id()
-    }
-}
-
 impl SessionEventInput {
     fn stateful_agent_id(&self) -> &str {
         self.runtime.stateful_agent_id()
     }
 
-    fn patch_text(&self) -> Option<&str> {
-        string_payload_field(
-            &self.tool_input,
-            &["command", "patch", "input", "cmd", "diff"],
-        )
-    }
-}
-
-impl UserPromptSubmitInput {
-    fn stateful_agent_id(&self) -> &str {
-        self.runtime.stateful_agent_id()
+    fn explicit_handoff(&self) -> Option<serde_json::Value> {
+        self.handoff
+            .clone()
+            .or_else(|| self.tool_input.get("handoff").cloned())
+            .filter(serde_json::Value::is_object)
     }
 }
 
@@ -3535,27 +3267,6 @@ mod tests {
     }
 
     #[test]
-    fn context_render_request_body_includes_resource_when_target_is_known() {
-        let runtime = ServerRuntime::new("http://127.0.0.1:9", "secret", "local", 7);
-        let identity = RepoIdentity {
-            repo_id: "repo-a".to_string(),
-            worktree_id: "worktree-a".to_string(),
-            root: "/repo".to_string(),
-            branch: "main".to_string(),
-        };
-
-        let body =
-            context_render_request_body(&runtime, "session-a", Some(&identity), Some("src/lib.rs"));
-
-        assert_eq!(body["agent_id"], "session-a");
-        assert_eq!(body["workspace_id"], "workspace-worktree-a");
-        assert_eq!(body["mode"], "brief");
-        assert_eq!(body["resource"], "src/lib.rs");
-        assert_eq!(body["repo_id"], "repo-a");
-        assert_eq!(body["worktree_id"], "worktree-a");
-    }
-
-    #[test]
     fn hook_file_target_uses_core_relative_path_normalization() {
         let temp =
             std::env::temp_dir().join(format!("stateful-hook-normalize-{}", std::process::id()));
@@ -3572,56 +3283,6 @@ mod tests {
             stateful_core::normalize_relative_path("src/auth.ts")
         );
 
-        let _ = std::fs::remove_dir_all(&temp);
-    }
-    #[test]
-    fn omp_post_tool_targets_include_write_path() {
-        let temp =
-            std::env::temp_dir().join(format!("stateful-omp-post-write-{}", std::process::id()));
-        let repo = temp.join("repo");
-        let cwd = repo.join("src");
-        std::fs::create_dir_all(&cwd).expect("repo dirs should create");
-        let input = OmpSessionEventInput {
-            agent_id: "omp-session-1".to_string(),
-            parent_agent_id: None,
-            omp_agent_id: None,
-            workspace_id: None,
-            cwd: Some(cwd),
-            commit_id: None,
-            tool_name: Some("write".to_string()),
-            tool_input: serde_json::json!({ "path": "../README.md" }),
-        };
-
-        let targets =
-            omp_post_tool_refresh_targets(&input, &repo).expect("targets should normalize");
-
-        assert_eq!(targets, vec![PatchTarget::write("README.md")]);
-        let _ = std::fs::remove_dir_all(&temp);
-    }
-
-    #[test]
-    fn omp_post_tool_targets_include_edit_hashlines() {
-        let temp =
-            std::env::temp_dir().join(format!("stateful-omp-post-edit-{}", std::process::id()));
-        let repo = temp.join("repo");
-        std::fs::create_dir_all(&repo).expect("repo dir should create");
-        let input = OmpSessionEventInput {
-            agent_id: "omp-session-1".to_string(),
-            parent_agent_id: None,
-            omp_agent_id: None,
-            workspace_id: None,
-            cwd: Some(repo.clone()),
-            commit_id: None,
-            tool_name: Some("edit".to_string()),
-            tool_input: serde_json::json!({
-                "input": "[src/lib.rs#ABCD]\nSWAP 1.=1:\n+pub fn value() -> u8 { 1 }\n"
-            }),
-        };
-
-        let targets =
-            omp_post_tool_refresh_targets(&input, &repo).expect("targets should normalize");
-
-        assert_eq!(targets, vec![PatchTarget::write("src/lib.rs")]);
         let _ = std::fs::remove_dir_all(&temp);
     }
 }

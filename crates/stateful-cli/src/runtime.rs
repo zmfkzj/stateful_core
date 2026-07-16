@@ -14,8 +14,8 @@ use crate::global_paths::GlobalPaths;
 use crate::repo_registry::RepoIdentity;
 use serde::{Deserialize, Serialize};
 use stateful_core::{
-    ActorType, AgentIdentity, ProtocolVersion, QueryEnvelope, RequestEnvelope, ReservationScope,
-    SourceKind, SourceRef, V2ErrorEnvelope, WorkspaceIdentity,
+    ActorType, AgentIdentity, Decision, ProtocolVersion, QueryEnvelope, RequestEnvelope,
+    ReservationScope, SourceKind, SourceRef, V2ErrorEnvelope, WorkspaceIdentity,
 };
 
 const REQUIRED_RUNTIME_CAPABILITIES: &[&str] = &["presence"];
@@ -341,11 +341,19 @@ pub fn post_v2<T: Serialize>(
     path: &str,
     request: &RequestEnvelope<T>,
 ) -> anyhow::Result<HttpResponse> {
+    let response = post_v2_raw(runtime, path, request)?;
+    decode_v2_response(response, request.request_id)
+}
+
+pub fn post_v2_raw<T: Serialize>(
+    runtime: &ServerRuntime,
+    path: &str,
+    request: &RequestEnvelope<T>,
+) -> anyhow::Result<HttpResponse> {
     ensure_v2_path(path)?;
     request.validate().map_err(anyhow::Error::msg)?;
     ensure_runtime_protocol(runtime, &request.agent, &request.workspace, &request.source)?;
-    let response = post_json(runtime, path, &serde_json::to_value(request)?)?;
-    decode_v2_response(response, request.request_id)
+    post_json(runtime, path, &serde_json::to_value(request)?)
 }
 
 pub fn replay_v2_request(
@@ -361,6 +369,10 @@ pub fn replay_v2_request(
     decode_v2_response(response, request.request_id)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the V2 envelope exposes its complete protocol identity"
+)]
 pub fn v2_request_envelope<T>(
     request_id: uuid::Uuid,
     agent_id: String,
@@ -438,7 +450,10 @@ pub fn v2_query_envelope<Q>(
     .map_err(anyhow::Error::msg)
 }
 
-
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the V2 query exposes its complete protocol identity"
+)]
 pub fn v2_query_for_runtime<Q>(
     request_id: uuid::Uuid,
     agent_id: String,
@@ -476,8 +491,11 @@ fn ensure_runtime_protocol(
     workspace: &WorkspaceIdentity,
     source: &SourceRef,
 ) -> anyhow::Result<()> {
-    let identity = fetch_runtime_identity_for(runtime, agent.clone(), workspace.clone(), source.clone())?
-        .ok_or_else(|| anyhow::anyhow!("runtime handshake did not return a successful response"))?;
+    let identity =
+        fetch_runtime_identity_for(runtime, agent.clone(), workspace.clone(), source.clone())?
+            .ok_or_else(|| {
+                anyhow::anyhow!("runtime handshake did not return a successful response")
+            })?;
     if identity.protocol_version != "stateful.v2" {
         anyhow::bail!(
             "runtime protocol {} is unsupported; stateful.v2 is required before mutation",
@@ -488,6 +506,12 @@ fn ensure_runtime_protocol(
         anyhow::bail!(
             "runtime journal schema {} is unsupported; schema 2 is required before mutation",
             identity.journal_schema_version
+        );
+    }
+    if !runtime_identity_has_required_capabilities(runtime, &identity) {
+        anyhow::bail!(
+            "runtime does not support required capabilities: {}",
+            REQUIRED_RUNTIME_CAPABILITIES.join(", ")
         );
     }
     Ok(())
@@ -543,7 +567,10 @@ fn percent_encode(value: &str) -> String {
     encoded
 }
 
-fn decode_v2_response(response: HttpResponse, request_id: uuid::Uuid) -> anyhow::Result<HttpResponse> {
+fn decode_v2_response(
+    response: HttpResponse,
+    request_id: uuid::Uuid,
+) -> anyhow::Result<HttpResponse> {
     if (200..300).contains(&response.status_code) {
         return Ok(response);
     }
@@ -551,6 +578,9 @@ fn decode_v2_response(response: HttpResponse, request_id: uuid::Uuid) -> anyhow:
         if error.protocol_version == ProtocolVersion::V2 && error.request_id == request_id {
             anyhow::bail!("{}: {}", error.error.code, error.error.message);
         }
+    }
+    if let Ok(decision) = serde_json::from_str::<Decision>(&response.body) {
+        anyhow::bail!("{}: {}", decision.reason_code, decision.message);
     }
     anyhow::bail!(
         "stateful.v2 request {request_id} failed with HTTP {}",
@@ -838,8 +868,7 @@ pub fn protocol_envelope(args: ProtocolEnvelopeArgs<'_>) -> serde_json::Value {
     };
 
     let request = v2_request_envelope(
-        uuid::Uuid::parse_str(&request_id)
-            .expect("protocol envelope request ID must be a UUID"),
+        uuid::Uuid::parse_str(&request_id).expect("protocol envelope request ID must be a UUID"),
         agent_id,
         workspace_id,
         identity,
@@ -853,7 +882,6 @@ pub fn protocol_envelope(args: ProtocolEnvelopeArgs<'_>) -> serde_json::Value {
     .expect("protocol envelope arguments must form a valid stateful.v2 envelope");
     serde_json::to_value(request).expect("protocol envelope must serialize")
 }
-
 
 fn runtime_file_path(repo_root: impl AsRef<Path>) -> std::path::PathBuf {
     repo_root
@@ -1136,5 +1164,27 @@ mod tests {
         let error = std::io::Error::from_raw_os_error(45);
 
         assert!(parent_dir_sync_is_unsupported(&error));
+    }
+
+    #[test]
+    fn v2_authorization_denial_preserves_reason_code() {
+        let request_id = uuid::Uuid::new_v4();
+        let error = decode_v2_response(
+            HttpResponse {
+                status_code: 403,
+                body: serde_json::json!({
+                    "decision": "deny",
+                    "reason_code": "missing_reservation",
+                    "message": "Declare a reservation.",
+                    "required_next_action": "Declare an exact file reservation."
+                })
+                .to_string(),
+            },
+            request_id,
+        )
+        .expect_err("authorization denial should remain an error");
+
+        assert!(error.to_string().contains("missing_reservation"));
+        assert!(error.to_string().contains("Declare a reservation."));
     }
 }

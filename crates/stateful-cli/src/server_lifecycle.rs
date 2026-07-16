@@ -602,7 +602,7 @@ mod tests {
             .expect("sleep child should spawn");
         let fake = FakeHttpServer::start(vec![fake_response(
             200,
-            r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":["presence"]}"#,
+            r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":42,"workspace_id":"w1","workspace_version":1,"capabilities":["presence"]}"#,
         )]);
         let delayed_runtime = ServerRuntime::new(fake.base_url(), "token", "w1", child.id());
         let delayed_paths = paths.clone();

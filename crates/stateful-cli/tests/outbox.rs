@@ -73,7 +73,8 @@ fn recovery_outbox_preserves_original_request_id_and_retries_idempotently() {
         drop(first);
 
         let (mut second, request) = accept_v2_request(&listener);
-        tx.send(request).expect("second request should send to test");
+        tx.send(request)
+            .expect("second request should send to test");
         write_json_response(
             &mut second,
             r#"{"outbox_id":"outbox-1","status":"ok","sync_status":"synced","duplicate":true}"#,
@@ -130,9 +131,10 @@ fn recovery_outbox_preserves_original_request_id_and_retries_idempotently() {
     sync_outbox_with_runtime(&paths, &runtime)
         .expect_err("disconnected replay should remain pending for retry");
     assert!(outbox_file.exists(), "failed replay should remain pending");
-    let pending: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&outbox_file).expect("pending outbox should read"))
-            .expect("pending record should parse");
+    let pending: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&outbox_file).expect("pending outbox should read"),
+    )
+    .expect("pending record should parse");
     assert_eq!(pending["attempts"], 1);
     assert_eq!(pending["sync_status"], "pending");
     assert_eq!(pending["request_id"], original["request_id"]);
@@ -142,7 +144,10 @@ fn recovery_outbox_preserves_original_request_id_and_retries_idempotently() {
         sync_outbox_with_runtime(&paths, &runtime).expect("duplicate receipt should sync"),
         1
     );
-    assert!(!outbox_file.exists(), "success receipt should clear pending outbox");
+    assert!(
+        !outbox_file.exists(),
+        "success receipt should clear pending outbox"
+    );
 
     let first = rx
         .recv_timeout(Duration::from_secs(2))
@@ -156,8 +161,7 @@ fn recovery_outbox_preserves_original_request_id_and_retries_idempotently() {
         let body = request.split_once("\r\n\r\n").expect("body separator").1;
         assert_eq!(body, frozen_original);
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(body)
-                .expect("request body should parse")["request_id"],
+            serde_json::from_str::<serde_json::Value>(body).expect("request body should parse")["request_id"],
             original["request_id"]
         );
     }
@@ -403,10 +407,7 @@ fn sync_outbox_preserves_records_queued_while_file_is_in_flight() {
     let outbox_file_for_server = outbox_file.clone();
     thread::spawn(move || {
         let (mut stream, _request) = accept_v2_request(&listener);
-        write_pending_records(
-            &outbox_file_for_server,
-            &[("outbox-late", "s1", "w1", 2)],
-        );
+        write_pending_records(&outbox_file_for_server, &[("outbox-late", "s1", "w1", 2)]);
         write_json_response(&mut stream, r#"{"status":"ok","sync_status":"synced"}"#);
     });
 
@@ -671,7 +672,10 @@ fn sync_outbox_deduplicates_claimed_records_already_merged_into_base() {
     let claimed_file = paths.outbox_dir.join("s1.jsonl.syncing-old");
     write_pending_records(
         &outbox_file,
-        &[("outbox-claimed", "s1", "w1", 1), ("outbox-base", "s1", "w1", 2)],
+        &[
+            ("outbox-claimed", "s1", "w1", 1),
+            ("outbox-base", "s1", "w1", 2),
+        ],
     );
     write_pending_records(&claimed_file, &[("outbox-claimed", "s1", "w1", 1)]);
 
@@ -740,7 +744,7 @@ fn accept_v2_request(listener: &TcpListener) -> (std::net::TcpStream, String) {
         if request.starts_with("GET /v2/runtime/identity?") {
             write_json_response(
                 &mut stream,
-                r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","capabilities":["presence"]}"#,
+                r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":42,"workspace_id":"w1","workspace_version":1,"capabilities":["presence"]}"#,
             );
             continue;
         }

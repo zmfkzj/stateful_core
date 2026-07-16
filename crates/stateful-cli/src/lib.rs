@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
+use stateful_core::{ActorType, SourceKind};
 use std::{
     io::Write,
     net::SocketAddr,
@@ -6,7 +7,6 @@ use std::{
     str::FromStr,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use stateful_core::{ActorType, SourceKind};
 
 mod codex_benchmark;
 mod codex_wrapper;
@@ -60,13 +60,13 @@ pub use runtime::{
     ReservationDeclareArgs, ReservationRequestArgs, ServerRuntime, cancel_reservation_via_http,
     claim_reservation_via_http, declare_reservation_via_http, discover_runtime,
     discover_runtime_with_global, discover_runtime_with_optional_global, get_json, get_v2,
-    global_state_db_path, post_json, post_v2, protocol_envelope, request_reservation_via_http,
-    reservation_cancel_protocol_body, reservation_claim_protocol_body,
-    reservation_declare_protocol_body, reservation_request_protocol_body, replay_v2_request,
-    runtime_env_override_is_configured, runtime_from_remote, runtime_has_required_identity,
-    runtime_identity_matches_pid, runtime_status, v2_query_envelope, v2_query_for_runtime,
-    v2_request_envelope, validate_agent_id,
-    write_global_runtime_file, write_runtime_file,
+    global_state_db_path, post_json, post_v2, post_v2_raw, protocol_envelope, replay_v2_request,
+    request_reservation_via_http, reservation_cancel_protocol_body,
+    reservation_claim_protocol_body, reservation_declare_protocol_body,
+    reservation_request_protocol_body, runtime_env_override_is_configured, runtime_from_remote,
+    runtime_has_required_identity, runtime_identity_matches_pid, runtime_status, v2_query_envelope,
+    v2_query_for_runtime, v2_request_envelope, validate_agent_id, write_global_runtime_file,
+    write_runtime_file,
 };
 pub use sandbox::{SandboxFsProfile, SandboxNetworkPolicy};
 pub use server_lifecycle::{
@@ -1317,10 +1317,7 @@ fn write_doctor_journal_baseline(path: &Path, baseline: &DoctorJournalBaseline) 
     let Ok(contents) = serde_json::to_vec(baseline) else {
         return false;
     };
-    let temp_path = doctor_journal_sidecar_path(
-        path,
-        &format!(".{}.tmp", uuid::Uuid::new_v4()),
-    );
+    let temp_path = doctor_journal_sidecar_path(path, &format!(".{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| -> std::io::Result<()> {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -1466,7 +1463,6 @@ pub fn doctor_report_with_global(repo_root: impl AsRef<Path>, paths: &GlobalPath
     let capabilities = runtime.capabilities.clone();
     let coordination_mode = runtime.coordination_mode.clone();
 
-
     DoctorReport {
         installed: (codex_config_toml || paths.config_yml.is_file()) && config_yml,
         legacy_hooks_json,
@@ -1538,7 +1534,7 @@ fn default_config_yml() -> &'static str {
     r#"# stateful-core repo policy config
 # These are informational target defaults for this repository.
 # Runtime loading of these keys is not yet shipped.
-protocol_version: stateful.v1
+protocol_version: stateful.v2
 intent_ttl_seconds: 900
 intent_max_seconds: 3600
 claim_ttl_seconds: 300
