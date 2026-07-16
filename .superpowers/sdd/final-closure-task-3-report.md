@@ -19,9 +19,8 @@ RED behavior was observed before each implementation change:
 
 GREEN verification:
 - `cargo test -p stateful-store --test journal_v2` — 12 passed.
-- `cargo test -p stateful-store --test migration_v2 migration_keeps_human_fingerprints_and_terminal_coordination_records` — passed.
-- `cargo test -p stateful-store --test migration_v2 migrated_claim_conflict_is_frozen_after_blocker_release` — passed.
-- `cargo test -p stateful-store --test migration_v2 malformed_legacy_json_rolls_back_and_preserves_original_schema` — passed.
+- `cargo test -p stateful-store --test migration_v2 existing_v2_upgrade_repairs_omitted_terminal_seed_projections` — passed.
+- `cargo test -p stateful-store --test migration_v2 failed_terminal_projection_repair_rolls_back_canonical_tables` — passed.
 - `cargo test -p stateful-store --test task9_migration_authority` — 3 passed.
 
 ## Frozen rejection receipts
@@ -44,10 +43,18 @@ Human snapshot seeds retain the immutable legacy `{exists, content_hash}` eviden
 - Migration seed ordering/provenance was unchanged. Terminal rows are retained in projection but active checks continue to require `status == "active"`.
 - Independent re-review after the two receipt findings: no findings.
 
+## Post-closure corrective review
+
+The receipt decoder now rejects a syntactically valid but nonpersistable V2 internal error in both duplicate handling and rebuild validation. This keeps the frozen receipt boundary identical at every replay path.
+
+Existing checkpointed V2 databases repair omitted terminal claim/fence seed rows in one immediate transaction. Terminal events are applied through the canonical projector; a full journal replay then verifies all non-derived projections. Logical projection snapshots sort encoded rows, so storage row insertion order is not semantic. Only `workspace_version` and `agent_context_cursor` are replaced from the full replay when their journal-order provenance differs. A forced retained-row mismatch occurs after terminal application and proves the transaction rolls back the newly inserted terminal projection.
+
+Independent corrective re-review found no Critical, Important, or Minor findings.
+
 ## Commit / push
 
 Implementation commit `ea15822` (`fix: freeze rejections and preserve migration terminals`) was pushed to `origin/presence-first-event-journal-v2`.
 
 ## Concerns
 
-`cargo test -p stateful-store --test migration_v2` has two pre-existing failures unrelated to this change: `migrated_presence_and_handoff_project_to_typed_records_before_commands` and `finalization_cleans_migrated_coordination_rows_by_journal_owner`. Both fail with `ReservationOwnerMismatch` in unchanged presence/handoff ownership guards. A clean detached clone at `bad9574` reproduces the same two failures (9 passed, 2 failed); current Task 3 binary results are 11 passed, 2 failed.
+`cargo test -p stateful-store --test migration_v2` has two pre-existing failures unrelated to this change: `migrated_presence_and_handoff_project_to_typed_records_before_commands` and `finalization_cleans_migrated_coordination_rows_by_journal_owner`. Both fail with `ReservationOwnerMismatch` in unchanged presence/handoff ownership guards. A clean detached clone at `bad9574` reproduces the same two failures (9 passed, 2 failed); the current expanded binary has 13 passed, 2 failed.

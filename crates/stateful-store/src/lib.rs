@@ -167,6 +167,7 @@ impl Store {
         };
         migration::migrate_persistent_v1(&store.conn, path, store.clock.as_ref())?;
         schema::create_v2_schema(&store.conn)?;
+        migration::repair_v2_terminal_seed_projections(&store.conn)?;
         store.startup_housekeeping()?;
         Ok(store)
     }

@@ -469,6 +469,77 @@ fn migrated_claim_conflict_is_frozen_after_blocker_release() {
 }
 
 #[test]
+fn existing_v2_upgrade_repairs_omitted_terminal_seed_projections() {
+    let temp = TempDir::new().expect("temporary directory should exist");
+    let path = legacy_database(&temp, "prechange-terminal-projections.sqlite");
+    drop(open_legacy(&path).expect("legacy database should migrate"));
+    Connection::open(&path)
+        .expect("migrated database opens")
+        .execute_batch(
+            "
+            DELETE FROM claim_current WHERE aggregate_id = 'claim-expired';
+            DELETE FROM write_fence_current WHERE aggregate_id = 'fence-expired';
+            ",
+        )
+        .expect("prechange omitted terminal projections simulate");
+
+    let mut store = Store::open_with_clock(&path, migration_clock())
+        .expect("existing v2 database repairs terminal projections");
+    assert_eq!(
+        store
+            .claim("workspace-main", "claim-expired")
+            .expect("claim reads")
+            .expect("terminal claim is repaired")
+            .status,
+        "expired",
+    );
+    assert!(store
+        .active_claims_for_path("workspace-main", "src/review.rs")
+        .expect("active claims load")
+        .is_empty());
+    assert!(store
+        .active_write_fence("workspace-main", "src/review.rs")
+        .expect("active fence loads")
+        .is_none());
+    store
+        .rebuild_projections()
+        .expect("repaired projections replay identically");
+}
+
+#[test]
+fn failed_terminal_projection_repair_rolls_back_canonical_tables() {
+    let temp = TempDir::new().expect("temporary directory should exist");
+    let path = legacy_database(&temp, "terminal-repair-rollback.sqlite");
+    drop(open_legacy(&path).expect("legacy database should migrate"));
+    let connection = Connection::open(&path).expect("migrated database opens");
+    connection
+        .execute_batch(
+            "
+            DELETE FROM claim_current WHERE aggregate_id = 'claim-expired';
+            UPDATE claim_current
+            SET payload_json = '{}'
+            WHERE aggregate_id = 'claim-active';
+            ",
+        )
+        .expect("repair failure setup applies");
+    drop(connection);
+
+    assert!(matches!(
+        Store::open_with_clock(&path, migration_clock()),
+        Err(stateful_store::StoreError::ReplayMismatch)
+    ));
+    let missing: u64 = Connection::open(&path)
+        .expect("database reopens after failed repair")
+        .query_row(
+            "SELECT COUNT(*) FROM claim_current WHERE aggregate_id = 'claim-expired'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("canonical table reads");
+    assert_eq!(missing, 0, "failed repair must not commit partial canonical rows");
+}
+
+#[test]
 fn unavailable_actor_and_handoff_fields_remain_unknown_or_empty() {
     let temp = TempDir::new().expect("temporary directory should exist");
     let path = legacy_database(&temp, "handoff.sqlite");

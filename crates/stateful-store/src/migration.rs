@@ -1,11 +1,11 @@
 use crate::{
     StoreError, StoreResult,
     clock::Clock,
-    journal::{MigrationJournalMetadata, append_migration_event, load_journal_events, projection_snapshot},
+    journal::{JournalEvent, MigrationJournalMetadata, append_migration_event, load_journal_events, projection_snapshot},
     projector::Projector,
     schema,
 };
-use rusqlite::{Connection, OptionalExtension, backup::Backup, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, backup::Backup, params};
 use serde_json::{Map, Value, json};
 use stateful_core::{EventData, EventPayload, MigrationEvent, NewEvent, ReservationScope, LEGACY_MIGRATION_NAMESPACE};
 use std::{collections::BTreeMap, fs::{self, File}, path::{Path, PathBuf}, time::Duration};
@@ -20,6 +20,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 const CHECKPOINT: &str = "stateful.v2.event-journal";
 const SHADOW_PREFIX: &str = "_v2_shadow_";
+const REPAIR_PREFIX: &str = "_v2_repair_";
 const REPLAY_PREFIX: &str = "_v2_replay_";
 const LEGACY_TABLES: &[&str] = &[
     "events",
@@ -207,9 +208,74 @@ fn has_checkpoint(connection: &Connection) -> StoreResult<bool> {
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
             [CHECKPOINT],
+
             |row| row.get(0),
         )
         .map_err(StoreError::from)
+}
+
+pub(crate) fn repair_v2_terminal_seed_projections(connection: &Connection) -> StoreResult<()> {
+    if !has_checkpoint(connection)? {
+        return Ok(());
+    }
+    let transaction = rusqlite::Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+    let events = load_journal_events(&transaction)?;
+    let terminal_events: Vec<_> = events
+        .iter()
+        .filter(|event| migration_snapshot_is_terminal(event))
+        .collect();
+    if terminal_events.is_empty() {
+        transaction.commit()?;
+        return Ok(());
+    }
+
+    let mut canonical_projector = Projector::new(&transaction, "", None);
+    for event in terminal_events {
+        canonical_projector.apply(event)?;
+    }
+    let canonical = projection_snapshot(&transaction, "")?;
+    schema::create_projection_tables_with_prefix(&transaction, REPAIR_PREFIX)?;
+    let mut replay_projector = Projector::new(&transaction, REPAIR_PREFIX, None);
+    for event in &events {
+        replay_projector.apply(event)?;
+    }
+    let replay = projection_snapshot(&transaction, REPAIR_PREFIX)?;
+    const DERIVED_TABLES: [&str; 2] = ["workspace_version", "agent_context_cursor"];
+    for table in schema::PROJECTION_TABLES {
+        if !DERIVED_TABLES.contains(table)
+            && canonical.get(*table) != replay.get(*table)
+        {
+            return Err(StoreError::ReplayMismatch);
+        }
+    }
+    let derived_to_replace: Vec<_> = DERIVED_TABLES
+        .into_iter()
+        .filter(|table| canonical.get(*table) != replay.get(*table))
+        .collect();
+    if !derived_to_replace.is_empty() {
+        schema::replace_projection_tables_from_prefix(
+            &transaction,
+            REPAIR_PREFIX,
+            &derived_to_replace,
+        )?;
+    }
+    schema::drop_projection_tables_with_prefix(&transaction, REPAIR_PREFIX)?;
+    if projection_snapshot(&transaction, "")? != replay {
+        return Err(StoreError::ReplayMismatch);
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+fn migration_snapshot_is_terminal(event: &JournalEvent) -> bool {
+    let status = match event.stored.payload() {
+        EventPayload::Migration(MigrationEvent::ClaimSnapshotSeeded(data))
+        | EventPayload::Migration(MigrationEvent::WriteFenceSnapshotSeeded(data)) => {
+            data.data.get("status").and_then(Value::as_str)
+        }
+        _ => return false,
+    };
+    status.is_some_and(|status| matches!(status, "released" | "expired" | "cancelled"))
 }
 
 fn has_legacy_tables(connection: &Connection) -> StoreResult<bool> {

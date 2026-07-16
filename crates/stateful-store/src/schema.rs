@@ -1,4 +1,4 @@
-use crate::StoreResult;
+use crate::{StoreError, StoreResult};
 use rusqlite::Connection;
 
 pub(crate) const PROJECTION_TABLES: &[&str] = &[
@@ -316,6 +316,23 @@ pub(crate) fn replace_projections_from_prefix(
     prefix: &str,
 ) -> StoreResult<()> {
     for table in PROJECTION_TABLES {
+        let prefixed = format!("{prefix}{table}");
+        connection.execute_batch(&format!(
+            "DROP TABLE {table}; ALTER TABLE {prefixed} RENAME TO {table};"
+        ))?;
+    }
+    create_v2_schema(connection)
+}
+
+pub(crate) fn replace_projection_tables_from_prefix(
+    connection: &Connection,
+    prefix: &str,
+    tables: &[&str],
+) -> StoreResult<()> {
+    for table in tables {
+        if !PROJECTION_TABLES.contains(table) {
+            return Err(StoreError::InvalidJournalEvent);
+        }
         let prefixed = format!("{prefix}{table}");
         connection.execute_batch(&format!(
             "DROP TABLE {table}; ALTER TABLE {prefixed} RENAME TO {table};"

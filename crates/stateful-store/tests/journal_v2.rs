@@ -258,13 +258,23 @@ fn replay_rejects_corrupt_eventless_rejection_receipts() {
     Connection::open(&path)
         .expect("database opens")
         .execute(
-            "UPDATE command_receipts SET rejection_json = 'not JSON'",
-            [],
+            "UPDATE command_receipts SET rejection_json = ?1, http_status = 400",
+            [r#"{"V2":{"code":"internal_test_failure","message":"simulated internal defect","required_next_action":null}}"#],
         )
         .expect("receipt corruption applies");
 
     let mut store = Store::open_with_clock(&path, FixedClock::new(NOW))
         .expect("store reopens");
+    let duplicate = store
+        .execute_command(
+            &request,
+            "test.command",
+            |_| -> stateful_store::StoreResult<CommandPlan<serde_json::Value>> {
+                panic!("corrupt rejection receipt must fail before policy")
+            },
+        )
+        .expect_err("duplicate must validate the persisted rejection");
+    assert!(matches!(duplicate, StoreError::InvalidJournalEvent));
     assert!(
         store.rebuild_projections().is_err(),
         "replay must validate eventless rejection receipts"

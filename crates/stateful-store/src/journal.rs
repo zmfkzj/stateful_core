@@ -442,8 +442,16 @@ impl Store {
             if receipt.route_kind != route_kind || receipt.request_sha256 != request_sha256 || receipt.agent_id != request.agent.agent_id || receipt.workspace_id != request.workspace.workspace_id || receipt.actor_id != request.agent.actor_id {
                 return Err(StoreError::IdempotencyKeyReused);
             }
-            if let Some(rejection_json) = receipt.rejection_json {
-                return Err(serde_json::from_str::<FrozenRejection>(&rejection_json)?.into_store_error());
+            let rejection = validate_receipt(
+                &transaction,
+                &request.request_id.to_string(),
+                receipt.http_status,
+                receipt.first_event_seq,
+                receipt.last_event_seq,
+                receipt.rejection_json.as_deref(),
+            )?;
+            if let Some(rejection) = rejection {
+                return Err(rejection.into_store_error());
             }
             let response = serde_json::from_str(&receipt.response_json)?;
             return Ok(CommandOutcome { response, http_status: receipt.http_status, first_event_seq: receipt.first_event_seq, last_event_seq: receipt.last_event_seq, duplicate: true });
@@ -616,25 +624,8 @@ enum FrozenRejection {
 
 impl FrozenRejection {
     fn from_store_error(error: &StoreError) -> Option<Self> {
-        Some(match error {
-            StoreError::V2(error)
-                if matches!(
-                    error.code.as_str(),
-                    "invalid_context_delivery"
-                        | "missing_reservation"
-                        | "reservation_owner_mismatch"
-                        | "scope_mismatch"
-                        | "missing_read_provenance"
-                        | "stale_observation"
-                        | "notification_target_mismatch"
-                        | "tool_fields_require_tool_command"
-                        | "last_result_too_long"
-                        | "presence_not_found"
-                        | "invalid_tool_result"
-                ) =>
-            {
-                Self::V2(error.clone())
-            }
+        let rejection = match error {
+            StoreError::V2(error) => Self::V2(error.clone()),
             StoreError::ClaimConflict => Self::ClaimConflict,
             StoreError::ClaimAlreadyHeld => Self::ClaimAlreadyHeld,
             StoreError::WriteFenceConflict { path, owner_agent_id } => Self::WriteFenceConflict {
@@ -657,8 +648,7 @@ impl FrozenRejection {
             StoreError::InvalidWriteIntent => Self::InvalidWriteIntent,
             StoreError::WriteIntentNotFound => Self::WriteIntentNotFound,
             StoreError::WriteIntentOwnerMismatch => Self::WriteIntentOwnerMismatch,
-            StoreError::V2(_)
-            | StoreError::Io(_)
+            StoreError::Io(_)
             | StoreError::Sqlite(_)
             | StoreError::Json(_)
             | StoreError::IdempotencyKeyReused
@@ -668,7 +658,21 @@ impl FrozenRejection {
             | StoreError::ProjectorFailure
             | StoreError::ReplayMismatch
             | StoreError::InvalidTimestamp(_) => return None,
-        })
+        };
+        rejection.is_persistable().then_some(rejection)
+    }
+
+    fn decode_persisted(json: &str) -> StoreResult<Self> {
+        let rejection: Self = serde_json::from_str(json).map_err(|_| StoreError::InvalidJournalEvent)?;
+        if rejection.is_persistable() {
+            Ok(rejection)
+        } else {
+            Err(StoreError::InvalidJournalEvent)
+        }
+    }
+
+    fn is_persistable(&self) -> bool {
+        !matches!(self, Self::V2(error) if !is_deterministic_v2_rejection(error))
     }
 
     fn http_status(&self) -> u16 {
@@ -830,32 +834,63 @@ fn validate_command_receipts(connection: &Connection) -> StoreResult<()> {
         })?
         .collect::<Result<Vec<_>, _>>()?;
     for (request_id, http_status, first_event_seq, last_event_seq, rejection_json) in receipts {
-        Uuid::parse_str(&request_id).map_err(|_| StoreError::InvalidJournalEvent)?;
-        let bounds = connection.query_row(
-            "SELECT MIN(event_seq), MAX(event_seq) FROM journal_events WHERE request_id = ?1",
-            [&request_id],
-            |row| Ok((row.get::<_, Option<u64>>(0)?, row.get::<_, Option<u64>>(1)?)),
+        validate_receipt(
+            connection,
+            &request_id,
+            http_status,
+            first_event_seq,
+            last_event_seq,
+            rejection_json.as_deref(),
         )?;
-        match (first_event_seq, last_event_seq) {
-            (None, None) => {
-                if bounds.0.is_some() {
-                    return Err(StoreError::InvalidJournalEvent);
-                }
-                if let Some(rejection_json) = rejection_json {
-                    let rejection = serde_json::from_str::<FrozenRejection>(&rejection_json)?;
-                    if http_status != rejection.http_status() {
-                        return Err(StoreError::InvalidJournalEvent);
-                    }
-                }
-            }
-            (Some(first_event_seq), Some(last_event_seq))
-                if rejection_json.is_none()
-                    && first_event_seq <= last_event_seq
-                    && bounds == (Some(first_event_seq), Some(last_event_seq)) => {}
-            _ => return Err(StoreError::InvalidJournalEvent),
-        }
     }
     Ok(())
+}
+
+fn validate_receipt(
+    connection: &Connection,
+    request_id: &str,
+    http_status: u16,
+    first_event_seq: Option<u64>,
+    last_event_seq: Option<u64>,
+    rejection_json: Option<&str>,
+) -> StoreResult<Option<FrozenRejection>> {
+    Uuid::parse_str(request_id).map_err(|_| StoreError::InvalidJournalEvent)?;
+    let bounds = connection.query_row(
+        "SELECT MIN(event_seq), MAX(event_seq) FROM journal_events WHERE request_id = ?1",
+        [request_id],
+        |row| Ok((row.get::<_, Option<u64>>(0)?, row.get::<_, Option<u64>>(1)?)),
+    )?;
+    match (first_event_seq, last_event_seq) {
+        (None, None) if bounds.0.is_none() => {
+            let rejection = rejection_json.map(FrozenRejection::decode_persisted).transpose()?;
+            if rejection.as_ref().is_some_and(|rejection| http_status != rejection.http_status()) {
+                return Err(StoreError::InvalidJournalEvent);
+            }
+            Ok(rejection)
+        }
+        (Some(first_event_seq), Some(last_event_seq))
+            if rejection_json.is_none()
+                && first_event_seq <= last_event_seq
+                && bounds == (Some(first_event_seq), Some(last_event_seq)) => Ok(None),
+        _ => Err(StoreError::InvalidJournalEvent),
+    }
+}
+
+fn is_deterministic_v2_rejection(error: &V2Error) -> bool {
+    matches!(
+        error.code.as_str(),
+        "invalid_context_delivery"
+            | "missing_reservation"
+            | "reservation_owner_mismatch"
+            | "scope_mismatch"
+            | "missing_read_provenance"
+            | "stale_observation"
+            | "notification_target_mismatch"
+            | "tool_fields_require_tool_command"
+            | "last_result_too_long"
+            | "presence_not_found"
+            | "invalid_tool_result"
+    )
 }
 
 fn load_journal_event(
@@ -1072,12 +1107,13 @@ pub(crate) fn projection_snapshot(connection: &Connection, prefix: &str) -> Stor
     let mut snapshots = BTreeMap::new();
     for table in PROJECTION_TABLES {
         let name = format!("{prefix}{table}");
-        let mut statement = connection.prepare(&format!("SELECT * FROM {name} ORDER BY rowid"))?;
-        let rows = statement.query_map([], |row| {
+        let mut statement = connection.prepare(&format!("SELECT * FROM {name}"))?;
+        let mut rows = statement.query_map([], |row| {
             (0..row.as_ref().column_count()).map(|index| match row.get_ref(index)? {
                 ValueRef::Null => Ok("null".into()), ValueRef::Integer(value) => Ok(format!("i:{value}")), ValueRef::Real(value) => Ok(format!("r:{value}")), ValueRef::Text(value) => Ok(format!("t:{}", String::from_utf8_lossy(value))), ValueRef::Blob(value) => Ok(format!("b:{value:?}")),
             }).collect::<Result<Vec<_>, rusqlite::Error>>()
         })?.collect::<Result<Vec<_>, _>>()?;
+        rows.sort();
         snapshots.insert((*table).into(), rows);
     }
     Ok(snapshots)

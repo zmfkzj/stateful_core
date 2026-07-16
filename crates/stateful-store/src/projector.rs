@@ -594,7 +594,12 @@ impl<'a> Projector<'a> {
         self.connection.execute(
             &format!(
                 "INSERT INTO {table} (workspace_id, version, origin_event_seq) VALUES (?1, ?2, ?2)
-                 ON CONFLICT(workspace_id) DO UPDATE SET version=excluded.version, origin_event_seq=excluded.origin_event_seq"
+                 ON CONFLICT(workspace_id) DO UPDATE SET
+                    version = MAX(version, excluded.version),
+                    origin_event_seq = CASE
+                        WHEN excluded.version > version THEN excluded.origin_event_seq
+                        ELSE origin_event_seq
+                    END"
             ),
             params![event.workspace_id, event.stored.event_seq()],
         )?;
