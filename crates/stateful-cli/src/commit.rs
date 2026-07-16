@@ -58,7 +58,7 @@ pub fn run_structured_commit(request: CommitRequest) -> anyhow::Result<CommitRes
             Ok(Some(lifecycle)) => lifecycles.push(lifecycle),
             Ok(None) => {}
             Err(error) => {
-                let _ = complete_commit_lifecycles(&lifecycles, true);
+                complete_commit_lifecycles(&lifecycles, true)?;
                 return Err(error);
             }
         }
@@ -293,7 +293,7 @@ fn authorize_path(
     if let Some(decision) = authorization.decision
         && decision.decision == stateful_core::DecisionKind::Deny
     {
-        let _ = complete_commit_lifecycles(std::slice::from_ref(&lifecycle), true);
+        complete_commit_lifecycles(std::slice::from_ref(&lifecycle), true)?;
         anyhow::bail!("{}: {}", decision.reason_code, decision.message);
     }
     Ok(Some(lifecycle))

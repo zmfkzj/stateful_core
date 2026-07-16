@@ -323,8 +323,8 @@ fn partial_or_truncated_read_completes_without_baseline() {
         r#"{"operation_id":"partial-read-1","path":"src/read.txt"}"#,
         identity,
         identity,
-        r#"{"status":"updated"}"#,
         r#"{"status":"recorded"}"#,
+        r#"{"status":"updated"}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
     let input = serde_json::json!({
@@ -369,28 +369,74 @@ fn partial_or_truncated_read_completes_without_baseline() {
         let request = rx.recv().expect("post-read identity request should arrive");
         assert!(request.contains("GET /v2/runtime/identity?"));
     }
-    let update = rx
-        .recv()
-        .expect("partial read presence update should arrive");
-    assert!(
-        update.contains("POST /v2/presence/update HTTP/1.1"),
-        "{update}"
-    );
-    let body = request_json_body(&update);
-    assert_eq!(body["payload"]["kind"], "tool_result");
-    assert_eq!(body["payload"]["outcome"], "partial");
-    let complete = rx
-        .recv_timeout(Duration::from_millis(200))
-        .expect("partial read completion should arrive");
-    assert!(
-        complete.contains("POST /v2/read/complete HTTP/1.1"),
-        "{complete}"
-    );
-    let body = request_json_body(&complete);
-    assert_eq!(body["payload"]["operation_id"], "partial-read-1");
-    assert_eq!(body["payload"]["classification"], "partial");
-    assert!(body["payload"].get("after").is_none());
+        let complete = rx
+            .recv_timeout(Duration::from_millis(200))
+            .expect("partial read completion should arrive");
+        assert!(
+            complete.contains("POST /v2/read/complete HTTP/1.1"),
+            "{complete}"
+        );
+        let body = request_json_body(&complete);
+        assert_eq!(body["payload"]["operation_id"], "partial-read-1");
+        assert_eq!(body["payload"]["classification"], "partial");
+        assert!(body["payload"].get("after").is_none());
+        let update = rx
+            .recv()
+            .expect("partial read presence update should arrive");
+        assert!(
+            update.contains("POST /v2/presence/update HTTP/1.1"),
+            "{update}"
+        );
+        let body = request_json_body(&update);
+        assert_eq!(body["payload"]["kind"], "tool_result");
+        assert_eq!(body["payload"]["outcome"], "partial");
 }
+
+#[test]
+fn failed_optional_read_presence_update_does_not_skip_prior_completion() {
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let paths = GlobalPaths::new(temp.path().join("home"));
+    let repo_root = temp.path().join("repo");
+    fs::create_dir_all(repo_root.join("src")).expect("repo source should create");
+    fs::write(repo_root.join("src/read.txt"), "partial contents\n")
+        .expect("read fixture should write");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, requests) = spawn_server_dropping_presence_update();
+    write_global_runtime_file(&paths, &runtime).expect("runtime file should write");
+    let input = serde_json::json!({
+        "agent_id": "codex-agent-1",
+        "cwd": repo_root,
+        "tool_name": "Read",
+        "tool_call_id": "partial-read-presence-failure",
+        "is_complete": false,
+        "tool_input": { "file_path": "src/read.txt", "offset": 1, "limit": 1 }
+    })
+    .to_string();
+
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "post-tool-use"],
+        &input,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let requests = requests.try_iter().collect::<Vec<_>>();
+    let complete = requests
+        .iter()
+        .position(|request| request.starts_with("POST /v2/read/complete "));
+    let update = requests
+        .iter()
+        .position(|request| request.starts_with("POST /v2/presence/update "));
+    assert!(
+        matches!((complete, update), (Some(complete), Some(update)) if complete < update),
+        "completion must precede failed optional presence update: {requests:?}"
+    );
+}
+
 
 #[test]
 fn omp_raw_reads_use_the_underlying_file_for_lifecycle_fingerprints() {
@@ -439,23 +485,23 @@ fn omp_raw_reads_use_the_underlying_file_for_lifecycle_fingerprints() {
 
     let post = run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "post-tool-use"], &input);
     assert!(post.status.success(), "{}", String::from_utf8_lossy(&post.stderr));
-    for _ in 0..2 {
-        let identity = rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("heartbeat identity should arrive");
-        assert!(identity.starts_with("GET /v2/runtime/identity?"));
+    let mut post_requests = Vec::new();
+    while let Ok(request) = rx.recv_timeout(Duration::from_millis(200)) {
+        post_requests.push(request);
     }
-    let _heartbeat = rx
-        .recv_timeout(Duration::from_secs(2))
+    let completion_index = post_requests
+        .iter()
+        .position(|request| request.starts_with("POST /v2/read/complete "))
+        .expect("read completion should arrive");
+    let heartbeat_index = post_requests
+        .iter()
+        .position(|request| request.starts_with("POST /v2/presence/update "))
         .expect("heartbeat should arrive");
-    let completion_identity = rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("read-complete identity should arrive");
-    assert!(completion_identity.starts_with("GET /v2/runtime/identity?"));
-    let complete = request_json_body(
-        &rx.recv_timeout(Duration::from_secs(2))
-            .expect("read completion should arrive"),
+    assert!(
+        completion_index < heartbeat_index,
+        "read completion must precede heartbeat: {post_requests:?}"
     );
+    let complete = request_json_body(&post_requests[completion_index]);
     assert_eq!(complete["payload"]["path"], "src/read.txt");
     assert!(complete["payload"]["after"]["sha256"].is_string());
 }
@@ -543,6 +589,56 @@ fn pre_write_returns_intent_and_post_success_commits_it() {
     assert_eq!(body["payload"]["outcome"], "committed");
     assert!(body["payload"]["post_fingerprints"][0][1]["sha256"].is_string());
 }
+
+#[test]
+fn denied_v2_write_intent_completes_the_exact_started_intent_as_failed() {
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let paths = GlobalPaths::new(temp.path().join("home"));
+    let repo_root = temp.path().join("repo");
+    fs::create_dir_all(repo_root.join("src")).expect("repo source should create");
+    fs::write(repo_root.join("src/deny.txt"), "before\n").expect("write fixture should create");
+    enable_test_repo(&paths, &repo_root);
+    let (runtime, requests) = spawn_v2_started_deny_server();
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+    let input = serde_json::json!({
+        "agent_id": "codex-agent-1",
+        "cwd": repo_root,
+        "tool_name": "Write",
+        "tool_use_id": "deny-operation-1",
+        "tool_input": { "file_path": "src/deny.txt", "content": "after" }
+    })
+    .to_string();
+
+    let output = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "codex", "pre-tool-use"],
+        &input,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rendered: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("denial should serialize");
+    assert_eq!(rendered["hookSpecificOutput"]["permissionDecision"], "deny");
+
+    let authorize = request_json_body(
+        &requests
+            .recv_timeout(Duration::from_secs(2))
+            .expect("authorization should arrive"),
+    );
+    assert_eq!(authorize["payload"]["operation_id"], "deny-operation-1");
+    let completion = request_json_body(
+        &requests
+            .recv_timeout(Duration::from_secs(2))
+            .expect("failed completion should arrive"),
+    );
+    assert_eq!(completion["payload"]["intent_id"], "intent-denied-1");
+    assert_eq!(completion["payload"]["outcome"], "failed");
+}
+
 #[test]
 fn session_start_registers_explicit_agent_without_current_file() {
     let temp = tempfile::tempdir().expect("temp dir should create");
@@ -5376,6 +5472,56 @@ fn spawn_fake_stateful_server_sequence_with_current(
     )
 }
 
+fn spawn_v2_started_deny_server() -> (ServerRuntime, mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener addr should load");
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        while let Ok((mut stream, _)) = listener.accept() {
+            let request = read_http_request_maybe_body(&mut stream);
+            if request.starts_with("GET /v2/runtime/identity?") {
+                write_json_response(&mut stream, fake_v2_runtime_identity());
+                continue;
+            }
+            tx.send(request.clone()).expect("request should send to test");
+            let body = if request.starts_with("POST /v2/authorize ") {
+                r#"{"intent_id":"intent-denied-1","decision":{"decision":"deny","reason_code":"denied","message":"blocked"}}"#
+            } else {
+                r#"{"status":"completed"}"#
+            };
+            write_ok_json_response(&mut stream, body);
+        }
+    });
+    (
+        ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42),
+        rx,
+    )
+}
+
+fn spawn_server_dropping_presence_update() -> (ServerRuntime, mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener addr should load");
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        while let Ok((mut stream, _)) = listener.accept() {
+            let request = read_http_request_maybe_body(&mut stream);
+            if request.starts_with("GET /v2/runtime/identity?") {
+                write_json_response(&mut stream, fake_v2_runtime_identity());
+                continue;
+            }
+            tx.send(request.clone()).expect("request should send to test");
+            if request.starts_with("POST /v2/presence/update ") {
+                break;
+            }
+            write_json_response(&mut stream, r#"{"status":"recorded"}"#);
+        }
+    });
+    (
+        ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42),
+        rx,
+    )
+}
+
 fn spawn_fake_stateful_server_dropping_authorize() -> (ServerRuntime, mpsc::Receiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
@@ -5496,6 +5642,20 @@ fn write_json_response(stream: &mut std::net::TcpStream, body: &str) {
     };
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream
+        .write_all(response.as_bytes())
+        .expect("response should write");
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .expect("response should close");
+}
+
+fn write_ok_json_response(stream: &mut std::net::TcpStream, body: &str) {
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
         body.len(),
         body
     );

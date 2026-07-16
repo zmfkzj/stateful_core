@@ -164,6 +164,9 @@ fn run_omp_hook(command: HookCommand) -> anyhow::Result<()> {
     }
     let runtime = discover_runtime_with_global(&repo_root, &paths)?;
     let identity = repo_identity_for_enabled_repo(&paths, &repo_root).ok();
+    if let Err(error) = write_lifecycle::replay_pending(&paths, &runtime) {
+        eprintln!("stateful OMP write lifecycle replay warning: {error}");
+    }
 
     match command {
         HookCommand::PreToolUse => {
@@ -619,7 +622,19 @@ fn authorize_omp_targets(
                         }
                     }
                     Some(decision) if decision.decision == stateful_core::DecisionKind::Deny => {
-                        release_omp_claims(runtime, input, &workspace_id, identity, &claim_ids);
+                        write_lifecycle::complete(
+                            &paths,
+                            runtime,
+                            &input.agent_id,
+                            &workspace_id,
+                            identity,
+                            input.omp_agent_id.as_deref(),
+                            input.parent_agent_id.as_deref(),
+                            repo_root,
+                            operation_id,
+                            true,
+                            &OMP_WRITE_LIFECYCLE,
+                        )?;
                         OmpHookOutcome::Block {
                             reason: format!("{}: {}", decision.reason_code, decision.message),
                         }
@@ -1063,14 +1078,14 @@ fn post_omp_post_tool_use_event(
     repo_root: Option<&Path>,
     identity: Option<&RepoIdentity>,
 ) -> anyhow::Result<()> {
-    post_omp_presence_heartbeat(runtime, input, identity)?;
     let tool_name = input
         .tool_name
         .as_deref()
         .map(runtime_tool_name_leaf)
         .unwrap_or_default();
     if tool_name.eq_ignore_ascii_case("read") {
-        return record_omp_read_complete(input, runtime, repo_root, identity);
+        record_omp_read_complete(input, runtime, repo_root, identity)?;
+        return post_omp_presence_heartbeat(runtime, input, identity);
     }
     if let (Some(repo_root), Some(operation_id)) = (repo_root, input.metadata.operation_id())
         && (tool_name.eq_ignore_ascii_case("write")
@@ -1096,7 +1111,7 @@ fn post_omp_post_tool_use_event(
             &OMP_WRITE_LIFECYCLE,
         )?;
     }
-    Ok(())
+    post_omp_presence_heartbeat(runtime, input, identity)
 }
 
 fn post_omp_presence_heartbeat(
@@ -1150,7 +1165,7 @@ fn record_omp_read_complete(
     } else {
         stateful_core::ReadClassification::StructuralSummary
     };
-    if classification != stateful_core::ReadClassification::Exact {
+    let update = if classification != stateful_core::ReadClassification::Exact {
         let mut request = crate::v2_request_envelope(
             uuid::Uuid::new_v4(),
             input.agent_id.clone(),
@@ -1175,9 +1190,14 @@ fn record_omp_read_complete(
             input.omp_agent_id.as_deref(),
             input.parent_agent_id.as_deref(),
         );
-        crate::post_v2(runtime, "/v2/presence/update", &request)?;
-    }
+        Some(request)
+    } else {
+        None
+    };
     let Some(operation_id) = input.metadata.operation_id() else {
+        if let Some(update) = update {
+            crate::post_v2(runtime, "/v2/presence/update", &update)?;
+        }
         return Ok(());
     };
     let semantic_marker = input
@@ -1213,6 +1233,9 @@ fn record_omp_read_complete(
         input.parent_agent_id.as_deref(),
     );
     crate::post_v2(runtime, "/v2/read/complete", &request)?;
+    if let Some(update) = update {
+        crate::post_v2(runtime, "/v2/presence/update", &update)?;
+    }
     Ok(())
 }
 
@@ -1282,6 +1305,9 @@ fn handle_session_start_context_in_repo(
     };
     let runtime = discover_runtime_with_global(&repo_root, &paths)?;
     let identity = repo_identity(&paths, &repo_root)?;
+    if let Err(error) = write_lifecycle::replay_pending(&paths, &runtime) {
+        eprintln!("stateful write lifecycle replay warning: {error}");
+    }
     handle_session_start_with_runtime(input, &runtime, Some(&identity))
 }
 
@@ -1584,8 +1610,8 @@ fn record_read_complete(
     };
     let classification = observation::classification(&input.metadata);
     let workspace_id = effective_workspace_id(runtime, identity);
-    if classification != stateful_core::ReadClassification::Exact {
-        let update = crate::v2_request_envelope(
+    let update = if classification != stateful_core::ReadClassification::Exact {
+        Some(crate::v2_request_envelope(
             uuid::Uuid::new_v4(),
             input.stateful_agent_id().to_string(),
             workspace_id.clone(),
@@ -1601,10 +1627,14 @@ fn record_read_complete(
                 "outcome": classification,
                 "summary": input.metadata.result_summary(),
             }),
-        )?;
-        crate::post_v2(runtime, "/v2/presence/update", &update)?;
-    }
+        )?)
+    } else {
+        None
+    };
     let Some(operation_id) = input.metadata.operation_id() else {
+        if let Some(update) = update {
+            crate::post_v2(runtime, "/v2/presence/update", &update)?;
+        }
         return Ok(());
     };
     let mut payload = json!({
@@ -1629,6 +1659,9 @@ fn record_read_complete(
         payload,
     )?;
     crate::post_v2(runtime, "/v2/read/complete", &request)?;
+    if let Some(update) = update {
+        crate::post_v2(runtime, "/v2/presence/update", &update)?;
+    }
     Ok(())
 }
 
@@ -2617,6 +2650,19 @@ fn authorize_targets(
                 }
             }
             Some(decision) if decision.decision == stateful_core::DecisionKind::Deny => {
+                write_lifecycle::complete(
+                    &paths,
+                    runtime,
+                    input.stateful_agent_id(),
+                    &workspace_id,
+                    identity,
+                    None,
+                    None,
+                    repo_root,
+                    operation_id,
+                    true,
+                    &CODEX_WRITE_LIFECYCLE,
+                )?;
                 HookOutcome::Deny {
                     reason: decision.required_next_action.unwrap_or(decision.message),
                 }

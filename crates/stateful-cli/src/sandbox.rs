@@ -336,7 +336,6 @@ pub fn run_sandbox_in_repo(
     let mut denied_write_targets = Vec::new();
     let mut authorization_warnings = Vec::new();
     let mut release_after_run: Option<SandboxLeaseReleaseContext> = None;
-    let mut authorized_operation_ids = Vec::new();
     let writable_paths = match request.fs {
         SandboxFsProfile::ReadOnly => Vec::new(),
         SandboxFsProfile::External => {
@@ -375,15 +374,39 @@ pub fn run_sandbox_in_repo(
                     reservation_id: request.reservation_id.as_deref(),
                 };
 
+                release_after_run = Some(SandboxLeaseReleaseContext {
+                    agent_id: agent_context.agent_id.clone(),
+                    workspace_id: agent_context.workspace_id.clone(),
+                    repo_root: repo_root.clone(),
+                    identity: repo_identity_for_enabled_repo(paths, &repo_root).ok(),
+                    operation_ids: Vec::new(),
+                });
                 for path in external_scope
                     .repo_write_targets
                     .iter()
                     .chain(external_scope.repo_create_targets.iter())
                 {
                     let authorization =
-                        authorize_sandbox_write(&authorize_context, "write_file", path)?;
+                        match authorize_sandbox_write(&authorize_context, "write_file", path) {
+                            Ok(authorization) => authorization,
+                            Err(error) => {
+                                complete_sandbox_write_intents(
+                                    paths,
+                                    runtime,
+                                    release_after_run
+                                        .as_ref()
+                                        .expect("cleanup context should exist"),
+                                    true,
+                                )?;
+                                return Err(error);
+                            }
+                        };
                     if let Some(operation_id) = authorization.operation_id {
-                        authorized_operation_ids.push(operation_id);
+                        release_after_run
+                            .as_mut()
+                            .expect("cleanup context should exist")
+                            .operation_ids
+                            .push(operation_id);
                     }
                     match authorization.decision {
                         SandboxAuthorizeDecision::Allow => allowed_write_targets.push(path.clone()),
@@ -401,13 +424,30 @@ pub fn run_sandbox_in_repo(
                 }
                 for path in &external_scope.repo_write_dirs {
                     let authorization_path = sandbox_write_dir_display_path(path);
-                    let authorization = authorize_sandbox_write(
+                    let authorization = match authorize_sandbox_write(
                         &authorize_context,
                         "write_directory",
                         &authorization_path,
-                    )?;
+                    ) {
+                        Ok(authorization) => authorization,
+                        Err(error) => {
+                            complete_sandbox_write_intents(
+                                paths,
+                                runtime,
+                                release_after_run
+                                    .as_ref()
+                                    .expect("cleanup context should exist"),
+                                true,
+                            )?;
+                            return Err(error);
+                        }
+                    };
                     if let Some(operation_id) = authorization.operation_id {
-                        authorized_operation_ids.push(operation_id);
+                        release_after_run
+                            .as_mut()
+                            .expect("cleanup context should exist")
+                            .operation_ids
+                            .push(operation_id);
                     }
                     match authorization.decision {
                         SandboxAuthorizeDecision::Allow => {
@@ -427,13 +467,6 @@ pub fn run_sandbox_in_repo(
                     }
                 }
 
-                release_after_run = Some(SandboxLeaseReleaseContext {
-                    agent_id: agent_context.agent_id.clone(),
-                    workspace_id: agent_context.workspace_id.clone(),
-                    repo_root: repo_root.clone(),
-                    identity: repo_identity_for_enabled_repo(paths, &repo_root).ok(),
-                    operation_ids: std::mem::take(&mut authorized_operation_ids),
-                });
 
                 if !denied_write_targets.is_empty() {
                     let body = sandbox_authorization_denied_body(
@@ -442,7 +475,7 @@ pub fn run_sandbox_in_repo(
                     )
                     .to_string();
                     if let Some(release_context) = &release_after_run {
-                        let _ = complete_sandbox_write_intents(paths, runtime, release_context, true);
+                        complete_sandbox_write_intents(paths, runtime, release_context, true)?;
                     }
                     return Err(SandboxAuthorizationDenied::new(body).into());
                 }
@@ -455,14 +488,9 @@ pub fn run_sandbox_in_repo(
                 ) {
                     Ok(paths) => writable_paths.extend(paths),
                     Err(error) => {
-                        if let Some(release_context) = &release_after_run {
-                            let _ = complete_sandbox_write_intents(
-                                paths,
-                                runtime,
-                                release_context,
-                                true,
-                            );
-                        }
+                    if let Some(release_context) = &release_after_run {
+                        complete_sandbox_write_intents(paths, runtime, release_context, true)?;
+                    }
                         return Err(error);
                     }
                 }
@@ -490,11 +518,35 @@ pub fn run_sandbox_in_repo(
                 reservation_id: request.reservation_id.as_deref(),
             };
 
+            release_after_run = Some(SandboxLeaseReleaseContext {
+                agent_id: agent_context.agent_id.clone(),
+                workspace_id: agent_context.workspace_id.clone(),
+                repo_root: repo_root.clone(),
+                identity: repo_identity_for_enabled_repo(paths, &repo_root).ok(),
+                operation_ids: Vec::new(),
+            });
             for path in write_targets.iter().chain(create_targets.iter()) {
                 let authorization =
-                    authorize_sandbox_write(&authorize_context, "write_file", path)?;
+                    match authorize_sandbox_write(&authorize_context, "write_file", path) {
+                        Ok(authorization) => authorization,
+                        Err(error) => {
+                            complete_sandbox_write_intents(
+                                paths,
+                                runtime,
+                                release_after_run
+                                    .as_ref()
+                                    .expect("cleanup context should exist"),
+                                true,
+                            )?;
+                            return Err(error);
+                        }
+                    };
                 if let Some(operation_id) = authorization.operation_id {
-                    authorized_operation_ids.push(operation_id);
+                    release_after_run
+                        .as_mut()
+                        .expect("cleanup context should exist")
+                        .operation_ids
+                        .push(operation_id);
                 }
                 match authorization.decision {
                     SandboxAuthorizeDecision::Allow => allowed_write_targets.push(path.clone()),
@@ -512,13 +564,30 @@ pub fn run_sandbox_in_repo(
             }
             for path in &write_dirs {
                 let authorization_path = sandbox_write_dir_display_path(path);
-                let authorization = authorize_sandbox_write(
+                let authorization = match authorize_sandbox_write(
                     &authorize_context,
                     "write_directory",
                     &authorization_path,
-                )?;
+                ) {
+                    Ok(authorization) => authorization,
+                    Err(error) => {
+                        complete_sandbox_write_intents(
+                            paths,
+                            runtime,
+                            release_after_run
+                                .as_ref()
+                                .expect("cleanup context should exist"),
+                            true,
+                        )?;
+                        return Err(error);
+                    }
+                };
                 if let Some(operation_id) = authorization.operation_id {
-                    authorized_operation_ids.push(operation_id);
+                    release_after_run
+                        .as_mut()
+                        .expect("cleanup context should exist")
+                        .operation_ids
+                        .push(operation_id);
                 }
                 match authorization.decision {
                     SandboxAuthorizeDecision::Allow => {
@@ -538,20 +607,13 @@ pub fn run_sandbox_in_repo(
                 }
             }
 
-            release_after_run = Some(SandboxLeaseReleaseContext {
-                agent_id: agent_context.agent_id.clone(),
-                workspace_id: agent_context.workspace_id.clone(),
-                repo_root: repo_root.clone(),
-                identity: repo_identity_for_enabled_repo(paths, &repo_root).ok(),
-                operation_ids: std::mem::take(&mut authorized_operation_ids),
-            });
 
             if !denied_write_targets.is_empty() {
                 let body =
                     sandbox_authorization_denied_body(allowed_write_targets, denied_write_targets)
                         .to_string();
                 if let Some(release_context) = &release_after_run {
-                    let _ = complete_sandbox_write_intents(paths, runtime, release_context, true);
+                    complete_sandbox_write_intents(paths, runtime, release_context, true)?;
                 }
                 return Err(SandboxAuthorizationDenied::new(body).into());
             }
@@ -565,8 +627,7 @@ pub fn run_sandbox_in_repo(
                 Ok(paths) => paths,
                 Err(error) => {
                     if let Some(release_context) = &release_after_run {
-                        let _ =
-                            complete_sandbox_write_intents(paths, runtime, release_context, true);
+                        complete_sandbox_write_intents(paths, runtime, release_context, true)?;
                     }
                     return Err(error);
                 }
@@ -3780,6 +3841,58 @@ mod tests {
         )
     }
 
+    fn spawn_server_dropping_second_authorization() -> (ServerRuntime, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let address = listener.local_addr().expect("listener address should resolve");
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut authorizations = 0;
+            while let Ok((mut stream, _)) = listener.accept() {
+                let mut request = Vec::new();
+                let mut byte = [0_u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).expect("headers should read");
+                    request.push(byte[0]);
+                }
+                let headers = String::from_utf8(request.clone()).expect("headers should be UTF-8");
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Content-Length: "))
+                    .and_then(|length| length.parse::<usize>().ok())
+                    .unwrap_or_default();
+                let mut body = vec![0; content_length];
+                stream.read_exact(&mut body).expect("body should read");
+                request.extend(body);
+                let request = String::from_utf8(request).expect("request should be UTF-8");
+                tx.send(request.clone()).expect("request should send");
+                if request.starts_with("POST /v2/authorize ") {
+                    authorizations += 1;
+                    if authorizations == 2 {
+                        continue;
+                    }
+                }
+                let body = if request.starts_with("GET /v2/runtime/identity?") {
+                    r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":42,"workspace_id":"w1","workspace_version":1,"capabilities":["presence"]}"#
+                } else if request.starts_with("POST /v2/authorize ") {
+                    r#"{"intent_id":"intent-first","decision":{"decision":"allow","reason_code":"allowed","message":"ok"}}"#
+                } else {
+                    r#"{"status":"completed"}"#
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .expect("response should write");
+            }
+        });
+        (
+            ServerRuntime::new(format!("http://{address}"), "token", "w1", 1),
+            rx,
+        )
+    }
+
     fn assert_setup_failure_completes_write_lifecycle(request: SandboxRunRequest) {
         let temp = tempfile::tempdir().expect("temp dir should create");
         let paths = GlobalPaths::new(temp.path().join("home"));
@@ -3811,6 +3924,61 @@ mod tests {
             .expect("failed completion should arrive");
         assert!(completion.contains("POST /v2/write/complete "));
         assert!(completion.contains(r#""outcome":"failed""#));
+    }
+
+    #[test]
+    fn second_authorization_transport_failure_completes_the_first_started_intent() {
+        let temp = tempfile::tempdir().expect("temp dir should create");
+        let paths = GlobalPaths::new(temp.path().join("home"));
+        let repo_root = temp.path().join("repo");
+        fs::create_dir_all(repo_root.join(".git")).expect("git marker should create");
+        fs::create_dir_all(&paths.home).expect("stateful home should create");
+        fs::write(repo_root.join("first.txt"), "first\n").expect("first target should write");
+        fs::write(repo_root.join("second.txt"), "second\n").expect("second target should write");
+        crate::enable_repo(&paths, &repo_root).expect("repo should enable");
+        let (runtime, requests) = spawn_server_dropping_second_authorization();
+        crate::write_global_runtime_file(&paths, &runtime).expect("runtime file should write");
+
+        run_sandbox_in_repo(
+            &repo_root,
+            &paths,
+            SandboxRunRequest {
+                fs: SandboxFsProfile::WriteTargets,
+                network: SandboxNetworkPolicy::Disabled,
+                purpose: None,
+                reservation_id: None,
+                agent_id: Some("agent-1".to_string()),
+                workspace_id: Some("w1".to_string()),
+                write_targets: vec!["first.txt".to_string(), "second.txt".to_string()],
+                create_targets: Vec::new(),
+                write_dirs: Vec::new(),
+                connect_sockets: Vec::new(),
+                allow_signal: false,
+                command: "true".to_string(),
+                timeout_seconds: None,
+                stream_events: false,
+            },
+        )
+        .expect_err("second authorization transport failure should fail");
+
+        let mut completion = None;
+        for _ in 0..8 {
+            let Ok(request) = requests.recv_timeout(Duration::from_millis(250)) else {
+                break;
+            };
+            if request.starts_with("POST /v2/write/complete ") {
+                completion = Some(serde_json::from_str::<serde_json::Value>(
+                    request
+                        .split_once("\r\n\r\n")
+                        .expect("completion should have a body")
+                        .1,
+                )
+                .expect("completion body should be JSON"));
+            }
+        }
+        let completion = completion.expect("first started intent should complete after later failure");
+        assert_eq!(completion["payload"]["intent_id"], "intent-first");
+        assert_eq!(completion["payload"]["outcome"], "failed");
     }
 
     #[test]

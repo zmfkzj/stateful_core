@@ -431,6 +431,11 @@ mod tests {
                 stream
                     .read_exact(&mut request_body)
                     .expect("request body should read");
+                let request = format!(
+                    "{}{}",
+                    request,
+                    String::from_utf8(request_body).expect("body should be UTF-8")
+                );
                 tx.send(request.clone()).expect("request should send");
                 let body = if request.starts_with("GET /v2/runtime/identity?") {
                     r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":42,"workspace_id":"w1","workspace_version":1,"capabilities":["presence"]}"#
@@ -481,16 +486,24 @@ mod tests {
         )
         .expect_err("denied benchmark should fail");
         assert!(error.to_string().contains("target authorization denied"), "{error}");
-        for expected in [
-            "/v2/runtime/identity?",
-            "/v2/runtime/identity?",
-            "/v2/authorize",
-        ] {
+        for expected in ["/v2/runtime/identity?", "/v2/runtime/identity?"] {
             let request = requests
                 .recv_timeout(Duration::from_secs(2))
-                .expect("authorization request should arrive");
+                .expect("authorization identity request should arrive");
             assert!(request.contains(expected), "expected {expected}, got {request}");
         }
+        let authorize = requests
+            .recv_timeout(Duration::from_secs(2))
+            .expect("authorization request should arrive");
+        assert!(authorize.contains("POST /v2/authorize"), "{authorize}");
+        let authorize_body = serde_json::from_str::<serde_json::Value>(
+            authorize
+                .split_once("\r\n\r\n")
+                .expect("authorization should have a body")
+                .1,
+        )
+        .expect("authorization body should be JSON");
+        assert!(authorize_body["payload"]["operation_id"].is_string());
         let identity = requests
             .recv_timeout(Duration::from_millis(500))
             .expect("completion identity should arrive");
@@ -498,7 +511,16 @@ mod tests {
         let completion = requests
             .recv_timeout(Duration::from_millis(500))
             .expect("failed completion should arrive");
-        assert!(completion.contains("POST /v2/write/complete "));
+        assert!(completion.contains("POST /v2/write/complete "), "{completion}");
+        let body = serde_json::from_str::<serde_json::Value>(
+            completion
+                .split_once("\r\n\r\n")
+                .expect("completion should have a body")
+                .1,
+        )
+        .expect("completion body should be JSON");
+        assert_eq!(body["payload"]["intent_id"], "intent-1");
+        assert_eq!(body["payload"]["outcome"], "failed");
     }
 
     #[test]

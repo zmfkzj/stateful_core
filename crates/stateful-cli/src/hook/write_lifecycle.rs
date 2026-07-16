@@ -259,6 +259,72 @@ pub(crate) fn complete(
     Ok(true)
 }
 
+pub(crate) fn replay_pending(paths: &GlobalPaths, runtime: &ServerRuntime) -> anyhow::Result<()> {
+    let root = paths.runtime_dir.join("write-intents");
+    let agents = match fs::read_dir(&root) {
+        Ok(agents) => agents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut failure = None;
+    for agent in agents {
+        let agent = match agent {
+            Ok(agent) => agent,
+            Err(error) => {
+                failure.get_or_insert_with(|| error.into());
+                continue;
+            }
+        };
+        if !agent.file_type()?.is_dir() {
+            continue;
+        }
+        let operations = match fs::read_dir(agent.path()) {
+            Ok(operations) => operations,
+            Err(error) => {
+                failure.get_or_insert_with(|| error.into());
+                continue;
+            }
+        };
+        for operation in operations {
+            let operation = match operation {
+                Ok(operation) => operation,
+                Err(error) => {
+                    failure.get_or_insert_with(|| error.into());
+                    continue;
+                }
+            };
+            let path = operation.path();
+            if path.extension().is_none_or(|extension| extension != "json") {
+                continue;
+            }
+            if let Err(error) = replay_pending_at(runtime, &path) {
+                failure.get_or_insert(error);
+            }
+        }
+    }
+    failure.map_or(Ok(()), Err)
+}
+
+fn replay_pending_at(runtime: &ServerRuntime, path: &Path) -> anyhow::Result<()> {
+    let mut intent: PendingIntent = serde_json::from_slice(&fs::read(path)?)?;
+    if !intent.completed {
+        let Some(request) = intent.completion_request.as_deref() else {
+            return Ok(());
+        };
+        crate::replay_v2_request(runtime, "/v2/write/complete", request)?;
+        intent.completion_request = None;
+        intent.completed = true;
+        save_pending_at(path, &intent)?;
+    }
+    while let Some(request) = intent.release_requests.first() {
+        crate::replay_v2_request(runtime, "/v2/claim/release", request)?;
+        intent.release_requests.remove(0);
+        save_pending_at(path, &intent)?;
+    }
+    fs::remove_file(path)?;
+    Ok(())
+}
+
 fn save_pending(
     paths: &GlobalPaths,
     agent_id: &str,
@@ -268,6 +334,10 @@ fn save_pending(
     let path = pending_path(paths, agent_id, operation_id);
     let parent = path.parent().expect("pending path has a parent");
     fs::create_dir_all(parent)?;
+    save_pending_at(&path, intent)
+}
+
+fn save_pending_at(path: &Path, intent: &PendingIntent) -> anyhow::Result<()> {
     fs::write(path, serde_json::to_vec(intent)?)?;
     Ok(())
 }
@@ -377,36 +447,26 @@ mod tests {
         assert_eq!(initial["payload"]["intent_id"], "intent-1");
         assert!(pending_path(&paths, "agent-1", "operation-1").exists());
 
-        assert!(
-            complete(
-                &paths,
-                &runtime,
-                "agent-1",
-                "workspace-1",
-                None,
-                None,
-                None,
-                &repo_root,
-                "operation-1",
-                false,
-                &SOURCE,
-            )
-            .expect("completion recovery should replay"),
-        );
+        replay_pending(&paths, &runtime).expect("later lifecycle should replay completion");
         let replay = request_body(&requests.recv().expect("replayed completion should arrive"));
         assert_eq!(replay, initial, "replay must retain the original request UUID");
         assert!(!pending_path(&paths, "agent-1", "operation-1").exists());
     }
 
     #[test]
-    fn retains_completed_intent_until_claim_release_replays() {
+    fn retains_each_pending_claim_release_until_all_replay() {
         let temp = tempfile::tempdir().expect("temp dir should create");
         let paths = GlobalPaths::new(temp.path().join("home"));
         let repo_root = temp.path().join("repo");
         fs::create_dir_all(&repo_root).expect("repo should create");
         fs::write(repo_root.join("target.txt"), "after").expect("target should write");
-        let (runtime, requests) =
-            fake_server([Some(AUTHORIZED), Some(r#"{"status":"ok"}"#), None, Some(r#"{"status":"ok"}"#)]);
+        let (runtime, requests) = fake_server([
+            Some(AUTHORIZED),
+            Some(r#"{"status":"ok"}"#),
+            Some(r#"{"status":"ok"}"#),
+            None,
+            Some(r#"{"status":"ok"}"#),
+        ]);
 
         authorize(
             &paths,
@@ -423,53 +483,51 @@ mod tests {
                 stateful_core::ContentFingerprint::missing(),
             )],
             None,
-            vec!["claim-1".to_string()],
+            vec!["claim-1".to_string(), "claim-2".to_string()],
             &SOURCE,
         )
         .expect("authorization should persist its intent");
         let _authorize = requests.recv().expect("authorization should arrive");
 
-        assert!(
-            complete(
-                &paths,
-                &runtime,
-                "agent-1",
-                "workspace-1",
-                None,
-                None,
-                None,
-                &repo_root,
-                "operation-1",
-                false,
-                &SOURCE,
-            )
-            .expect("release failure should retain replay state"),
-        );
+        complete(
+            &paths,
+            &runtime,
+            "agent-1",
+            "workspace-1",
+            None,
+            None,
+            None,
+            &repo_root,
+            "operation-1",
+            false,
+            &SOURCE,
+        )
+        .expect("second release failure should retain replay state");
         let _completion = requests.recv().expect("completion should arrive");
-        let first_release = request_body(&requests.recv().expect("release should arrive"));
+        let first_release = request_body(&requests.recv().expect("first release should arrive"));
+        let second_release =
+            request_body(&requests.recv().expect("second release should arrive"));
         assert_eq!(first_release["payload"]["claim_id"], "claim-1");
-        assert!(pending_path(&paths, "agent-1", "operation-1").exists());
+        assert_eq!(second_release["payload"]["claim_id"], "claim-2");
 
-        assert!(
-            complete(
-                &paths,
-                &runtime,
-                "agent-1",
-                "workspace-1",
-                None,
-                None,
-                None,
-                &repo_root,
-                "operation-1",
-                false,
-                &SOURCE,
-            )
-            .expect("release recovery should replay"),
+        let pending = load_pending(&paths, "agent-1", "operation-1")
+            .expect("pending record should load")
+            .expect("second release should remain pending");
+        assert!(pending.completed);
+        assert_eq!(pending.release_requests.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&pending.release_requests[0])
+                .expect("pending release should be JSON"),
+            second_release,
+            "only the second frozen release should remain pending"
         );
-        let replay = request_body(&requests.recv().expect("release replay should arrive"));
-        assert_eq!(replay, first_release, "claim release replay must retain its request UUID");
+
+        replay_pending(&paths, &runtime).expect("later lifecycle should replay second release");
+        let replay = request_body(&requests.recv().expect("replayed release should arrive"));
+        assert_eq!(replay, second_release, "claim release replay must retain its request UUID");
         assert!(!pending_path(&paths, "agent-1", "operation-1").exists());
     }
+
 
     fn fake_server<const N: usize>(
         responses: [Option<&'static str>; N],

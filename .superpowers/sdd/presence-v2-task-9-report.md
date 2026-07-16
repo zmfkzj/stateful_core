@@ -128,3 +128,27 @@ Changed files: `crates/stateful-cli/src/hook.rs`, `src/hook/write_lifecycle.rs`,
 
 Residual concern: commit lifecycle ordering is covered by the focused existing commit execution test; no live V2 transport fixture was added for it.
 - Final affected binaries: `stateful sandbox run --fs build --network enabled --write-dir task9-review-final-lib --command 'cargo test -p stateful-cli --lib'`: 126 passed; `stateful sandbox run --fs build --network enabled --write-dir task9-review-final-hook --command 'cargo test -p stateful-cli --test hook'`: 138 passed.
+
+### Second independent review closure
+
+#### RED evidence
+
+- `stateful sandbox run --fs build --network enabled --write-dir task9-red-write-recovery --command 'cargo test -p stateful-cli --lib write_lifecycle::tests::retries_failed_write_completion_with_the_original_request_and_operation_ids'` exited 101 because the production `replay_pending` scanner did not exist.
+- `stateful sandbox run --fs build --network enabled --write-dir task9-red-read-order --command 'cargo test -p stateful-cli --test hook partial_or_truncated_read_completes_without_baseline'` exited 101: **0 passed, 1 failed**; it observed `/v2/presence/update` before `/v2/read/complete`.
+- `stateful sandbox run --fs build --network enabled --write-dir task9-red-denied-intent --command 'cargo test -p stateful-cli --test hook denied_v2_write_intent_completes_the_exact_started_intent_as_failed'` exited 101: **0 passed, 1 failed**; no failed completion arrived after a 200 V2 authorization response containing both an intent ID and `decision: deny`.
+- `stateful sandbox run --fs build --network enabled --write-dir task9-red-sandbox-transport --command 'cargo test -p stateful-cli --lib second_authorization_transport_failure_completes_the_first_started_intent'` initially exited 101 before the CLI test ran because concurrent core work temporarily omitted `actor_id` from `ReadObservationRecord` literals. The focused test was written before the cleanup implementation; its GREEN run below exercised the intended second-authorization transport failure.
+
+#### GREEN evidence
+
+- `stateful sandbox run --fs build --network enabled --write-dir task9-final-write-recovery-current --command 'cargo test -p stateful-cli --lib write_lifecycle::tests::'`: **2 passed**. It scans persisted records, replays the frozen completion request unchanged, retains two releases independently after the second fails, and deletes only after the replay succeeds.
+- `stateful sandbox run --fs build --network enabled --write-dir task9-final-sandbox-recovery --command 'cargo test -p stateful-cli --lib second_authorization_transport_failure_completes_the_first_started_intent'`: **1 passed**. It observes the first exact intent completed failed after the second authorization transport failure.
+- `stateful sandbox run --fs build --network enabled --write-dir task9-final-benchmark-denial --command 'cargo test -p stateful-cli --lib denied_benchmark_intent_completes_as_failed'`: **1 passed**. It parses the completion request body and verifies `intent_id: intent-1` with `outcome: failed`.
+- `stateful sandbox run --fs build --network enabled --write-dir task9-final-hook --command 'cargo test -p stateful-cli --test hook'`: **140 passed**. It covers required completion before optional presence/heartbeat, presence-drop ordering, and exact failed-intent bodies.
+- `stateful sandbox run --fs build --network enabled --write-dir task9-final-commit --command 'cargo test -p stateful-cli --test commit structured_commit_v2_completion_follows_the_git_outcome'`: **1 passed**. A real V2 fake transport observed no completion until Git had succeeded, then `committed`; a pre-commit setup failure left Git at its original commit count and completed `failed`.
+- `stateful sandbox run --fs build --network enabled --write-dir task9-final-cli --command 'cargo test -p stateful-cli --lib --test hook --test commit'`: **127 library, 140 hook, and 29 commit tests passed**.
+
+#### Residual risks
+
+- A record that contains only a Started intent and no frozen completion request is retained, not guessed at or deleted. The later scan replays only frozen requests so it cannot generate a new request or operation ID.
+- A corrupt record remains on disk and causes a replay warning; valid sibling records are still scanned. Repairing irrecoverably corrupt JSON remains an operator action.
+- The earlier claim that commit ordering had no live V2 fixture is superseded by `structured_commit_v2_completion_follows_the_git_outcome`.
