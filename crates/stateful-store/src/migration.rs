@@ -355,14 +355,14 @@ fn collect_pending_events(connection: &Connection, now: &str) -> StoreResult<Vec
 }
 
 fn append_audits(connection: &Connection, contexts: &BTreeMap<String, Metadata>, pending: &mut Vec<PendingEvent>) -> StoreResult<()> {
-    let mut statement = connection.prepare("SELECT event_id, event_type, agent_id, workspace_id, repo_id, worktree_id, root, branch, payload_json, created_at FROM events ORDER BY created_at, event_id")?;
-    for row in statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, Option<String>>(5)?, row.get::<_, Option<String>>(6)?, row.get::<_, Option<String>>(7)?, row.get::<_, String>(8)?, row.get::<_, String>(9)?)))? {
-        let (event_id, event_type, agent_id, workspace_id, repo_id, worktree_id, root, branch, payload_json, created_at) = row?;
+    let mut statement = connection.prepare("SELECT event_id, event_type, agent_id, workspace_id, sequence, repo_id, worktree_id, root, branch, payload_json, created_at FROM events ORDER BY created_at, event_id")?;
+    for row in statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, Option<i64>>(4)?, row.get::<_, Option<String>>(5)?, row.get::<_, Option<String>>(6)?, row.get::<_, Option<String>>(7)?, row.get::<_, Option<String>>(8)?, row.get::<_, String>(9)?, row.get::<_, String>(10)?)))? {
+        let (event_id, event_type, agent_id, workspace_id, legacy_sequence, repo_id, worktree_id, root, branch, payload_json, created_at) = row?;
         pending.push(PendingEvent {
             payload: EventPayload::Migration(MigrationEvent::LegacyAuditImported(EventData {
                 aggregate_id: format!("legacy-audit:{event_id}"),
                 repeated: false,
-                data: json!({"legacy_event_id": event_id, "legacy_event_type": event_type, "non_projectable": true, "legacy_payload": serde_json::from_str::<Value>(&payload_json)?}),
+                data: json!({"legacy_event_id": event_id, "legacy_event_type": event_type, "legacy_sequence": legacy_sequence, "non_projectable": true, "legacy_payload": serde_json::from_str::<Value>(&payload_json)?}),
             })),
             occurred_at: created_at,
             metadata: metadata(&workspace_id, &agent_id, repo_id, worktree_id, root, branch, contexts),

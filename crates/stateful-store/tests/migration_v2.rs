@@ -162,6 +162,32 @@ fn persistent_v1_db_is_backed_up_seeded_replayed_and_cut_over() {
 }
 
 #[test]
+fn legacy_audit_import_retains_source_sequence_as_payload_provenance() {
+    let temp = TempDir::new().expect("temporary directory should exist");
+    let path = legacy_database(&temp, "audit-sequence.sqlite");
+    open_legacy(&path).expect("legacy database should migrate");
+
+    let provenance = journal_payloads(&path, "migration.legacy_audit_imported")
+        .into_iter()
+        .map(|payload| {
+            (
+                payload["data"]["data"]["legacy_event_id"].clone(),
+                payload["data"]["data"]["legacy_sequence"].clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        provenance,
+        vec![
+            (serde_json::json!("event-a"), serde_json::json!(2)),
+            (serde_json::json!("event-z"), serde_json::json!(9)),
+            (serde_json::json!("event-b"), serde_json::json!(3)),
+        ],
+        "legacy sequence is payload provenance, while audit order remains created_at/event_id",
+    );
+}
+
+#[test]
 fn tied_activities_choose_latest_expiry_then_activity_id() {
     let temp = TempDir::new().expect("temporary directory should exist");
     let path = legacy_database(&temp, "tied.sqlite");
