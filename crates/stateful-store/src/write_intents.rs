@@ -728,8 +728,14 @@ fn authorization_decision_event<T>(
     decision: &Decision,
     variant: fn(EventData) -> AuthorizationEvent,
 ) -> StoreResult<NewEvent> {
-    let mut data = EventData::new(operation_id);
+    let audit_aggregate_id = if operation_id.trim().is_empty() {
+        request.request_id.to_string()
+    } else {
+        operation_id.to_owned()
+    };
+    let mut data = EventData::new(&audit_aggregate_id);
     data.data = json!({
+        "operation_id": operation_id,
         "decision": &decision.decision,
         "reason_code": &decision.reason_code,
         "message": &decision.message,

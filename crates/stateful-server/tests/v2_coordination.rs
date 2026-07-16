@@ -609,6 +609,67 @@ async fn action_validation_precedes_thin_freshness_policy() {
 }
 
 #[tokio::test]
+async fn whitespace_operation_denial_is_frozen_and_audited_without_write_lifecycle() {
+    let app = build_router(
+        ServerConfig::new("test-token").with_coordination_mode(CoordinationMode::Enforcement),
+    );
+    let authorization = envelope_for("agent-1", "00000000-0000-4000-8000-00000000d418", json!({
+        "operation_id": "   ",
+        "action": "write_file",
+        "targets": [{"path": "src/lib.rs", "before": {"exists": false, "byte_len": 0}}]
+    }));
+    let first = app
+        .clone()
+        .oneshot(post("/v2/authorize", authorization.clone()))
+        .await
+        .expect("whitespace operation denial responds");
+    assert_eq!(first.status(), StatusCode::FORBIDDEN);
+    let first_body = response_json(first).await;
+    assert_eq!(first_body["reason_code"], "invalid_write_action");
+
+    successful_post(
+        &app,
+        "/v2/reservation/declare",
+        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d419", json!({
+            "scopes": [{"kind": "file", "path": "src/lib.rs"}],
+            "action": "write_file",
+            "purpose": "Mutate coordination state before retrying."
+        })),
+    )
+    .await;
+
+    let retry = app
+        .clone()
+        .oneshot(post("/v2/authorize", authorization))
+        .await
+        .expect("frozen whitespace denial responds");
+    assert_eq!(retry.status(), StatusCode::FORBIDDEN);
+    assert_eq!(response_json(retry).await, first_body);
+
+    let events = app
+        .oneshot(support::query_get(
+            "/v2/events",
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d420",
+            "workspace-1",
+        ))
+        .await
+        .expect("whitespace denial audit responds");
+    let events = response_json(events).await["events"].as_array().expect("event list").clone();
+    let denials = events.iter().filter(|event| event["event_type"] == "authorization.denied").collect::<Vec<_>>();
+    assert_eq!(denials.len(), 1);
+    assert_eq!(denials[0]["payload"]["event"]["data"]["data"]["operation_id"], "   ");
+    assert_eq!(
+        events.iter().filter(|event| event["event_type"] == "write_intent.started").count(),
+        0,
+    );
+    assert_eq!(
+        events.iter().filter(|event| event["event_type"] == "write_fence.acquired").count(),
+        0,
+    );
+}
+
+#[tokio::test]
 async fn denied_authorization_is_frozen_audited_and_rejects_reused_actor_uuid() {
     let app = build_router(
         ServerConfig::new("test-token").with_coordination_mode(CoordinationMode::Enforcement),
