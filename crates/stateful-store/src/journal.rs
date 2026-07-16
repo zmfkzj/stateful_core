@@ -225,9 +225,8 @@ impl ProjectionReader for SqlProjectionReader<'_> {
             "SELECT DISTINCT aggregate_kind, aggregate_id FROM (
                 SELECT aggregate_kind, aggregate_id
                 FROM journal_events
-                WHERE workspace_id = ?1 AND affects_context = 1
+                WHERE workspace_id = ?1 AND affects_context = 1 AND event_seq > ?2
                 ORDER BY event_seq
-                LIMIT -1 OFFSET ?2
             )",
         )?;
         statement

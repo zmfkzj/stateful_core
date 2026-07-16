@@ -460,10 +460,7 @@ impl<'a> Projector<'a> {
                 &format!(
                     "DELETE FROM {table}
                      WHERE workspace_id = ?1
-                       AND origin_event_seq IN (
-                           SELECT event_seq FROM journal_events
-                           WHERE workspace_id = ?1 AND agent_id = ?2
-                       )"
+                       AND json_extract(payload_json, '$.agent_id') = ?2"
                 ),
                 params![event.workspace_id, agent_id],
             )?;
@@ -560,8 +557,8 @@ impl<'a> Projector<'a> {
         let table = format!("{}workspace_version", self.prefix);
         self.connection.execute(
             &format!(
-                "INSERT INTO {table} (workspace_id, version, origin_event_seq) VALUES (?1, 1, ?2)
-                 ON CONFLICT(workspace_id) DO UPDATE SET version=version+1, origin_event_seq=excluded.origin_event_seq"
+                "INSERT INTO {table} (workspace_id, version, origin_event_seq) VALUES (?1, ?2, ?2)
+                 ON CONFLICT(workspace_id) DO UPDATE SET version=excluded.version, origin_event_seq=excluded.origin_event_seq"
             ),
             params![event.workspace_id, event.stored.event_seq()],
         )?;

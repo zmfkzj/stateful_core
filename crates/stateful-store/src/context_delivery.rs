@@ -642,7 +642,7 @@ fn item_from_current(
             format!("Agent {} has a write fence on {resource}.", agent_id.unwrap_or("another agent")),
             "Wait for the write fence to release or coordinate with its owner.",
         ),
-        "human_observation" if status == "unreconciled" => (
+        "human_observation" if status == "pending" => (
             CurrentItemKind::Claim,
             CurrentSeverity::Block,
             format!("{resource} has an unreconciled human write."),

@@ -1,10 +1,13 @@
 use stateful_core::{
     AGENT_CONTEXT_SCOPE_SOURCE_REF, ActorType, AgentIdentity, ContextDelta, CurrentItemKind,
-    CurrentSeverity, ExplicitHandoff, HandoffStatus, PresenceResourceRelation, RenderMode,
-    RequestEnvelope, SourceKind, SourceRef, WorkspaceIdentity, WriteIntentStart, WriteTarget,
+    CurrentSeverity, EventData, EventPayload, ExplicitHandoff, HandoffStatus,
+    HumanObservationEvent, MigrationEvent, NewEvent, PresenceResourceRelation, RenderMode,
+    RequestEnvelope, ReservationEvent, SourceKind, SourceRef, WorkspaceIdentity, WriteIntentStart,
+    WriteTarget,
 };
 use stateful_store::{
-    Clock, ContextAcknowledgement, ContextRender, DeliveryAttempt, FixedClock, NotificationCreate,
+    Clock, CommandPlan, ContextAcknowledgement, ContextRender, DeliveryAttempt, FixedClock,
+    HumanObservationConfidence, HumanObservationInput, HumanObservationKind, NotificationCreate,
     NotificationDelivery, PresenceRegistration, PresenceResourceUpdate, ReservationDeclaration,
     ReservationRelease, Store, WaitRequest,
 };
@@ -192,7 +195,7 @@ fn acknowledgements_are_cumulative_and_isolated_per_agent() {
             },
         ))
         .expect("older acknowledgement succeeds");
-    assert_eq!(store.context_cursor("workspace-1", "agent-2").expect("cursor loads"), 1);
+    assert_eq!(store.context_cursor("workspace-1", "agent-2").expect("cursor loads"), first.workspace_version);
     assert_eq!(
         store
             .pending_context_deliveries("agent-2", "workspace-1")
@@ -200,7 +203,7 @@ fn acknowledgements_are_cumulative_and_isolated_per_agent() {
             .iter()
             .map(|delivery| delivery.workspace_version)
             .collect::<Vec<_>>(),
-        vec![2],
+        vec![second.workspace_version],
     );
     assert!(
         store
@@ -228,7 +231,7 @@ fn acknowledgements_are_cumulative_and_isolated_per_agent() {
             },
         ))
         .expect("latest acknowledgement succeeds");
-    assert_eq!(store.context_cursor("workspace-1", "agent-2").expect("cursor loads"), 2);
+    assert_eq!(store.context_cursor("workspace-1", "agent-2").expect("cursor loads"), second.workspace_version);
     assert!(store
         .pending_context_deliveries("agent-2", "workspace-1")
         .expect("deliveries load")
@@ -271,7 +274,7 @@ fn newer_delivery_keeps_sent_payload_immutable_and_coalesces_one_unread_notifica
 
     assert_ne!(first.delivery_id, second.delivery_id);
     assert_eq!(first.workspace_version, 1);
-    assert_eq!(second.workspace_version, first.workspace_version + 1);
+    assert_eq!(second.workspace_version, 5);
     let persisted_first = store
         .context_delivery(
             "workspace-1",
@@ -459,7 +462,7 @@ fn overflow_uses_an_exact_summary_after_twenty_and_dead_letters_after_sixty_four
         .expect("summary delivery exists");
     assert_eq!(
         summary.prompt_text,
-        "Context delivery queue: 21 unacknowledged deliveries; this is version 21.\n",
+        "Context delivery queue: 21 unacknowledged deliveries; this is version 271.\n",
     );
     assert_eq!(
         store
@@ -482,7 +485,7 @@ fn overflow_uses_an_exact_summary_after_twenty_and_dead_letters_after_sixty_four
             .expect("overflow summary loads")
             .expect("overflow summary exists")
             .prompt_text,
-        "Context delivery queue: 64 unacknowledged deliveries; this is version 65.\n",
+        "Context delivery queue: 64 unacknowledged deliveries; this is version 2273.\n",
     );
 }
 
@@ -1032,5 +1035,202 @@ fn reconnect_replays_pending_delivery_then_persists_the_ack_cursor() {
             .expect("post-ack reconnect render succeeds")
             .response
             .changed,
+    );
+}
+
+fn reservation_context_event(
+    request_id: Uuid,
+    ordinal: u32,
+    reservation_id: &str,
+    relative_path: &str,
+) -> NewEvent {
+    let mut data = EventData::new(reservation_id);
+    data.data = serde_json::json!({"reservation": {
+        "reservation_id": reservation_id,
+        "agent_id": "owner",
+        "workspace_id": "workspace-1",
+        "scopes": [{"kind": "file", "path": relative_path}],
+        "purpose": "Coordinate source changes.",
+        "status": "active"
+    }});
+    NewEvent::new(
+        request_id,
+        ordinal,
+        NOW,
+        EventPayload::Reservation(ReservationEvent::Declared(data)),
+    )
+    .expect("reservation event builds")
+}
+
+#[test]
+fn context_cursor_uses_event_sequence_across_legacy_audit_gaps() {
+    let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    let request_id = Uuid::new_v4();
+    let owner = request("owner", request_id, ());
+    let mut audit = EventData::new("legacy-audit");
+    audit.data = serde_json::json!({"source_sequence": 42});
+    store
+        .execute_command(&owner, "test.audit_gap", |_| {
+            Ok(CommandPlan {
+                events: vec![
+                    reservation_context_event(request_id, 0, "reservation-1", "src/one.rs"),
+                    NewEvent::new(
+                        request_id,
+                        1,
+                        NOW,
+                        EventPayload::Migration(MigrationEvent::LegacyAuditImported(audit)),
+                    )
+                    .expect("audit event builds"),
+                    reservation_context_event(request_id, 2, "reservation-2", "src/two.rs"),
+                ],
+                response: (),
+                http_status: 200,
+            })
+        })
+        .expect("events commit");
+
+    let first = store
+        .render_context(&request(
+            "reader",
+            Uuid::new_v4(),
+            ContextRender { mode: RenderMode::Brief, resource: None },
+        ))
+        .expect("first context renders")
+        .response;
+    assert_eq!(first.workspace_version, 3);
+    assert_eq!(first.items.len(), 2);
+    store
+        .acknowledge_context(&request(
+            "reader",
+            Uuid::new_v4(),
+            ContextAcknowledgement {
+                delivery_id: first.delivery_id.expect("delivery id"),
+                sequence: first.sequence.expect("delivery sequence"),
+                workspace_version: first.workspace_version,
+            },
+        ))
+        .expect("context acknowledges");
+    assert_eq!(store.context_cursor("workspace-1", "reader").expect("cursor loads"), 3);
+
+    let later_request_id = Uuid::new_v4();
+    let later_request = request("owner", later_request_id, ());
+    store
+        .execute_command(&later_request, "test.later_change", |_| {
+            Ok(CommandPlan {
+                events: vec![reservation_context_event(later_request_id, 0, "reservation-3", "src/three.rs")],
+                response: (),
+                http_status: 200,
+            })
+        })
+        .expect("later event commits");
+    let next = store
+        .render_context(&request(
+            "reader",
+            Uuid::new_v4(),
+            ContextRender { mode: RenderMode::Brief, resource: None },
+        ))
+        .expect("later context renders")
+        .response;
+    assert_eq!(next.workspace_version, 8);
+    assert_eq!(
+        next.items.iter().map(|item| item.resource.as_str()).collect::<Vec<_>>(),
+        vec!["src/three.rs"],
+        "the audit gap and already acknowledged events must not be redelivered",
+    );
+}
+
+#[test]
+fn pending_human_writes_render_while_reconciled_and_expired_writes_do_not() {
+    let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    let pending = store
+        .record_human_observation(&request(
+            "human",
+            Uuid::new_v4(),
+            HumanObservationInput {
+                relative_path: "src/pending.rs".into(),
+                kind: HumanObservationKind::Save,
+                confidence: HumanObservationConfidence::High,
+                source: "watcher".into(),
+                summary: "pending human write".into(),
+                observed_at: None,
+            },
+        ))
+        .expect("pending observation records")
+        .response;
+    let reconciled = store
+        .record_human_observation(&request(
+            "human",
+            Uuid::new_v4(),
+            HumanObservationInput {
+                relative_path: "src/reconciled.rs".into(),
+                kind: HumanObservationKind::Save,
+                confidence: HumanObservationConfidence::High,
+                source: "watcher".into(),
+                summary: "reconciled human write".into(),
+                observed_at: None,
+            },
+        ))
+        .expect("reconciled observation records")
+        .response;
+    let expired = store
+        .record_human_observation(&request(
+            "human",
+            Uuid::new_v4(),
+            HumanObservationInput {
+                relative_path: "src/expired.rs".into(),
+                kind: HumanObservationKind::Save,
+                confidence: HumanObservationConfidence::High,
+                source: "watcher".into(),
+                summary: "expired human write".into(),
+                observed_at: None,
+            },
+        ))
+        .expect("expired observation records")
+        .response;
+    let mut reconciled = reconciled;
+    reconciled.status = "reconciled".into();
+    let mut expired = expired;
+    expired.status = "expired".into();
+    let resolution_request = request("maintenance", Uuid::new_v4(), ());
+    store
+        .execute_command(&resolution_request, "test.resolve_human_writes", |_| {
+            let mut reconciled_data = EventData::new(&reconciled.observation_id);
+            reconciled_data.data = serde_json::json!({"observation": reconciled});
+            let mut expired_data = EventData::new(&expired.observation_id);
+            expired_data.data = serde_json::json!({"observation": expired});
+            Ok(CommandPlan {
+                events: vec![
+                    NewEvent::new(
+                        resolution_request.request_id,
+                        0,
+                        NOW,
+                        EventPayload::HumanObservation(HumanObservationEvent::Reconciled(reconciled_data)),
+                    )
+                    .expect("reconciled event builds"),
+                    NewEvent::new(
+                        resolution_request.request_id,
+                        1,
+                        NOW,
+                        EventPayload::HumanObservation(HumanObservationEvent::Expired(expired_data)),
+                    )
+                    .expect("expired event builds"),
+                ],
+                response: (),
+                http_status: 200,
+            })
+        })
+        .expect("resolution events commit");
+
+    let delta = store
+        .render_context(&request(
+            "reader",
+            Uuid::new_v4(),
+            ContextRender { mode: RenderMode::Brief, resource: None },
+        ))
+        .expect("context renders")
+        .response;
+    assert_eq!(
+        delta.items.iter().filter(|item| item.kind == CurrentItemKind::Claim).map(|item| item.resource.as_str()).collect::<Vec<_>>(),
+        vec![pending.relative_path.as_str()],
     );
 }

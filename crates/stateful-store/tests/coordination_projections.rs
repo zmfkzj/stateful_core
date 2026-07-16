@@ -1,7 +1,7 @@
 use serde_json::json;
 use stateful_core::{
-    ActorType, AgentIdentity, EventData, EventPayload, NewEvent, RequestEnvelope, ReservationEvent,
-    SourceKind, SourceRef, WorkspaceIdentity,
+    ActorType, AgentIdentity, ClaimEvent, EventData, EventPayload, NewEvent, RequestEnvelope,
+    ReservationEvent, SourceKind, SourceRef, WaitEvent, WorkspaceIdentity,
 };
 use stateful_store::{CommandPlan, FixedClock, ReservationDeclaration, Store};
 use time::{macros::datetime, OffsetDateTime};
@@ -327,4 +327,55 @@ fn aggregate_failure_rolls_back_a_multi_event_transition() {
         .is_err());
     assert_eq!(store.journal_event_count().expect("journal count should load"), 0);
     assert_eq!(store.command_receipt_count().expect("receipt count should load"), 0);
+}
+
+#[test]
+fn cleanup_removes_granted_records_by_payload_owner_not_event_author() {
+    let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    let request_id = Uuid::new_v4();
+    let request = request(request_id);
+    let owned = |record_id: &str, status: &str| {
+        json!({
+            "agent_id": "agent-b",
+            "relative_path": "src/owned.rs",
+            "status": status,
+            "reservation_id": record_id,
+            "claim_id": record_id,
+            "wait_id": record_id,
+            "request_id": record_id,
+        })
+    };
+    let cleanup_event = |ordinal: u32, payload: fn(EventData) -> EventPayload| {
+        let mut data = EventData::new("agent-b");
+        data.data = json!({"agent_id": "agent-b", "cleanup": true});
+        NewEvent::new(request_id, ordinal, NOW, payload(data)).expect("cleanup event builds")
+    };
+    store
+        .execute_command(&request, "cleanup.granted_owner", |_| {
+            Ok(CommandPlan {
+                events: vec![
+                    aggregate_event(request_id, 0, "reservation-b", "reservation", owned("reservation-b", "active"), |data| EventPayload::Reservation(ReservationEvent::Declared(data))),
+                    aggregate_event(request_id, 1, "claim-b", "claim", owned("claim-b", "active"), |data| EventPayload::Claim(ClaimEvent::Acquired(data))),
+                    aggregate_event(request_id, 2, "wait-b", "wait", owned("wait-b", "claimable"), |data| EventPayload::Wait(WaitEvent::BecameClaimable(data))),
+                    cleanup_event(3, |data| EventPayload::Reservation(ReservationEvent::Released(data))),
+                    cleanup_event(4, |data| EventPayload::Claim(ClaimEvent::Released(data))),
+                    cleanup_event(5, |data| EventPayload::Wait(WaitEvent::Cancelled(data))),
+                ],
+                response: (),
+                http_status: 200,
+            })
+        })
+        .expect("owner cleanup commits");
+
+    let snapshot = store.projection_snapshot().expect("projection loads");
+    for (table, aggregate_id) in [
+        ("reservation_current", "reservation-b"),
+        ("claim_current", "claim-b"),
+        ("wait_current", "wait-b"),
+    ] {
+        assert!(
+            snapshot[table].iter().all(|row| row[1] != format!("t:{aggregate_id}")),
+            "{table} must remove records owned by agent-b even when agent-1 authored the grant",
+        );
+    }
 }
