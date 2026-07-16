@@ -661,7 +661,10 @@ fn authorization_warned_event<T>(
 ) -> StoreResult<NewEvent> {
     let mut data = EventData::new(&intent.operation_id);
     data.data = json!({
-        "decision": decision,
+        "decision": &decision.decision,
+        "reason_code": &decision.reason_code,
+        "message": &decision.message,
+        "required_next_action": &decision.required_next_action,
         "action": &intent.action,
         "targets": &intent.targets,
     });

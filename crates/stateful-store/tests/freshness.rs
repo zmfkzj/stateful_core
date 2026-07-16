@@ -771,10 +771,11 @@ fn warned_authorization_audits_its_reason_before_intent_and_fence_events() {
         .find(|event| event.event_type == "authorization.warned")
         .expect("warning event exists");
     assert_eq!(
-        warned.payload["event"]["data"]["data"]["decision"]["reason_code"],
+        warned.payload["event"]["data"]["data"]["reason_code"],
         "missing_read_provenance",
     );
     assert_eq!(warned.payload["event"]["data"]["data"]["action"], "write_file");
+    assert!(warned.payload["event"]["data"]["data"]["decision"].is_string());
 }
 
 #[test]
