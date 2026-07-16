@@ -496,25 +496,28 @@ fn remove_stale_lock(path: &Path) -> anyhow::Result<bool> {
 
 fn pid_matches_current_exe(pid: u32) -> anyhow::Result<bool> {
     let output = Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "command="])
+        .args(["-p", &pid.to_string(), "-o", "comm="])
         .output()?;
     if !output.status.success() {
         return Ok(false);
     }
 
-    let command = String::from_utf8(output.stdout)?;
+    let executable = Path::new(String::from_utf8(output.stdout)?.trim()).to_path_buf();
     let current_exe = std::env::current_exe()?;
-    let Some(current_exe_name) = current_exe.file_name().and_then(|name| name.to_str()) else {
-        return Ok(false);
-    };
+    Ok(executable_path_matches_current_exe(&executable, &current_exe))
+}
 
-    Ok(command.contains(current_exe.to_string_lossy().as_ref())
-        || command.split_whitespace().next().is_some_and(|program| {
-            Path::new(program)
-                .file_name()
-                .and_then(|name| name.to_str())
-                == Some(current_exe_name)
-        }))
+fn executable_path_matches_current_exe(executable: &Path, current_exe: &Path) -> bool {
+    if !executable.is_absolute() {
+        return false;
+    }
+    let Ok(executable) = executable.canonicalize() else {
+        return false;
+    };
+    let Ok(current_exe) = current_exe.canonicalize() else {
+        return false;
+    };
+    executable == current_exe
 }
 
 struct StartLock {
@@ -656,6 +659,27 @@ mod tests {
             "retiring an unproved runtime must remove only the stale runtime file"
         );
         let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn executable_proof_rejects_different_absolute_binary_with_same_basename() {
+        let root = temp_home("stateful-executable-proof");
+        let expected = root.join("expected").join("stateful");
+        let different = root.join("different").join("stateful");
+        fs::create_dir_all(expected.parent().expect("expected parent")).expect("parent should create");
+        fs::create_dir_all(different.parent().expect("different parent")).expect("parent should create");
+        fs::write(&expected, "expected").expect("expected executable marker should write");
+        fs::write(&different, "different").expect("different executable marker should write");
+
+        assert!(
+            !executable_path_matches_current_exe(&different, &expected),
+            "matching only the basename must never prove executable ownership"
+        );
+        assert!(
+            executable_path_matches_current_exe(&expected, &expected),
+            "the exact canonical executable path should prove ownership"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     fn temp_home(name: &str) -> std::path::PathBuf {

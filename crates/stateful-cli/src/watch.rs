@@ -62,14 +62,18 @@ pub fn run_watch(repo: Option<PathBuf>) -> anyhow::Result<()> {
         match receiver.recv_timeout(FLUSH_INTERVAL) {
             Ok(Ok(event)) => queue_event_paths(&repo_root, event.paths, &mut pending),
             Ok(Err(error)) => eprintln!("stateful watch warning: {error}"),
-            Err(mpsc::RecvTimeoutError::Timeout) => flush_pending(
-                &repo_root,
-                &runtime,
-                identity.clone(),
-                &agent_id,
-                &workspace_id,
-                &mut pending,
-            )?,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if let Err(error) = flush_pending(
+                    &repo_root,
+                    &runtime,
+                    identity.clone(),
+                    &agent_id,
+                    &workspace_id,
+                    &mut pending,
+                ) {
+                    eprintln!("stateful watch warning: {error}");
+                }
+            },
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
@@ -112,12 +116,21 @@ fn flush_pending(
         return Ok(());
     }
 
-    let candidates = pending
-        .keys()
-        .filter_map(|path| observed_path(repo_root, path))
-        .filter(|(_, relative)| !prefix_excluded(relative))
-        .filter(|(absolute, _)| !absolute.metadata().is_ok_and(|metadata| metadata.is_dir()))
-        .collect::<Vec<_>>();
+    let mut candidates = Vec::new();
+    let paths = pending.keys().cloned().collect::<Vec<_>>();
+    for path in paths {
+        let Some((absolute, relative)) = observed_path(repo_root, &path) else {
+            pending.remove(&path);
+            continue;
+        };
+        if prefix_excluded(&relative)
+            || absolute.metadata().is_ok_and(|metadata| metadata.is_dir())
+        {
+            pending.remove(&absolute);
+            continue;
+        }
+        candidates.push((absolute, relative));
+    }
     let ignored = gitignored_paths(
         repo_root,
         candidates.iter().map(|(_, relative)| relative.as_path()),
@@ -437,6 +450,36 @@ fn watcher_retries_failed_and_unsent_paths_with_exact_request_envelopes() {
         delivered,
         HashSet::from(["src/a.rs".to_string(), "src/b.rs".to_string()]),
         "retry should acknowledge every path exactly once"
+    );
+}
+
+#[cfg(test)]
+
+#[test]
+fn watcher_discards_permanently_undeliverable_paths() {
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).expect("git marker should write");
+    let directory = repo.join("src");
+    std::fs::create_dir_all(&directory).expect("directory should write");
+    let mut pending = HashMap::new();
+    pending.insert(repo.join(".git").join("index"), PendingObservation::new());
+    pending.insert(directory, PendingObservation::new());
+    pending.insert(temp.path().join("outside.rs"), PendingObservation::new());
+
+    flush_pending(
+        &repo,
+        &crate::ServerRuntime::new("http://127.0.0.1:1", "token", "w1", 0),
+        None,
+        "human-1",
+        "w1",
+        &mut pending,
+    )
+    .expect("permanent filters should not need delivery");
+
+    assert!(
+        pending.is_empty(),
+        "outside-root, excluded, and directory paths must not remain queued"
     );
 }
 
