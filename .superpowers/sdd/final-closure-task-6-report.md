@@ -21,5 +21,5 @@
 ## Self-review and concerns
 - Confirmed normal reads cannot create an exact after-fingerprint, raw selectors use the underlying file target, and Codex mixed patch targets are rejected rather than authorized using the first action.
 - Independent review identified typed Testing transitions; these were added.
-- Commit/push: pending.
+- Commit/push: `7645eca` pushed to `origin/presence-first-event-journal-v2`.
 - Concern: the full focused hook/outbox command timed out in the sandbox and must be rerun successfully before final integration.
