@@ -68,7 +68,7 @@ where
 
 pub fn ensure_server(paths: &GlobalPaths) -> anyhow::Result<ServerRuntime> {
     if let Some(runtime) = read_runtime_file(paths)? {
-        if runtime_is_healthy(&runtime) {
+        if runtime_is_reusable(&runtime) {
             return Ok(runtime);
         }
     }
@@ -76,7 +76,7 @@ pub fn ensure_server(paths: &GlobalPaths) -> anyhow::Result<ServerRuntime> {
     {
         let _lock = acquire_start_lock(paths)?;
         if let Some(runtime) = read_runtime_file(paths)? {
-            if runtime_is_healthy(&runtime) {
+            if runtime_is_reusable(&runtime) {
                 return Ok(runtime);
             }
             retire_incompatible_runtime(paths, &runtime)?;
@@ -101,7 +101,7 @@ fn ensure_current_server_with_options(
     options: &ServerStartOptions,
 ) -> anyhow::Result<ServerRuntime> {
     if let Some(runtime) = read_runtime_file(paths)? {
-        if runtime_is_healthy(&runtime) {
+        if runtime_is_reusable(&runtime) {
             ensure_runtime_matches_options(&runtime, options)?;
             return Ok(runtime);
         }
@@ -110,7 +110,7 @@ fn ensure_current_server_with_options(
     {
         let _lock = acquire_start_lock(paths)?;
         if let Some(runtime) = read_runtime_file(paths)? {
-            if runtime_is_healthy(&runtime) {
+            if runtime_is_reusable(&runtime) {
                 ensure_runtime_matches_options(&runtime, options)?;
                 return Ok(runtime);
             }
@@ -159,6 +159,12 @@ where
 
 pub fn runtime_is_healthy(runtime: &ServerRuntime) -> bool {
     runtime_is_basic_healthy(runtime)
+}
+
+fn runtime_is_reusable(runtime: &ServerRuntime) -> bool {
+    runtime_is_basic_healthy(runtime)
+        && runtime_identity_matches_pid(runtime).unwrap_or(false)
+        && pid_matches_current_exe(runtime.pid).unwrap_or(false)
 }
 
 fn runtime_is_basic_healthy(runtime: &ServerRuntime) -> bool {
@@ -260,10 +266,9 @@ fn retire_incompatible_runtime(paths: &GlobalPaths, runtime: &ServerRuntime) -> 
         return terminate_runtime(paths, runtime);
     }
 
-    anyhow::bail!(
-        "existing stateful server pid {} is reachable but does not support required runtime capabilities; stop it with the matching stateful binary and retry",
-        runtime.pid
-    )
+    let _ = fs::remove_file(&paths.server_json);
+    Ok(())
+
 }
 
 fn terminate_runtime(paths: &GlobalPaths, runtime: &ServerRuntime) -> anyhow::Result<()> {
@@ -618,6 +623,38 @@ mod tests {
         assert_eq!(result.pid, child.id());
         let _ = child.kill();
         let _ = child.wait();
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn mismatched_identity_runtime_is_retired_without_reuse_or_signal() {
+        let home = temp_home("stateful-retire-mismatched-runtime");
+        let paths = GlobalPaths::new(&home);
+        let identity = r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":42,"workspace_id":"w1","workspace_version":1,"capabilities":["presence"]}"#;
+        let fake = FakeHttpServer::start(vec![
+            fake_response(200, identity),
+            fake_response(200, identity),
+            fake_response(200, identity),
+            fake_response(200, identity),
+        ]);
+        let runtime = ServerRuntime::new(
+            fake.base_url(),
+            "token",
+            "w1",
+            std::process::id(),
+        );
+        write_global_runtime_file(&paths, &runtime).expect("runtime should write");
+
+        assert!(
+            !runtime_is_reusable(&runtime),
+            "an endpoint with a different live identity pid must not be reusable"
+        );
+        retire_incompatible_runtime(&paths, &runtime)
+            .expect("unproved runtime should be retired without signaling its pid");
+        assert!(
+            !paths.server_json.exists(),
+            "retiring an unproved runtime must remove only the stale runtime file"
+        );
         let _ = fs::remove_dir_all(home);
     }
 

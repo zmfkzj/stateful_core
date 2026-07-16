@@ -1567,8 +1567,8 @@ fn reservation_declare_command_requires_at_least_one_file() {
 }
 
 #[test]
-fn reservation_claim_command_parses_wait_id() {
-    let cli = Cli::try_parse_from([
+fn reservation_claim_command_requires_granted_path() {
+    let error = Cli::try_parse_from([
         "stateful",
         "reservation",
         "claim",
@@ -1579,6 +1579,31 @@ fn reservation_claim_command_parses_wait_id() {
         "--wait-id",
         "wait-1",
     ])
+    .expect_err("reservation claim without granted path should fail");
+
+    assert!(
+        error.to_string().contains("--path"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn reservation_claim_command_preserves_wait_id_and_granted_path() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "reservation",
+        "claim",
+        "--agent-id",
+        "agent-a",
+        "--workspace-id",
+        "w1",
+        "--reservation-id",
+        "reservation-a",
+        "--wait-id",
+        "wait-1",
+        "--path",
+        "src/auth.ts",
+    ])
     .expect("reservation claim command should parse");
 
     assert!(matches!(
@@ -1586,11 +1611,14 @@ fn reservation_claim_command_parses_wait_id() {
         Command::Reservation(stateful_cli::ReservationCommand::Claim {
             ref agent_id,
             ref workspace_id,
+            ref reservation_id,
             ref wait_id,
-            ..
+            ref path,
         }) if agent_id.as_deref() == Some("agent-a")
             && workspace_id.as_deref() == Some("w1")
+            && reservation_id.as_deref() == Some("reservation-a")
             && wait_id == "wait-1"
+            && path == "src/auth.ts"
     ));
 }
 
@@ -1604,6 +1632,8 @@ fn reservation_claim_command_parses_reservation_id() {
         "reservation-a",
         "--wait-id",
         "wait-1",
+        "--path",
+        "src/auth.ts",
     ])
     .expect("claim command should parse");
 
@@ -1612,8 +1642,11 @@ fn reservation_claim_command_parses_reservation_id() {
         Command::Reservation(stateful_cli::ReservationCommand::Claim {
             ref reservation_id,
             ref wait_id,
+            ref path,
             ..
-        }) if reservation_id.as_deref() == Some("reservation-a") && wait_id == "wait-1"
+        }) if reservation_id.as_deref() == Some("reservation-a")
+            && wait_id == "wait-1"
+            && path == "src/auth.ts"
     ));
 }
 

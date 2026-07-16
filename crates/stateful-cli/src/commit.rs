@@ -52,6 +52,10 @@ pub fn run_structured_commit(request: CommitRequest) -> anyhow::Result<CommitRes
         .map(|path| commit_target(&request.repo_root, path))
         .collect::<anyhow::Result<Vec<_>>>()?;
 
+    if request.authorize.is_none() {
+        replay_pending_commit_writes(&request)?;
+    }
+
     let mut lifecycles = Vec::new();
     for target in &targets {
         match authorize_path(&request, target) {
@@ -297,6 +301,12 @@ fn authorize_path(
         anyhow::bail!("{}: {}", decision.reason_code, decision.message);
     }
     Ok(Some(lifecycle))
+}
+
+fn replay_pending_commit_writes(request: &CommitRequest) -> anyhow::Result<()> {
+    let runtime = discover_runtime_with_optional_global(&request.repo_root)?;
+    let paths = GlobalPaths::from_env()?;
+    write_lifecycle::replay_pending(&paths, &runtime, &request.repo_root)
 }
 
 fn commit_workspace_id(

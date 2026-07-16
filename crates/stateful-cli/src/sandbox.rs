@@ -331,6 +331,16 @@ pub fn run_sandbox_in_repo(
     } else {
         None
     };
+    if sandbox_profile_mutates_repo(request.fs, external_has_repo_targets) {
+        write_lifecycle::replay_pending(
+            paths,
+            runtime
+                .as_ref()
+                .expect("repo-mutating sandbox profile requires runtime"),
+            &repo_root,
+        )?;
+    }
+
 
     let mut allowed_write_targets = Vec::new();
     let mut denied_write_targets = Vec::new();
@@ -2312,6 +2322,13 @@ fn sandbox_profile_requires_runtime(fs: SandboxFsProfile) -> bool {
     !matches!(fs, SandboxFsProfile::ReadOnly | SandboxFsProfile::External)
 }
 
+fn sandbox_profile_mutates_repo(fs: SandboxFsProfile, external_has_repo_targets: bool) -> bool {
+    matches!(
+        fs,
+        SandboxFsProfile::WriteTargets | SandboxFsProfile::Git | SandboxFsProfile::GithubPr
+    ) || (fs == SandboxFsProfile::External && external_has_repo_targets)
+}
+
 fn git_profile_writable_paths(repo_root: &Path) -> Vec<SandboxWritablePath> {
     vec![
         SandboxWritablePath::directory(git_profile_private_dir(repo_root)),
@@ -3798,7 +3815,11 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
         let address = listener.local_addr().expect("listener address should resolve");
         let (tx, rx) = mpsc::channel();
+        let pid = std::process::id();
         thread::spawn(move || {
+            let identity = format!(
+                r#"{{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":{pid},"workspace_id":"w1","workspace_version":1,"capabilities":["presence"]}}"#
+            );
             while let Ok((mut stream, _)) = listener.accept() {
                 let mut request = Vec::new();
                 let mut byte = [0_u8; 1];
@@ -3820,7 +3841,7 @@ mod tests {
                 tx.send(String::from_utf8(request).expect("request should be UTF-8"))
                     .expect("request should send");
                 let body = if is_identity {
-                    r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":42,"workspace_id":"w1","workspace_version":1,"capabilities":["presence"]}"#
+                    identity.as_str()
                 } else if is_authorize {
                     r#"{"intent_id":"intent-1","decision":{"decision":"allow","reason_code":"allowed","message":"ok"}}"#
                 } else {
@@ -3836,7 +3857,7 @@ mod tests {
             }
         });
         (
-            ServerRuntime::new(format!("http://{address}"), "token", "w1", 1),
+            ServerRuntime::new(format!("http://{address}"), "token", "w1", pid),
             rx,
         )
     }
@@ -3924,6 +3945,67 @@ mod tests {
             .expect("failed completion should arrive");
         assert!(completion.contains("POST /v2/write/complete "));
         assert!(completion.contains(r#""outcome":"failed""#));
+    }
+
+    #[test]
+    fn sandbox_replays_only_profiles_that_can_mutate_repo_files() {
+        assert!(!sandbox_profile_mutates_repo(SandboxFsProfile::ReadOnly, false));
+        assert!(!sandbox_profile_mutates_repo(SandboxFsProfile::Build, false));
+        assert!(!sandbox_profile_mutates_repo(SandboxFsProfile::External, false));
+        assert!(sandbox_profile_mutates_repo(SandboxFsProfile::External, true));
+        assert!(sandbox_profile_mutates_repo(SandboxFsProfile::WriteTargets, false));
+        assert!(sandbox_profile_mutates_repo(SandboxFsProfile::Git, false));
+        assert!(sandbox_profile_mutates_repo(SandboxFsProfile::GithubPr, false));
+    }
+
+    #[test]
+    fn sandbox_replay_failure_prevents_new_write_authorization() {
+        let temp = tempfile::tempdir().expect("temp dir should create");
+        let paths = GlobalPaths::new(temp.path().join("home"));
+        let repo_root = temp.path().join("repo");
+        fs::create_dir_all(repo_root.join(".git")).expect("git marker should create");
+        fs::create_dir_all(&paths.home).expect("stateful home should create");
+        fs::write(repo_root.join("target.txt"), "target\n").expect("target should write");
+        crate::enable_repo(&paths, &repo_root).expect("repo should enable");
+        let (runtime, requests) = spawn_sandbox_fake_server();
+        crate::write_global_runtime_file(&paths, &runtime).expect("runtime file should write");
+        let pending_dir = paths.runtime_dir.join("write-intents").join("agent");
+        fs::create_dir_all(&pending_dir).expect("pending directory should create");
+        fs::write(pending_dir.join("broken.json"), "{not-json")
+            .expect("corrupt pending lifecycle should write");
+
+        let error = run_sandbox_in_repo(
+            &repo_root,
+            &paths,
+            SandboxRunRequest {
+                fs: SandboxFsProfile::WriteTargets,
+                network: SandboxNetworkPolicy::Disabled,
+                purpose: None,
+                reservation_id: None,
+                agent_id: Some("agent-1".to_string()),
+                workspace_id: Some("w1".to_string()),
+                write_targets: vec!["target.txt".to_string()],
+                create_targets: Vec::new(),
+                write_dirs: Vec::new(),
+                connect_sockets: Vec::new(),
+                allow_signal: false,
+                command: "true".to_string(),
+                timeout_seconds: None,
+                stream_events: false,
+            },
+        )
+        .expect_err("replay failure must prevent the new sandbox authorization");
+
+        assert!(
+            error.to_string().contains("key must be a string"),
+            "unexpected replay failure: {error}"
+        );
+        while let Ok(request) = requests.recv_timeout(Duration::from_millis(100)) {
+            assert!(
+                !request.starts_with("POST /v2/authorize "),
+                "replay failure must prevent new authorization, got {request}"
+            );
+        }
     }
 
     #[test]

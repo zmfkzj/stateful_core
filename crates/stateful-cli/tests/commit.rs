@@ -1077,6 +1077,8 @@ fn structured_commit_restores_unrelated_index_entries_added_by_failed_hook() {
 
 const COMMIT_CHILD_REPO: &str = "STATEFUL_COMMIT_V2_CHILD_REPO";
 const COMMIT_CHILD_FAILS: &str = "STATEFUL_COMMIT_V2_CHILD_FAILS";
+const COMMIT_CHILD_REPLAY_FAILURE: &str = "STATEFUL_COMMIT_REPLAY_FAILURE";
+
 
 #[cfg(unix)]
 #[test]
@@ -1132,11 +1134,48 @@ fn structured_commit_v2_completion_follows_the_git_outcome() {
 }
 
 #[test]
+fn structured_commit_replay_failure_prevents_new_authorization() {
+    let repo = git_repo("stateful-commit-replay-failure");
+    fs::write(repo.path().join("README.md"), "seed\n").expect("seed should write");
+    git(repo.path(), &["add", "README.md"]);
+    git(repo.path(), &["commit", "-m", "seed"]);
+    fs::create_dir_all(repo.path().join("docs")).expect("docs dir should write");
+    fs::write(repo.path().join("docs/plan.md"), "plan\n").expect("plan should write");
+    let home = tempfile::tempdir().expect("stateful home should create");
+    let paths = GlobalPaths::new(home.path());
+    let (runtime, events) = spawn_commit_v2_server(repo.path().to_path_buf());
+    write_global_runtime_file(&paths, &runtime).expect("runtime should write");
+    let pending = paths.runtime_dir.join("write-intents").join("agent");
+    fs::create_dir_all(&pending).expect("pending dir should create");
+    fs::write(pending.join("broken.json"), "{not-json").expect("pending record should write");
+
+    let output = Command::new(std::env::current_exe().expect("test executable should resolve"))
+        .args(["--exact", "structured_commit_v2_completion_child"])
+        .env(COMMIT_CHILD_REPO, repo.path())
+        .env(COMMIT_CHILD_REPLAY_FAILURE, "1")
+        .env("STATEFUL_HOME", &paths.home)
+        .env_remove("STATEFUL_SERVER_URL")
+        .env_remove("STATEFUL_SERVER_TOKEN")
+        .output()
+        .expect("commit child should run");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        events.recv_timeout(Duration::from_millis(200)).is_err(),
+        "replay failure must prevent the new authorization request"
+    );
+}
+
+#[test]
 fn structured_commit_v2_completion_child() {
     let Ok(repo_root) = std::env::var(COMMIT_CHILD_REPO) else {
         return;
     };
     let fails = std::env::var(COMMIT_CHILD_FAILS).as_deref() == Ok("1");
+    let replay_failure = std::env::var(COMMIT_CHILD_REPLAY_FAILURE).as_deref() == Ok("1");
     let result = run_structured_commit(CommitRequest {
         repo_root: repo_root.into(),
         message: "docs: add plan".to_string(),
@@ -1145,7 +1184,9 @@ fn structured_commit_v2_completion_child() {
         workspace_id: Some("w1".to_string()),
         authorize: None,
     });
-    if fails {
+    if replay_failure {
+        assert!(result.is_err(), "replay failure should fail before authorization");
+    } else if fails {
         assert!(result.is_err(), "failing hook should fail commit");
     } else {
         result.expect("commit should succeed");

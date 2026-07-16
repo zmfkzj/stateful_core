@@ -568,7 +568,7 @@ fn declare_reservation_via_http_posts_one_task_envelope_and_returns_its_identity
 }
 
 #[test]
-fn claim_reservation_via_http_posts_expected_payload() {
+fn claim_reservation_via_http_posts_granted_path_and_validates_wait_identity() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
     let (tx, rx) = mpsc::channel();
@@ -581,7 +581,10 @@ fn claim_reservation_via_http_posts_expected_payload() {
         let (mut stream, _) = listener.accept().expect("connection should arrive");
         let request = read_http_request(&mut stream);
         tx.send(request).expect("request should send to test");
-        write_http_response(&mut stream, r#"{}"#);
+        write_http_response(
+            &mut stream,
+            r#"{"wait_id":"wait-1","relative_path":"src/auth.ts"}"#,
+        );
     });
 
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
@@ -594,6 +597,7 @@ fn claim_reservation_via_http_posts_expected_payload() {
             agent_id: "s1".to_string(),
             workspace_id: "w1".to_string(),
             wait_id: "wait-1".to_string(),
+            relative_path: "src/auth.ts".to_string(),
             reservation_id: None,
             identity: None,
         },
@@ -613,7 +617,7 @@ fn claim_reservation_via_http_posts_expected_payload() {
     assert_eq!(
         body["payload"],
         serde_json::json!({
-            "relative_path": "wait-1"
+            "relative_path": "src/auth.ts"
         })
     );
 }

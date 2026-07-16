@@ -383,6 +383,8 @@ pub enum ReservationCommand {
         reservation_id: Option<String>,
         #[arg(long)]
         wait_id: String,
+        #[arg(long)]
+        path: String,
     },
     Cancel {
         #[arg(long = "agent-id")]
@@ -634,10 +636,11 @@ pub fn run() -> anyhow::Result<()> {
             let identity = GlobalPaths::from_env()
                 .ok()
                 .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok());
+            let workspace_id = query_workspace_id(&runtime, identity.as_ref());
             let request = v2_query_for_runtime(
                 uuid::Uuid::new_v4(),
                 "stateful-cli".to_string(),
-                runtime.workspace_id.clone(),
+                workspace_id,
                 identity,
                 SourceKind::Cli,
                 "current",
@@ -652,10 +655,11 @@ pub fn run() -> anyhow::Result<()> {
             let identity = GlobalPaths::from_env()
                 .ok()
                 .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok());
+            let workspace_id = query_workspace_id(&runtime, identity.as_ref());
             let request = v2_query_for_runtime(
                 uuid::Uuid::new_v4(),
                 "stateful-cli".to_string(),
-                runtime.workspace_id.clone(),
+                workspace_id,
                 identity,
                 SourceKind::Cli,
                 "events",
@@ -974,6 +978,7 @@ pub fn run() -> anyhow::Result<()> {
             agent_id,
             workspace_id,
             wait_id,
+            path,
             reservation_id,
         }) => {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
@@ -986,6 +991,7 @@ pub fn run() -> anyhow::Result<()> {
                     agent_id,
                     workspace_id,
                     wait_id,
+                    relative_path: path,
                     reservation_id,
                     identity: GlobalPaths::from_env()
                         .ok()
@@ -1165,6 +1171,10 @@ fn resolve_agent_workspace(
     });
 
     Ok((agent_id, workspace_id))
+}
+
+fn query_workspace_id(runtime: &ServerRuntime, identity: Option<&RepoIdentity>) -> String {
+    effective_workspace_id_for_repo(&runtime.workspace_id, identity)
 }
 
 fn print_http_response(response: HttpResponse) -> anyhow::Result<()> {
@@ -1615,4 +1625,43 @@ mod tests {
         assert_eq!(body["status"], "ok");
         assert_eq!(body["processes"], serde_json::json!([{ "pid": 202 }]));
     }
+    #[test]
+    fn current_and_events_query_the_enabled_repo_workspace_identity() {
+        let runtime = ServerRuntime::new("http://127.0.0.1:43873", "token", "local", 0);
+        let identity = RepoIdentity {
+            repo_id: "repo-abc123".to_string(),
+            worktree_id: "worktree-def456".to_string(),
+            root: "/repo".to_string(),
+            branch: "main".to_string(),
+        };
+
+        assert_eq!(
+            query_workspace_id(&runtime, Some(&identity)),
+            effective_workspace_id_for_repo("local", Some(&identity)),
+            "enabled repo queries must use the hook workspace derivation"
+        );
+        assert_eq!(
+            query_workspace_id(&runtime, None),
+            "local",
+            "outside a repository queries retain the global workspace"
+        );
+        let request = v2_query_for_runtime(
+            uuid::Uuid::new_v4(),
+            "stateful-cli".to_string(),
+            query_workspace_id(&runtime, Some(&identity)),
+            Some(identity),
+            SourceKind::Cli,
+            "current",
+            "stateful-cli",
+            None,
+            serde_json::json!({}),
+        )
+        .expect("enabled repo query should build");
+        let body = serde_json::to_value(request).expect("query should serialize");
+        assert_eq!(body["workspace_id"], "workspace-worktree-def456");
+        assert_eq!(body["repo_id"], "repo-abc123");
+        assert_eq!(body["worktree_id"], "worktree-def456");
+    }
+
+
 }

@@ -8,11 +8,11 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use notify::{RecursiveMode, Watcher};
-use stateful_core::{ActorType, SourceKind};
+use stateful_core::{ActorType, RequestEnvelope, SourceKind};
 use stateful_store::{HumanObservationConfidence, HumanObservationInput, HumanObservationKind};
 
 use crate::{
@@ -21,6 +21,18 @@ use crate::{
 };
 
 const FLUSH_INTERVAL: Duration = Duration::from_millis(300);
+
+type PendingObservations = HashMap<PathBuf, PendingObservation>;
+
+struct PendingObservation {
+    request: Option<RequestEnvelope<HumanObservationInput>>,
+}
+
+impl PendingObservation {
+    fn new() -> Self {
+        Self { request: None }
+    }
+}
 
 pub fn run_watch(repo: Option<PathBuf>) -> anyhow::Result<()> {
     let paths = GlobalPaths::from_env()?;
@@ -76,16 +88,15 @@ pub fn run_watch(repo: Option<PathBuf>) -> anyhow::Result<()> {
 fn queue_event_paths(
     repo_root: &Path,
     paths: Vec<PathBuf>,
-    pending: &mut HashMap<PathBuf, Instant>,
+    pending: &mut PendingObservations,
 ) {
-    let now = Instant::now();
     for path in paths {
         let absolute = if path.is_absolute() {
             path
         } else {
             repo_root.join(path)
         };
-        pending.insert(absolute, now);
+        pending.entry(absolute).or_insert_with(PendingObservation::new);
     }
 }
 
@@ -95,15 +106,15 @@ fn flush_pending(
     identity: Option<crate::RepoIdentity>,
     agent_id: &str,
     workspace_id: &str,
-    pending: &mut HashMap<PathBuf, Instant>,
+    pending: &mut PendingObservations,
 ) -> anyhow::Result<()> {
     if pending.is_empty() {
         return Ok(());
     }
 
-    let candidates = std::mem::take(pending)
-        .into_keys()
-        .filter_map(|path| observed_path(repo_root, &path))
+    let candidates = pending
+        .keys()
+        .filter_map(|path| observed_path(repo_root, path))
         .filter(|(_, relative)| !prefix_excluded(relative))
         .filter(|(absolute, _)| !absolute.metadata().is_ok_and(|metadata| metadata.is_dir()))
         .collect::<Vec<_>>();
@@ -112,36 +123,46 @@ fn flush_pending(
         candidates.iter().map(|(_, relative)| relative.as_path()),
     );
 
-    for (_absolute, relative) in candidates {
+    for (absolute, relative) in candidates {
         if ignored.contains(&relative) {
+            pending.remove(&absolute);
             continue;
         }
-        let relative_string = relative_path_string(&relative);
-        let kind = if _absolute.exists() {
-            HumanObservationKind::Change
-        } else {
-            HumanObservationKind::Delete
-        };
-        let request = v2_request_envelope(
-            uuid::Uuid::new_v4(),
-            agent_id.to_string(),
-            workspace_id.to_string(),
-            identity.clone(),
-            ActorType::Human,
-            SourceKind::Watcher,
-            "human_observe",
-            "stateful.watch.run",
-            None,
-            HumanObservationInput {
-                relative_path: relative_string,
-                kind,
-                confidence: HumanObservationConfidence::High,
-                source: "watcher".to_string(),
-                summary: "File changed by watcher.".to_string(),
-                observed_at: Some(time::OffsetDateTime::now_utc()),
-            },
+        let entry = pending
+            .get_mut(&absolute)
+            .expect("candidate must remain pending until acknowledged");
+        if entry.request.is_none() {
+            let relative_string = relative_path_string(&relative);
+            let kind = if absolute.exists() {
+                HumanObservationKind::Change
+            } else {
+                HumanObservationKind::Delete
+            };
+            entry.request = Some(v2_request_envelope(
+                uuid::Uuid::new_v4(),
+                agent_id.to_string(),
+                workspace_id.to_string(),
+                identity.clone(),
+                ActorType::Human,
+                SourceKind::Watcher,
+                "human_observe",
+                "stateful.watch.run",
+                None,
+                HumanObservationInput {
+                    relative_path: relative_string,
+                    kind,
+                    confidence: HumanObservationConfidence::High,
+                    source: "watcher".to_string(),
+                    summary: "File changed by watcher.".to_string(),
+                    observed_at: Some(time::OffsetDateTime::now_utc()),
+                },
+            )?);
+        }
+        let response = post_v2(
+            runtime,
+            "/v2/human/observe",
+            entry.request.as_ref().expect("request should be initialized"),
         )?;
-        let response = post_v2(runtime, "/v2/human/observe", &request)?;
         if !(200..300).contains(&response.status_code) {
             anyhow::bail!(
                 "human observe failed with HTTP {}: {}",
@@ -149,6 +170,7 @@ fn flush_pending(
                 response.body
             );
         }
+        pending.remove(&absolute);
     }
 
     Ok(())
@@ -319,7 +341,7 @@ fn watcher_emits_v2_human_observation_and_reconciliation() {
     });
 
     let mut pending = HashMap::new();
-    pending.insert(file, Instant::now());
+    pending.insert(file, PendingObservation::new());
     flush_pending(
         &repo,
         &crate::ServerRuntime::new(format!("http://{addr}"), "token", "w1", 0),
@@ -337,6 +359,121 @@ fn watcher_emits_v2_human_observation_and_reconciliation() {
     assert_eq!(body["protocol_version"], "stateful.v2");
     assert_eq!(body["agent"]["actor_type"], "human");
     assert_eq!(body["payload"]["relative_path"], "src/lib.rs");
+}
+
+#[test]
+fn watcher_retries_failed_and_unsent_paths_with_exact_request_envelopes() {
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).expect("git marker should write");
+    let first = repo.join("src").join("a.rs");
+    let second = repo.join("src").join("b.rs");
+    std::fs::create_dir_all(first.parent().expect("source directory")).expect("source directory");
+    std::fs::write(&first, "a").expect("first file should write");
+    std::fs::write(&second, "b").expect("second file should write");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener address should load");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let identity = r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":42,"workspace_id":"w1","workspace_version":1,"capabilities":["presence"]}"#;
+        let mut observation_count = 0;
+        for _ in 0..6 {
+            let (mut stream, _) = listener.accept().expect("request should arrive");
+            let request = read_watcher_http_request(&mut stream);
+            if request.starts_with("GET /v2/runtime/identity?") {
+                write_watcher_http_response(&mut stream, 200, identity);
+                continue;
+            }
+            tx.send(request).expect("observation should send");
+            let status = if observation_count == 0 { 503 } else { 200 };
+            observation_count += 1;
+            write_watcher_http_response(&mut stream, status, "{}");
+        }
+    });
+
+    let runtime = crate::ServerRuntime::new(format!("http://{addr}"), "token", "w1", 0);
+    let mut pending = HashMap::new();
+    pending.insert(first, PendingObservation::new());
+    pending.insert(second, PendingObservation::new());
+
+    assert!(
+        flush_pending(&repo, &runtime, None, "human-1", "w1", &mut pending).is_err(),
+        "the first rejected observation should fail the flush"
+    );
+    assert_eq!(
+        pending.len(),
+        2,
+        "the failed and unsent observations must remain queued"
+    );
+    flush_pending(&repo, &runtime, None, "human-1", "w1", &mut pending)
+        .expect("retry should deliver the retained observations");
+    assert!(pending.is_empty(), "only acknowledged observations may be removed");
+
+    let requests = (0..3)
+        .map(|_| rx.recv().expect("all observation requests should arrive"))
+        .map(|request| {
+            let body = request
+                .split_once("\r\n\r\n")
+                .expect("request should include a body")
+                .1;
+            serde_json::from_str::<serde_json::Value>(body).expect("body should parse")
+        })
+        .collect::<Vec<_>>();
+    let failed_path = requests[0]["payload"]["relative_path"].clone();
+    assert_eq!(
+        requests[0]["request_id"], requests[1]["request_id"],
+        "the retry must preserve the failed observation request id"
+    );
+    assert_eq!(
+        requests[1]["payload"]["relative_path"], failed_path,
+        "the retry must preserve the failed observation path"
+    );
+    let delivered = requests[1..]
+        .iter()
+        .map(|request| request["payload"]["relative_path"].as_str().expect("path").to_string())
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        delivered,
+        HashSet::from(["src/a.rs".to_string(), "src/b.rs".to_string()]),
+        "retry should acknowledge every path exactly once"
+    );
+}
+
+#[cfg(test)]
+
+fn read_watcher_http_request(stream: &mut std::net::TcpStream) -> String {
+    let mut request = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !request.ends_with(b"\r\n\r\n") {
+        std::io::Read::read_exact(stream, &mut byte).expect("header byte should read");
+        request.push(byte[0]);
+    }
+    let headers = String::from_utf8(request.clone()).expect("headers should be utf8");
+    let content_length = headers
+        .lines()
+        .find_map(|line| line.strip_prefix("Content-Length: "))
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or_default();
+    let mut body = vec![0_u8; content_length];
+    std::io::Read::read_exact(stream, &mut body).expect("body should read");
+    request.extend_from_slice(&body);
+    String::from_utf8(request).expect("request should be utf8")
+}
+
+#[cfg(test)]
+
+fn write_watcher_http_response(stream: &mut std::net::TcpStream, status: u16, body: &str) {
+    let reason = if status == 200 { "OK" } else { "Service Unavailable" };
+    std::io::Write::write_all(
+        stream,
+        format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .as_bytes(),
+    )
+    .expect("response should write");
 }
 
 #[test]
@@ -374,7 +511,7 @@ fn watcher_observation_blocks_writes_until_reread_and_reconciliation() {
 
     let runtime = crate::ServerRuntime::new(format!("http://{addr}"), "token", "w1", 0);
     let mut pending = HashMap::new();
-    pending.insert(file.clone(), Instant::now());
+    pending.insert(file.clone(), PendingObservation::new());
     flush_pending(&repo, &runtime, None, "human-1", "w1", &mut pending)
         .expect("watcher should submit the human observation");
     assert!(pending.is_empty(), "watcher should flush the observed path");

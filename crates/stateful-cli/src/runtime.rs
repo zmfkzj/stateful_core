@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use stateful_core::{
     ActorType, AgentIdentity, Decision, ProtocolVersion, QueryEnvelope, RequestEnvelope,
     ReservationScope, SourceKind, SourceRef, V2ErrorEnvelope, WorkspaceIdentity,
+    normalize_relative_path,
 };
 
 const REQUIRED_RUNTIME_CAPABILITIES: &[&str] = &["presence"];
@@ -37,6 +38,7 @@ pub struct ReservationClaimArgs {
     pub agent_id: String,
     pub workspace_id: String,
     pub wait_id: String,
+    pub relative_path: String,
     pub reservation_id: Option<String>,
     pub identity: Option<RepoIdentity>,
 }
@@ -637,19 +639,51 @@ pub fn claim_reservation_via_http(
     runtime: &ServerRuntime,
     args: ReservationClaimArgs,
 ) -> anyhow::Result<()> {
+    let ReservationClaimArgs {
+        request_id,
+        agent_id,
+        workspace_id,
+        wait_id,
+        relative_path,
+        reservation_id: _,
+        identity,
+    } = args;
+    let normalized_path = normalize_relative_path(&relative_path);
+    if normalized_path.is_empty() || normalized_path != relative_path {
+        anyhow::bail!("reservation claim path must be a normalized nonempty relative path");
+    }
     let request = v2_request_envelope(
-        args.request_id,
-        args.agent_id,
-        args.workspace_id,
-        args.identity,
+        request_id,
+        agent_id,
+        workspace_id,
+        identity,
         ActorType::Agent,
         SourceKind::Cli,
         "reservation_claim",
         "stateful-cli",
         None,
-        serde_json::json!({ "relative_path": args.wait_id }),
+        serde_json::json!({ "relative_path": normalized_path }),
     )?;
-    post_v2(runtime, "/v2/reservation/claim", &request)?;
+    let response = post_v2(runtime, "/v2/reservation/claim", &request)?;
+    validate_claimed_wait(&response.body, &wait_id, &normalized_path)?;
+    Ok(())
+}
+
+fn validate_claimed_wait(
+    response_body: &str,
+    expected_wait_id: &str,
+    expected_relative_path: &str,
+) -> anyhow::Result<()> {
+    let body: serde_json::Value = serde_json::from_str(response_body)
+        .map_err(|error| anyhow::anyhow!("reservation claim returned invalid JSON: {error}"))?;
+    if body.get("wait_id").and_then(serde_json::Value::as_str) != Some(expected_wait_id)
+        || body
+            .get("relative_path")
+            .and_then(serde_json::Value::as_str)
+            != Some(expected_relative_path)
+    {
+        anyhow::bail!("reservation claim response did not match queued wait identity and path");
+    }
     Ok(())
 }
 
@@ -743,11 +777,13 @@ pub fn reservation_claim_protocol_body(
         agent_id,
         workspace_id,
         wait_id,
+        relative_path,
         reservation_id,
         identity,
     } = args;
     let mut payload = serde_json::json!({
-        "wait_id": wait_id
+        "wait_id": wait_id,
+        "relative_path": relative_path
     });
     if let Some(reservation_id) = reservation_id {
         payload["reservation_id"] = serde_json::json!(reservation_id);
@@ -1187,4 +1223,51 @@ mod tests {
         assert!(error.to_string().contains("missing_reservation"));
         assert!(error.to_string().contains("Declare a reservation."));
     }
+    #[test]
+    fn claim_validation_rejects_uuid_as_path_or_a_different_queued_wait() {
+        let error = validate_claimed_wait(
+            r#"{"wait_id":"wait-1","relative_path":"src/auth.ts"}"#,
+            "wait-1",
+            "00000000-0000-4000-8000-000000000103",
+        )
+        .expect_err("a UUID must not be accepted as the granted path");
+        assert!(
+            error.to_string().contains("did not match"),
+            "unexpected error: {error}"
+        );
+
+        assert!(
+            validate_claimed_wait(
+                r#"{"wait_id":"wait-other","relative_path":"src/auth.ts"}"#,
+                "wait-1",
+                "src/auth.ts",
+            )
+            .is_err(),
+            "claim response wait identity must match the queued wait"
+        );
+    }
+
+    #[test]
+    fn native_claim_protocol_preserves_wait_identity_and_granted_path() {
+        let runtime = ServerRuntime::new("http://127.0.0.1:43873", "token", "w1", 0);
+        let body = reservation_claim_protocol_body(
+            &runtime,
+            ReservationClaimArgs {
+                request_id: uuid::Uuid::new_v4(),
+                agent_id: "agent-1".to_string(),
+                workspace_id: "w1".to_string(),
+                wait_id: "wait-1".to_string(),
+                relative_path: "src/auth.ts".to_string(),
+                reservation_id: Some("reservation-1".to_string()),
+                identity: None,
+            },
+            "hook",
+            "native-tool",
+        );
+
+        assert_eq!(body["payload"]["wait_id"], "wait-1");
+        assert_eq!(body["payload"]["relative_path"], "src/auth.ts");
+        assert_eq!(body["payload"]["reservation_id"], "reservation-1");
+    }
+
 }
