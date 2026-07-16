@@ -1,7 +1,8 @@
 use stateful_core::{
-    ActorType, AgentIdentity, ExplicitHandoff, HandoffStatus, PresencePhase, PresenceResourceRelation,
-    PresenceUpdate, RequestEnvelope, SourceKind, SourceRef, WorkspaceIdentity, WriteIntentStart,
-    WriteIntentStatus, WriteTarget,
+    ActorType, AgentIdentity, ExplicitHandoff, HandoffStatus, PresencePhase,
+    PresenceResourceRelation, PresenceUpdate, ReadClassification, ReadCompletion,
+    ReadObservationStart, RequestEnvelope, SourceKind, SourceRef, WorkspaceIdentity,
+    WriteIntentStart, WriteIntentStatus, WriteTarget,
 };
 use stateful_store::{
     ActivityFinalization, ActivityStart, Clock, FixedClock, PresenceRegistration,
@@ -1076,4 +1077,64 @@ fn finalization_keeps_same_agent_fence_owned_by_a_different_actor() {
         .active_write_fence("workspace-1", "src/held.rs")
         .expect("fence loads")
         .is_some());
+}
+
+#[test]
+fn expired_presence_exact_read_finalizes_before_reopening_resource_presence_and_replays() {
+    let clock = MutableClock::new(NOW);
+    let mut store = Store::open_in_memory_with_clock(clock.clone()).expect("store opens");
+    store
+        .register_presence(&register_request(
+            Uuid::new_v4(),
+            "agent-1",
+            "actor-1",
+            ActorType::Agent,
+            None,
+        ))
+        .expect("presence registers");
+    clock.advance(Duration::minutes(61));
+    let content = stateful_core::fingerprint_reader(std::io::Cursor::new(b"content"))
+        .expect("content fingerprint");
+    store
+        .start_read_observation(&request(
+            Uuid::new_v4(),
+            "agent-1",
+            "actor-1",
+            ActorType::Agent,
+            ReadObservationStart {
+                operation_id: "expired-read".into(),
+                path: "src/expired.rs".into(),
+                before: content.clone(),
+            },
+        ))
+        .expect("read starts");
+    let complete = request(
+        Uuid::new_v4(),
+        "agent-1",
+        "actor-1",
+        ActorType::Agent,
+        ReadCompletion {
+            operation_id: "expired-read".into(),
+            path: "src/expired.rs".into(),
+            classification: ReadClassification::Exact,
+            after: Some(content),
+            semantic_marker: None,
+        },
+    );
+    store
+        .complete_read_observation(&complete)
+        .expect("exact completion finalizes then reopens lifecycle presence");
+    let events = store
+        .journal_event_types_for_request(complete.request_id)
+        .expect("completion event types load");
+    let finalized = events.iter().position(|event| event == "presence.finalized").expect("presence finalizes");
+    let read = events.iter().position(|event| event == "read_observation.stabilized").expect("read stabilizes");
+    let resource = events.iter().position(|event| event == "presence.resources_updated").expect("read resource updates");
+    assert!(finalized < read && read < resource);
+    assert!(presence(&mut store, "agent-1").is_some());
+    assert!(resources(&mut store, "agent-1").iter().any(|resource| {
+        resource.relative_path == "src/expired.rs"
+            && resource.relation == PresenceResourceRelation::Read
+    }));
+    store.rebuild_projections().expect("empty replay matches live projections");
 }

@@ -476,7 +476,8 @@ impl<'a> Projector<'a> {
                                AND json_extract(payload_json, '$.actor_type') = ?4
                                AND json_extract(payload_json, '$.owner_id') IS ?5
                                AND json_extract(payload_json, '$.parent_agent_id') IS ?6
-                               AND json_extract(payload_json, '$.parent_actor_id') IS ?7"
+                               AND json_extract(payload_json, '$.parent_actor_id') IS ?7
+                               AND json_extract(payload_json, '$.initiating_actor_known') = 1"
                         ),
                         params![
                             event.workspace_id,

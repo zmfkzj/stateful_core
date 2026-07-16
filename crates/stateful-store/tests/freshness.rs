@@ -1251,13 +1251,14 @@ fn legacy_write_fence_attribution_is_never_actionable_by_unknown_actor() {
     let fence_id = acquired.fences[0].fence_id.clone();
     strip_current_attribution(&database, "write_fence_current", &fence_id);
     let journal_count = store.journal_event_count().expect("journal count loads");
-    let error = store
+    let renewal = store
         .acquire_write_fences(&unknown_request(WriteFenceAcquire {
             paths: vec!["src/fence.rs".into()],
             action: "write_file".into(),
         }))
-        .expect_err("legacy fence must not be renewable by a sentinel actor");
-    assert!(matches!(error, stateful_store::StoreError::ClaimOwnerMismatch));
+        .expect("legacy fence conflict is a normal response");
+    assert_eq!(renewal.http_status, 409);
+    assert!(renewal.response.conflict.is_some());
     assert_eq!(store.journal_event_count().expect("journal count loads"), journal_count);
 
     let error = store
@@ -1436,5 +1437,50 @@ fn retained_handoff_blocks_other_actor_implicit_read_and_write_presence() {
         ))
         .expect_err("retained handoff must reject another actor's write lifecycle");
     assert!(matches!(error, stateful_store::StoreError::ReservationOwnerMismatch));
+    assert_eq!(store.journal_event_count().expect("journal count loads"), before);
+}
+
+#[test]
+fn same_agent_different_actor_cannot_overlap_fence_or_intent() {
+    let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    store
+        .acquire_write_fences(&request_as(
+            "agent-1",
+            "actor-a",
+            WriteFenceAcquire {
+                paths: vec!["src/".into()],
+                action: "write_directory".into(),
+            },
+        ))
+        .expect("directory fence acquires");
+    let before = store.journal_event_count().expect("journal count loads");
+    let acquire = store
+        .acquire_write_fences(&request_as(
+            "agent-1",
+            "actor-b",
+            WriteFenceAcquire {
+                paths: vec!["src/lib.rs".into()],
+                action: "write_file".into(),
+            },
+        ))
+        .expect("conflict is a normal response");
+    assert_eq!(acquire.http_status, 409);
+    assert!(acquire.response.conflict.is_some());
+    assert_eq!(store.journal_event_count().expect("journal count loads"), before);
+    let error = store
+        .start_write_intent(&request_as(
+            "agent-1",
+            "actor-b",
+            WriteIntentStart {
+                operation_id: "nested-write".into(),
+                action: "write_file".into(),
+                targets: vec![WriteTarget {
+                    path: "src/lib.rs".into(),
+                    before: fingerprint(b"before"),
+                }],
+            },
+        ))
+        .expect_err("other actor cannot start under the active directory fence");
+    assert!(matches!(error, stateful_store::StoreError::WriteFenceConflict { .. }));
     assert_eq!(store.journal_event_count().expect("journal count loads"), before);
 }

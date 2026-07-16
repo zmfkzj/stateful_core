@@ -100,7 +100,7 @@ impl Store {
             if let Some(conflict) = existing.iter().find(|fence| {
                 fence.status == "active"
                     && !expired(&fence.expires_at, now)
-                    && fence.agent_id != request.agent.agent_id
+                    && !fence.is_owned_by(&request.agent)
                     && paths.iter().any(|path| scopes_conflict(&fence.relative_path, path))
             }) {
                 let conflict = WriteFenceConflict { path: conflict.relative_path.clone(), owner_agent_id: conflict.agent_id.clone() };

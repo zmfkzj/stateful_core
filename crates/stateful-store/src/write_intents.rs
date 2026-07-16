@@ -85,7 +85,7 @@ impl Store {
                 if let Some(fence) = existing_fences.iter().find(|fence| {
                     fence.status == "active"
                         && !expired(&fence.expires_at, now)
-                        && fence.agent_id != request.agent.agent_id
+                        && !fence.is_owned_by(&request.agent)
                         && scopes_conflict(&fence.relative_path, &target.path)
                 }) {
                     return Err(StoreError::WriteFenceConflict {
