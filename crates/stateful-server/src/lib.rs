@@ -5,7 +5,7 @@ mod routes_v2;
 use axum::{Router, extract::{Request, State}, http::{HeaderMap, StatusCode}, middleware::{self, Next}, response::{IntoResponse, Response}, routing::get};
 use stateful_core::V2Error;
 use stateful_store::Store;
-use std::{net::SocketAddr, str::FromStr, sync::{Arc, Mutex}, time::Duration};
+use std::{future::Future, net::SocketAddr, str::FromStr, sync::{Arc, Mutex}, time::Duration};
 
 pub const CRATE_NAME: &str = "stateful-server";
 pub(crate) const RUNTIME_CAPABILITIES: &[&str] = &[
@@ -111,9 +111,17 @@ pub async fn serve_listener(
     listener: tokio::net::TcpListener,
     config: ServerConfig,
 ) -> anyhow::Result<()> {
+    serve_listener_until(listener, config, std::future::pending()).await
+}
+
+pub async fn serve_listener_until(
+    listener: tokio::net::TcpListener,
+    config: ServerConfig,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
     let maintenance = run_maintenance_loop(config.store.clone(), config.maintenance_interval);
     tokio::select! {
-        result = axum::serve(listener, build_router(config)) => result?,
+        result = axum::serve(listener, build_router(config)).with_graceful_shutdown(shutdown) => result?,
         () = maintenance => {},
     }
     Ok(())
