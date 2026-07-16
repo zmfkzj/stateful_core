@@ -234,3 +234,65 @@ async fn every_v2_route_executes_a_real_store_flow() {
         StatusCode::OK,
     );
 }
+
+#[tokio::test]
+async fn mixed_scope_reservation_authorizes_file_write_with_directory_claim_label() {
+    let app = app();
+    let reservation = successful_post(
+        &app,
+        "/v2/reservation/declare",
+        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d125", json!({
+            "scopes": [
+                {"kind": "directory", "path": "src"},
+                {"kind": "file", "path": "src/lib.rs"}
+            ],
+            "action": "write_directory",
+            "purpose": "Update the directory and its module."
+        })),
+    )
+    .await;
+    let reservation_id = reservation["reservation_id"].as_str().expect("reservation id");
+
+    successful_post(
+        &app,
+        "/v2/claim/acquire",
+        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d126", json!({
+            "reservation_id": reservation_id,
+            "paths": [{"relative_path": "src/lib.rs", "observation": {"exists": false}}]
+        })),
+    )
+    .await;
+    successful_post(
+        &app,
+        "/v2/read/start",
+        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d127", json!({
+            "operation_id": "read-lib", "path": "src/lib.rs",
+            "before": {"exists": false, "byte_len": 0}
+        })),
+    )
+    .await;
+    successful_post(
+        &app,
+        "/v2/read/complete",
+        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d128", json!({
+            "operation_id": "read-lib", "path": "src/lib.rs", "classification": "exact",
+            "after": {"exists": false, "byte_len": 0}
+        })),
+    )
+    .await;
+
+    let response = successful_post(
+        &app,
+        "/v2/authorize",
+        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d129", json!({
+            "reservation_id": reservation_id,
+            "operation_id": "write-lib",
+            "action": "write_file",
+            "targets": [{"path": "src/lib.rs", "before": {"exists": false, "byte_len": 0}}]
+        })),
+    )
+    .await;
+
+    assert_eq!(response["decision"]["reason_code"], "authorized");
+    assert_eq!(response["decision"]["decision"], "allow");
+}

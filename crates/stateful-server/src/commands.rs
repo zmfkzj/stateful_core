@@ -590,7 +590,6 @@ fn authorization_decision(store: &mut Store, request: &RequestEnvelope<Authorize
             .any(|claim| {
                 claim.reservation_id == reservation.reservation_id
                     && claim.agent_id == request.agent.agent_id
-                    && claim.action == request.payload.action
             });
         if !claimed {
             return Ok(Decision::deny(
