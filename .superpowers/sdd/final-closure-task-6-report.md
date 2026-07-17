@@ -1,7 +1,7 @@
 # Final Closure Task 6 Report
 
 ## Status
-- Implementation commit: `80afc6c` (`Capture durable write recovery roots`).
+- Implementation commit: `1e3a5e8` (`Bind write replay to runtime origin`).
 - Push: implementation and this report commit pushed to `origin/presence-first-event-journal-v2`.
 
 ## RED/GREEN
@@ -13,20 +13,26 @@
 - RED: `cargo test -p stateful-cli --test outbox sync_outbox_discards_deterministic_client_rejections` showed deterministic HTTP 400 records replayed forever.
 - GREEN: `cargo test -p stateful-cli --test hook` — 148 passed.
 - GREEN: `cargo test -p stateful-cli --test outbox` — 18 passed.
-- GREEN: `cargo test -p stateful-cli hook::write_lifecycle::tests` — 7 passed.
+- GREEN: `cargo test -p stateful-cli hook::write_lifecycle::tests` — 8 passed.
 - Review RED: a start and fallback completion were appended independently, allowing a crash-visible start-only outbox; generic heartbeat replay lost structured 404 status; recovery fell back to a triggering repository when no captured root existed.
 - Review GREEN: `cargo test -p stateful-cli durable_read_start_pair_persists_start_and_failed_completion_before_send` — the pair is atomically persisted before a dropped first response.
 - Review GREEN: `cargo test -p stateful-cli --test outbox sync_outbox_discards_a_structured_404_heartbeat_and_sends_the_next_record` — raw 404 is discarded and the following heartbeat record is sent.
 - Review GREEN: `cargo test -p stateful-cli recovery_` — 4 passed, including no fallback from an unknown captured root.
 - Review RED: new writes derived recovery roots from envelope identity and successful pair acknowledgement treated empty-file cleanup as durable failure.
-- Review GREEN: `cargo test -p stateful-cli identityless_authorization_captures_the_actual_root_for_recovery` and `legacy_pending_intent_backfills_a_known_absolute_authorization_root` — new writes capture the actual canonical root, while legacy known roots backfill safely.
+- Review GREEN: `cargo test -p stateful-cli identityless_authorization_captures_the_actual_root_for_recovery` — new writes capture the actual canonical root; legacy pending records without an origin remain preserved rather than guessed.
 - Review GREEN: `cargo test -p stateful-cli durable_read_start_pair_persists_start_and_failed_completion_before_send` — a dropped start response leaves the pair durable; empty-file unlink is nonfatal after the atomic acknowledgement rewrite.
+- Review RED: global pending write replay used the trigger repository's runtime for every record.
+- Review GREEN: `cargo test -p stateful-cli pending_intent_bound_to_another_origin_is_not_replayed` — records persist their EnvOverride/Global/RepoLocal origin and a mismatch is retained without network delivery.
+- Fixture RED: strict runtime reuse correctly rejected test-only fake global runtimes with PID `42`, while isolated hook subprocesses had cleared environment and could not prove ownership.
+- Fixture GREEN: focused subprocess lifecycle regressions use the fixture runtime as an explicit environment override, preserving the intended fake-server contract under strict reuse.
 
 ## State-machine invariants
 - Read start and its failed fallback completion are serialized and atomically persisted as one pair under the global outbox lock before start dispatch; success removes both in one locked rewrite, while error leaves both for ordered replay.
 - Lifecycle replay preserves per-agent sequence order; generic `/v2/outbox/sync` uses raw transport so structured 4xx status is retained and discarded, while exact lifecycle records retain canonical frozen serialization. 408 and 429 remain retryable.
 - Write recovery uses only an authorization-captured absolute root. Missing, relative, or `unknown` roots fail safely while preserving the pending intent and fences.
-- New write authorizations capture their actual canonical repository root before posting, independent of envelope identity; legacy records only backfill a known absolute frozen authorization root.
+- New write authorizations capture their actual canonical repository root before posting, independent of envelope identity; a bound legacy record may backfill a known absolute frozen authorization root, while an unbound record is never guessed.
+- Pending writes capture the selected runtime origin, not a process endpoint. Replay identifies the current trigger origin and sends only exact-origin records, preserving legacy unbound or mismatched records; matching Global and RepoLocal origins use current runtime discovery after restart.
+- Hook subprocess fixtures expose their explicitly configured fake runtime as an environment override; this is test-only alignment with the production no-fallback runtime ownership policy.
 - Exact reads require successful, complete, untruncated raw full-file evidence. Nested line selectors are stripped from the lifecycle target and remain Partial.
 - Testing presence starts only after a recognized Bash command is permitted; Codex and OMP emit typed start/result envelopes and refresh heartbeat after their successful post-tool paths.
 - Pending write state is fsynced to a temporary file and atomically renamed; authorization, completion/recovery, and every frozen release remain stable until acknowledged.
