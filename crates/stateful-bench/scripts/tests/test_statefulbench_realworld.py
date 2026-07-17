@@ -3641,6 +3641,42 @@ class RealWorldRunnerTests(unittest.TestCase):
         self.assertIn("--arms", stdout.getvalue())
         self.assertIn("--trials", stdout.getvalue())
 
+    def test_run_arms_require_explicit_parallel_on(self) -> None:
+        def parsed_arms(argv: list[str]) -> list[str]:
+            parsed = {}
+            parse_args = self.mod.argparse.ArgumentParser.parse_args
+
+            def capture(parser, args=None, namespace=None):
+                parsed["arms"] = parse_args(parser, args, namespace).arms
+                raise RuntimeError("parsed")
+
+            with mock.patch.object(self.mod.argparse.ArgumentParser, "parse_args", capture):
+                with self.assertRaisesRegex(RuntimeError, "parsed"):
+                    self.mod.main(
+                        [
+                            "run",
+                            "--manifest",
+                            "manifest.json",
+                            "--cache",
+                            "cache",
+                            "--out",
+                            "out",
+                            "--repos",
+                            "fixture",
+                            "--docker-image",
+                            "image",
+                            *argv,
+                        ]
+                    )
+            return parsed["arms"]
+
+        self.assertEqual(parsed_arms([]), ["sequential", "parallel-off"])
+        self.assertEqual(parsed_arms(["--arms", "parallel-on"]), ["parallel-on"])
+        self.assertEqual(
+            parsed_arms(["--arms", "sequential,parallel-off,parallel-on"]),
+            ["sequential", "parallel-off", "parallel-on"],
+        )
+
 class RealWorldReportingTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()

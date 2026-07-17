@@ -750,7 +750,12 @@ def main(argv: list[str] | None = None) -> int:
     generate.add_argument("--tasks", type=int, default=5)
 
     run = subparsers.add_parser("run")
-    run.add_argument("--arms", type=_parse_arms, default=_parse_arms("sequential,parallel-off,parallel-on"))
+    run.add_argument(
+        "--arms",
+        type=_parse_arms,
+        default=_parse_arms("sequential,parallel-off"),
+        help="comma-separated benchmark arms; parallel-on is opt-in",
+    )
     run.add_argument("--tasks", type=int, default=5)
     run.add_argument("--trials", type=int, default=1)
     run.add_argument("--model", default="openai-codex/gpt-5.6-terra")
@@ -771,7 +776,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.timeout_s < 1:
         parser.error("--timeout-s must be at least 1")
     if "parallel-on" in args.arms and not args.stateful_binary:
-        parser.error("parallel-on requires a resolvable stateful binary; pass --stateful-binary")
+        parser.error("parallel-on is opt-in and requires a resolvable stateful binary; pass --stateful-binary")
 
     try:
         omp_binary = resolve_omp_binary(args.omp_bin)

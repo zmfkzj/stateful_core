@@ -2501,7 +2501,7 @@ def run_repo_arm(
             repo,
             arm,
             trial,
-            "parallel-on requires a resolvable stateful binary",
+            "parallel-on is opt-in and requires a resolvable stateful binary",
             _qualification_row_identity(qualification_receipt),
         )
         _write_run_result(out_dir, result)
@@ -3250,12 +3250,19 @@ def main(argv: list[str] | None = None) -> int:
     qualify.add_argument("--manifest", type=Path, required=True)
     qualify.add_argument("--cache", type=Path, required=True)
     qualify.add_argument("--repo", action="append")
-    run = commands.add_parser("run", help="run real-world three-arm corpus")
+    run = commands.add_parser(
+        "run", help="run real-world benchmark (parallel-on opt-in)"
+    )
     run.add_argument("--manifest", type=Path, required=True)
     run.add_argument("--cache", type=Path, required=True)
     run.add_argument("--out", type=Path, required=True)
     run.add_argument("--repos", type=_parse_repositories)
-    run.add_argument("--arms", type=_LITE._parse_arms, default=_LITE._parse_arms("sequential,parallel-off,parallel-on"))
+    run.add_argument(
+        "--arms",
+        type=_LITE._parse_arms,
+        default=_LITE._parse_arms("sequential,parallel-off"),
+        help="comma-separated benchmark arms; parallel-on is opt-in",
+    )
     run.add_argument("--trials", type=int, default=1)
     run.add_argument("--model", default="openai-codex/gpt-5.6-terra")
     run.add_argument("--thinking", default="high")

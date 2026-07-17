@@ -114,6 +114,27 @@ class StatefulBenchLiteTests(unittest.TestCase):
             ["sequential", "parallel-off"],
         )
 
+    def test_run_arms_require_explicit_parallel_on(self):
+        def parsed_arms(argv):
+            parsed = {}
+            parse_args = self.mod.argparse.ArgumentParser.parse_args
+
+            def capture(parser, args=None, namespace=None):
+                parsed["arms"] = parse_args(parser, args, namespace).arms
+                raise RuntimeError("parsed")
+
+            with patch.object(self.mod.argparse.ArgumentParser, "parse_args", capture):
+                with self.assertRaisesRegex(RuntimeError, "parsed"):
+                    self.mod.main(argv)
+            return parsed["arms"]
+
+        self.assertEqual(parsed_arms(["run"]), ["sequential", "parallel-off"])
+        self.assertEqual(parsed_arms(["run", "--arms", "parallel-on"]), ["parallel-on"])
+        self.assertEqual(
+            parsed_arms(["run", "--arms", "sequential,parallel-off,parallel-on"]),
+            ["sequential", "parallel-off", "parallel-on"],
+        )
+
     def test_json_writer_is_atomic_and_preserves_prior_valid_json(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             target = Path(temp_dir) / "results.json"
