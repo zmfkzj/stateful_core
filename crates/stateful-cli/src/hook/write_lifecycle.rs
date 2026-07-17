@@ -104,6 +104,19 @@ pub(crate) fn authorize(
     )
 }
 
+fn require_matching_runtime_origin(
+    paths: &GlobalPaths,
+    repo_root: &Path,
+    runtime: &ServerRuntime,
+    intent: &PendingIntent,
+) -> anyhow::Result<RuntimeOrigin> {
+    let origin = runtime_origin_for_authorization(repo_root, paths, runtime)?;
+    if intent.runtime_origin.as_ref() != Some(&origin) {
+        anyhow::bail!("pending write lifecycle belongs to a different runtime origin");
+    }
+    Ok(origin)
+}
+
 pub(crate) fn authorize_at_root(
     paths: &GlobalPaths,
     runtime: &ServerRuntime,
@@ -146,11 +159,12 @@ pub(crate) fn authorize_at_root(
     request.agent.parent_agent_id = parent_agent_id.map(str::to_string);
     let authorization_request = serde_json::to_string(&request)?;
     let captured_repo_root = fs::canonicalize(repo_root)?;
+    let origin = runtime_origin_for_authorization(repo_root, paths, runtime)?;
     let mut pending = load_pending(paths, agent_id, operation_id)?.unwrap_or(PendingIntent {
         intent_id: None,
         authorization_request: authorization_request.clone(),
         repo_root: captured_repo_root.to_string_lossy().into_owned(),
-        runtime_origin: Some(runtime_origin_for_authorization(repo_root, paths, runtime)?),
+        runtime_origin: Some(origin.clone()),
         targets: targets.iter().map(|(path, _)| path.clone()).collect(),
         claim_ids,
         completion_request: None,
@@ -158,6 +172,7 @@ pub(crate) fn authorize_at_root(
         release_requests: Vec::new(),
         completed: false,
     });
+    require_matching_runtime_origin(paths, repo_root, runtime, &pending)?;
     if pending.authorization_request.is_empty() {
         pending.authorization_request = authorization_request;
     }
@@ -234,6 +249,7 @@ pub(crate) fn complete(
     let Some(mut intent) = load_pending(paths, agent_id, operation_id)? else {
         return Ok(false);
     };
+    require_matching_runtime_origin(paths, repo_root, runtime, &intent)?;
     if !intent.completed {
         if let Some(request) = intent.completion_request.as_deref() {
             if crate::replay_v2_request(runtime, "/v2/write/complete", request).is_err() {
@@ -1021,6 +1037,82 @@ mod tests {
         let replay = request_body(&requests.recv().expect("release replay should arrive"));
         assert_eq!(replay, second_release, "release replay must retain its request UUID");
         assert!(!pending_path(&paths, "agent-1", "operation-1").exists());
+    }
+
+    #[test]
+    fn direct_lifecycle_posts_reject_a_changed_runtime_origin_and_allow_same_origin_restart() {
+        let temp = tempfile::tempdir().expect("temp dir should create");
+        let paths = GlobalPaths::new(temp.path().join("home"));
+        let repo_root = temp.path().join("repo");
+        fs::create_dir_all(&repo_root).expect("repo should create");
+        fs::write(repo_root.join("target.txt"), "before").expect("target should write");
+        let (runtime_a, requests_a) = fake_server([None]);
+        let (runtime_b, requests_b) = fake_server([Some(AUTHORIZED)]);
+        crate::write_global_runtime_file(&paths, &runtime_a).expect("global runtime A should write");
+
+        let authorization = authorize_at_root(
+            &paths,
+            &runtime_a,
+            "agent-1",
+            "workspace-1",
+            &repo_root,
+            None,
+            None,
+            None,
+            "origin-retry",
+            "write_file",
+            vec![(
+                "target.txt".to_string(),
+                stateful_core::ContentFingerprint::missing(),
+            )],
+            None,
+            Vec::new(),
+            &SOURCE,
+        );
+        assert!(authorization.is_err(), "lost authorization response should retain the frozen pending intent");
+        let _accepted_by_a = requests_a.recv().expect("A authorization should arrive");
+        assert!(pending_path(&paths, "agent-1", "origin-retry").exists());
+
+        fs::remove_file(&paths.server_json).expect("global runtime should remove");
+        let local_runtime = repo_root.join(".stateful_core/runtime");
+        fs::create_dir_all(&local_runtime).expect("local runtime directory should create");
+        fs::write(
+            local_runtime.join("server.json"),
+            serde_json::to_string(&runtime_b).expect("runtime B should serialize"),
+        )
+        .expect("local runtime B should write");
+        assert!(
+            authorize_at_root(
+                &paths, &runtime_b, "agent-1", "workspace-1", &repo_root, None, None, None,
+                "origin-retry", "write_file",
+                vec![("target.txt".to_string(), stateful_core::ContentFingerprint::missing())],
+                None, Vec::new(), &SOURCE,
+            )
+            .is_err(),
+            "a different runtime origin must not receive the frozen authorization"
+        );
+        assert!(
+            complete(
+                &paths, &runtime_b, "agent-1", "workspace-1", None, None, None, &repo_root,
+                "origin-retry", false, &SOURCE,
+            )
+            .is_err(),
+            "a different runtime origin must not receive completion or release"
+        );
+        assert!(requests_b.try_recv().is_err(), "B must receive no lifecycle requests");
+        assert!(pending_path(&paths, "agent-1", "origin-retry").exists());
+
+        fs::remove_file(local_runtime.join("server.json")).expect("local runtime should remove");
+        crate::write_global_runtime_file(&paths, &runtime_b).expect("global runtime B should write");
+        authorize_at_root(
+            &paths, &runtime_b, "agent-1", "workspace-1", &repo_root, None, None, None,
+            "origin-retry", "write_file",
+            vec![("target.txt".to_string(), stateful_core::ContentFingerprint::missing())],
+            None, Vec::new(), &SOURCE,
+        )
+        .expect("same Global origin restart should replay the frozen authorization");
+        let replay = request_body(&requests_b.recv().expect("B authorization should arrive"));
+        assert_eq!(replay["payload"]["operation_id"], "origin-retry");
     }
 
 
