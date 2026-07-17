@@ -5,11 +5,11 @@ Implemented and verified at base `f86ae6d`.
 
 ## RED/GREEN evidence
 
-- RED — `node --test crates/stateful-cli/assets/stateful-omp-extension.test.mjs`: new lazy edit/write tests failed when the claim runner rejected a wait-only claim; the resumed hooks lacked the captured original ID.
-- RED — `node --test integrations/vscode/test/core.test.js`: enabled-repository identity tests failed with global runtime identity (`unknown` repo/worktree), disabled/mismatched folders posted, and multi-root presence coalesced.
-- RED — focused regressions also caught raw subdirectory claim paths, quoted YAML booleans, and explicit-workspace multi-root actor collisions.
-- GREEN — `node --test crates/stateful-cli/assets/stateful-omp-extension.test.mjs`: 14 passing, 0 failing.
-- GREEN — `node --test integrations/vscode/test/core.test.js`: 17 passing, 0 failing.
+- RED — `node --test crates/stateful-cli/assets/stateful-omp-extension.test.mjs`: lazy resumes attempted wait-only/redundant claims before a grant; grant-path, original-ID, and completion-identity regressions were added first.
+- RED — `node --test integrations/vscode/test/core.test.js`: enabled-repository identity initially emitted global unknown metadata; disabled/mismatched folders posted, multi-root presence coalesced, symlink document paths were dropped, and an outer root won over a nested enabled root.
+- RED — focused regressions also caught raw subdirectory claim paths, quoted YAML booleans, explicit-workspace actor collisions, missing grant binding, and grant-path mismatch acceptance.
+- GREEN — `node --test crates/stateful-cli/assets/stateful-omp-extension.test.mjs`: 15 passing, 0 failing.
+- GREEN — `node --test integrations/vscode/test/core.test.js`: 19 passing, 0 failing.
 
 ## Identity invariants
 
@@ -18,11 +18,12 @@ Implemented and verified at base `f86ae6d`.
 - Runtime `local`, `shared`, and `unknown` map to Rust's `workspace-<repo suffix>` form. Explicit runtime workspace IDs are preserved exactly.
 - Actor IDs include the derived workspace identity; when an explicit runtime workspace is shared by multiple roots they additionally include the worktree identity, keeping folders and low-confidence throttling distinct.
 - Runtime query, save-check, observe, and reconcile all consume this one derived workspace object.
+- Document containment accepts the opened workspace-folder spelling while events retain the canonical root; nested enabled roots select the longest matching canonical root rather than workspace-folder order.
 
 ## OMP and Task 7 closure
 
-- Lazy edit/write stores the original OMP `toolCallId`, reservation/wait identity, and normalized repository-relative claim path. Both resumed Rust hooks receive that same original `tool_call_id`; PostToolUse records completion/error result metadata.
-- Resume claims use the clean Task 7 interface only: `stateful reservation claim --agent-id … --wait-id … --path <normalized-repo-relative-path>`. There is no wait-only compatibility call. A queued wait without one unambiguous normalized target is not resumed with a fabricated claim path.
+- Lazy edit/write stores the original OMP `toolCallId`, wait identity, and normalized repository-relative target. A `reservation_granted` notification binds its exact `wait_id` to the payload's actual `reservation_id`; a payload path, when present, must equal the stored target. Unmatched or ungranted waits fail closed.
+- A granted wait is not claimed again. Resumed PreToolUse uses the bound real reservation ID and original tool-call ID; PostToolUse uses that original ID and records wait/reservation IDs only as result diagnostics. No wait-only compatibility claim exists.
 
 ## Files
 
@@ -37,7 +38,8 @@ Implemented and verified at base `f86ae6d`.
 
 - Implementation: `da1770b` — `fix: preserve integration repository identities`
 - Review fixes: `3a6689c` — `fix: scope resumed claims and IDE actors`
-- Pushed `f86ae6d..3a6689c` to `origin/presence-first-event-journal-v2`.
+- Independent review closure: `9dcb3d8` — `fix: bind granted lazy reservations`
+- Pushed `0bd6496..9dcb3d8` to `origin/presence-first-event-journal-v2`.
 
 ## Concerns
 
