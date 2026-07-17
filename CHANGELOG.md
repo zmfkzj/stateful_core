@@ -2,9 +2,9 @@
 
 All notable changes to `stateful_core` will be documented in this file.
 
-The project is pre-release. Until a stable release process exists, changes are tracked under `Unreleased`.
+The first stable workspace release is 1.0.0. Package-specific release notes are maintained in each crate's changelog.
 
-## Unreleased
+## 1.0.0 (2026-07-17)
 
 ### Added
 

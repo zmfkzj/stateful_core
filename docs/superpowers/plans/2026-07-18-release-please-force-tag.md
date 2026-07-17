@@ -118,8 +118,8 @@ gh pr view "$RELEASE_PR" --json number,title,files,url
 gh pr diff "$RELEASE_PR"
 ```
 
-Expected: title and diff describe 1.0.0; all four Cargo versions and all four
-manifest entries are 1.0.0; changelogs contain the intended current history.
+Expected: the PR body and diff describe 1.0.0; all four Cargo versions and all
+four manifest entries are 1.0.0; changelogs contain the intended current history.
 
 - [ ] **Step 3: Obtain explicit approval before merge**
 

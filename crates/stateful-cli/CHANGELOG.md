@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.0.0](https://github.com/zmfkzj/stateful_core/compare/stateful-cli-v0.1.1...stateful-cli-v1.0.0) (2026-07-17)
+## [1.0.0](https://github.com/zmfkzj/stateful_core/releases/tag/stateful-cli-v1.0.0) (2026-07-17)
 
 
 ### Features
@@ -81,7 +81,7 @@
 
 * release 1.0.0 ([97745c7](https://github.com/zmfkzj/stateful_core/commit/97745c77ffe77543b94a372fdb7861df2b854ea7))
 
-## [0.1.1](https://github.com/zmfkzj/stateful_core/compare/stateful-cli-v0.1.0...stateful-cli-v0.1.1) (2026-06-23)
+## 0.1.1 (unpublished) (2026-06-23)
 
 
 ### Features

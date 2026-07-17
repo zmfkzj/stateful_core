@@ -1,6 +1,6 @@
 # Contributing
 
-This project is pre-release. Keep changes scoped, documented, and verified against the current implementation contract.
+Keep changes scoped, documented, and verified against the current implementation contract.
 
 ## Development Setup
 
