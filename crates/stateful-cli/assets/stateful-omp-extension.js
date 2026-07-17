@@ -345,6 +345,7 @@ function reservationMessage(notification) {
 
 function deliverReservationNotification(pi, notification, stream) {
   if (!notificationTargetsStreamAgent(notification, stream)) return true;
+  bindGrantedLazyReservation(notification);
   if (typeof pi?.sendMessage !== "function") return false;
   try {
     pi.sendMessage(
@@ -600,6 +601,26 @@ const lazyWriteOperations = new Map();
 let lazyWriteOperationCounter = 0;
 const lazyBashOperations = new Map();
 let lazyBashOperationCounter = 0;
+
+export function bindGrantedLazyReservation(notification) {
+  const payload = notification?.payload || {};
+  const waitId = String(payload.wait_id || "").trim();
+  const reservationId = String(payload.reservation_id || "").trim();
+  if (!waitId || !reservationId) return false;
+  const grantedPath = payload.relative_path === undefined ? "" : String(payload.relative_path).trim();
+  let bound = false;
+  for (const operations of [lazyEditOperations, lazyWriteOperations]) {
+    const operation = operations.get(waitId);
+    if (!operation) continue;
+    if (grantedPath && (!safeLazyOperationTarget(grantedPath) || grantedPath !== operation.claim_path)) {
+      continue;
+    }
+    operation.reservation_id = reservationId;
+    operation.claimable = true;
+    bound = true;
+  }
+  return bound;
+}
 
 function extractWaitId(reason) {
   const match = String(reason || "").match(/wait_id ([A-Za-z0-9_-]+)/);
@@ -1374,30 +1395,13 @@ export default function statefulOmpExtension(pi) {
       if (!approved) return { block: true, reason: "user denied stateful external sandbox grant" };
     }
   });
-function state_reservation_claim(operation, ctx) {
+function state_reservation_claim(operation, _ctx) {
   const waitId = String(operation?.wait_id || "").trim();
   if (!waitId) return { ok: true };
-  const relativePath = String(operation?.claim_path || "").trim();
-  if (!safeLazyOperationTarget(relativePath)) {
-    return { ok: false, message: "state_reservation_claim missing normalized path" };
+  if (operation?.claimable !== true || !String(operation?.reservation_id || "").trim()) {
+    return { ok: false, message: "state_reservation_claim wait is not claimable yet" };
   }
-  const agentId = String(operation?.agent_id || "").trim();
-  if (!agentId) return { ok: false, message: "state_reservation_claim missing agent_id" };
-  const args = ["reservation", "claim", "--agent-id", agentId, "--wait-id", waitId, "--path", relativePath];
-  const workspaceId = firstString(operation?.workspace_id, detectWorkspaceId({}, ctx));
-  if (workspaceId) args.push("--workspace-id", workspaceId);
-  const reservationId = String(operation?.reservation_id || "").trim();
-  if (reservationId) args.push("--reservation-id", reservationId);
-  const options = { encoding: "utf8" };
-  const cwd = operation?.cwd || ctx?.cwd;
-  if (cwd) options.cwd = cwd;
-  const result = spawnSync(STATEFUL, args, options);
-  if (result.status === 0) return { ok: true };
-  const detail = String(result.stderr || result.stdout || "").trim();
-  return {
-    ok: false,
-    message: "state_reservation_claim failed" + (detail ? ": " + detail : ""),
-  };
+  return { ok: true };
 }
 
   pi.registerTool({
@@ -1454,6 +1458,8 @@ function state_reservation_claim(operation, ctx) {
           status: result.status,
           message: result.message,
           targets: operation.targets,
+          wait_id: operation.wait_id || undefined,
+          reservation_id: operation.reservation_id || undefined,
         },
       });
       return lazyToolResult(result.status, result.message, { operation_id: operationId, targets: operation.targets });
@@ -1512,6 +1518,8 @@ function state_reservation_claim(operation, ctx) {
         result_metadata: {
           status: result.status,
           message: result.message,
+          wait_id: operation.wait_id || undefined,
+          reservation_id: operation.reservation_id || undefined,
           targets: operation.targets,
         },
       });

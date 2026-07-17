@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const fs = require('node:fs');
 const path = require('node:path');
 const vscode = require('vscode');
 const core = require('./lib/core');
@@ -22,9 +23,17 @@ async function activate(context) {
   for (const folder of vscode.workspace.workspaceFolders || []) {
     const identity = core.enabledRepoIdentity(folder.uri.fsPath);
     if (!identity) continue;
+    let folderRelativePath;
+    try {
+      folderRelativePath = path.relative(identity.root, fs.realpathSync(folder.uri.fsPath));
+    } catch {
+      continue;
+    }
     const workspaceId = core.effectiveWorkspaceId(runtime.workspaceId, identity);
     const workspace = {
       root: identity.root,
+      folderRoot: folder.uri.fsPath,
+      folderRelativePath: folderRelativePath.split(path.sep).join('/'),
       workspaceId,
       actorId: `ide-${workspaceId}${workspaceId === runtime.workspaceId ? `-${identity.worktreeId}` : ''}`,
       repoId: identity.repoId,
@@ -213,13 +222,18 @@ function v2Envelope(workspace, payload, event) {
 
 function documentTarget(workspaces, document) {
   if (!document || document.uri.scheme !== 'file') return null;
-  for (const workspace of workspaces) {
-    const relativePath = path.relative(workspace.workspace.root, document.uri.fsPath);
-    if (!relativePath.startsWith('..') && !path.isAbsolute(relativePath)) {
-      return { workspace: workspace.workspace, relativePath: relativePath.split(path.sep).join('/') };
-    }
+  const matches = [];
+  for (const candidate of workspaces) {
+    const relativePath = path.relative(candidate.workspace.folderRoot, document.uri.fsPath);
+    if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) continue;
+    const prefix = candidate.workspace.folderRelativePath;
+    matches.push({
+      workspace: candidate.workspace,
+      relativePath: [prefix, relativePath].filter(Boolean).join('/').split(path.sep).join('/'),
+    });
   }
-  return null;
+  matches.sort((left, right) => right.workspace.root.length - left.workspace.root.length);
+  return matches[0] || null;
 }
 
 function warn(status, text) {

@@ -689,3 +689,86 @@ test('VS Code keeps multi-root repository envelopes and low-confidence actors di
     else process.env.STATEFUL_HOME = originalHome;
   }
 });
+
+test('VS Code accepts document paths through a symlinked enabled folder', async () => {
+  const home = tempDir();
+  const root = fs.realpathSync(tempDir());
+  const link = path.join(tempDir(), 'linked-repo');
+  const originalHome = process.env.STATEFUL_HOME;
+  const originalFetch = global.fetch;
+  const calls = [];
+  writeGitRepo(root);
+  fs.symlinkSync(root, link, 'dir');
+  writeRuntime(home, 'local');
+  writeEnabledRepos(home, [{ repoId: 'repo-link', root }]);
+  process.env.STATEFUL_HOME = home;
+  global.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), options });
+    return jsonResponse({ protocol_version: 'stateful.v2', journal_schema_version: 2, capabilities: ['presence'], blocked: false, observations: [] });
+  };
+
+  try {
+    const harness = vscodeHarness([{ uri: { fsPath: link } }]);
+    await extension(harness.api).activate({ subscriptions: { push() {} } });
+    harness.handlers.open({
+      uri: { scheme: 'file', fsPath: path.join(link, 'src', 'app.js') },
+      getText: () => '',
+    });
+    await settle();
+    const observation = calls
+      .filter((call) => new URL(call.url).pathname === '/v2/human/observe')
+      .map((call) => JSON.parse(call.options.body))
+      .at(-1);
+    assert.equal(observation.workspace.root, root);
+    assert.equal(observation.payload.relative_path, 'src/app.js');
+  } finally {
+    global.fetch = originalFetch;
+    if (originalHome === undefined) delete process.env.STATEFUL_HOME;
+    else process.env.STATEFUL_HOME = originalHome;
+  }
+});
+
+test('VS Code routes nested enabled roots to the most specific folder', async () => {
+  const home = tempDir();
+  const outerRoot = fs.realpathSync(tempDir());
+  const innerRoot = path.join(outerRoot, 'packages', 'inner');
+  const originalHome = process.env.STATEFUL_HOME;
+  const originalFetch = global.fetch;
+  const calls = [];
+  fs.mkdirSync(innerRoot, { recursive: true });
+  writeGitRepo(outerRoot);
+  writeGitRepo(innerRoot);
+  writeRuntime(home, 'local');
+  writeEnabledRepos(home, [
+    { repoId: 'repo-outer', root: outerRoot },
+    { repoId: 'repo-inner', root: innerRoot },
+  ]);
+  process.env.STATEFUL_HOME = home;
+  global.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), options });
+    return jsonResponse({ protocol_version: 'stateful.v2', journal_schema_version: 2, capabilities: ['presence'], blocked: false, observations: [] });
+  };
+
+  try {
+    const harness = vscodeHarness([
+      { uri: { fsPath: outerRoot } },
+      { uri: { fsPath: innerRoot } },
+    ]);
+    await extension(harness.api).activate({ subscriptions: { push() {} } });
+    harness.handlers.open({
+      uri: { scheme: 'file', fsPath: path.join(innerRoot, 'src', 'app.js') },
+      getText: () => '',
+    });
+    await settle();
+    const observation = calls
+      .filter((call) => new URL(call.url).pathname === '/v2/human/observe')
+      .map((call) => JSON.parse(call.options.body))
+      .at(-1);
+    assert.equal(observation.workspace.repo_id, 'repo-inner');
+    assert.equal(observation.payload.relative_path, 'src/app.js');
+  } finally {
+    global.fetch = originalFetch;
+    if (originalHome === undefined) delete process.env.STATEFUL_HOME;
+    else process.env.STATEFUL_HOME = originalHome;
+  }
+});

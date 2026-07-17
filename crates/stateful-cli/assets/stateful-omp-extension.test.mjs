@@ -31,7 +31,7 @@ function fakePi() {
   };
 }
 
-async function loadExtension(t, { decision = { decision: "allow" }, fetchImpl, claimRequiresPath = false } = {}) {
+async function loadExtension(t, { decision = { decision: "allow" }, fetchImpl, claimRequiresPath = false, claimAlwaysFails = false } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "stateful-omp-extension-"));
   await mkdir(join(directory, ".git"));
   const extensionContext = context(directory);
@@ -46,6 +46,11 @@ process.stdin.on("end", () => {
   const event = process.argv[4];
   const payload = JSON.parse(input || "{}");
   appendFileSync(${JSON.stringify(hookLog)}, JSON.stringify({ event, args: process.argv.slice(2), payload }) + "\\n");
+  if (${JSON.stringify(claimAlwaysFails)} && process.argv[2] === "reservation" && process.argv[3] === "claim") {
+    process.stderr.write("claim must not be repeated after a grant");
+    process.exitCode = 1;
+    return;
+  }
   const decision = ${JSON.stringify(decision)};
   if (${JSON.stringify(claimRequiresPath)} && process.argv[2] === "reservation" && process.argv[3] === "claim" && !process.argv.includes("--path")) {
     process.stderr.write("reservation claim requires --path");
@@ -349,7 +354,7 @@ test("pre and post hooks retain the tool call ID and result metadata", async (t)
 });
 
 test("lazy edit resume preserves the original tool-call identity through both hooks", async (t) => {
-  const { pi, hookLog, context: extensionContext, directory } = await loadExtension(t, {
+  const { extension, pi, hookLog, context: extensionContext, directory } = await loadExtension(t, {
     decision: {
       decision: "block",
       reason: "reservation pending",
@@ -367,6 +372,10 @@ test("lazy edit resume preserves the original tool-call identity through both ho
     input,
   }, extensionContext);
   assert.equal(blocked.block, true);
+  assert.equal(extension.bindGrantedLazyReservation({
+    kind: "reservation_granted",
+    payload: { wait_id: "wait-edit", reservation_id: "reservation-edit" },
+  }), true);
 
   const resumed = await pi.tools.get("lazy_edit_resume").execute(
     "resume-edit-tool-call",
@@ -379,17 +388,6 @@ test("lazy edit resume preserves the original tool-call identity through both ho
   assert.equal(await readFile(join(directory, "resume-edit.js"), "utf8"), "after\n");
 
   const recorded = await hooks(hookLog);
-  const claim = recorded.find(({ args }) => args?.[0] === "reservation" && args[1] === "claim");
-  assert.deepEqual(claim.args.slice(0, 8), [
-    "reservation",
-    "claim",
-    "--agent-id",
-    "omp-00000000-0000-4000-8000-000000000011",
-    "--wait-id",
-    "wait-edit",
-    "--path",
-    "resume-edit.js",
-  ]);
   const resumedHooks = recorded.filter(({ event, payload }) => event === "pre-tool-use" && payload.yolo)
     .concat(recorded.filter(({ event, payload }) => event === "post-tool-use" && payload.tool_call_id === "original-edit-call"));
   assert.equal(resumedHooks.length, 2);
@@ -405,11 +403,13 @@ test("lazy edit resume preserves the original tool-call identity through both ho
     status: "applied",
     message: "lazy edit applied",
     targets: ["resume-edit.js"],
+    wait_id: "wait-edit",
+    reservation_id: "reservation-edit",
   });
 });
 
 test("lazy write resume preserves the original tool-call identity through both hooks", async (t) => {
-  const { pi, hookLog, context: extensionContext, directory } = await loadExtension(t, {
+  const { extension, pi, hookLog, context: extensionContext, directory } = await loadExtension(t, {
     decision: {
       decision: "block",
       reason: "reservation pending",
@@ -427,6 +427,10 @@ test("lazy write resume preserves the original tool-call identity through both h
     input,
   }, extensionContext);
   assert.equal(blocked.block, true);
+  assert.equal(extension.bindGrantedLazyReservation({
+    kind: "reservation_granted",
+    payload: { wait_id: "wait-write", reservation_id: "reservation-write" },
+  }), true);
 
   const resumed = await pi.tools.get("lazy_write_resume").execute(
     "resume-write-tool-call",
@@ -454,11 +458,13 @@ test("lazy write resume preserves the original tool-call identity through both h
     status: "applied",
     message: "lazy write applied",
     targets: ["resume-write.js"],
+    wait_id: "wait-write",
+    reservation_id: "reservation-write",
   });
 });
 
-test("lazy write claim uses the repository-relative granted path", async (t) => {
-  const { pi, hookLog, context: extensionContext, directory } = await loadExtension(t, {
+test("lazy write resume uses its granted subdirectory reservation without a redundant claim", async (t) => {
+  const { extension, pi, hookLog, context: extensionContext, directory } = await loadExtension(t, {
     decision: {
       decision: "block",
       reason: "reservation pending",
@@ -478,6 +484,10 @@ test("lazy write claim uses the repository-relative granted path", async (t) => 
     reservationId: "reservation-subdir",
     input,
   }, nestedContext);
+  assert.equal(extension.bindGrantedLazyReservation({
+    kind: "reservation_granted",
+    payload: { wait_id: "wait-subdir", reservation_id: "reservation-subdir" },
+  }), true);
   const resumed = await pi.tools.get("lazy_write_resume").execute(
     "resume-subdir-tool-call",
     { operation_id: "wait-subdir" },
@@ -487,6 +497,89 @@ test("lazy write claim uses the repository-relative granted path", async (t) => 
   );
   assert.equal(resumed.isError, false);
 
-  const claim = (await hooks(hookLog)).find(({ args }) => args?.[0] === "reservation" && args[1] === "claim");
-  assert.equal(claim.args[claim.args.indexOf("--path") + 1], "packages/client/src/resume.js");
+  assert.equal((await hooks(hookLog)).some(({ args }) => args?.[0] === "reservation" && args[1] === "claim"), false);
+});
+
+test("lazy write waits for its reservation grant and preserves it through completion", async (t) => {
+  let reads = 0;
+  let grantAcknowledged;
+  const granted = new Promise((resolve) => { grantAcknowledged = resolve; });
+  const { extension, pi, hookLog, context: extensionContext, directory } = await loadExtension(t, {
+    decision: { decision: "block", reason: "reservation pending", wait: { wait_id: "wait-grant" } },
+    fetchImpl: async (url) => {
+      const pathname = new URL(url).pathname;
+      if (pathname === "/v2/context/render") {
+        return jsonResponse({ changed: false, workspace_version: 1, prompt_text: "" });
+      }
+      if (pathname === "/v2/notifications/poll") {
+        grantAcknowledged();
+        return jsonResponse({});
+      }
+      if (pathname === "/v2/notifications/stream") {
+        return {
+          ok: true,
+          body: {
+            getReader: () => ({
+              read: async () => {
+                if (reads++ === 0) {
+                  const frame = "event: notification\n"
+                    + "data: {\"notification_id\":\"wait-grant\",\"sequence\":1,\"kind\":\"reservation_granted\",\"payload\":{\"wait_id\":\"wait-grant\",\"reservation_id\":\"reservation-grant\"}}\n\n";
+                  return { done: false, value: new TextEncoder().encode(frame) };
+                }
+                return new Promise(() => {});
+              },
+            }),
+          },
+        };
+      }
+      throw new Error(`unexpected URL ${url}`);
+    },
+    claimAlwaysFails: true,
+  });
+  await writeFile(join(directory, "granted.js"), "before\n");
+  const input = { path: "granted.js", content: "after\n" };
+  await pi.handlers.get("tool_call")({
+    toolCallId: "original-grant-call",
+    toolName: "write",
+    input,
+  }, extensionContext);
+
+  const beforeGrant = await pi.tools.get("lazy_write_resume").execute(
+    "resume-before-grant",
+    { operation_id: "wait-grant" },
+    undefined,
+    undefined,
+    extensionContext,
+  );
+  assert.equal(beforeGrant.isError, true);
+  assert.match(beforeGrant.content[0].text, /not claimable/);
+  assert.equal(extension.bindGrantedLazyReservation({
+    kind: "reservation_granted",
+    payload: { wait_id: "wait-grant", reservation_id: "wrong-reservation", relative_path: "other.js" },
+  }), false);
+
+  await pi.handlers.get("session_start")({ workspaceId: "workspace-1" }, extensionContext);
+  await granted;
+  const resumed = await pi.tools.get("lazy_write_resume").execute(
+    "resume-after-grant",
+    { operation_id: "wait-grant" },
+    undefined,
+    undefined,
+    extensionContext,
+  );
+  assert.equal(resumed.isError, false);
+  assert.equal(await readFile(join(directory, "granted.js"), "utf8"), "after\n");
+
+  const recorded = await hooks(hookLog);
+  assert.equal(recorded.some(({ args }) => args?.[0] === "reservation" && args[1] === "claim"), false);
+  const pre = recorded.find(({ event, payload }) => event === "pre-tool-use" && payload.yolo);
+  const post = recorded.find(({ event, payload }) => event === "post-tool-use" && payload.tool_call_id === "original-grant-call");
+  assert.equal(pre.payload.reservation_id, "reservation-grant");
+  assert.deepEqual(post.payload.result_metadata, {
+    status: "applied",
+    message: "lazy write applied",
+    targets: ["granted.js"],
+    wait_id: "wait-grant",
+    reservation_id: "reservation-grant",
+  });
 });
