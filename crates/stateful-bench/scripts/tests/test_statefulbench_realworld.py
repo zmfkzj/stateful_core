@@ -948,7 +948,11 @@ class ArchiveTests(unittest.TestCase):
             nonlocal opener_count
             with opener_lock:
                 opener_count += 1
-                return Response(contents) if opener_count == 1 else Response(unverified, first_finished)
+                return (
+                    Response(contents, second_write)
+                    if opener_count == 1
+                    else Response(unverified, first_finished)
+                )
 
         def download() -> None:
             try:
