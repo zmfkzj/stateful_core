@@ -10,7 +10,7 @@ DONE for Task 7 Rust-owned scope. Task 8 must update the installed OMP JavaScrip
 - Every sandbox profile that can mutate repository files (`write-targets`, `git`, `github-pr`, and external with repository targets) replays retained lifecycles before work begins. `read-only`, build scratch, and external-only scopes do not replay.
 - `RuntimeOrigin` is a persisted, serde-compatible binding API: authorization can fail-closed classify environment override (with captured URL), global runtime, or canonical repo-local runtime; replay resolution has no cross-scope fallback and permits same-origin restarts.
 - Reservation claim carries distinct `wait_id` and normalized `relative_path`. The HTTP request sends the path required by `/v2/reservation/claim`, then validates that the returned queued grant has the supplied wait ID and path. The Rust native protocol payload preserves both fields. The CLI has no wait-ID-only claim compatibility path.
-- Server reuse requires compatible V2 identity, the persisted PID matching that identity, and an exact canonical live executable path match with the current Stateful executable. An unproved persisted runtime file is removed without signaling its PID; only a fully proved runtime can be terminated.
+- Server reuse requires compatible V2 identity, the persisted PID matching that identity, and an exact canonical live executable path match with the current Stateful executable. Linux/Android prove the live path through `/proc/<pid>/exe`; macOS accepts only an absolute `/bin/ps -o comm=` path; other platforms fail closed. `terminate_runtime` repeats identity and executable proof immediately before `/bin/kill`.
 - Watcher candidates remain queued until a successful response. Timeout failures are logged and retried by the live loop, failed observations retain their immutable request envelope and request ID, and permanently excluded/outside-root/directory candidates are removed rather than rescanned.
 - `current` and `events` derive their workspace with `effective_workspace_id_for_repo` and retain repo/worktree identity in enabled repositories. Outside a repository they retain the runtime workspace.
 
@@ -38,19 +38,22 @@ cargo test -p stateful-cli --test commit structured_commit_replay_failure_preven
 cargo test -p stateful-cli --lib runtime_origin_binds_global_or_canonical_repo_without_fallback
 cargo test -p stateful-cli --lib executable_proof_rejects_different_absolute_binary_with_same_basename
 cargo test -p stateful-cli --lib watcher_discards_permanently_undeliverable_paths
+cargo test -p stateful-cli --lib current_process_exact_executable_path_proves_ownership
+cargo test -p stateful-cli --lib copied_same_basename_child_never_proves_executable_ownership
 ```
 
 Results: 1/1, 1/1, 2/2, 1/1, 1/1, 1/1, 1/1, 3/3, 1/1, and 1/1 passed, respectively.
 Follow-up reviewer fixes passed 1/1, 1/1, 1/1, and 1/1 for runtime-origin binding, exact executable proof, permanent watcher filtering, and watcher retained-envelope retry, respectively.
+Residual lifecycle hardening passed 1/1, 1/1, and 1/1 for current-binary proof, copied same-basename-child rejection, and unproved-runtime no-signal retirement, respectively.
 
 ## Ordering and Identity Review
 
 - Replay occurs before a new native commit authorization and before every repository-mutating sandbox profile; replay errors are propagated rather than logged or ignored.
 - Claim wait identity is never serialized as a path. The response must return the exact wait ID and normalized path supplied by the caller.
-- Runtime retirement signals only after both endpoint PID identity and executable ownership proof; unproved PIDs receive no signal.
+- Runtime retirement signals only after endpoint PID identity and exact executable ownership proof; `terminate_runtime` repeats both checks immediately before the absolute kill executable. Same-basename processes never qualify.
 - Watch retry preserves the first request ID and removes only paths whose request received a successful response.
 - Current/events use the same effective workspace derivation and full repo/worktree identity supplied to hook requests.
-- `RuntimeOrigin` captures authorization source without persisting a token: environment replay requires the same current override URL; global and repo-local replay load only their own runtime file and may adopt a restarted PID/token/port. `hook/write_lifecycle.rs` must persist and consume this API per pending intent.
+- `RuntimeOrigin` captures authorization source without persisting a token: environment replay requires the same current override URL; global and repo-local replay load only their own runtime file and may adopt a restarted PID/token/port. Task 6 now persists and consumes this API per pending intent.
 
 ## Files
 
@@ -66,9 +69,8 @@ Follow-up reviewer fixes passed 1/1, 1/1, 1/1, and 1/1 for runtime-origin bindin
 
 ## Commit and Push
 
-Implementation commits `12d5900` (`fix: close CLI lifecycle identity gaps`), `4d8a2e5` (`fix: retain watcher retries and verify executable path`), and `7823486` (`fix: bind lifecycle replay to runtime origin`) were pushed to `origin/presence-first-event-journal-v2`.
+Implementation commits `12d5900` (`fix: close CLI lifecycle identity gaps`), `4d8a2e5` (`fix: retain watcher retries and verify executable path`), `7823486` (`fix: bind lifecycle replay to runtime origin`), and `689957e` (`fix: prove live server executable before signaling`) were pushed to `origin/presence-first-event-journal-v2`.
 
-## Pending Consumer Dependencies
+## Remaining Dependency
 
-- Task 6 must update `crates/stateful-cli/src/hook/write_lifecycle.rs` to persist `RuntimeOrigin` for each pending intent and resolve replay through `resolve_runtime_origin`; until then its global scan still cannot safely select each record's source runtime.
 - `assets/stateful-omp-extension.js` still invokes `stateful reservation claim` with only `--wait-id`. Task 8 must pass the granted normalized `--path` and update its installed-dispatch JavaScript test. Task 7 intentionally leaves no Rust shim for that obsolete invocation.
