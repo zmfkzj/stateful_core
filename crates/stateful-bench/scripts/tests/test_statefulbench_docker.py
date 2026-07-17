@@ -46,7 +46,7 @@ class DockerRuntimeTests(unittest.TestCase):
             return completed
 
         runtime = self.mod.inspect_runtime(
-            "docker", "statefulbench-realworld:local", runner=runner
+            sys.executable, "statefulbench-realworld:local", runner=runner
         )
         self.assertEqual(runtime.image_id, "sha256:abc")
         self.assertEqual(runtime.repo_digests, ("statefulbench@sha256:def",))
@@ -77,7 +77,7 @@ class DockerRuntimeTests(unittest.TestCase):
             return image
 
         runtime = self.mod.inspect_runtime(
-            "docker", "statefulbench-realworld:local", runner=runner
+            sys.executable, "statefulbench-realworld:local", runner=runner
         )
         self.assertEqual(runtime.platform, "linux/arm64")
         self.assertEqual(runtime.server_platform, "linux/amd64")
@@ -106,12 +106,12 @@ class DockerRuntimeTests(unittest.TestCase):
             return image
 
         with self.assertRaisesRegex(RuntimeError, "linux/arm64"):
-            self.mod.inspect_runtime("docker", "statefulbench-realworld:local", runner=runner)
+            self.mod.inspect_runtime(sys.executable, "statefulbench-realworld:local", runner=runner)
 
     def test_inspect_runtime_fails_closed_on_missing_daemon_or_non_linux_image(self) -> None:
         with self.assertRaisesRegex(RuntimeError, r"Docker .*inspection failed"):
             self.mod.inspect_runtime(
-                "docker",
+                sys.executable,
                 "missing",
                 runner=Mock(
                     return_value=subprocess.CompletedProcess([], 1, "", "daemon unavailable")

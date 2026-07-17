@@ -555,6 +555,7 @@ class StatefulBenchLiteTests(unittest.TestCase):
                     "stateful",
                     self.mod.RunConfig(
                         launch_env=launch_env,
+                        omp_bin=sys.executable,
                         stateful_runtime_env={"STATEFUL_SERVER_TOKEN": "runtime-token"},
                     ),
                 )
@@ -595,7 +596,7 @@ class StatefulBenchLiteTests(unittest.TestCase):
                     "task",
                     root / "task.prompt.txt",
                     "no-state",
-                    self.mod.RunConfig(launch_env={}),
+                    self.mod.RunConfig(launch_env={}, omp_bin=sys.executable),
                 )
 
     def test_launch_agent_merges_workspace_virtualenv_environment_before_popen(self):
@@ -631,7 +632,7 @@ class StatefulBenchLiteTests(unittest.TestCase):
                     "task",
                     root / "task.prompt.txt",
                     "no-state",
-                    self.mod.RunConfig(launch_env=launch_env),
+                    self.mod.RunConfig(launch_env=launch_env, omp_bin=sys.executable),
                 )
 
         launched_env = popen.call_args.kwargs["env"]
