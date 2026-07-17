@@ -1,10 +1,17 @@
 use std::{
     fs,
+    io::{Read, Write},
+    net::TcpListener,
     process::Command,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
+    thread,
+    time::Duration,
 };
 
-use stateful_cli::{CommitRequest, run_structured_commit};
+use stateful_cli::{
+    CommitRequest, GlobalPaths, ServerRuntime, enable_repo, run_structured_commit,
+    write_global_runtime_file,
+};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -1068,6 +1075,250 @@ fn structured_commit_restores_unrelated_index_entries_added_by_failed_hook() {
     assert!(!root.path().join("generated.txt").exists());
 }
 
+const COMMIT_CHILD_REPO: &str = "STATEFUL_COMMIT_V2_CHILD_REPO";
+const COMMIT_CHILD_FAILS: &str = "STATEFUL_COMMIT_V2_CHILD_FAILS";
+const COMMIT_CHILD_REPLAY_FAILURE: &str = "STATEFUL_COMMIT_REPLAY_FAILURE";
+
+#[cfg(unix)]
+#[test]
+fn structured_commit_v2_completion_follows_the_git_outcome() {
+    let success = git_repo("stateful-commit-v2-success");
+    fs::write(success.path().join("README.md"), "seed\n").expect("seed should write");
+    git(success.path(), &["add", "README.md"]);
+    git(success.path(), &["commit", "-m", "seed"]);
+    fs::create_dir_all(success.path().join("docs")).expect("docs dir should write");
+    fs::write(success.path().join("docs/plan.md"), "plan\n").expect("plan should write");
+    let success_home = tempfile::tempdir().expect("stateful home should create");
+    let success_paths = GlobalPaths::new(success_home.path());
+    enable_repo(&success_paths, success.path()).expect("success repo should enable");
+    let (success_runtime, success_events) = spawn_commit_v2_server(success.path().to_path_buf());
+    write_global_runtime_file(&success_paths, &success_runtime).expect("runtime should write");
+
+    run_commit_v2_child(success.path(), &success_paths, false);
+    let success_authorize = commit_v2_event(&success_events, "/v2/authorize");
+    assert_eq!(
+        request_json_body(&success_authorize.0)["payload"]["action"],
+        "write_file"
+    );
+    let success_completion = commit_v2_event(&success_events, "/v2/write/complete");
+    let success_body = request_json_body(&success_completion.0);
+    assert_eq!(
+        success_completion.1, 2,
+        "completion must follow the Git commit"
+    );
+    assert_eq!(success_body["payload"]["intent_id"], "commit-intent");
+    assert_eq!(success_body["payload"]["outcome"], "committed");
+
+    let failure = git_repo("stateful-commit-v2-failure");
+    fs::write(failure.path().join("README.md"), "seed\n").expect("seed should write");
+    git(failure.path(), &["add", "README.md"]);
+    git(failure.path(), &["commit", "-m", "seed"]);
+    fs::create_dir_all(failure.path().join("docs")).expect("docs dir should write");
+    fs::write(failure.path().join("docs/plan.md"), "plan\n").expect("plan should write");
+    let hook_path = failure.path().join(".git/hooks/pre-commit");
+    fs::write(&hook_path, "#!/bin/sh\nexit 1\n").expect("pre-commit hook should write");
+    let mut permissions = fs::metadata(&hook_path)
+        .expect("pre-commit metadata should load")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&hook_path, permissions).expect("pre-commit hook should be executable");
+    let failure_home = tempfile::tempdir().expect("stateful home should create");
+    let failure_paths = GlobalPaths::new(failure_home.path());
+    enable_repo(&failure_paths, failure.path()).expect("failure repo should enable");
+    let (failure_runtime, failure_events) = spawn_commit_v2_server(failure.path().to_path_buf());
+    write_global_runtime_file(&failure_paths, &failure_runtime).expect("runtime should write");
+
+    run_commit_v2_child(failure.path(), &failure_paths, true);
+    let _failure_authorize = commit_v2_event(&failure_events, "/v2/authorize");
+    let failure_completion = commit_v2_event(&failure_events, "/v2/write/complete");
+    let failure_body = request_json_body(&failure_completion.0);
+    assert_eq!(failure_completion.1, 1, "failed setup must not commit");
+    assert_eq!(failure_body["payload"]["intent_id"], "commit-intent");
+    assert_eq!(failure_body["payload"]["outcome"], "failed");
+}
+
+#[test]
+fn structured_commit_replay_failure_prevents_new_authorization() {
+    let repo = git_repo("stateful-commit-replay-failure");
+    fs::write(repo.path().join("README.md"), "seed\n").expect("seed should write");
+    git(repo.path(), &["add", "README.md"]);
+    git(repo.path(), &["commit", "-m", "seed"]);
+    fs::create_dir_all(repo.path().join("docs")).expect("docs dir should write");
+    fs::write(repo.path().join("docs/plan.md"), "plan\n").expect("plan should write");
+    let home = tempfile::tempdir().expect("stateful home should create");
+    let paths = GlobalPaths::new(home.path());
+    enable_repo(&paths, repo.path()).expect("replay repo should enable");
+    let (runtime, events) = spawn_commit_v2_server(repo.path().to_path_buf());
+    write_global_runtime_file(&paths, &runtime).expect("runtime should write");
+    let pending = paths.runtime_dir.join("write-intents").join("agent");
+    fs::create_dir_all(&pending).expect("pending dir should create");
+    fs::write(pending.join("broken.json"), "{not-json").expect("pending record should write");
+
+    let output = Command::new(std::env::current_exe().expect("test executable should resolve"))
+        .args(["--exact", "structured_commit_v2_completion_child"])
+        .env(COMMIT_CHILD_REPO, repo.path())
+        .env(COMMIT_CHILD_REPLAY_FAILURE, "1")
+        .env("STATEFUL_HOME", &paths.home)
+        .env_remove("STATEFUL_SERVER_URL")
+        .env_remove("STATEFUL_SERVER_TOKEN")
+        .output()
+        .expect("commit child should run");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        events.recv_timeout(Duration::from_millis(200)).is_err(),
+        "replay failure must prevent the new authorization request"
+    );
+}
+
+#[test]
+fn structured_commit_v2_completion_child() {
+    let Ok(repo_root) = std::env::var(COMMIT_CHILD_REPO) else {
+        return;
+    };
+    let fails = std::env::var(COMMIT_CHILD_FAILS).as_deref() == Ok("1");
+    let replay_failure = std::env::var(COMMIT_CHILD_REPLAY_FAILURE).as_deref() == Ok("1");
+    let result = run_structured_commit(CommitRequest {
+        repo_root: repo_root.into(),
+        message: "docs: add plan".to_string(),
+        paths: vec!["docs/plan.md".to_string()],
+        agent_id: Some("agent-1".to_string()),
+        workspace_id: Some("w1".to_string()),
+        authorize: None,
+    });
+    if replay_failure {
+        assert!(
+            result.is_err(),
+            "replay failure should fail before authorization"
+        );
+    } else if fails {
+        assert!(result.is_err(), "failing hook should fail commit");
+    } else {
+        result.expect("commit should succeed");
+    }
+}
+
+fn run_commit_v2_child(repo_root: &std::path::Path, paths: &GlobalPaths, fails: bool) {
+    let output = Command::new(std::env::current_exe().expect("test executable should resolve"))
+        .args(["--exact", "structured_commit_v2_completion_child"])
+        .env(COMMIT_CHILD_REPO, repo_root)
+        .env(COMMIT_CHILD_FAILS, if fails { "1" } else { "0" })
+        .env("STATEFUL_HOME", &paths.home)
+        .env_remove("STATEFUL_SERVER_URL")
+        .env_remove("STATEFUL_SERVER_TOKEN")
+        .output()
+        .expect("commit child should run");
+    assert!(
+        output.status.success(),
+        "child status: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn spawn_commit_v2_server(
+    repo_root: std::path::PathBuf,
+) -> (ServerRuntime, mpsc::Receiver<(String, usize)>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let address = listener
+        .local_addr()
+        .expect("listener address should resolve");
+    let (tx, rx) = mpsc::channel();
+    let pid = std::process::id();
+    thread::spawn(move || {
+        let identity = format!(
+            r#"{{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":{pid},"workspace_id":"w1","workspace_version":1,"capabilities":["presence"]}}"#
+        );
+        while let Ok((mut stream, _)) = listener.accept() {
+            let request = read_http_request(&mut stream);
+            let body = if request.starts_with("GET /v2/runtime/identity?") {
+                identity.as_str()
+            } else if request.starts_with("POST /v2/authorize ") {
+                tx.send((request, commit_count(&repo_root)))
+                    .expect("authorization should send");
+                r#"{"intent_id":"commit-intent","decision":{"decision":"allow","reason_code":"allowed","message":"ok"}}"#
+            } else {
+                tx.send((request, commit_count(&repo_root)))
+                    .expect("completion should send");
+                r#"{"status":"completed"}"#
+            };
+            write_http_response(&mut stream, body);
+        }
+    });
+    (
+        ServerRuntime::new(format!("http://{address}"), "token", "w1", pid),
+        rx,
+    )
+}
+
+fn commit_v2_event(events: &mpsc::Receiver<(String, usize)>, endpoint: &str) -> (String, usize) {
+    loop {
+        let event = events
+            .recv_timeout(Duration::from_secs(2))
+            .expect("V2 lifecycle event should arrive");
+        if event.0.contains(endpoint) {
+            return event;
+        }
+    }
+}
+
+fn commit_count(repo_root: &std::path::Path) -> usize {
+    git_output(repo_root, &["rev-list", "--count", "HEAD"])
+        .trim()
+        .parse()
+        .expect("commit count should parse")
+}
+
+fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+    let mut request = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !request.ends_with(b"\r\n\r\n") {
+        stream
+            .read_exact(&mut byte)
+            .expect("request header should read");
+        request.push(byte[0]);
+    }
+    let headers = String::from_utf8(request.clone()).expect("headers should be UTF-8");
+    let content_length = headers
+        .lines()
+        .find_map(|line| line.strip_prefix("Content-Length: "))
+        .map(|length| {
+            length
+                .parse::<usize>()
+                .expect("content length should parse")
+        })
+        .unwrap_or_default();
+    let mut body = vec![0; content_length];
+    stream
+        .read_exact(&mut body)
+        .expect("request body should read");
+    request.extend(body);
+    String::from_utf8(request).expect("request should be UTF-8")
+}
+
+fn request_json_body(request: &str) -> serde_json::Value {
+    serde_json::from_str(
+        request
+            .split_once("\r\n\r\n")
+            .expect("request should have a body")
+            .1,
+    )
+    .expect("request body should be JSON")
+}
+
+fn write_http_response(stream: &mut std::net::TcpStream, body: &str) {
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
+    .expect("response should write");
+}
 fn git_repo(name: &str) -> tempfile_root::TempRoot {
     let root = tempfile_root::TempRoot::new(name);
     git(root.path(), &["init"]);

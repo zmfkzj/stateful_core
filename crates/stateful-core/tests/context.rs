@@ -1,4 +1,5 @@
 use stateful_core::{
+    AGENT_CONTEXT_SCOPE_SOURCE_REF, BRIEF_CONTEXT_MAX_ITEMS, BRIEF_CONTEXT_MAX_SCALARS,
     ContextPackage, CurrentEvidenceKind, CurrentFreshness, CurrentItem, CurrentItemKind,
     CurrentSeverity, ReconciliationDecision, RenderMode, render_prompt_text,
 };
@@ -240,4 +241,62 @@ fn only_adopt_and_reapply_clear_human_write_blocks() {
     assert!(ReconciliationDecision::Reapply.clears_human_write_block());
     assert!(!ReconciliationDecision::AskUser.clears_human_write_block());
     assert!(!ReconciliationDecision::Abandon.clears_human_write_block());
+}
+
+#[test]
+fn brief_context_enforces_item_and_unicode_scalar_limits() {
+    let package = ContextPackage::from_items(
+        (0..=BRIEF_CONTEXT_MAX_ITEMS)
+            .map(|index| {
+                CurrentItem::new(
+                    CurrentItemKind::Reservation,
+                    CurrentSeverity::Warn,
+                    CurrentFreshness::Live,
+                    format!("src/{index}.rs"),
+                    "🦀".repeat(BRIEF_CONTEXT_MAX_SCALARS),
+                    "🦀".repeat(BRIEF_CONTEXT_MAX_SCALARS),
+                )
+            })
+            .collect(),
+    );
+
+    let text = render_prompt_text(&package, RenderMode::Brief);
+    assert!(text.chars().count() <= BRIEF_CONTEXT_MAX_SCALARS);
+    assert!(text.matches("- [").count() <= BRIEF_CONTEXT_MAX_ITEMS);
+}
+
+#[test]
+fn brief_prioritizes_complete_hard_actions_over_long_owned_scopes() {
+    let mut items = (0..BRIEF_CONTEXT_MAX_ITEMS)
+        .map(|index| {
+            CurrentItem::new(
+                CurrentItemKind::Reservation,
+                CurrentSeverity::Info,
+                CurrentFreshness::Live,
+                format!("src/owned-{index}.rs"),
+                "owned scope".repeat(200),
+                "owned scope".repeat(200),
+            )
+            .with_source_ref(AGENT_CONTEXT_SCOPE_SOURCE_REF)
+        })
+        .collect::<Vec<_>>();
+    let required_action =
+        "Reread src/changed.rs, summarize the human change, then acknowledge reconciliation.";
+    items.push(
+        CurrentItem::new(
+            CurrentItemKind::Claim,
+            CurrentSeverity::Block,
+            CurrentFreshness::Live,
+            "src/changed.rs",
+            "Reconcile a human write before editing.",
+            "src/changed.rs has an unreconciled human write.",
+        )
+        .with_next_action(required_action),
+    );
+
+    let text = render_prompt_text(&ContextPackage::from_items(items), RenderMode::Brief);
+
+    assert!(text.chars().count() <= BRIEF_CONTEXT_MAX_SCALARS);
+    assert!(text.contains("Blocking"));
+    assert!(text.contains(required_action.trim_end_matches('.')));
 }

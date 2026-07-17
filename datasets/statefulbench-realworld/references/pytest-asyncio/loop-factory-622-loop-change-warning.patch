@@ -1,0 +1,93 @@
+diff --git a/pytest_asyncio/plugin.py b/pytest_asyncio/plugin.py
+--- a/pytest_asyncio/plugin.py
++++ b/pytest_asyncio/plugin.py
+@@ -1020,6 +1020,11 @@ Here is the traceback of the exception triggered during teardown:
+ %s
+ """
+ 
++_RUNNER_LOOP_CHANGE_WARNING = """\
++pytest-asyncio detected that a test changed the current event loop. \
++Restore the runner's loop before the test finishes.\
++"""
++
+ 
+ def _create_scoped_runner_fixture(scope: _ScopeName) -> Callable:
+     @pytest.fixture(
+@@ -1031,34 +1036,54 @@ def _create_scoped_runner_fixture(scope: _ScopeName) -> Callable:
+         _asyncio_loop_factory,
+         request: FixtureRequest,
+     ) -> Iterator[Runner]:
++        try:
++            old_loop = _get_event_loop_no_warn()
++        except RuntimeError:
++            old_loop = None
+         new_loop_policy = event_loop_policy
+         debug_mode = _get_asyncio_debug(request.config)
+-        with _temporary_event_loop_policy(new_loop_policy):
+-            runner = Runner(
+-                debug=debug_mode,
+-                loop_factory=_asyncio_loop_factory,
+-            ).__enter__()
+-            if _asyncio_loop_factory is not None:
+-                _set_event_loop(runner.get_loop())
+-            try:
+-                yield runner
+-            except Exception as e:
+-                runner.__exit__(type(e), e, e.__traceback__)
+-            else:
+-                with warnings.catch_warnings():
+-                    warnings.filterwarnings(
+-                        "ignore", ".*BaseEventLoop.shutdown_asyncgens.*", RuntimeWarning
+-                    )
++        try:
++            with _temporary_event_loop_policy(new_loop_policy):
++                runner = Runner(
++                    debug=debug_mode,
++                    loop_factory=_asyncio_loop_factory,
++                ).__enter__()
++                runner_loop = runner.get_loop()
++                if _asyncio_loop_factory is not None:
++                    _set_event_loop(runner_loop)
++                def loop_changed() -> bool:
+                     try:
+-                        runner.__exit__(None, None, None)
++                        current_loop = _get_event_loop_no_warn()
+                     except RuntimeError:
+-                        warnings.warn(
+-                            _RUNNER_TEARDOWN_WARNING % traceback.format_exc(),
+-                            RuntimeWarning,
++                        current_loop = None
++                    return scope == "function" and current_loop not in (
++                        None, runner_loop, old_loop
++                    )
++
++                try:
++                    yield runner
++                except Exception as e:
++                    changed_loop = loop_changed()
++                    runner.__exit__(type(e), e, e.__traceback__)
++                    if changed_loop:
++                        warnings.warn(_RUNNER_LOOP_CHANGE_WARNING, RuntimeWarning)
++                else:
++                    changed_loop = loop_changed()
++                    with warnings.catch_warnings():
++                        warnings.filterwarnings(
++                            "ignore", ".*BaseEventLoop.shutdown_asyncgens.*", RuntimeWarning
+                         )
+-            finally:
+-                if _asyncio_loop_factory is not None:
+-                    _set_event_loop(None)
++                        try:
++                            runner.__exit__(None, None, None)
++                        except RuntimeError:
++                            warnings.warn(
++                                _RUNNER_TEARDOWN_WARNING % traceback.format_exc(),
++                                RuntimeWarning,
++                            )
++                    if changed_loop:
++                        warnings.warn(_RUNNER_LOOP_CHANGE_WARNING, RuntimeWarning)
++        finally:
++            _set_event_loop(old_loop)
+ 
+     return _scoped_runner
+ 

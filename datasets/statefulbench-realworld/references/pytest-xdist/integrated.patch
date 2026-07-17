@@ -1,0 +1,202 @@
+diff --git a/src/xdist/dsession.py b/src/xdist/dsession.py
+index 41e62d4..951203a 100644
+--- a/src/xdist/dsession.py
++++ b/src/xdist/dsession.py
+@@ -5,6 +5,7 @@ from enum import auto
+ from enum import Enum
+ from queue import Empty
+ from queue import Queue
++import time
+ import sys
+ from typing import Any
+ import warnings
+@@ -87,16 +88,26 @@ class DSession:
+         soon as nodes start they will emit the worker_workerready event.
+         """
+         self.nodemanager = NodeManager(self.config)
+-        nodes = self.nodemanager.setup_nodes(putevent=self.queue.put)
+-        self._active_nodes.update(nodes)
+-        self._session = session
+         ramp = self.config.getoption("ramp")
+         if ramp:
+-            workers = len(nodes)
++            specs = self.nodemanager.specs
++            self.config.hook.pytest_xdist_setupnodes(config=self.config, specs=specs)
++            workers = len(specs)
+             workers_noun = "worker" if workers == 1 else "workers"
+             self.report_line(
+                 f"ramping test start over {ramp:g}s across {workers} {workers_noun}"
+             )
++            nodes = []
++            for worker_index, spec in enumerate(specs):
++                nodes.append(
++                    self.nodemanager.setup_node(spec, self.queue.put, worker_index)
++                )
++                if worker_index + 1 < workers:
++                    time.sleep(ramp / (workers - 1))
++        else:
++            nodes = self.nodemanager.setup_nodes(putevent=self.queue.put)
++        self._active_nodes.update(nodes)
++        self._session = session
+ 
+     @pytest.hookimpl
+     def pytest_sessionfinish(self) -> None:
+@@ -263,7 +273,8 @@ class DSession:
+         if maximum_reached:
+             if self._max_worker_restart == 0:
+                 msg = f"worker {node.gateway.id} crashed and worker restarting disabled"
+             else:
+                 msg = f"maximum crashed workers reached: {self._max_worker_restart}"
+             self._summary_report = msg
++            self.shouldstop = msg
+             self.report_line("\n" + msg)
+diff --git a/src/xdist/plugin.py b/src/xdist/plugin.py
+index 7dcdcdb..30b567b 100644
+--- a/src/xdist/plugin.py
++++ b/src/xdist/plugin.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++import argparse
+ import math
+ import os
+ import sys
+@@ -131,10 +132,22 @@ def pytest_xdist_auto_num_workers(config: pytest.Config) -> int:
+         if result is not None:
+             return result
+     return 1
+ 
+ 
+-def parse_numprocesses(s: str) -> int | Literal["auto", "logical"]:
+-    if s in ("auto", "logical"):
++class _ExplicitDistAction(argparse.Action):
++    def __call__(
++        self,
++        parser: argparse.ArgumentParser,
++        namespace: argparse.Namespace,
++        values: object,
++        option_string: str | None = None,
++    ) -> None:
++        setattr(namespace, self.dest, values)
++        namespace._xdist_explicit_dist = True
++
++
++def parse_numprocesses(s: str) -> int | Literal["auto", "auto-1", "logical"]:
++    if s in ("auto", "auto-1", "logical"):
+         return s  # type: ignore[return-value]
+     elif s is not None:
+         return int(s)
+@@ -218,7 +231,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
+     group.addoption(
+         "--dist",
+         metavar="distmode",
+-        action="store",
++        action=_ExplicitDistAction,
+         choices=[
+             "each",
+             "load",
+@@ -425,21 +438,27 @@ def pytest_cmdline_main(config: pytest.Config) -> None:
+         config.option.dist = "load"
+ 
+     usepdb = config.getoption("usepdb", False)  # a core option
+-    if config.option.numprocesses in ("auto", "logical"):
++    if config.option.numprocesses in ("auto", "auto-1", "logical"):
+         if usepdb:
+             config.option.numprocesses = 0
+             config.option.dist = "no"
+         else:
+             auto_num_cpus = config.hook.pytest_xdist_auto_num_workers(config=config)
++            if config.option.numprocesses == "auto-1":
++                auto_num_cpus = max(auto_num_cpus - 1, 0)
+             config.option.numprocesses = auto_num_cpus
+ 
++    explicit_dist = getattr(config.option, "_xdist_explicit_dist", False)
+     if config.option.numprocesses:
+-        if config.option.dist == "no":
++        if config.option.dist == "no" and not explicit_dist:
+             config.option.dist = "load"
+-        numprocesses = config.option.numprocesses
+-        if config.option.maxprocesses:
+-            numprocesses = min(numprocesses, config.option.maxprocesses)
+-        config.option.tx = ["popen"] * numprocesses
++        if config.option.dist != "no":
++            numprocesses = config.option.numprocesses
++            if config.option.maxprocesses:
++                numprocesses = min(numprocesses, config.option.maxprocesses)
++            config.option.tx = ["popen"] * numprocesses
++        else:
++            config.option.numprocesses = 0
+ 
+     if config.option.numprocesses == 0:
+         config.option.dist = "no"
+diff --git a/src/xdist/scheduler/loadscope.py b/src/xdist/scheduler/loadscope.py
+index 73162dc..031e3c9 100644
+--- a/src/xdist/scheduler/loadscope.py
++++ b/src/xdist/scheduler/loadscope.py
+@@ -132,3 +132,3 @@ class LoadScopeScheduling:
+         for assigned_unit in self.assigned_work.values():
+-            if self._pending_of(assigned_unit) >= 2:
++            if self._pending_of(assigned_unit) > 0:
+                 return False
+@@ -303,7 +303,10 @@ class LoadScopeScheduling:
+             example/loadsuite/test/test_delta.py::Delta1
+             example/loadsuite/epsilon/__init__.py
+         """
+-        return nodeid.rsplit("::", 1)[0]
++        if nodeid.rfind("@") > nodeid.rfind("]"):
++            return nodeid.rsplit("@", 1)[-1]
++
++        return nodeid.split("[", 1)[0].rsplit("::", 1)[0]
+ 
+     def _pending_of(self, workload: dict[str, dict[str, bool]]) -> int:
+         """Return the number of pending tests in a workload."""
+@@ -320,9 +323,15 @@ class LoadScopeScheduling:
+         if node.shutting_down:
+             return
+ 
++        # A restarted worker must never receive a completed work unit.
++        while self.workqueue and all(next(iter(self.workqueue.values())).values()):
++            self.workqueue.popitem(last=False)
++
+         # Check that more work is available
+         if not self.workqueue:
++            # This queues a FIFO marker; assigned runtests stay ahead of it.
++            # Removing it makes a worker block while waiting for its next command.
+             node.shutdown()
+             return
+ 
+         self.log("Number of units waiting for node:", len(self.workqueue))
+@@ -364,14 +372,19 @@ class LoadScopeScheduling:
+         if not self.collection:
+             return
+ 
++        controller_runner = getattr(self.config.option, "loadscopecontroller", None)
++
+         # Determine chunks of work (scopes)
+         unsorted_workqueue: dict[str, dict[str, bool]] = {}
+         for nodeid in self.collection:
++            if controller_runner is not None and controller_runner(nodeid):
++                continue
++
+             scope = self._split_scope(nodeid)
+             work_unit = unsorted_workqueue.setdefault(scope, {})
+             work_unit[nodeid] = False
+ 
+-        if self.config.option.loadscopereorder:
++        if self.config.option.loadscopereorder and len(self.nodes) > 1:
+             # Insert tests scopes into work queue ordered by number of tests.
+             for scope, nodeids in sorted(
+                 unsorted_workqueue.items(), key=lambda item: -len(item[1])
+@@ -401,9 +414,10 @@ class LoadScopeScheduling:
+         for node in self.nodes:
+             self._reschedule(node)
+ 
+-        # Initial distribution sent all tests, start node shutdown
++        # Initial distribution enqueued every test command before this marker.
++        # WorkerController sends commands through a FIFO channel.
+         if not self.workqueue:
+             for node in self.nodes:
+                 node.shutdown()
+ 
+     def _check_nodes_have_same_collection(self) -> bool:
+         """Return True if all nodes have collected the same items.

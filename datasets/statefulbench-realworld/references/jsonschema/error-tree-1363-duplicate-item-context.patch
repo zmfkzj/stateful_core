@@ -1,0 +1,48 @@
+diff --git a/jsonschema/_keywords.py b/jsonschema/_keywords.py
+index 65e3a79..d13d53c 100644
+--- a/jsonschema/_keywords.py
++++ b/jsonschema/_keywords.py
+@@ -209,6 +209,17 @@ def uniqueItems(validator, uI, instance, schema):
+         and validator.is_type(instance, "array")
+         and not uniq(instance)
+     ):
+-        yield ValidationError(f"{instance!r} has non-unique elements")
++        duplicate_item_contexts = []
++        previous = []
++        for index, item in enumerate(instance):
++            for first_index, earlier in enumerate(previous):
++                if equal(item, earlier):
++                    duplicate_item_contexts.append((first_index, index, item))
++                    break
++            previous.append(item)
++
++        error = ValidationError(f"{instance!r} has non-unique elements")
++        error.duplicate_item_contexts = duplicate_item_contexts
++        yield error
+ 
+ 
+diff --git a/jsonschema/exceptions.py b/jsonschema/exceptions.py
+index 2e5d4ca..14c6f22 100644
+--- a/jsonschema/exceptions.py
++++ b/jsonschema/exceptions.py
+@@ -321,6 +321,9 @@ class ErrorTree:
+ 
+     def __init__(self, errors: Iterable[ValidationError] = ()):
+         self.errors: MutableMapping[str, ValidationError] = {}
++        self.duplicate_item_contexts: MutableMapping[
++            str, list[tuple[int, int, Any]]
++        ] = defaultdict(list)
+         self._contents: Mapping[str, ErrorTree] = defaultdict(self.__class__)
+ 
+         for error in errors:
+@@ -330,5 +333,10 @@ class ErrorTree:
+             container.errors[error.validator] = error
+ 
+             container._instance = error.instance
++            contexts = getattr(error, "duplicate_item_contexts", ())
++            if contexts:
++                container.duplicate_item_contexts[error.validator].extend(
++                    contexts,
++                )
+ 
+     def __contains__(self, index: str | int):

@@ -1,0 +1,76 @@
+diff --git a/jsonschema/exceptions.py b/jsonschema/exceptions.py
+index 2e5d4ca..239afdb 100644
+--- a/jsonschema/exceptions.py
++++ b/jsonschema/exceptions.py
+@@ -65,6 +65,7 @@ class _Error(Exception):
+         schema_path: Iterable[str | int] = (),
+         parent: _Error | None = None,
+         type_checker: _types.TypeChecker = _unset,  # type: ignore[assignment]
++        relative_schema_path: Iterable[str | int] | None = None,
+     ) -> None:
+         super().__init__(
+             message,
+@@ -80,7 +81,10 @@ class _Error(Exception):
+         )
+         self.message = message
+         self.path = self.relative_path = deque(path)
+-        self.schema_path = self.relative_schema_path = deque(schema_path)
++        self.schema_path = deque(schema_path)
++        self.relative_schema_path = deque(
++            schema_path if relative_schema_path is None else relative_schema_path,
++        )
+         self.context = list(context)
+         self.cause = self.__cause__ = cause
+         self.validator = validator
+@@ -143,9 +147,9 @@ class _Error(Exception):
+     def absolute_schema_path(self) -> Sequence[str | int]:
+         parent = self.parent
+         if parent is None:
+-            return self.relative_schema_path
++            return self.schema_path
+ 
+-        path = deque(self.relative_schema_path)
++        path = deque(self.schema_path)
+         path.extendleft(reversed(parent.absolute_schema_path))
+         return path
+ 
+@@ -177,7 +181,7 @@ class _Error(Exception):
+     def _contents(self):
+         attrs = (
+             "message", "cause", "context", "validator", "validator_value",
+-            "path", "schema_path", "instance", "schema", "parent",
++            "path", "schema_path", "relative_schema_path", "instance", "schema", "parent",
+         )
+         return {attr: getattr(self, attr) for attr in attrs}
+ 
+@@ -200,6 +203,7 @@
+ class ValidationError(_Error):
+     """
+     An instance was invalid under a provided schema.
+     """
+ 
++    relative_schema_path: Sequence[str | int]
+     _word_for_schema_in_error_message = "schema"
+diff --git a/jsonschema/validators.py b/jsonschema/validators.py
+--- a/jsonschema/validators.py
++++ b/jsonschema/validators.py
+@@ -390,7 +390,9 @@ def create(
+                         type_checker=self.TYPE_CHECKER,
+                     )
+                     if k not in {"if", "$ref"}:
+                         error.schema_path.appendleft(k)
++                        if error.schema is _schema:
++                            error.relative_schema_path.appendleft(k)
+                     yield error
+ 
+         def descend(
+@@ -438,7 +440,9 @@ def create(
+                         type_checker=evolved.TYPE_CHECKER,
+                     )
+                     if k not in {"if", "$ref"}:
+                         error.schema_path.appendleft(k)
++                        if error.schema is schema:
++                            error.relative_schema_path.appendleft(k)
+                     if path is not None:
+                         error.path.appendleft(path)
+                     if schema_path is not None:

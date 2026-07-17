@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="430" viewBox="0 0 960 430" role="img" aria-labelledby="title desc">
-  <title id="title">Example stateful current output</title>
-  <desc id="desc">Terminal-style example showing active leases and a wait queue for stateful current.</desc>
+  <title id="title">Example Stateful V2 coordination briefing</title>
+  <desc id="desc">Terminal-style example showing nearby presence, fresh exact-read evidence, and an advisory overlap warning.</desc>
   <rect width="960" height="430" rx="8" fill="#101214"/>
   <rect x="24" y="24" width="912" height="382" rx="8" fill="#171b1f" stroke="#313942"/>
   <circle cx="52" cy="52" r="6" fill="#ff5f57"/>
@@ -8,21 +8,21 @@
   <circle cx="96" cy="52" r="6" fill="#28c840"/>
   <text x="124" y="57" fill="#98a2ad" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15">stateful current</text>
 
-  <text x="52" y="104" fill="#f2f4f8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" font-weight="700">ACTIVE LEASES</text>
+  <text x="52" y="104" fill="#f2f4f8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" font-weight="700">NEARBY PRESENCE</text>
   <line x1="52" y1="120" x2="888" y2="120" stroke="#313942"/>
 
   <text x="52" y="156" fill="#dbe2ea" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">session-a</text>
   <text x="176" y="156" fill="#7dd3fc" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">src/auth.ts</text>
-  <text x="720" y="156" fill="#a7f3d0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">expires in 78s</text>
+  <text x="720" y="156" fill="#a7f3d0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">fresh exact read</text>
 
   <text x="52" y="194" fill="#dbe2ea" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">session-b</text>
   <text x="176" y="194" fill="#7dd3fc" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">src/billing.ts</text>
-  <text x="710" y="194" fill="#a7f3d0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">expires in 110s</text>
+  <text x="710" y="194" fill="#a7f3d0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">handoff: tests passed</text>
 
-  <text x="52" y="260" fill="#f2f4f8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" font-weight="700">WAIT QUEUE</text>
+  <text x="52" y="260" fill="#f2f4f8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" font-weight="700">AWARENESS CONTEXT</text>
   <line x1="52" y1="276" x2="888" y2="276" stroke="#313942"/>
 
   <text x="52" y="312" fill="#dbe2ea" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">session-c</text>
-  <text x="176" y="312" fill="#fbbf24" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">waiting for src/auth.ts</text>
-  <text x="52" y="350" fill="#98a2ad" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15">Other files remain available while the conflict is scoped to src/auth.ts.</text>
+  <text x="176" y="312" fill="#fbbf24" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">warning: planned overlap on src/auth.ts</text>
+  <text x="52" y="350" fill="#98a2ad" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15">Reread changed evidence; enforcement is explicit and thin safety stops still apply.</text>
 </svg>

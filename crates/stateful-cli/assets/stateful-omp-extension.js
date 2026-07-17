@@ -2,9 +2,9 @@
 // extension's command parsing/preflight is advisory UX only; do not extend
 // its quoting rules independently of crates/stateful-cli/src/shell_command.rs.
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { delimiter, dirname, resolve } from "node:path";
+import { delimiter, dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const STATEFUL = __STATEFUL_BINARY_JSON__;
@@ -173,16 +173,57 @@ function reservationId(event, decision) {
   );
 }
 
-let reservationStreamAbort;
-let reservationStreamKey = "";
-let reservationStreamLastEventId = "";
-const seenReservationWaitIds = new Set();
+let contextStreamAbort;
+let contextStreamKey = "";
+let contextStreamLastEventId = "";
+let activeContextStream;
+let contextState = {
+  deliveredVersion: undefined,
+  pendingVersion: undefined,
+  initialPending: false,
+  deliveryInFlight: false,
+};
 
-function stopReservationStream() {
-  if (reservationStreamAbort) {
-    reservationStreamAbort.abort();
-    reservationStreamAbort = undefined;
+function version(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+export function exactReadCandidate(event) {
+  const toolName = event?.toolName;
+  if (toolName !== "read" && toolName !== "functions.read") return false;
+  const path = event?.input?.path;
+  if (typeof path !== "string" || !path.endsWith(":raw")) return false;
+  const source = path.slice(0, -":raw".length);
+  if (!source || /:\d+(?:[-+]\d*)?(?:,\d+(?:[-+]\d*)?)*$/.test(source)) return false;
+  const metadata = event?.resultMetadata || event?.result_metadata || event?.result || {};
+  return event?.isError !== true
+    && event?.isComplete !== false
+    && event?.complete !== false
+    && event?.truncated !== true
+    && event?.isTruncated !== true
+    && metadata?.truncated !== true;
+}
+
+export function coalesceContextInvalidation(currentVersion, targetVersion) {
+  const current = version(currentVersion);
+  const target = version(targetVersion);
+  if (target === undefined) return current;
+  return current === undefined || target > current ? target : current;
+}
+
+export function shouldDeliverContextVersion(deliveredVersion, targetVersion) {
+  const target = version(targetVersion);
+  if (target === undefined) return false;
+  const delivered = version(deliveredVersion);
+  return delivered === undefined || target > delivered;
+}
+
+function stopContextStream() {
+  if (contextStreamAbort) {
+    contextStreamAbort.abort();
+    contextStreamAbort = undefined;
   }
+  activeContextStream = undefined;
 }
 
 function sleepWithAbort(ms, signal) {
@@ -197,14 +238,89 @@ function sleepWithAbort(ms, signal) {
   });
 }
 
-function reservationStreamUrl(stream) {
-  const base = String(stream.base_url || "").replace(/\/+$/, "");
-  return base + "/v1/notifications/stream?agent_id=" + encodeURIComponent(stream.agent_id) + "&workspace_id=" + encodeURIComponent(stream.workspace_id);
+function contextIdentity(stream) {
+  const streamAgent = stream?.agent || {};
+  const streamWorkspace = stream?.workspace || {};
+  const agentId = firstString(streamAgent.agent_id, stream?.agent_id);
+  const workspaceId = firstString(streamWorkspace.workspace_id, stream?.workspace_id);
+  return {
+    agent: {
+      agent_id: agentId,
+      actor_id: firstString(streamAgent.actor_id, stream?.actor_id, agentId),
+      actor_type: firstString(streamAgent.actor_type, stream?.actor_type, "agent"),
+    },
+    workspace: {
+      root: firstString(streamWorkspace.root, stream?.root, stream?.cwd, "."),
+      workspace_id: workspaceId,
+      repo_id: firstString(streamWorkspace.repo_id, stream?.repo_id, "unknown"),
+      worktree_id: firstString(streamWorkspace.worktree_id, stream?.worktree_id, "unknown"),
+      branch: firstString(streamWorkspace.branch, stream?.branch, "unknown"),
+    },
+  };
 }
 
-function reservationResumeUrl(stream) {
-  const base = String(stream.base_url || "").replace(/\/+$/, "");
-  return base + "/v1/resume/next";
+function contextEnvelope(stream, event, payload, toolName) {
+  const identity = contextIdentity(stream);
+  const source = {
+    kind: "hook",
+    event,
+    source_ref: "omp:" + event,
+  };
+  if (toolName) source.tool_name = toolName;
+  return {
+    protocol_version: "stateful.v2",
+    request_id: randomUUID(),
+    observed_at: new Date().toISOString(),
+    agent: identity.agent,
+    workspace: identity.workspace,
+    source,
+    payload,
+  };
+}
+
+async function postContextV2(stream, path, event, payload, toolName) {
+  if (typeof fetch !== "function") return undefined;
+  try {
+    return await fetch(String(stream.base_url || "").replace(/\/+$/, "") + path, {
+      method: "POST",
+      headers: {
+        authorization: stream.authorization,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(contextEnvelope(stream, event, payload, toolName)),
+    });
+  } catch (_) {
+    return undefined;
+  }
+}
+
+function contextStreamUrl(stream) {
+  const envelope = contextEnvelope(stream, "omp_notification_stream", {});
+  const query = new URLSearchParams({
+    protocol_version: envelope.protocol_version,
+    request_id: envelope.request_id,
+    observed_at: envelope.observed_at,
+    agent_id: envelope.agent.agent_id,
+    actor_id: envelope.agent.actor_id,
+    actor_type: envelope.agent.actor_type,
+    root: envelope.workspace.root,
+    workspace_id: envelope.workspace.workspace_id,
+    repo_id: envelope.workspace.repo_id,
+    worktree_id: envelope.workspace.worktree_id,
+    branch: envelope.workspace.branch,
+    kind: envelope.source.kind,
+    event: envelope.source.event,
+    source_ref: envelope.source.source_ref,
+  });
+  return String(stream.base_url || "").replace(/\/+$/, "") + "/v2/notifications/stream?" + query;
+}
+
+function notificationTargetsStreamAgent(notification, stream) {
+  const targetAgentId = notification?.target_agent_id
+    || notification?.agent_id
+    || notification?.payload?.agent_id;
+  if (!targetAgentId) return true;
+  return targetAgentId === stream?.agent_id;
 }
 
 function reservationMessage(notification) {
@@ -227,77 +343,157 @@ function reservationMessage(notification) {
   return lines.join("\n");
 }
 
-function notificationTargetsStreamAgent(notification, stream) {
-  const targetAgentId = property(notification, "target_agent_id")
-    || property(notification, "agent_id")
-    || propertyPath(notification, "payload", "agent_id");
-  if (!targetAgentId) return true;
-  return targetAgentId === property(stream, "agent_id");
-}
-
-
 function deliverReservationNotification(pi, notification, stream) {
   if (!notificationTargetsStreamAgent(notification, stream)) return true;
-  const payload = notification?.payload || {};
-  const waitId = payload.wait_id;
-  if (!waitId || seenReservationWaitIds.has(waitId)) {
-    return true;
-  }
-  if (typeof pi?.sendMessage !== "function") {
-    return false;
-  }
-  const text = reservationMessage(notification);
+  bindGrantedLazyReservation(notification);
+  if (typeof pi?.sendMessage !== "function") return false;
   try {
     pi.sendMessage(
       {
         customType: "stateful_reservation_ready",
-        content: text,
+        content: reservationMessage(notification),
         display: true,
         details: notification,
       },
       { triggerTurn: true, deliverAs: "nextTurn" }
     );
-    seenReservationWaitIds.add(waitId);
     return true;
   } catch (_) {
     return false;
   }
 }
 
-async function checkReservationResume(pi, stream, signal) {
-  if (typeof fetch !== "function" || signal?.aborted) return;
+function deliverCoordinationWarning(pi, notification) {
+  if (typeof pi?.sendMessage !== "function") return false;
+  const payload = notification?.payload || {};
+  const content = firstString(payload.message, notification?.message, "Stateful detected overlapping work.");
   try {
-    const response = await fetch(reservationResumeUrl(stream), {
-      method: "POST",
-      headers: {
-        authorization: stream.authorization,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({ agent_id: stream.agent_id, workspace_id: stream.workspace_id }),
-      signal,
-    });
-    if (!response.ok) return;
-    const body = await response.json();
-    if (body?.resume_available && body?.reservation) {
-      deliverReservationNotification(pi, {
-        notification_id: "resume:" + body.reservation.wait_id,
-        workspace_id: stream.workspace_id,
-        kind: "reservation_granted",
-        payload: {
-          wait_id: body.reservation.wait_id,
-          reservation_id: body.reservation.reservation_id || body.reservation.wait_id,
-          relative_path: body.reservation.relative_path,
-          action: body.reservation.action,
-          purpose: body.reservation.purpose,
-          reservation_expires_at: body.reservation.reservation_expires_at,
-        },
-        required_next_action: body.required_next_action,
-      }, stream);
-    }
-  } catch (_) {}
+    pi.sendMessage(
+      { customType: "stateful_coordination_warning", content, display: true },
+      { deliverAs: "nextTurn" }
+    );
+    return true;
+  } catch (_) {
+    return false;
+  }
 }
 
-function processReservationSseBlock(pi, block, stream) {
+async function acknowledgeNotification(stream, notification) {
+  const sequence = version(notification?.sequence);
+  if (sequence === undefined) return true;
+  const response = await postContextV2(stream, "/v2/notifications/poll", "omp_notification_ack", { sequence });
+  return response?.ok === true;
+}
+
+async function deliverContext(pi, stream, targetVersion) {
+  if (targetVersion !== undefined && !shouldDeliverContextVersion(contextState.deliveredVersion, targetVersion)) {
+    return true;
+  }
+  const response = await postContextV2(stream, "/v2/context/render", "omp_context_render", { mode: "brief" });
+  if (!response?.ok) return false;
+  let context;
+  try {
+    context = await response.json();
+  } catch (_) {
+    return false;
+  }
+  const renderedVersion = version(context?.workspace_version);
+  if (renderedVersion === undefined) return false;
+  if (targetVersion !== undefined && renderedVersion < targetVersion) return false;
+  if (!context?.changed) {
+    contextState.deliveredVersion = coalesceContextInvalidation(contextState.deliveredVersion, renderedVersion);
+    return true;
+  }
+  if (!shouldDeliverContextVersion(contextState.deliveredVersion, renderedVersion)) return true;
+  if (!context?.delivery_id || version(context?.sequence) === undefined || typeof pi?.sendMessage !== "function") {
+    return false;
+  }
+  try {
+    pi.sendMessage(
+      {
+        customType: "stateful_context",
+        content: String(context.prompt_text || ""),
+        display: true,
+      },
+      { triggerTurn: true, deliverAs: "nextTurn" }
+    );
+  } catch (_) {
+    return false;
+  }
+  const acknowledgement = await postContextV2(stream, "/v2/context/ack", "context_ack", {
+    delivery_id: context.delivery_id,
+    sequence: context.sequence,
+    workspace_version: renderedVersion,
+  });
+  if (!acknowledgement?.ok) return false;
+  contextState.deliveredVersion = coalesceContextInvalidation(contextState.deliveredVersion, renderedVersion);
+  return true;
+}
+
+function queueContextInvalidation(targetVersion) {
+  const target = version(targetVersion);
+  if (target === undefined) return false;
+  contextState.pendingVersion = coalesceContextInvalidation(contextState.pendingVersion, target);
+  return true;
+}
+
+async function flushContextDelivery(pi, stream) {
+  if (contextState.deliveryInFlight) return true;
+  contextState.deliveryInFlight = true;
+  try {
+    if (contextState.initialPending) {
+      contextState.initialPending = false;
+      if (!await deliverContext(pi, stream)) {
+        contextState.initialPending = true;
+        return false;
+      }
+    }
+    const target = contextState.pendingVersion;
+    if (target === undefined) return true;
+    contextState.pendingVersion = undefined;
+    if (!shouldDeliverContextVersion(contextState.deliveredVersion, target)) return true;
+    if (await deliverContext(pi, stream, target)) return true;
+    contextState.pendingVersion = coalesceContextInvalidation(contextState.pendingVersion, target);
+    return false;
+  } finally {
+    contextState.deliveryInFlight = false;
+  }
+}
+
+async function processContextNotification(pi, notification, stream, event) {
+  if (!notificationTargetsStreamAgent(notification, stream)) return true;
+  const kind = event === "message" || event === "notification" ? notification?.kind : event;
+  if (kind === "context_invalidated") {
+    if (!queueContextInvalidation(notification?.payload?.target_version)) return false;
+    return flushContextDelivery(pi, stream);
+  }
+  if (kind === "reservation_granted") {
+    return deliverReservationNotification(pi, notification, stream);
+  }
+  if (kind === "scope_overlap") {
+    return deliverCoordinationWarning(pi, notification);
+  }
+  return true;
+}
+
+async function recoverContextNotifications(pi, stream) {
+  const response = await postContextV2(stream, "/v2/notifications/poll", "omp_notification_poll", {});
+  if (!response?.ok) return false;
+  let notifications;
+  try {
+    notifications = await response.json();
+  } catch (_) {
+    return false;
+  }
+  if (!Array.isArray(notifications)) return false;
+  for (const notification of notifications) {
+    if (!await processContextNotification(pi, notification, stream, notification?.kind || "message")) return false;
+    if (!await acknowledgeNotification(stream, notification)) return false;
+  }
+  return flushContextDelivery(pi, stream);
+}
+
+async function processContextSseBlock(pi, block, stream) {
   let event = "message";
   let id = "";
   const data = [];
@@ -307,50 +503,59 @@ function processReservationSseBlock(pi, block, stream) {
     if (line.startsWith("event:")) event = line.slice(6).trim();
     if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
   }
-  if (event !== "reservation_granted" || data.length === 0) return;
+  if (data.length === 0) return;
   try {
-    if (deliverReservationNotification(pi, JSON.parse(data.join("\n")), stream) && id) {
-      reservationStreamLastEventId = id;
+    const notification = JSON.parse(data.join("\n"));
+    if (await processContextNotification(pi, notification, stream, event)) {
+      if (!await acknowledgeNotification(stream, notification)) return;
+      if (id) contextStreamLastEventId = id;
     }
   } catch (_) {}
 }
 
-function processReservationSseBuffer(pi, buffer, stream) {
+async function processContextSseBuffer(pi, buffer, stream) {
   buffer = buffer.replace(/\r\n/g, "\n");
   let cursor = 0;
   for (;;) {
     const next = buffer.indexOf("\n\n", cursor);
     if (next === -1) break;
-    processReservationSseBlock(pi, buffer.slice(cursor, next), stream);
+    await processContextSseBlock(pi, buffer.slice(cursor, next), stream);
     cursor = next + 2;
   }
   return buffer.slice(cursor);
 }
 
-function startReservationStream(pi, stream) {
+function activateContextStream(stream, reset = false) {
+  const streamKey = stream.agent_id + "\u0000" + stream.workspace_id;
+  if (reset || contextStreamKey !== streamKey) {
+    contextStreamKey = streamKey;
+    contextStreamLastEventId = "";
+    contextState = {
+      deliveredVersion: undefined,
+      pendingVersion: undefined,
+      initialPending: false,
+      deliveryInFlight: false,
+    };
+  }
+  activeContextStream = stream;
+}
+
+function startContextStream(pi, stream) {
   if (!stream?.base_url || !stream?.authorization || !stream?.agent_id || !stream?.workspace_id) return;
   if (typeof fetch !== "function" || typeof TextDecoder !== "function") return;
-  stopReservationStream();
-  const streamKey = stream.agent_id + "\u0000" + stream.workspace_id;
-  if (reservationStreamKey !== streamKey) {
-    reservationStreamKey = streamKey;
-    reservationStreamLastEventId = "";
-  }
+  stopContextStream();
+  activateContextStream(stream);
   const controller = new AbortController();
-  reservationStreamAbort = controller;
+  contextStreamAbort = controller;
   const signal = controller.signal;
   const run = async () => {
     let backoffMs = 1000;
-    await checkReservationResume(pi, stream, signal);
     while (!signal.aborted) {
       try {
         const headers = { authorization: stream.authorization, accept: "text/event-stream" };
-        if (reservationStreamLastEventId) headers["last-event-id"] = reservationStreamLastEventId;
-        const response = await fetch(reservationStreamUrl(stream), {
-          headers,
-          signal,
-        });
-        if (!response.ok || !response.body?.getReader) throw new Error("reservation stream unavailable");
+        if (contextStreamLastEventId) headers["last-event-id"] = contextStreamLastEventId;
+        const response = await fetch(contextStreamUrl(stream), { headers, signal });
+        if (!response.ok || !response.body?.getReader) throw new Error("context stream unavailable");
         backoffMs = 1000;
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
@@ -358,11 +563,11 @@ function startReservationStream(pi, stream) {
         for (;;) {
           const { done, value } = await reader.read();
           if (done || signal.aborted) break;
-          buffer = processReservationSseBuffer(pi, buffer + decoder.decode(value, { stream: true }), stream);
+          buffer = await processContextSseBuffer(pi, buffer + decoder.decode(value, { stream: true }), stream);
         }
       } catch (_) {
         if (signal.aborted) return;
-        await checkReservationResume(pi, stream, signal);
+        await recoverContextNotifications(pi, stream);
         await sleepWithAbort(backoffMs, signal);
         backoffMs = Math.min(backoffMs * 2, 30000);
       }
@@ -396,6 +601,26 @@ const lazyWriteOperations = new Map();
 let lazyWriteOperationCounter = 0;
 const lazyBashOperations = new Map();
 let lazyBashOperationCounter = 0;
+
+export function bindGrantedLazyReservation(notification) {
+  const payload = notification?.payload || {};
+  const waitId = String(payload.wait_id || "").trim();
+  const reservationId = String(payload.reservation_id || "").trim();
+  if (!waitId || !reservationId) return false;
+  const grantedPath = payload.relative_path === undefined ? "" : String(payload.relative_path).trim();
+  let bound = false;
+  for (const operations of [lazyEditOperations, lazyWriteOperations]) {
+    const operation = operations.get(waitId);
+    if (!operation) continue;
+    if (grantedPath && (!safeLazyOperationTarget(grantedPath) || grantedPath !== operation.claim_path)) {
+      continue;
+    }
+    operation.reservation_id = reservationId;
+    operation.claimable = true;
+    bound = true;
+  }
+  return bound;
+}
 
 function extractWaitId(reason) {
   const match = String(reason || "").match(/wait_id ([A-Za-z0-9_-]+)/);
@@ -464,6 +689,19 @@ function safeLazyOperationTarget(target) {
     && !target.split("/").some((part) => part === "" || part === "." || part === "..");
 }
 
+function repoRelativeLazyTarget(cwd, target) {
+  if (!safeLazyOperationTarget(target)) return "";
+  const base = resolve(cwd || process.cwd());
+  let root = base;
+  while (!existsSync(resolve(root, ".git"))) {
+    const parent = dirname(root);
+    if (parent === root) return "";
+    root = parent;
+  }
+  const normalized = relative(root, resolve(base, target)).replace(/\\/g, "/");
+  return safeLazyOperationTarget(normalized) ? normalized : "";
+}
+
 function readOperationBase(path) {
   if (!existsSync(path)) return { ok: true, value: null };
   try {
@@ -490,13 +728,19 @@ function rememberLazyEditOperation(event, ctx, decision) {
   if (targets.length === 0 || !targets.every(safeLazyOperationTarget)) return "";
   const bases = readOperationBases(ctx.cwd, targets);
   if (!bases) return "";
-  const operationId = structuredLazyEditOperationId(decision) || nextLazyEditOperationId();
+  const toolCallId = String(event?.toolCallId || "").trim();
+  if (!toolCallId) return "";
+  const waitId = structuredLazyWaitId(decision);
+  const claimPath = targets.length === 1 ? repoRelativeLazyTarget(ctx.cwd, targets[0]) : "";
+  if (waitId && !claimPath) return "";
+  const operationId = waitId || nextLazyEditOperationId();
   lazyEditOperations.set(operationId, {
-    operation_id: operationId,
+    tool_call_id: toolCallId,
     agent_id: agentId(event, ctx),
     workspace_id: detectWorkspaceId(event, ctx),
-    wait_id: structuredLazyWaitId(decision),
+    wait_id: waitId,
     reservation_id: structuredLazyReservationId(event, decision),
+    claim_path: claimPath,
     cwd: ctx.cwd,
     tool_name: event.toolName,
     tool_input: event.input || {},
@@ -519,13 +763,19 @@ function rememberLazyWriteOperation(event, ctx, decision) {
   const targets = [target];
   const bases = readOperationBases(ctx.cwd, targets);
   if (!bases) return "";
-  const operationId = structuredLazyWriteOperationId(decision) || nextLazyWriteOperationId();
+  const toolCallId = String(event?.toolCallId || "").trim();
+  if (!toolCallId) return "";
+  const waitId = structuredLazyWaitId(decision);
+  const claimPath = repoRelativeLazyTarget(ctx.cwd, target);
+  if (waitId && !claimPath) return "";
+  const operationId = waitId || nextLazyWriteOperationId();
   lazyWriteOperations.set(operationId, {
-    operation_id: operationId,
+    tool_call_id: toolCallId,
     agent_id: agentId(event, ctx),
     workspace_id: detectWorkspaceId(event, ctx),
-    wait_id: structuredLazyWaitId(decision),
+    wait_id: waitId,
     reservation_id: structuredLazyReservationId(event, decision),
+    claim_path: claimPath,
     cwd: ctx.cwd,
     tool_name: event.toolName,
     tool_input: event.input || {},
@@ -1145,26 +1395,13 @@ export default function statefulOmpExtension(pi) {
       if (!approved) return { block: true, reason: "user denied stateful external sandbox grant" };
     }
   });
-function state_reservation_claim(operation, ctx) {
+function state_reservation_claim(operation, _ctx) {
   const waitId = String(operation?.wait_id || "").trim();
   if (!waitId) return { ok: true };
-  const agentId = String(operation?.agent_id || "").trim();
-  if (!agentId) return { ok: false, message: "state_reservation_claim missing agent_id" };
-  const args = ["reservation", "claim", "--agent-id", agentId, "--wait-id", waitId];
-  const workspaceId = firstString(operation?.workspace_id, detectWorkspaceId({}, ctx));
-  if (workspaceId) args.push("--workspace-id", workspaceId);
-  const reservationId = String(operation?.reservation_id || "").trim();
-  if (reservationId) args.push("--reservation-id", reservationId);
-  const options = { encoding: "utf8" };
-  const cwd = operation?.cwd || ctx?.cwd;
-  if (cwd) options.cwd = cwd;
-  const result = spawnSync(STATEFUL, args, options);
-  if (result.status === 0) return { ok: true };
-  const detail = String(result.stderr || result.stdout || "").trim();
-  return {
-    ok: false,
-    message: "state_reservation_claim failed" + (detail ? ": " + detail : ""),
-  };
+  if (operation?.claimable !== true || !String(operation?.reservation_id || "").trim()) {
+    return { ok: false, message: "state_reservation_claim wait is not claimable yet" };
+  }
+  return { ok: true };
 }
 
   pi.registerTool({
@@ -1187,6 +1424,7 @@ function state_reservation_claim(operation, ctx) {
       const claim = state_reservation_claim(operation, ctx);
       if (!claim.ok) return lazyToolResult("failed", claim.message, { operation_id: operationId, targets: operation.targets });
       const authorization = runStatefulHook("pre-tool-use", {
+        tool_call_id: operation.tool_call_id,
         agent_id: operation.agent_id,
         reservation_id: operation.reservation_id || undefined,
         cwd: operation.cwd || ctx.cwd,
@@ -1194,24 +1432,34 @@ function state_reservation_claim(operation, ctx) {
         tool_name: operation.tool_name,
         tool_input: operation.tool_input,
       });
-      if (authorization.decision !== "allow") {
+      if (authorization.decision !== "allow" && authorization.decision !== "warn") {
         return lazyToolResult("failed", authorization.reason || "stateful authorization denied lazy edit resume", { operation_id: operationId, authorization });
       }
+      if (authorization.decision === "warn") deliverCoordinationWarning(pi, { payload: { message: authorization.message } });
       let result;
       try {
         result = applyOmpLinePatch(operation.cwd || ctx.cwd, operation.tool_input?.input || "", operation.bases);
       } catch (error) {
         result = { status: "failed", message: error instanceof Error ? error.message : String(error) };
       }
-      if (result.status === "applied") {
-        lazyEditOperations.delete(operationId);
-        runStatefulHook("post-tool-use", {
-          agent_id: operation.agent_id,
-          cwd: operation.cwd || ctx.cwd,
-          tool_name: operation.tool_name,
-          tool_input: operation.tool_input,
-        });
-      }
+      if (result.status === "applied") lazyEditOperations.delete(operationId);
+      runStatefulHook("post-tool-use", {
+        agent_id: operation.agent_id,
+        tool_call_id: operation.tool_call_id,
+        cwd: operation.cwd || ctx.cwd,
+        tool_name: operation.tool_name,
+        tool_input: operation.tool_input,
+        is_error: result.status !== "applied",
+        is_complete: true,
+        exact_read_candidate: false,
+        result_metadata: {
+          status: result.status,
+          message: result.message,
+          targets: operation.targets,
+          wait_id: operation.wait_id || undefined,
+          reservation_id: operation.reservation_id || undefined,
+        },
+      });
       return lazyToolResult(result.status, result.message, { operation_id: operationId, targets: operation.targets });
     },
   });
@@ -1239,27 +1487,38 @@ function state_reservation_claim(operation, ctx) {
         reservation_id: operation.reservation_id || undefined,
         cwd: operation.cwd || ctx.cwd,
         yolo: true,
+        tool_call_id: operation.tool_call_id,
         tool_name: operation.tool_name,
         tool_input: operation.tool_input,
       });
-      if (authorization.decision !== "allow") {
+      if (authorization.decision !== "allow" && authorization.decision !== "warn") {
         return lazyToolResult("failed", authorization.reason || "stateful authorization denied lazy write resume", { operation_id: operationId, authorization });
       }
+      if (authorization.decision === "warn") deliverCoordinationWarning(pi, { payload: { message: authorization.message } });
       let result;
       try {
         result = applyOmpWrite(operation.cwd || ctx.cwd, operation);
       } catch (error) {
         result = { status: "failed", message: error instanceof Error ? error.message : String(error) };
       }
-      if (result.status === "applied") {
-        lazyWriteOperations.delete(operationId);
-        runStatefulHook("post-tool-use", {
-          agent_id: operation.agent_id,
-          cwd: operation.cwd || ctx.cwd,
-          tool_name: operation.tool_name,
-          tool_input: operation.tool_input,
-        });
-      }
+      if (result.status === "applied") lazyWriteOperations.delete(operationId);
+      runStatefulHook("post-tool-use", {
+        agent_id: operation.agent_id,
+        tool_call_id: operation.tool_call_id,
+        cwd: operation.cwd || ctx.cwd,
+        tool_name: operation.tool_name,
+        tool_input: operation.tool_input,
+        is_error: result.status !== "applied",
+        is_complete: true,
+        exact_read_candidate: false,
+        result_metadata: {
+          status: result.status,
+          message: result.message,
+          wait_id: operation.wait_id || undefined,
+          reservation_id: operation.reservation_id || undefined,
+          targets: operation.targets,
+        },
+      });
       return lazyToolResult(result.status, result.message, { operation_id: operationId, targets: operation.targets });
     },
   });
@@ -1320,14 +1579,26 @@ function state_reservation_claim(operation, ctx) {
     verifyBareStateful(ctx.cwd);
     const activeAgentId = detectAgentId(event, ctx);
     if (!activeAgentId) {
-      stopReservationStream();
+      stopContextStream();
       return;
     }
     const result = runStatefulHook("session-start", {
       agent_id: activeAgentId,
       cwd: ctx.cwd,
     });
-    startReservationStream(pi, result?.notifications_stream);
+    const stream = {
+      ...result?.notifications_stream,
+      agent_id: firstString(result?.notifications_stream?.agent_id, result?.agent_id, activeAgentId),
+      workspace_id: firstString(result?.notifications_stream?.workspace_id, result?.workspace_id, detectWorkspaceId(event, ctx)),
+      cwd: ctx.cwd,
+    };
+    if (!stream.base_url || !stream.authorization || !stream.agent_id || !stream.workspace_id) {
+      stopContextStream();
+      return;
+    }
+    activateContextStream(stream, true);
+    if (!await deliverContext(pi, stream)) contextState.initialPending = true;
+    startContextStream(pi, stream);
   });
   pi.on("tool_call", async (event, ctx) => {
     const benchmarkBlockReason = benchmarkSourceBlockReason(event);
@@ -1336,6 +1607,7 @@ function state_reservation_claim(operation, ctx) {
     if (!activeAgentId) return { block: true, reason: missingAgentIdReason() };
     const decision = runStatefulHook("pre-tool-use", {
       agent_id: activeAgentId,
+      tool_call_id: event?.toolCallId,
       reservation_id: reservationId(event),
       cwd: ctx.cwd,
       yolo: isYolo(event, ctx),
@@ -1384,15 +1656,34 @@ function state_reservation_claim(operation, ctx) {
   pi.on("tool_result", async (event, ctx) => {
     const activeAgentId = detectAgentId(event, ctx);
     if (!activeAgentId) return;
+    const resultMetadata = event?.resultMetadata
+      ?? event?.result_metadata
+      ?? event?.metadata
+      ?? event?.details
+      ?? event?.result
+      ?? {};
     runStatefulHook("post-tool-use", {
       agent_id: activeAgentId,
+      tool_call_id: event?.toolCallId,
       cwd: ctx.cwd,
       tool_name: event.toolName,
       tool_input: event.input || {},
+      is_error: event?.isError === true,
+      is_complete: event?.isComplete !== false && event?.complete !== false,
+      exact_read_candidate: exactReadCandidate(event),
+      is_truncated: event?.truncated === true
+        || event?.isTruncated === true
+        || resultMetadata?.truncated === true
+        || resultMetadata?.is_truncated === true
+        || resultMetadata?.isTruncated === true,
+      result_metadata: resultMetadata,
     });
+    if (activeContextStream) {
+      await recoverContextNotifications(pi, activeContextStream);
+    }
   });
   pi.on("session_shutdown", async (event, ctx) => {
-    stopReservationStream();
+    stopContextStream();
     const activeAgentId = detectAgentId(event, ctx);
     if (!activeAgentId) return;
     runStatefulHook("stop", {

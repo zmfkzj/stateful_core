@@ -1,0 +1,183 @@
+{
+  "repository": "gorakhargosh/watchdog",
+  "issue_snapshot": "issues/watchdog.json",
+  "tasks": [
+    {
+      "key": "debouncer-999-deadline",
+      "kind": "bug",
+      "sources": ["https://github.com/gorakhargosh/watchdog/issues/999"],
+      "source_hash": "4c15c1475895c9fa14a147d4847fed81c046fe50f8a098802787bf1bfb5b1587",
+      "prompt": "Fix watchdog issue #999 in watchdog.utils.event_debouncer.EventDebouncer.run. For every event batch, calculate one monotonic debounce deadline when the batch starts. A notification during that batch must wait only the remaining time, so repeated notifications cannot restart the full delay or postpone the callback indefinitely. Preserve event order and begin a fresh deadline for each later batch.",
+      "acceptance": [
+        "The first batch fires after its configured interval.",
+        "A second batch starts a new interval after the first callback.",
+        "An event four seconds into a ten-second second batch leaves six seconds of delay, rather than restarting ten seconds.",
+        "The production change is in src/watchdog/utils/event_debouncer.py at EventDebouncer.run; this is an issue-family bounded-delay regression rather than an upstream API claim."
+      ],
+      "overlap_anchors": [{"path": "src/watchdog/utils/event_debouncer.py", "symbol": "watchdog.utils.event_debouncer.EventDebouncer.run"}],
+      "evaluator": "evaluators/watchdog/debouncer-999-deadline.py",
+      "reference_patch": "references/watchdog/debouncer-999-deadline.patch"
+    },
+    {
+      "key": "debouncer-1000-stop-flush",
+      "kind": "bug",
+      "sources": ["https://github.com/gorakhargosh/watchdog/issues/1000"],
+      "source_hash": "b73adc85fdaa7b7012785025a9b8ccb3d00cd0a086d88f0fd39f0c5c61a45d40",
+      "prompt": "Fix watchdog issue #1000 in watchdog.utils.event_debouncer.EventDebouncer.run. When stop is signaled with queued events, invoke the callback exactly once with those queued events before the thread exits. Stopping with no queued events must not invoke an empty callback, and the thread must join promptly.",
+      "acceptance": [
+        "Stopping after an event was queued invokes the callback once with that exact queued event.",
+        "The debouncer thread exits and joins within the evaluator timeout.",
+        "Stopping with no queued events exits and joins without invoking an empty callback batch.",
+        "The production change is in src/watchdog/utils/event_debouncer.py at EventDebouncer.run."
+      ],
+      "overlap_anchors": [{"path": "src/watchdog/utils/event_debouncer.py", "symbol": "watchdog.utils.event_debouncer.EventDebouncer.run"}],
+      "evaluator": "evaluators/watchdog/debouncer-1000-stop-flush.py",
+      "reference_patch": "references/watchdog/debouncer-1000-stop-flush.patch"
+    },
+    {
+      "key": "polling-start-1110-symlink-created",
+      "kind": "bug",
+      "sources": ["https://github.com/gorakhargosh/watchdog/issues/1110"],
+      "source_hash": "8c2e7b37d752b612ae0d0c58c96b437a1c118f0a3c90d6490708f74ebb7b5060",
+      "prompt": "Fix issue #1110 in watchdog.observers.polling.PollingEmitter. The default polling snapshot must preserve a symlink's own inode identity, so creating a symlink to an existing file emits FileCreatedEvent rather than FileMovedEvent. Keep injected stat functions unchanged for PollingObserverVFS and keep normal polling event dispatch order intact.",
+      "acceptance": [
+        "With fake snapshots for an existing target followed by a newly created symlink with a distinct link inode, PollingEmitter queues exactly FileCreatedEvent for the link and no move.",
+        "The default snapshot factory passes os.lstat to DirectorySnapshot, while a sentinel stat callable supplied to PollingEmitter is passed through unchanged.",
+        "The change is confined to src/watchdog/observers/polling.py in PollingEmitter."
+      ],
+      "overlap_anchors": [{"path": "src/watchdog/observers/polling.py", "symbol": "watchdog.observers.polling.PollingEmitter"}],
+      "evaluator": "evaluators/watchdog/polling-start-1110-symlink-created.py",
+      "reference_patch": "references/watchdog/polling-start-1110-symlink-created.patch"
+    },
+    {
+      "key": "polling-start-1010-initial-created",
+      "kind": "feature",
+      "sources": ["https://github.com/gorakhargosh/watchdog/issues/1010"],
+      "source_hash": "13f488fe18e04b295bda960ade1fdd333c265794461ef8718e71ff9bcc1c3a24",
+      "prompt": "Implement the explicitly benchmark-defined #1010 issue-family extension in watchdog.observers.polling.PollingEmitter. Add an emit_on_start=False constructor option. When true, after the initial snapshot is captured, diff it from EmptyDirectorySnapshot and enqueue those events through the same PollingEmitter event-dispatch block used by polling diffs. The default remains silent; do not claim this emitter-only option is a public Observer API.",
+      "acceptance": [
+        "emit_on_start=False leaves startup silent.",
+        "emit_on_start=True queues initial file and directory creation events in the existing dispatch order, with FileCreatedEvent before DirCreatedEvent for the fake initial snapshot; a FileCreatedEvent-only filter keeps the file and excludes the directory.",
+        "Initial and later polling diffs route through one event-dispatch block, preserving event filters and event-type ordering.",
+        "This is explicitly an issue-family extension because #1010 does not specify an API.",
+        "The change is confined to src/watchdog/observers/polling.py in PollingEmitter."
+      ],
+      "overlap_anchors": [{"path": "src/watchdog/observers/polling.py", "symbol": "watchdog.observers.polling.PollingEmitter"}],
+      "evaluator": "evaluators/watchdog/polling-start-1010-initial-created.py",
+      "reference_patch": "references/watchdog/polling-start-1010-initial-created.patch"
+    },
+    {
+      "key": "event-dispatch-1043-callable-handler",
+      "kind": "feature",
+      "sources": ["https://github.com/gorakhargosh/watchdog/issues/1043"],
+      "source_hash": "d92ab1d416c9b88f51abfdd9a2f197d88f31c99ace4424dec46a53c3f09c955b",
+      "prompt": "Implement issue #1043 in watchdog.observers.api.BaseObserver.dispatch_events. A function scheduled through schedule() or added through add_handler_for_watch() must be invoked with the FileSystemEvent exactly once, while FileSystemEventHandler instances retain their existing dispatch() behavior. Preserve handler-removal safety during dispatch and event-queue acknowledgement.",
+      "acceptance": [
+        "A callable handler registered for a watch receives the queued FileSystemEvent exactly once.",
+        "Existing FileSystemEventHandler dispatch behavior remains available.",
+        "The dispatch acknowledges the event queue after delivery.",
+        "The change is contained in src/watchdog/observers/api.py at watchdog.observers.api.BaseObserver.dispatch_events."
+      ],
+      "overlap_anchors": [{"path": "src/watchdog/observers/api.py", "symbol": "watchdog.observers.api.BaseObserver.dispatch_events"}],
+      "evaluator": "evaluators/watchdog/event-dispatch-1043-callable-handler.py",
+      "reference_patch": "references/watchdog/event-dispatch-1043-callable-handler.patch"
+    },
+    {
+      "key": "event-dispatch-1100-origin-pid",
+      "kind": "feature",
+      "sources": ["https://github.com/gorakhargosh/watchdog/issues/1100"],
+      "source_hash": "d8b78b48a9308a3860550b79a05abafb7d4c56ded32a2dd2f3e844db3d10b510",
+      "prompt": "Implement the portable, producer-supplied origin-PID extension motivated by open issue #1100. Add an optional keyword-only origin_pid to watchdog.observers.api.EventEmitter.queue_event(). Preserve it in the queue entry, and in watchdog.observers.api.BaseObserver.dispatch_events expose event.origin_pid to every handler before dispatch; events queued without the metadata must expose None. Preserve compatibility with existing two-item queue entries and normal event delivery. Do not claim to infer a native OS PID where a backend does not supply one.",
+      "acceptance": [
+        "EventEmitter.queue_event(event, origin_pid=4242) delivers the event and exposes event.origin_pid == 4242 to its handler.",
+        "An event queued without origin metadata exposes event.origin_pid is None during dispatch.",
+        "Existing two-item event queue entries remain dispatchable.",
+        "The dispatch-side change is contained in src/watchdog/observers/api.py at watchdog.observers.api.BaseObserver.dispatch_events."
+      ],
+      "overlap_anchors": [{"path": "src/watchdog/observers/api.py", "symbol": "watchdog.observers.api.BaseObserver.dispatch_events"}],
+      "evaluator": "evaluators/watchdog/event-dispatch-1100-origin-pid.py",
+      "reference_patch": "references/watchdog/event-dispatch-1100-origin-pid.patch"
+    },
+    {
+      "key": "observer-1044-start-schedule-race",
+      "kind": "bug",
+      "sources": ["https://github.com/gorakhargosh/watchdog/issues/1044"],
+      "source_hash": "a7b35a182bdcb49a3f2631d47191c91e9e47cbf88c38345f50a6d7c6c33210cf",
+      "prompt": "Fix issue #1044 in watchdog.observers.api.BaseObserver. Serialize the complete observer startup lifecycle with schedule() so a watch scheduled while start() is still starting existing emitters is itself started rather than silently remaining inactive. Preserve emitter-start failure cleanup and avoid leaked threads.",
+      "acceptance": [
+        "A schedule() call that overlaps a controlled in-progress start() cannot complete before the observer has become alive.",
+        "The watch scheduled during startup has a live emitter once both calls finish.",
+        "Startup, scheduling, observer, and emitter threads are cleaned up after the scenario.",
+        "The change is contained in src/watchdog/observers/api.py at watchdog.observers.api.BaseObserver."
+      ],
+      "overlap_anchors": [{"path": "src/watchdog/observers/api.py", "symbol": "watchdog.observers.api.BaseObserver"}],
+      "evaluator": "evaluators/watchdog/observer-1044-start-schedule-race.py",
+      "reference_patch": "references/watchdog/observer-1044-start-schedule-race.patch"
+    },
+    {
+      "key": "observer-1039-handlerless-watch",
+      "kind": "feature",
+      "sources": ["https://github.com/gorakhargosh/watchdog/issues/1039"],
+      "source_hash": "79ad45c8d8f2a48272fa58b2bf72254e557ff7919baf6ddace9b6976dd51b5d9",
+      "prompt": "Implement issue #1039 in watchdog.observers.api.BaseObserver. Allow schedule(None, path, ...) to create an ObservedWatch with no initial handler, permit add_handler_for_watch() later, and allow unschedule() before any handler is attached. Do not register None as an event handler or leave watch, handler, or emitter state behind.",
+      "acceptance": [
+        "schedule(None, path) records the watch without registering None in the handler mapping.",
+        "A real handler can be attached later with add_handler_for_watch().",
+        "A handlerless watch can be unscheduled without error and leaves no watch, handler, or emitter state behind.",
+        "The change is contained in src/watchdog/observers/api.py at watchdog.observers.api.BaseObserver."
+      ],
+      "overlap_anchors": [{"path": "src/watchdog/observers/api.py", "symbol": "watchdog.observers.api.BaseObserver"}],
+      "evaluator": "evaluators/watchdog/observer-1039-handlerless-watch.py",
+      "reference_patch": "references/watchdog/observer-1039-handlerless-watch.patch"
+    },
+    {
+      "key": "polling-loop-1065-mount-recovery",
+      "kind": "bug",
+      "sources": ["https://github.com/gorakhargosh/watchdog/issues/1065"],
+      "source_hash": "cf8eb63ee12448eb1bcf4b7f2ea6bd996d4cfc4c952c53f29bf03ac284d10168",
+      "prompt": "Fix Watchdog issue #1065 in watchdog.observers.polling.PollingEmitter.queue_events. A transient OSError while taking a polling snapshot, such as an unavailable SMB mount, must leave the emitter running and queue no synthetic deletion. A FileNotFoundError remains a permanent watched-root removal and must retain the existing root deletion event and stopped emitter. The next successful polling interval must diff against the last successful snapshot and emit its ordinary events. Preserve the stopped-event gate and let non-OSError snapshot failures propagate.",
+      "acceptance": [
+        "A transient OSError from _take_snapshot returns from that interval without stopping PollingEmitter or queuing a root DirDeletedEvent.",
+        "A FileNotFoundError retains the existing root DirDeletedEvent and stops PollingEmitter.",
+        "A later successful snapshot is compared with the last successful snapshot and detects a file created while the mount was unavailable.",
+        "queue_events remains interruptible by stopped_event and does not call _take_snapshot after an explicit stop.",
+        "Snapshot failures that are not OSError still propagate.",
+        "The production change is confined to watchdog.observers.polling.PollingEmitter.queue_events."
+      ],
+      "overlap_anchors": [{"path": "src/watchdog/observers/polling.py", "symbol": "watchdog.observers.polling.PollingEmitter.queue_events"}],
+      "evaluator": "evaluators/watchdog/polling-loop-1065-mount-recovery.py",
+      "reference_patch": "references/watchdog/polling-loop-1065-mount-recovery.patch"
+    },
+    {
+      "key": "polling-loop-1071-flush-event",
+      "kind": "feature",
+      "sources": ["https://github.com/gorakhargosh/watchdog/issues/1071"],
+      "source_hash": "606a33924ef5e66ea1ef5d2c353a5c25d8854e787e83fc11c1a521740d203d78",
+      "prompt": "Implement the explicitly benchmark-defined #1071 issue-family extension in watchdog.observers.polling.PollingEmitter.queue_events. When event_filter explicitly requests the existing FileClosedEvent, queue exactly one FileClosedEvent after each detected FileModifiedEvent for that path; this is an opt-in polling flush-completion signal. Without that filter, preserve the existing event stream exactly. Do not claim to observe Python file.flush() directly.",
+      "acceptance": [
+        "With event_filter=[FileModifiedEvent, FileClosedEvent], a changed file produces exactly one FileModifiedEvent followed by exactly one FileClosedEvent for its path during the polling interval.",
+        "The FileClosedEvent is queued immediately after its ordinary FileModifiedEvent, allowing event filtering to retain either or both opt-in events.",
+        "Without an explicit FileClosedEvent filter, the polling emitter keeps its pre-existing event stream and does not add close/flush events.",
+        "The extension is explicitly recorded as an issue-family extension rather than a claim that polling detects Python file.flush() calls.",
+        "The production change is confined to watchdog.observers.polling.PollingEmitter.queue_events."
+      ],
+      "overlap_anchors": [{"path": "src/watchdog/observers/polling.py", "symbol": "watchdog.observers.polling.PollingEmitter.queue_events"}],
+      "evaluator": "evaluators/watchdog/polling-loop-1071-flush-event.py",
+      "reference_patch": "references/watchdog/polling-loop-1071-flush-event.patch"
+    }
+  ],
+  "final_prompt": "Integrate the ten Watchdog tasks on the pinned base. Preserve every accepted behavior, resolve overlapping changes in src/watchdog/observers/polling.py, src/watchdog/observers/api.py, and src/watchdog/utils/event_debouncer.py, and run every listed evaluator before finishing.",
+  "evaluators": [
+    "evaluators/watchdog/debouncer-999-deadline.py",
+    "evaluators/watchdog/debouncer-1000-stop-flush.py",
+    "evaluators/watchdog/polling-start-1110-symlink-created.py",
+    "evaluators/watchdog/polling-start-1010-initial-created.py",
+    "evaluators/watchdog/event-dispatch-1043-callable-handler.py",
+    "evaluators/watchdog/event-dispatch-1100-origin-pid.py",
+    "evaluators/watchdog/observer-1044-start-schedule-race.py",
+    "evaluators/watchdog/observer-1039-handlerless-watch.py",
+    "evaluators/watchdog/polling-loop-1065-mount-recovery.py",
+    "evaluators/watchdog/polling-loop-1071-flush-event.py"
+  ],
+  "integrated_reference_patch": "references/watchdog/integrated.patch"
+}

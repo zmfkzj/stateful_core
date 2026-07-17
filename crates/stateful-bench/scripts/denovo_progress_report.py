@@ -88,6 +88,11 @@ def empty_stats() -> dict[str, Any]:
         "orchestration_denial_events": 0,
         "orchestration_denial_paths": Counter(),
         "orchestration_denial_messages": Counter(),
+        "orchestration_lifecycle_event_types": Counter(),
+        "running_time_ms": 0,
+        "has_running_time": False,
+        "agent_running_time_ms": 0,
+        "agent_timed_count": 0,
     }
 
 
@@ -121,6 +126,10 @@ def add_orchestration_trace(stats: dict[str, Any], trace: Any) -> None:
     stats["orchestration_denial_events"] += int_or_zero(trace.get("denial_events"))
     update_max_gap(stats, trace.get("heartbeat_max_gap_ms"))
     update_counter(stats["orchestration_event_types"], trace.get("event_types"))
+    update_counter(
+        stats["orchestration_lifecycle_event_types"],
+        trace.get("lifecycle_event_types"),
+    )
     update_counter(stats["orchestration_denial_paths"], trace.get("denial_paths"))
     update_counter(stats["orchestration_denial_messages"], trace.get("denial_messages"))
 
@@ -147,6 +156,15 @@ def add_row(stats: dict[str, Any], row: dict[str, Any]) -> None:
             stats["subagent_used_count"] += 1
 
     add_orchestration_trace(stats, row.get("orchestration_trace"))
+    running_time = numeric_or_none(row.get("running_time_ms"))
+    if running_time is not None and running_time >= 0:
+        stats["running_time_ms"] += running_time
+        stats["has_running_time"] = True
+    agent_time = numeric_or_none(row.get("agent_running_time_ms"))
+    if agent_time is not None and agent_time >= 0:
+        stats["agent_running_time_ms"] += agent_time
+        stats["agent_timed_count"] += 1
+
 
 
 def add_summary(stats: dict[str, Any], summary: dict[str, Any]) -> None:
@@ -198,6 +216,23 @@ def add_summary(stats: dict[str, Any], summary: dict[str, Any]) -> None:
         stats["orchestration_denial_messages"],
         summary.get("orchestration_denial_messages"),
     )
+    update_counter(
+        stats["orchestration_lifecycle_event_types"],
+        summary.get("orchestration_lifecycle_event_types"),
+    )
+    running_time = numeric_or_none(summary.get("running_time_ms"))
+    if running_time is not None and running_time >= 0:
+        stats["running_time_ms"] += running_time
+        stats["has_running_time"] = True
+    agent_time = numeric_or_none(summary.get("agent_running_time_ms"))
+    if agent_time is not None and agent_time >= 0:
+        stats["agent_running_time_ms"] += agent_time
+        average_agent_time = numeric_or_none(summary.get("average_agent_running_time_ms"))
+        stats["agent_timed_count"] += (
+            agent_time / average_agent_time
+            if average_agent_time and average_agent_time > 0
+            else int_or_zero(summary.get("rows"))
+        )
 
 
 def finalized_stats(
@@ -207,11 +242,33 @@ def finalized_stats(
     rows = stats["rows"]
     scored_count = stats["scored_count"]
     subagent_observed = stats["subagent_observed"]
+    average_score = stats["score_sum"] / scored_count if scored_count else None
+    running_time_ms = stats["running_time_ms"] if stats["has_running_time"] else None
+    agent_running_time_ms = (
+        stats["agent_running_time_ms"] if stats["agent_timed_count"] else None
+    )
     return {
         "rows": rows,
         "success_count": stats["success_count"],
         "success_rate": stats["success_count"] / rows if rows else None,
         "average_score": stats["score_sum"] / scored_count if scored_count else None,
+        "running_time_ms": running_time_ms,
+        "score_per_hour": (
+            average_score / (running_time_ms / 3_600_000)
+            if average_score is not None and running_time_ms
+            else None
+        ),
+        "agent_running_time_ms": agent_running_time_ms,
+        "average_agent_running_time_ms": (
+            agent_running_time_ms / stats["agent_timed_count"]
+            if agent_running_time_ms is not None
+            else None
+        ),
+        "score_per_agent_hour": (
+            average_score / (agent_running_time_ms / 3_600_000)
+            if average_score is not None and agent_running_time_ms
+            else None
+        ),
         "scored_count": scored_count,
         "setup_errors": stats["setup_errors"],
         "finish_reasons": dict(sorted(stats["finish_reasons"].items())),
@@ -227,6 +284,9 @@ def finalized_stats(
         "orchestration_conflict_events": stats["orchestration_conflict_events"],
         "orchestration_event_count": stats["orchestration_event_count"],
         "orchestration_event_types": dict(sorted(stats["orchestration_event_types"].items())),
+        "orchestration_lifecycle_event_types": dict(
+            sorted(stats["orchestration_lifecycle_event_types"].items())
+        ),
         "orchestration_heartbeat_events": stats["orchestration_heartbeat_events"],
         "orchestration_heartbeat_windows": stats["orchestration_heartbeat_windows"],
         "orchestration_heartbeat_max_gap_ms": stats["orchestration_heartbeat_max_gap_ms"],
@@ -320,6 +380,20 @@ def summarize_report(
         else result_stats["setup_errors"]
     )
     result_summary = finalized_stats(result_stats, None)
+    running_time_ms = numeric_or_none(report.get("running_time_ms"))
+    score_per_hour = numeric_or_none(report.get("score_per_hour"))
+    if score_per_hour is None and average_score is not None and running_time_ms:
+        score_per_hour = average_score / (running_time_ms / 3_600_000)
+    agent_running_time_ms = numeric_or_none(report.get("agent_running_time_ms"))
+    average_agent_running_time_ms = numeric_or_none(
+        report.get("average_agent_running_time_ms")
+    )
+    if average_agent_running_time_ms is None and agent_running_time_ms is not None and rows:
+        average_agent_running_time_ms = agent_running_time_ms / rows
+    score_per_agent_hour = numeric_or_none(report.get("score_per_agent_hour"))
+    if score_per_agent_hour is None and average_score is not None and agent_running_time_ms:
+        score_per_agent_hour = average_score / (agent_running_time_ms / 3_600_000)
+
 
     def report_int_or_result(key: str) -> int:
         return int_or_zero(report.get(key)) if key in report else int_or_zero(result_summary.get(key))
@@ -372,6 +446,10 @@ def summarize_report(
             "orchestration_event_types", {}
         )
         or {},
+        "orchestration_lifecycle_event_types": report_trace_value_or_result(
+            "orchestration_lifecycle_event_types", {}
+        )
+        or {},
         "orchestration_heartbeat_events": report_trace_int_or_result(
             "orchestration_heartbeat_events"
         ),
@@ -392,6 +470,11 @@ def summarize_report(
             "orchestration_denial_messages", {}
         )
         or {},
+        "running_time_ms": running_time_ms,
+        "score_per_hour": score_per_hour,
+        "agent_running_time_ms": agent_running_time_ms,
+        "average_agent_running_time_ms": average_agent_running_time_ms,
+        "score_per_agent_hour": score_per_agent_hour,
         "progress_rate": (
             rows / expected_instances_per_condition
             if expected_instances_per_condition
@@ -505,8 +588,8 @@ def render_markdown(summary: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "| Condition | Rows | Progress | Success | Avg score | Setup errors | Finish reasons | Subagent | Orchestration trace |",
-            "| --- | ---: | ---: | ---: | ---: | ---: | --- | ---: | --- |",
+            "| Condition | Rows | Progress | Success | Avg score | Setup errors | Finish reasons | Subagent | Orchestration trace | Agent running time ms | Score per agent hour | Running time ms | Score per hour |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | --- | ---: | --- | ---: | ---: | ---: | ---: |",
         ]
     )
     for condition in summary["conditions"]:
@@ -519,7 +602,7 @@ def render_markdown(summary: dict[str, Any]) -> str:
             condition["subagent_used_rate"],
         )
         lines.append(
-            "| {condition_id} | {rows} | {progress} | {success} | {average_score} | {setup_errors} | {finish_reasons} | {subagent} | {trace} |".format(
+            "| {condition_id} | {rows} | {progress} | {success} | {average_score} | {setup_errors} | {finish_reasons} | {subagent} | {trace} | {agent_running_time_ms} | {score_per_agent_hour} | {running_time_ms} | {score_per_hour} |".format(
                 condition_id=condition["condition_id"],
                 rows=rows,
                 progress=progress,
@@ -529,21 +612,25 @@ def render_markdown(summary: dict[str, Any]) -> str:
                 finish_reasons=format_finish_reasons(condition["finish_reasons"]),
                 subagent=subagent,
                 trace=format_orchestration_trace(condition),
+                agent_running_time_ms=format_decimal(condition["agent_running_time_ms"]),
+                score_per_agent_hour=format_decimal(condition["score_per_agent_hour"]),
+                running_time_ms=format_decimal(condition["running_time_ms"]),
+                score_per_hour=format_decimal(condition["score_per_hour"]),
             )
         )
 
     lines.extend(
         [
             "",
-            "| Run | Condition | Agent | Rows | Success | Avg score | Setup errors | Finish reasons | Orchestration trace |",
-            "| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |",
+            "| Run | Condition | Agent | Rows | Success | Avg score | Setup errors | Finish reasons | Orchestration trace | Agent running time ms | Score per agent hour | Running time ms | Score per hour |",
+            "| --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- | ---: | ---: | ---: | ---: |",
         ]
     )
     for run in summary["runs"]:
         rows = run["rows"]
         success = format_count_rate(run["success_count"], rows, run["success_rate"])
         lines.append(
-            "| {run_id} | {condition_id} | {agent} | {rows} | {success} | {average_score} | {setup_errors} | {finish_reasons} | {trace} |".format(
+            "| {run_id} | {condition_id} | {agent} | {rows} | {success} | {average_score} | {setup_errors} | {finish_reasons} | {trace} | {agent_running_time_ms} | {score_per_agent_hour} | {running_time_ms} | {score_per_hour} |".format(
                 run_id=run["run_id"],
                 condition_id=run["condition_id"],
                 agent=run["agent"],
@@ -553,6 +640,10 @@ def render_markdown(summary: dict[str, Any]) -> str:
                 setup_errors=run["setup_errors"],
                 finish_reasons=format_finish_reasons(run["finish_reasons"]),
                 trace=format_orchestration_trace(run),
+                agent_running_time_ms=format_decimal(run["agent_running_time_ms"]),
+                score_per_agent_hour=format_decimal(run["score_per_agent_hour"]),
+                running_time_ms=format_decimal(run["running_time_ms"]),
+                score_per_hour=format_decimal(run["score_per_hour"]),
             )
         )
     return "\n".join(lines) + "\n"

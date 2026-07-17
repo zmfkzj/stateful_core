@@ -1,0 +1,7 @@
+diff --git a/src/xdist/scheduler/loadscope.py b/src/xdist/scheduler/loadscope.py
+--- a/src/xdist/scheduler/loadscope.py
++++ b/src/xdist/scheduler/loadscope.py
+@@ -306,2 +306,2 @@
+-        return nodeid.rsplit("::", 1)[0]
++        return nodeid.split("[", 1)[0].rsplit("::", 1)[0]
+ 

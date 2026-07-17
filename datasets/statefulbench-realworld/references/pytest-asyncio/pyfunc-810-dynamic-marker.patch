@@ -1,0 +1,138 @@
+diff --git a/pytest_asyncio/plugin.py b/pytest_asyncio/plugin.py
+--- a/pytest_asyncio/plugin.py
++++ b/pytest_asyncio/plugin.py
+@@ -271,7 +271,38 @@ def _collect_hook_loop_factories(
+         raise pytest.UsageError(_INVALID_LOOP_FACTORIES)
+     return factories
+ 
+ 
++def _get_marker_loop_factory(item: Item) -> LoopFactory | None:
++    asyncio_marker = item.get_closest_marker("asyncio")
++    if asyncio_marker is None:
++        return None
++    _, selected_factory_names = _parse_asyncio_marker(asyncio_marker)
++    if selected_factory_names is None:
++        return None
++    hook_factories = _collect_hook_loop_factories(item.config, item)
++    if hook_factories is None:
++        raise pytest.UsageError(
++            "mark.asyncio 'loop_factories' requires at least one "
++            "pytest_asyncio_loop_factories hook implementation."
++        )
++    if len(selected_factory_names) != 1:
++        raise pytest.UsageError(
++            "mark.asyncio 'loop_factories' added after collection must name "
++            "exactly one factory."
++        )
++    factory_name = selected_factory_names[0]
++    try:
++        return hook_factories[factory_name]
++    except KeyError:
++        pytest.skip(
++            reason=(
++                f"Loop factory {factory_name!r} is not available."
++                f" Available factories:"
++                f" {', '.join(hook_factories)}."
++            ),
++        )
++
++
+ _DEFAULT_FIXTURE_LOOP_SCOPE_UNSET = """\
+ The configuration option "asyncio_default_fixture_loop_scope" is unset.
+ The event loop scope for asynchronous fixtures will default to the "fixture" caching \
+@@ -561,8 +592,9 @@ class PytestAsyncioFunction(Function):
+         runner_fixture_id = f"_{self._loop_scope}_scoped_runner"
+         runner = self._request.getfixturevalue(runner_fixture_id)
+         context = contextvars.copy_context()
++        timeout = self.get_closest_marker("asyncio").kwargs.get("timeout")
+         synchronized_obj = _synchronize_coroutine(
+-            getattr(*self._synchronization_target_attr), runner, context
++            getattr(*self._synchronization_target_attr), runner, context, timeout
+         )
+         with MonkeyPatch.context() as c:
+             c.setattr(*self._synchronization_target_attr, synchronized_obj)
+@@ -875,7 +907,23 @@ def pytest_pyfunc_call(pyfuncitem: Function) -> object | None:
+                     # no stacklevel points at the users code, so we set stacklevel=1
+                     # so it at least indicates that it's the plugin complaining.
+                     # Pytest gives the test file & name in the warnings summary at least
+-
++        elif inspect.iscoroutinefunction(pyfuncitem.obj):
++            asyncio_marker = pyfuncitem.get_closest_marker("asyncio")
++            assert asyncio_marker is not None
++            marker_loop_scope, _ = _parse_asyncio_marker(asyncio_marker)
++            runner = pyfuncitem._request.getfixturevalue(
++                f"_{marker_loop_scope or _get_default_test_loop_scope(pyfuncitem.config)}_scoped_runner"
++            )
++            synchronized = _synchronize_coroutine(
++                pyfuncitem.obj,
++                runner,
++                contextvars.copy_context(),
++                asyncio_marker.kwargs.get("timeout"),
++            )
++            with MonkeyPatch.context() as patch:
++                patch.setattr(pyfuncitem, "obj", synchronized)
++                yield
++            return
+         else:
+             pyfuncitem.warn(
+                 pytest.PytestWarning(
+@@ -894,6 +942,7 @@ def _synchronize_coroutine(
+     func: Callable[..., CoroutineType],
+     runner: asyncio.Runner,
+     context: contextvars.Context,
++    timeout: float | None = None,
+ ):
+     """
+     Return a sync wrapper around a coroutine executing it in the
+@@ -903,6 +952,8 @@ def _synchronize_coroutine(
+     @functools.wraps(func)
+     def inner(*args, **kwargs):
+         coro = func(*args, **kwargs)
++        if timeout is not None:
++            coro = asyncio.wait_for(coro, timeout)
+         runner.run(coro, context=context)
+ 
+     return inner
+@@ -997,10 +1048,11 @@ def _parse_asyncio_marker(
+ def _validate_asyncio_marker(asyncio_marker: Mark) -> None:
+     if asyncio_marker.args or (
+         asyncio_marker.kwargs
+-        and set(asyncio_marker.kwargs) - {"loop_scope", "scope", "loop_factories"}
++        and set(asyncio_marker.kwargs)
++        - {"loop_scope", "scope", "loop_factories", "timeout"}
+     ):
+         msg = (
+-            "mark.asyncio accepts only keyword arguments 'loop_scope' and"
+-            " 'loop_factories'."
++            "mark.asyncio accepts only keyword arguments 'loop_scope', "
++            "'loop_factories', and 'timeout'."
+         )
+         raise ValueError(msg)
+@@ -1031,13 +1083,14 @@ def _create_scoped_runner_fixture(scope: _ScopeName) -> Callable:
+         request: FixtureRequest,
+     ) -> Iterator[Runner]:
+         new_loop_policy = event_loop_policy
++        loop_factory = _asyncio_loop_factory or _get_marker_loop_factory(request._pyfuncitem)
+         debug_mode = _get_asyncio_debug(request.config)
+         with _temporary_event_loop_policy(new_loop_policy):
+             runner = Runner(
+                 debug=debug_mode,
+-                loop_factory=_asyncio_loop_factory,
++                loop_factory=loop_factory,
+             ).__enter__()
+-            if _asyncio_loop_factory is not None:
++            if loop_factory is not None:
+                 _set_event_loop(runner.get_loop())
+             try:
+                 yield runner
+@@ -1062,9 +1115,9 @@ def _create_scoped_runner_fixture(scope: _ScopeName) -> Callable:
+                         warnings.warn(
+                             _RUNNER_TEARDOWN_WARNING % traceback.format_exc(),
+                             RuntimeWarning,
+                         )
+             finally:
+-                if _asyncio_loop_factory is not None:
++                if loop_factory is not None:
+                     _set_event_loop(None)
+ 
+     return _scoped_runner

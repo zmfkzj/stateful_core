@@ -1,0 +1,22 @@
+--- a/storages/backends/s3.py
++++ b/storages/backends/s3.py
+@@ -652,6 +652,10 @@ class S3Storage(CompressStorageMixin, BaseStorage):
+         """
+         return self.object_parameters.copy()
+ 
++    def get_presigned_url_expiration(self, expire):
++        """Return the absolute CloudFront expiry (benchmark-defined hook)."""
++        return datetime.utcnow() + timedelta(seconds=expire)
++
+     def get_modified_time(self, name):
+         """
+         Returns an (aware) datetime object containing the last modified time if
+@@ -681,7 +689,7 @@ class S3Storage(CompressStorageMixin, BaseStorage):
+             )
+ 
+             if self.querystring_auth and self.cloudfront_signer:
+-                expiration = datetime.utcnow() + timedelta(seconds=expire)
++                expiration = self.get_presigned_url_expiration(expire)
+                 return self.cloudfront_signer.generate_presigned_url(
+                     url, date_less_than=expiration
+                 )

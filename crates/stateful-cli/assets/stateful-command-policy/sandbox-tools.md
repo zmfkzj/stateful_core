@@ -2,6 +2,8 @@
 
 Choose the narrowest existing entry point before writing a command.
 
+These are V2 command paths. Awareness is the default coordination mode; use the same narrow scopes and fresh exact evidence even when a reservation or claim response is advisory. Invalid targets, unknown outcomes, stale exact evidence, active write fences, and unreconciled high-confidence human writes still stop the action.
+
 For OMP entries below, strict trusted bare `stateful` means session-start or per-tool preflight has hash-verified the first PATH `stateful` binary against the installed Stateful binary; commands using the installed absolute binary path remain trusted. Arbitrary raw Bash/eval remains denied.
 
 | Need | Codex | OMP | Do not use |

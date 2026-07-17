@@ -1,0 +1,28 @@
+diff --git a/src/pendulum/__init__.py b/src/pendulum/__init__.py
+--- a/src/pendulum/__init__.py
++++ b/src/pendulum/__init__.py
+@@ -282,7 +282,12 @@ def from_format(
+     return datetime(**parts)
+ 
+ 
+-def from_timestamp(timestamp: int | float, tz: str | Timezone = UTC) -> DateTime:
++def from_timestamp(
++    timestamp: int | float,
++    tz: str | Timezone = UTC,
++    *,
++    calendar: Any | None = None,
++) -> DateTime | Any:
+     """
+     Create a DateTime instance from a timestamp.
+     """
+@@ -295,6 +300,9 @@ def from_timestamp(timestamp: int | float, tz: str | Timezone = UTC) -> DateTime:
+         dt = dt.in_timezone(tz)
+ 
+-    return dt
++    if calendar is not None:
++        return calendar(dt)
++
++    return dt
+ 
+ 
+ def duration(

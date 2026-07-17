@@ -16,17 +16,24 @@ use std::os::unix::fs::MetadataExt;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
+use stateful_core::{ActorType, RequestEnvelope, SourceKind};
 
-use crate::{GlobalPaths, ServerRuntime, discover_runtime_with_global, post_json};
+use crate::{
+    GlobalPaths, ServerRuntime, discover_runtime_with_global, replay_v2_request,
+    v2_request_envelope,
+};
 
 #[derive(Debug, Clone, Deserialize)]
 struct LocalOutboxRecord {
     outbox_id: String,
-    event_type: String,
     agent_id: String,
     workspace_id: String,
     sequence: u64,
-    payload: Value,
+    route: String,
+    request_id: String,
+    request_envelope: String,
+    #[serde(default)]
+    attempts: u32,
     sync_status: String,
 }
 
@@ -91,22 +98,24 @@ pub fn sync_outbox_with_runtime(
 
         for index in 0..records.len() {
             let record = &records[index].record;
-            let response = match post_json(
-                runtime,
-                "/v1/outbox/sync",
-                &json!({
-                    "outbox_id": record.outbox_id,
-                    "agent_id": record.agent_id,
-                    "workspace_id": record.workspace_id,
-                    "sequence": record.sequence,
-                    "event_type": record.event_type,
-                    "payload": record.payload,
-                }),
+            let response = match stateful_core::RequestEnvelope::<Value>::from_json(
+                &record.request_envelope,
             ) {
+                Ok(request)
+                    if record.route == "/v2/outbox/sync"
+                        || exact_envelope_json(&request)? == record.request_envelope =>
+                {
+                    crate::post_v2_raw(runtime, &record.route, &request)
+                }
+                Ok(_) => replay_v2_request(runtime, &record.route, &record.request_envelope),
+                Err(error) => Err(anyhow::anyhow!(error)),
+            };
+            let response = match response {
                 Ok(response) => response,
                 Err(error) => {
                     let _lock = acquire_outbox_lock(&outbox_dir)?;
-                    requeue_pending_records(&path, &records[index..])?;
+                    let pending = increment_attempts(&records[index..]);
+                    requeue_pending_records(&path, &pending)?;
                     fs::remove_file(&claimed_path)?;
                     active_claim.finish();
                     return Err(error);
@@ -114,8 +123,12 @@ pub fn sync_outbox_with_runtime(
             };
 
             if !(200..300).contains(&response.status_code) {
+                if is_deterministic_client_rejection(response.status_code) {
+                    continue;
+                }
                 let _lock = acquire_outbox_lock(&outbox_dir)?;
-                requeue_pending_records(&path, &records[index..])?;
+                let pending = increment_attempts(&records[index..]);
+                requeue_pending_records(&path, &pending)?;
                 fs::remove_file(&claimed_path)?;
                 active_claim.finish();
                 anyhow::bail!(
@@ -135,6 +148,10 @@ pub fn sync_outbox_with_runtime(
     Ok(synced)
 }
 
+fn is_deterministic_client_rejection(status_code: u16) -> bool {
+    (400..500).contains(&status_code) && !matches!(status_code, 408 | 429)
+}
+
 pub(crate) fn queue_session_heartbeat_outbox(
     paths: &GlobalPaths,
     runtime_workspace_id: &str,
@@ -147,17 +164,35 @@ pub(crate) fn queue_session_heartbeat_outbox(
     let stem = safe_file_stem(agent_id);
     let path = outbox_dir.join(format!("{stem}.jsonl"));
     let sequence = next_sequence(&outbox_dir, &stem)?;
+    let outbox_id = uuid::Uuid::new_v4().to_string();
+    let request = v2_request_envelope(
+        uuid::Uuid::new_v4(),
+        agent_id.to_string(),
+        runtime_workspace_id.to_string(),
+        None,
+        ActorType::Agent,
+        SourceKind::Cli,
+        "outbox_sync",
+        "stateful-cli",
+        None,
+        json!({
+            "outbox_id": outbox_id,
+            "sequence": sequence,
+            "event_type": "AgentHeartbeatQueued",
+            "payload": { "reason": reason }
+        }),
+    )?;
+    let request_id = request.request_id.to_string();
+    let request_envelope = serde_json::to_string(&request)?;
     let record = json!({
-        "outbox_id": uuid::Uuid::new_v4().to_string(),
-        "event_type": "AgentHeartbeatQueued",
+        "outbox_id": outbox_id,
         "agent_id": agent_id,
-        "actor_id": "unknown",
         "workspace_id": runtime_workspace_id,
         "sequence": sequence,
-        "created_at": now_rfc3339_timestamp(),
-        "payload": {
-            "reason": reason
-        },
+        "route": "/v2/outbox/sync",
+        "request_id": request_id,
+        "request_envelope": request_envelope,
+        "attempts": 0,
         "sync_status": "pending"
     });
 
@@ -166,10 +201,154 @@ pub(crate) fn queue_session_heartbeat_outbox(
     Ok(())
 }
 
-fn now_rfc3339_timestamp() -> String {
-    time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .expect("UTC timestamp should format as RFC3339")
+pub(crate) fn exact_envelope_json(request: &RequestEnvelope<Value>) -> anyhow::Result<String> {
+    Ok(serde_json::to_value(request)?.to_string())
+}
+
+pub(crate) fn queue_exact_envelope(
+    paths: &GlobalPaths,
+    route: &str,
+    request: &RequestEnvelope<Value>,
+) -> anyhow::Result<()> {
+    let outbox_dir = ensure_trusted_outbox_dir(paths)?;
+    let _lock = acquire_outbox_lock(&outbox_dir)?;
+    recover_claimed_outbox_files(&outbox_dir)?;
+    let stem = safe_file_stem(&request.agent.agent_id);
+    let path = outbox_dir.join(format!("{stem}.jsonl"));
+    let record = json!({
+        "outbox_id": uuid::Uuid::new_v4().to_string(),
+        "agent_id": request.agent.agent_id,
+        "workspace_id": request.workspace.workspace_id,
+        "sequence": next_sequence(&outbox_dir, &stem)?,
+        "route": route,
+        "request_id": request.request_id.to_string(),
+        "request_envelope": exact_envelope_json(request)?,
+        "attempts": 0,
+        "sync_status": "pending"
+    });
+    let mut file = open_plain_outbox_append(&path, "outbox file")?;
+    writeln!(file, "{record}")?;
+    file.sync_all()?;
+    Ok(())
+}
+
+pub(crate) fn post_durable_read_start_pair(
+    paths: &GlobalPaths,
+    runtime: &ServerRuntime,
+    start: &RequestEnvelope<Value>,
+    failed_completion: &RequestEnvelope<Value>,
+) -> anyhow::Result<()> {
+    let outbox_dir = ensure_trusted_outbox_dir(paths)?;
+    let _lock = acquire_outbox_lock(&outbox_dir)?;
+    recover_claimed_outbox_files(&outbox_dir)?;
+    if start.agent.agent_id != failed_completion.agent.agent_id {
+        anyhow::bail!("durable read pair agents differ");
+    }
+    let stem = safe_file_stem(&start.agent.agent_id);
+    let path = outbox_dir.join(format!("{stem}.jsonl"));
+    let mut records = match fs::read_to_string(&path) {
+        Ok(records) => records,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    for (route, request) in [
+        ("/v2/read/start", start),
+        ("/v2/read/complete", failed_completion),
+    ] {
+        let record = json!({
+            "outbox_id": uuid::Uuid::new_v4().to_string(),
+            "agent_id": request.agent.agent_id,
+            "workspace_id": request.workspace.workspace_id,
+            "sequence": next_sequence(&outbox_dir, &stem)?,
+            "route": route,
+            "request_id": request.request_id.to_string(),
+            "request_envelope": exact_envelope_json(request)?,
+            "attempts": 0,
+            "sync_status": "pending"
+        });
+        records.push_str(&record.to_string());
+        records.push('\n');
+    }
+    rewrite_outbox(&path, &records)?;
+
+    let serialized = exact_envelope_json(start)?;
+    crate::replay_v2_request(runtime, "/v2/read/start", &serialized)?;
+    let start_request_id = start.request_id.to_string();
+    let complete_request_id = failed_completion.request_id.to_string();
+    let retained = records
+        .lines()
+        .filter(|line| {
+            let Ok(record) = serde_json::from_str::<Value>(line) else {
+                return true;
+            };
+            let request_id = record.get("request_id").and_then(Value::as_str);
+            request_id != Some(start_request_id.as_str())
+                && request_id != Some(complete_request_id.as_str())
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    rewrite_outbox(&path, &retained)?;
+    if retained.is_empty() {
+        let _ = fs::remove_file(path);
+    }
+    Ok(())
+}
+
+pub(crate) fn acknowledge_exact_envelope(
+    paths: &GlobalPaths,
+    request: &RequestEnvelope<Value>,
+) -> anyhow::Result<()> {
+    let outbox_dir = ensure_trusted_outbox_dir(paths)?;
+    let _lock = acquire_outbox_lock(&outbox_dir)?;
+    recover_claimed_outbox_files(&outbox_dir)?;
+    let path = outbox_dir.join(format!("{}.jsonl", safe_file_stem(&request.agent.agent_id)));
+    if !existing_plain_file(&path, "outbox file")? {
+        return Ok(());
+    }
+    let request_id = request.request_id.to_string();
+    let contents = fs::read_to_string(&path)?;
+    let retained = contents
+        .lines()
+        .filter(|line| {
+            let Ok(record) = serde_json::from_str::<Value>(line) else {
+                return true;
+            };
+            !(record.get("request_id").and_then(Value::as_str) == Some(request_id.as_str())
+                && record
+                    .get("route")
+                    .and_then(Value::as_str)
+                    .is_some_and(|route| {
+                        route == "/v2/read/start"
+                            || route == "/v2/read/complete"
+                            || route == "/v2/activity/finalize"
+                    }))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    rewrite_outbox(&path, &retained)
+}
+
+fn rewrite_outbox(path: &Path, contents: &str) -> anyhow::Result<()> {
+    let temporary = path.with_file_name(format!(
+        "{}.ack-{}",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("outbox.jsonl"),
+        uuid::Uuid::new_v4()
+    ));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)?;
+    if !contents.is_empty() {
+        file.write_all(contents.as_bytes())?;
+        if !contents.ends_with('\n') {
+            file.write_all(b"\n")?;
+        }
+    }
+    file.sync_all()?;
+    fs::rename(temporary, path)?;
+    Ok(())
 }
 
 fn safe_file_stem(value: &str) -> String {
@@ -615,7 +794,17 @@ fn read_pending_records(path: &Path) -> anyhow::Result<Vec<PendingOutboxRecord>>
         let Ok(record) = serde_json::from_value::<LocalOutboxRecord>(raw.clone()) else {
             continue;
         };
-        if record.sync_status == "pending" {
+        let Ok(request) = RequestEnvelope::<Value>::from_json(&record.request_envelope) else {
+            continue;
+        };
+        if record.sync_status == "pending"
+            && request.request_id.to_string() == record.request_id
+            && request.agent.agent_id == record.agent_id
+            && request.workspace.workspace_id == record.workspace_id
+            && (record.route != "/v2/outbox/sync"
+                || request.payload.get("outbox_id").and_then(Value::as_str)
+                    == Some(&record.outbox_id))
+        {
             records.push(PendingOutboxRecord { record, raw });
         }
     }
@@ -674,6 +863,18 @@ fn outbox_record_dedupe_key(line: &str) -> String {
         .unwrap_or_else(|| format!("raw:{line}"))
 }
 
+fn increment_attempts(records: &[PendingOutboxRecord]) -> Vec<PendingOutboxRecord> {
+    records
+        .iter()
+        .cloned()
+        .map(|mut pending| {
+            pending.record.attempts += 1;
+            pending.raw["attempts"] = json!(pending.record.attempts);
+            pending
+        })
+        .collect()
+}
+
 fn requeue_pending_records(path: &Path, records: &[PendingOutboxRecord]) -> anyhow::Result<()> {
     if records.is_empty() {
         return Ok(());
@@ -700,6 +901,61 @@ mod tests {
         }
         fs::create_dir_all(&temp_root).expect("temp root should be creatable");
         temp_root
+    }
+
+    #[test]
+    fn durable_read_start_pair_persists_start_and_failed_completion_before_send() {
+        use std::net::TcpListener;
+
+        let temp_root = temp_root("stateful-outbox-read-pair");
+        let paths = GlobalPaths::new(temp_root.join("home"));
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let addr = listener.local_addr().expect("listener address should load");
+        thread::spawn(move || {
+            let _stream = listener.accept().expect("start request should arrive").0;
+        });
+        let runtime = ServerRuntime::new(format!("http://{addr}"), "secret", "w1", 1);
+        let start = v2_request_envelope(
+            uuid::Uuid::new_v4(),
+            "agent-1".to_string(),
+            "w1".to_string(),
+            None,
+            ActorType::Agent,
+            SourceKind::Hook,
+            "read_start",
+            "test",
+            None,
+            json!({"operation_id":"read-1"}),
+        )
+        .expect("start envelope should build");
+        let completion = v2_request_envelope(
+            uuid::Uuid::new_v4(),
+            "agent-1".to_string(),
+            "w1".to_string(),
+            None,
+            ActorType::Agent,
+            SourceKind::Hook,
+            "read_complete",
+            "test",
+            None,
+            json!({"operation_id":"read-1","classification":"failed"}),
+        )
+        .expect("completion envelope should build");
+
+        post_durable_read_start_pair(&paths, &runtime, &start, &completion)
+            .expect_err("dropped start response should leave the pair durable");
+        let records = fs::read_to_string(paths.outbox_dir.join("agent-1.jsonl"))
+            .expect("pair should be durable")
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("record should parse"))
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["route"], "/v2/read/start");
+        assert_eq!(records[1]["route"], "/v2/read/complete");
+        assert_eq!(records[0]["request_id"], start.request_id.to_string());
+        assert_eq!(records[1]["request_id"], completion.request_id.to_string());
+
+        fs::remove_dir_all(temp_root).expect("temp root should remove");
     }
 
     #[test]

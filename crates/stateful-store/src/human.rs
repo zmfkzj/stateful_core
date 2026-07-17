@@ -1,5 +1,21 @@
-use super::*;
+use crate::{
+    CommandOutcome, CommandPlan, CurrentAggregate, ReservationRecord, Store, StoreError,
+    StoreResult,
+    reservations::{expired, normalized_scope, record_from_current, timestamp, typed_records},
+    write_fences::active_fence_owner,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use stateful_core::{
+    EventData, EventPayload, HumanAcknowledgementEvent, HumanObservationEvent,
+    ReadObservationRecord, ReconciliationDecision, RequestEnvelope, ReservationScope, V2Error,
+};
 use std::str::FromStr;
+use time::{Duration, OffsetDateTime};
+use uuid::Uuid;
+
+const EPHEMERAL_OBSERVATION_TTL: Duration = Duration::minutes(5);
+const HUMAN_WRITE_OBSERVATION_TTL: Duration = Duration::hours(24);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -12,24 +28,16 @@ pub enum HumanObservationKind {
 }
 
 impl HumanObservationKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Save => "save",
-            Self::Change => "change",
-            Self::Delete => "delete",
-            Self::Presence => "presence",
-            Self::Dirty => "dirty",
-        }
-    }
-
     fn is_write(self) -> bool {
         matches!(self, Self::Save | Self::Change | Self::Delete)
+    }
+    fn is_ephemeral(self) -> bool {
+        matches!(self, Self::Presence | Self::Dirty)
     }
 }
 
 impl FromStr for HumanObservationKind {
     type Err = String;
-
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "save" => Ok(Self::Save),
@@ -37,7 +45,7 @@ impl FromStr for HumanObservationKind {
             "delete" => Ok(Self::Delete),
             "presence" => Ok(Self::Presence),
             "dirty" => Ok(Self::Dirty),
-            other => Err(format!("unknown human observation kind: {other}")),
+            _ => Err(format!("unknown human observation kind: {value}")),
         }
     }
 }
@@ -49,49 +57,42 @@ pub enum HumanObservationConfidence {
     Low,
 }
 
-impl HumanObservationConfidence {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::High => "high",
-            Self::Low => "low",
-        }
-    }
-}
-
 impl FromStr for HumanObservationConfidence {
     type Err = String;
-
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "high" => Ok(Self::High),
             "low" => Ok(Self::Low),
-            other => Err(format!("unknown human observation confidence: {other}")),
+            _ => Err(format!("unknown human observation confidence: {value}")),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HumanObservationInput {
-    pub workspace_id: String,
     pub relative_path: String,
     pub kind: HumanObservationKind,
     pub confidence: HumanObservationConfidence,
     pub source: String,
-    pub observed_at: String,
     pub summary: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub observed_at: Option<OffsetDateTime>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReconciliationAckInput {
-    pub agent_id: String,
-    pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reservation_id: Option<String>,
     pub decision: ReconciliationDecision,
     pub files_reread: Vec<String>,
     pub human_change_summary: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HumanObservationRecord {
     pub observation_id: String,
     pub workspace_id: String,
@@ -101,284 +102,365 @@ pub struct HumanObservationRecord {
     pub source: String,
     pub observed_at: String,
     pub summary: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reconciled_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<ReconciliationDecision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconciled_by_agent_id: Option<String>,
+    #[serde(default)]
+    pub origin_event_seq: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HumanReconciliationAcknowledgementRecord {
+    pub acknowledgement_id: String,
+    pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reservation_id: Option<String>,
+    pub decision: ReconciliationDecision,
+    pub files_reread: Vec<String>,
+    pub human_change_summary: String,
+    pub acknowledged_by_agent_id: String,
+    pub acknowledged_at: String,
+    #[serde(default)]
+    pub origin_event_seq: u64,
 }
 
 impl Store {
-    pub fn record_human_observation(&self, input: HumanObservationInput) -> StoreResult<String> {
-        self.store_transaction(move |store| store.record_human_observation_inner(input))
-    }
-
-    fn record_human_observation_inner(&self, input: HumanObservationInput) -> StoreResult<String> {
-        let observation_id = Uuid::new_v4().to_string();
-        let relative_path = normalize_relative_path(&input.relative_path);
-        let is_write =
-            input.kind.is_write() && input.confidence == HumanObservationConfidence::High;
-        let attributed_to_agent = is_write
-            && self
-                .write_fence_owner_for_observation(
-                    &input.workspace_id,
-                    &relative_path,
-                    &input.observed_at,
-                )?
-                .is_some();
-        let reconciled_at = attributed_to_agent.then_some(input.observed_at.clone());
-        let expires_at = if matches!(
-            input.kind,
-            HumanObservationKind::Presence | HumanObservationKind::Dirty
-        ) {
-            Some(timestamp_after(
-                &input.observed_at,
-                WRITE_FENCE_TTL_SECONDS,
-            )?)
-        } else {
-            None
-        };
-
-        self.conn.execute(
-            "INSERT INTO human_observations (
-                observation_id, workspace_id, relative_path, kind, source, confidence,
-                observed_exists, observed_content_hash, observed_at, summary, expires_at,
-                reconciled_at, reconcile_decision, reconciled_by_agent_id
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, NULL, ?7, ?8, ?9, ?10, NULL, NULL)",
-            params![
-                observation_id,
-                input.workspace_id,
+    pub fn record_human_observation(
+        &self,
+        request: &RequestEnvelope<HumanObservationInput>,
+    ) -> StoreResult<CommandOutcome<HumanObservationRecord>> {
+        let now = self.clock.now();
+        let payload = request.payload.clone();
+        self.execute_command(request, "human.observe", |reader| {
+            let relative_path = normalized_scope(&payload.relative_path)?;
+            let observed_at = payload.observed_at.unwrap_or(now);
+            let attributed_owner = (payload.kind.is_write()
+                && payload.confidence == HumanObservationConfidence::High)
+                .then(|| {
+                    active_fence_owner(
+                        reader,
+                        &request.workspace.workspace_id,
+                        &relative_path,
+                        observed_at,
+                    )
+                })
+                .transpose()?
+                .flatten();
+            let attributed = attributed_owner.is_some();
+            let observation = HumanObservationRecord {
+                observation_id: Uuid::new_v4().to_string(),
+                workspace_id: request.workspace.workspace_id.clone(),
                 relative_path,
-                input.kind.as_str(),
-                input.source,
-                input.confidence.as_str(),
-                input.observed_at,
-                input.summary,
-                expires_at,
-                reconciled_at
-            ],
-        )?;
-
-        if is_write && !attributed_to_agent {
-            self.append_inner(&Event::human_write_observed(
-                input.workspace_id,
-                relative_path,
-                input.kind.as_str(),
-                input.source,
-                input.summary,
-            ))?;
-        }
-
-        Ok(observation_id)
-    }
-
-    pub fn unreconciled_human_observations(
-        &self,
-        workspace_id: impl AsRef<str>,
-        paths: &[String],
-    ) -> StoreResult<Vec<HumanObservationRecord>> {
-        let paths = normalize_paths(paths);
-        if paths.is_empty() {
-            return Ok(Vec::new());
-        }
-        self.unreconciled_human_observations_inner(workspace_id.as_ref(), &paths)
-    }
-
-    fn unreconciled_human_observations_inner(
-        &self,
-        workspace_id: &str,
-        paths: &[String],
-    ) -> StoreResult<Vec<HumanObservationRecord>> {
-        let mut records = Vec::new();
-        let mut statement = self.conn.prepare(
-            "SELECT observation_id, workspace_id, relative_path, kind, confidence, source,
-                    observed_at, summary, reconciled_at
-             FROM human_observations
-             WHERE workspace_id = ?1
-               AND reconciled_at IS NULL
-               AND kind IN ('save', 'change', 'delete')
-               AND confidence = 'high'
-             ORDER BY observed_at",
-        )?;
-        let rows = statement.query_map([workspace_id], human_observation_record_from_row)?;
-        for row in rows {
-            let record = row?;
-            if paths.iter().any(|path| path == &record.relative_path) {
-                records.push(record);
-            }
-        }
-        Ok(records)
-    }
-
-    pub fn unreconciled_human_write_paths(
-        &self,
-        workspace_id: impl AsRef<str>,
-        paths: &[String],
-    ) -> StoreResult<Vec<String>> {
-        let mut paths = self
-            .unreconciled_human_observations(workspace_id, paths)?
-            .into_iter()
-            .map(|record| record.relative_path)
-            .collect::<Vec<_>>();
-        paths.sort();
-        paths.dedup();
-        Ok(paths)
+                kind: payload.kind,
+                confidence: payload.confidence,
+                source: payload.source,
+                observed_at: timestamp(observed_at)?,
+                summary: payload.summary,
+                status: if attributed {
+                    "reconciled".into()
+                } else {
+                    "pending".into()
+                },
+                expires_at: Some(timestamp(
+                    observed_at
+                        + if payload.kind.is_ephemeral() {
+                            EPHEMERAL_OBSERVATION_TTL
+                        } else {
+                            HUMAN_WRITE_OBSERVATION_TTL
+                        },
+                )?),
+                reconciled_at: attributed.then(|| timestamp(observed_at)).transpose()?,
+                decision: None,
+                reconciled_by_agent_id: attributed_owner,
+                origin_event_seq: 0,
+            };
+            Ok(CommandPlan {
+                events: vec![observation_event(
+                    request,
+                    0,
+                    now,
+                    HumanObservationEvent::Observed,
+                    &observation,
+                )?],
+                response: observation,
+                http_status: 200,
+            })
+        })
     }
 
     pub fn acknowledge_human_reconciliation(
         &self,
-        input: ReconciliationAckInput,
-    ) -> StoreResult<u64> {
-        self.store_transaction(move |store| store.acknowledge_human_reconciliation_inner(input))
+        request: &RequestEnvelope<ReconciliationAckInput>,
+    ) -> StoreResult<CommandOutcome<u64>> {
+        let now = self.clock.now();
+        let payload = request.payload.clone();
+        self.execute_command(request, "human.reconcile", |reader| {
+            let paths = payload.files_reread.iter()
+                .map(|path| normalized_scope(path))
+                .collect::<StoreResult<Vec<_>>>()?;
+            if payload.decision.clears_human_write_block() {
+                let reservation_id = payload.reservation_id.as_deref().ok_or_else(|| reconciliation_error(
+                    "missing_reservation",
+                    "Adopt and reapply reconciliation require an active reservation.",
+                    "Declare or provide the active reservation before acknowledging the human change.",
+                ))?;
+                let reservation = typed_records::<ReservationRecord>(
+                    reader,
+                    CurrentAggregate::Reservation,
+                    &request.workspace.workspace_id,
+                )?
+                .into_iter()
+                .find(|reservation| reservation.reservation_id == reservation_id)
+                .ok_or_else(|| reconciliation_error(
+                    "missing_reservation",
+                    "The supplied reservation does not exist in this workspace.",
+                    "Provide an active reservation owned by the acknowledging agent.",
+                ))?;
+                if reservation.agent_id != request.agent.agent_id {
+                    return Err(reconciliation_error(
+                        "reservation_owner_mismatch",
+                        "The supplied reservation belongs to another agent.",
+                        "Use an active reservation owned by the acknowledging agent.",
+                    ));
+                }
+                if reservation.status != "active"
+                    || reservation.expires_at.as_deref().is_some_and(|expires_at| expired(expires_at, now))
+                {
+                    return Err(reconciliation_error(
+                        "missing_reservation",
+                        "The supplied reservation is not active.",
+                        "Declare or refresh an active reservation before acknowledging the human change.",
+                    ));
+                }
+                let rereads = typed_records::<ReadObservationRecord>(
+                    reader,
+                    CurrentAggregate::ReadObservation,
+                    &request.workspace.workspace_id,
+                )?;
+                let human_writes = typed_records::<HumanObservationRecord>(
+                    reader,
+                    CurrentAggregate::HumanObservation,
+                    &request.workspace.workspace_id,
+                )?
+                .into_iter()
+                .filter(|observation| {
+                    observation.status == "pending"
+                        && observation.kind.is_write()
+                        && observation.confidence == HumanObservationConfidence::High
+                })
+                .collect::<Vec<_>>();
+                for path in &paths {
+                    if !reservation.scopes.iter().any(|scope| {
+                        matches!(scope, ReservationScope::File(scope_path) if scope_path == path)
+                    }) {
+                        return Err(reconciliation_error(
+                            "scope_mismatch",
+                            "Each reread file requires an exact active file reservation scope.",
+                            "Declare exact file scopes for every reread path.",
+                        ));
+                    }
+                    let reread = rereads.iter().find(|reread| {
+                        reread.agent_id == request.agent.agent_id && reread.path == *path
+                    }).ok_or_else(|| reconciliation_error(
+                        "missing_read_provenance",
+                        "Each reconciled human write requires a fresh exact reread.",
+                        "Read the exact file completely before acknowledging the human change.",
+                    ))?;
+                    if !reread.is_fresh_at(now)
+                        || human_writes.iter().any(|observation| {
+                            observation.relative_path == *path
+                                && reread.origin_event_seq <= observation.origin_event_seq
+                        })
+                    {
+                        return Err(reconciliation_error(
+                            "stale_observation",
+                            "The supplied reread is stale, inexact, or predates the human change.",
+                            "Perform a fresh complete exact reread after the human change before acknowledging it.",
+                        ));
+                    }
+                }
+            }
+            let acknowledgement = HumanReconciliationAcknowledgementRecord {
+                acknowledgement_id: request.request_id.to_string(),
+                workspace_id: request.workspace.workspace_id.clone(),
+                reservation_id: payload.reservation_id.clone(),
+                decision: payload.decision,
+                files_reread: paths.clone(),
+                human_change_summary: payload.human_change_summary.clone(),
+                acknowledged_by_agent_id: request.agent.agent_id.clone(),
+                acknowledged_at: timestamp(now)?,
+                origin_event_seq: 0,
+            };
+            let mut events = vec![acknowledgement_event(request, 0, now, &acknowledgement)?];
+            let mut count = 0;
+            if payload.decision.clears_human_write_block() && !paths.is_empty() {
+                for mut observation in typed_records::<HumanObservationRecord>(
+                    reader,
+                    CurrentAggregate::HumanObservation,
+                    &request.workspace.workspace_id,
+                )? {
+                    if observation.status != "pending"
+                        || !paths.contains(&observation.relative_path)
+                    {
+                        continue;
+                    }
+                    observation.status = "reconciled".into();
+                    observation.reconciled_at = Some(timestamp(now)?);
+                    observation.reconciled_by_agent_id = Some(request.agent.agent_id.clone());
+                    observation.decision = Some(payload.decision);
+                    count += 1;
+                    events.push(observation_event(
+                        request,
+                        events.len() as u32,
+                        now,
+                        HumanObservationEvent::Reconciled,
+                        &observation,
+                    )?);
+                }
+            } else if !paths.is_empty() {
+                for mut observation in typed_records::<HumanObservationRecord>(
+                    reader,
+                    CurrentAggregate::HumanObservation,
+                    &request.workspace.workspace_id,
+                )? {
+                    if observation.status != "pending"
+                        || !paths.contains(&observation.relative_path)
+                    {
+                        continue;
+                    }
+                    observation.decision = Some(payload.decision);
+                    events.push(observation_event(
+                        request,
+                        events.len() as u32,
+                        now,
+                        HumanObservationEvent::Reconciled,
+                        &observation,
+                    )?);
+                }
+            }
+            Ok(CommandPlan { events, response: count, http_status: 200 })
+        })
     }
 
-    fn acknowledge_human_reconciliation_inner(
+    pub fn expire_human_observations(
         &self,
-        input: ReconciliationAckInput,
-    ) -> StoreResult<u64> {
-        let now = now_timestamp();
-        let files = normalize_paths(&input.files_reread);
-        self.append_inner(&Event::reconciliation_acknowledged(
-            input.agent_id.clone(),
-            input.workspace_id.clone(),
-            input.decision,
-            files.clone(),
-            input.human_change_summary,
-        ))?;
-
-        if !input.decision.clears_human_write_block() || files.is_empty() {
-            return Ok(0);
-        }
-
-        let mut updated = 0;
-        for path in files {
-            updated += self.conn.execute(
-                "UPDATE human_observations
-                 SET reconciled_at = ?1,
-                     reconcile_decision = ?2,
-                     reconciled_by_agent_id = ?3
-                 WHERE workspace_id = ?4
-                   AND relative_path = ?5
-                   AND reconciled_at IS NULL
-                   AND kind IN ('save', 'change', 'delete')",
-                params![
-                    now,
-                    reconciliation_decision_as_str(input.decision),
-                    input.agent_id,
-                    input.workspace_id,
-                    path
-                ],
-            )? as u64;
-        }
-        Ok(updated)
+        request: &RequestEnvelope<()>,
+    ) -> StoreResult<CommandOutcome<Vec<String>>> {
+        let now = self.clock.now();
+        self.execute_command(request, "human.expire", |reader| {
+            let mut events = Vec::new();
+            let mut expired_ids = Vec::new();
+            for mut observation in typed_records::<HumanObservationRecord>(
+                reader,
+                CurrentAggregate::HumanObservation,
+                &request.workspace.workspace_id,
+            )? {
+                if observation.status == "pending"
+                    && observation
+                        .expires_at
+                        .as_deref()
+                        .is_some_and(|value| expired(value, now))
+                {
+                    observation.status = "expired".into();
+                    expired_ids.push(observation.observation_id.clone());
+                    events.push(observation_event(
+                        request,
+                        events.len() as u32,
+                        now,
+                        HumanObservationEvent::Expired,
+                        &observation,
+                    )?);
+                }
+            }
+            Ok(CommandPlan {
+                events,
+                response: expired_ids,
+                http_status: 200,
+            })
+        })
     }
 
-    pub(crate) fn live_human_observation_items(
+    pub fn unreconciled_human_observations(
         &self,
-        workspace_filter: Option<&str>,
-        identity_filter: CurrentStateIdentityFilter<'_>,
-        resource_filter: Option<&str>,
-    ) -> StoreResult<Vec<CurrentItem>> {
-        let mut statement = self.conn.prepare(
-            "SELECT observation_id, workspace_id, relative_path, kind, confidence, source,
-                    observed_at, summary, reconciled_at
-             FROM human_observations
-             WHERE reconciled_at IS NULL
-               AND kind IN ('save', 'change', 'delete')
-               AND confidence = 'high'
-             ORDER BY observed_at",
-        )?;
-        let rows = statement.query_map([], human_observation_record_from_row)?;
-        let mut items = Vec::new();
-        for row in rows {
-            let record = row?;
-            if workspace_filter.is_some_and(|workspace| workspace != record.workspace_id) {
-                continue;
-            }
-            if identity_filter.exclude_agent_id.is_some() {
-                // Human rows are not owned by an agent; keep them visible to every agent.
-            }
-            if !resource_matches_filter(&record.relative_path, resource_filter) {
-                continue;
-            }
-            items.push(
-                CurrentItem::new(
-                    CurrentItemKind::Claim,
-                    CurrentSeverity::Block,
-                    CurrentFreshness::Live,
-                    record.relative_path.clone(),
-                    "Reconcile a human write before resuming agent edits.",
-                    format!("{} has an unreconciled human write.", record.relative_path),
-                )
-                .with_workspace(record.workspace_id)
-                .with_next_action(format!(
-                    "Reread {}, summarize the human change, then call state.reconcile.ack.",
-                    record.relative_path
-                ))
-                .with_evidence(record.summary)
-                .with_evidence_kind(CurrentEvidenceKind::ObservedWrite)
-                .with_source_ref("HumanWriteObserved")
-                .with_observed_at(record.observed_at),
-            );
-        }
-        Ok(items)
+        workspace_id: &str,
+        paths: &[String],
+    ) -> StoreResult<Vec<HumanObservationRecord>> {
+        let paths = paths
+            .iter()
+            .map(|path| normalized_scope(path))
+            .collect::<StoreResult<Vec<_>>>()?;
+        Ok(self
+            .current_records(CurrentAggregate::HumanObservation, workspace_id)?
+            .into_iter()
+            .map(record_from_current::<HumanObservationRecord>)
+            .collect::<StoreResult<Vec<_>>>()?
+            .into_iter()
+            .filter(|observation| {
+                observation.status == "pending"
+                    && observation.kind.is_write()
+                    && observation.confidence == HumanObservationConfidence::High
+                    && paths.contains(&observation.relative_path)
+            })
+            .collect())
     }
 
-    pub(crate) fn expire_stale_human_observations_inner(&self, now: &str) -> StoreResult<()> {
-        self.conn.execute(
-            "DELETE FROM human_observations
-             WHERE kind IN ('presence', 'dirty')
-               AND expires_at IS NOT NULL
-               AND expires_at <= ?1",
-            [now],
-        )?;
-        Ok(())
+    pub fn human_reconciliation_acknowledgements(
+        &self,
+        workspace_id: &str,
+    ) -> StoreResult<Vec<HumanReconciliationAcknowledgementRecord>> {
+        self.current_records(CurrentAggregate::HumanAcknowledgement, workspace_id)?
+            .into_iter()
+            .map(record_from_current::<HumanReconciliationAcknowledgementRecord>)
+            .collect()
     }
 }
 
-fn normalize_paths(paths: &[String]) -> Vec<String> {
-    let mut paths = paths
-        .iter()
-        .map(normalize_relative_path)
-        .filter(|path| !path.is_empty())
-        .collect::<Vec<_>>();
-    paths.sort();
-    paths.dedup();
-    paths
+fn reconciliation_error(
+    code: &'static str,
+    message: &'static str,
+    next_action: &'static str,
+) -> StoreError {
+    V2Error::new(code, message)
+        .with_required_next_action(next_action)
+        .into()
 }
 
-fn human_observation_record_from_row(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<HumanObservationRecord> {
-    let kind = HumanObservationKind::from_str(&row.get::<_, String>(3)?).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(
-            3,
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::other(error)),
-        )
-    })?;
-    let confidence =
-        HumanObservationConfidence::from_str(&row.get::<_, String>(4)?).map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                4,
-                rusqlite::types::Type::Text,
-                Box::new(std::io::Error::other(error)),
-            )
-        })?;
-    Ok(HumanObservationRecord {
-        observation_id: row.get(0)?,
-        workspace_id: row.get(1)?,
-        relative_path: row.get(2)?,
-        kind,
-        confidence,
-        source: row.get(5)?,
-        observed_at: row.get(6)?,
-        summary: row.get(7)?,
-        reconciled_at: row.get(8)?,
-    })
+fn observation_event<T>(
+    request: &RequestEnvelope<T>,
+    ordinal: u32,
+    now: OffsetDateTime,
+    variant: fn(EventData) -> HumanObservationEvent,
+    observation: &HumanObservationRecord,
+) -> StoreResult<stateful_core::NewEvent> {
+    let mut data = EventData::new(&observation.observation_id);
+    data.data = json!({"observation": observation});
+    stateful_core::NewEvent::new(
+        request.request_id,
+        ordinal,
+        now,
+        EventPayload::HumanObservation(variant(data)),
+    )
+    .map_err(StoreError::from)
 }
-
-fn reconciliation_decision_as_str(decision: ReconciliationDecision) -> &'static str {
-    match decision {
-        ReconciliationDecision::Adopt => "adopt",
-        ReconciliationDecision::Reapply => "reapply",
-        ReconciliationDecision::AskUser => "ask_user",
-        ReconciliationDecision::Abandon => "abandon",
-    }
+fn acknowledgement_event<T>(
+    request: &RequestEnvelope<T>,
+    ordinal: u32,
+    now: OffsetDateTime,
+    acknowledgement: &HumanReconciliationAcknowledgementRecord,
+) -> StoreResult<stateful_core::NewEvent> {
+    let mut data = EventData::new(&acknowledgement.acknowledgement_id);
+    data.data = json!({"acknowledgement": acknowledgement});
+    stateful_core::NewEvent::new(
+        request.request_id,
+        ordinal,
+        now,
+        EventPayload::HumanAcknowledgement(HumanAcknowledgementEvent::Recorded(data)),
+    )
+    .map_err(StoreError::from)
 }

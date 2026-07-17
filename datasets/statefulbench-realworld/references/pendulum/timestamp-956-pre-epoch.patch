@@ -1,0 +1,27 @@
+diff --git a/src/pendulum/__init__.py b/src/pendulum/__init__.py
+--- a/src/pendulum/__init__.py
++++ b/src/pendulum/__init__.py
+@@ -286,10 +286,21 @@ def from_timestamp(timestamp: int | float, tz: str | Timezone = UTC) -> DateTime:
+     """
+     Create a DateTime instance from a timestamp.
+     """
+-    dt = _datetime.datetime.fromtimestamp(timestamp, tz=UTC)
++    try:
++        native = _datetime.datetime.fromtimestamp(timestamp, tz=UTC)
++    except (OSError, OverflowError):
++        native = _datetime.datetime(1970, 1, 1, tzinfo=UTC) + _datetime.timedelta(
++            seconds=timestamp
++        )
+ 
+     dt = datetime(
+-        dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, dt.microsecond
++        native.year,
++        native.month,
++        native.day,
++        native.hour,
++        native.minute,
++        native.second,
++        native.microsecond,
+     )
+ 
+     if tz is not UTC or tz != "UTC":

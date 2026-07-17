@@ -1,0 +1,21 @@
+diff --git a/src/requests/sessions.py b/src/requests/sessions.py
+--- a/src/requests/sessions.py
++++ b/src/requests/sessions.py
+@@ -245,11 +245,17 @@ class SessionRedirectMixin:
+             prepared_request.url = to_native_string(url)
+ 
+             self.rebuild_method(prepared_request, resp)
++            # https://www.rfc-editor.org/rfc/rfc10008.html#section-2.5
++            if req.method == "QUERY" and resp.status_code != codes.see_other:
++                prepared_request.method = req.method
+ 
+             # https://github.com/psf/requests/issues/1084
+             if resp.status_code not in (
+                 codes.temporary_redirect,
+                 codes.permanent_redirect,
++            ) and not (
++                req.method == "QUERY"
++                and resp.status_code in (codes.moved, codes.found)
+             ):
+                 # https://github.com/psf/requests/issues/3490
+                 purged_headers = ("Content-Length", "Content-Type", "Transfer-Encoding")

@@ -1,0 +1,219 @@
+diff --git a/src/watchdog/observers/api.py b/src/watchdog/observers/api.py
+index 71416f1..62718f2 100644
+--- a/src/watchdog/observers/api.py
++++ b/src/watchdog/observers/api.py
+@@ -147,7 +147,7 @@ def watch(self) -> ObservedWatch:
+         """The watch associated with this emitter."""
+         return self._watch
+ 
+-    def queue_event(self, event: FileSystemEvent) -> None:
++    def queue_event(self, event: FileSystemEvent, *, origin_pid: int | None = None) -> None:
+         """Queues a single event.
+ 
+         :param event:
+@@ -157,7 +157,7 @@ def queue_event(self, event: FileSystemEvent) -> None:
+             or a subclass.
+         """
+         if self._event_filter is None or any(isinstance(event, cls) for cls in self._event_filter):
+-            self._event_queue.put((event, self.watch))
++            self._event_queue.put((event, self.watch, origin_pid) if origin_pid is not None else (event, self.watch))
+ 
+     def queue_events(self, timeout: float) -> None:
+         """Override this method to populate the event queue with events
+@@ -276,13 +276,14 @@ def emitters(self) -> set[EventEmitter]:
+         return self._emitters
+ 
+     def start(self) -> None:
+-        for emitter in self._emitters.copy():
+-            try:
+-                emitter.start()
+-            except Exception:
+-                self._remove_emitter(emitter)
+-                raise
+-        super().start()
++        with self._lock:
++            for emitter in self._emitters.copy():
++                try:
++                    emitter.start()
++                except Exception:
++                    self._remove_emitter(emitter)
++                    raise
++            super().start()
+ 
+     def __enter__(self) -> Self:
+         """Context manager entry. Starts the observer if not already running."""
+@@ -303,7 +304,7 @@ def __exit__(
+ 
+     def schedule(
+         self,
+-        event_handler: FileSystemEventHandler,
++        event_handler: FileSystemEventHandler | None,
+         path: str | Path,
+         *,
+         recursive: bool = False,
+@@ -338,7 +339,8 @@ def schedule(
+         """
+         with self._lock:
+             watch = ObservedWatch(path, recursive=recursive, event_filter=event_filter, follow_symlink=follow_symlink)
+-            self._add_handler_for_watch(event_handler, watch)
++            if event_handler is not None:
++                self._add_handler_for_watch(event_handler, watch)
+ 
+             # If we don't have an emitter for this watch already, create it.
+             if watch not in self._emitter_for_watch:
+@@ -396,7 +398,7 @@ def unschedule(self, watch: ObservedWatch) -> None:
+         """
+         with self._lock:
+             emitter = self._emitter_for_watch[watch]
+-            del self._handlers[watch]
++            self._handlers.pop(watch, None)
+             self._remove_emitter(emitter)
+             self._watches.remove(watch)
+ 
+@@ -416,7 +418,8 @@ def dispatch_events(self, event_queue: EventQueue) -> None:
+             event_queue.task_done()
+             return
+ 
+-        event, watch = entry
++        event, watch, *origin = entry
++        event.origin_pid = origin[0] if origin else None
+ 
+         with self._lock:
+             # To allow unschedule/stop and safe removal of event handlers
+@@ -424,5 +427,8 @@ def dispatch_events(self, event_queue: EventQueue) -> None:
+             # registered after every dispatch.
+             for handler in self._handlers[watch].copy():
+                 if handler in self._handlers[watch]:
+-                    handler.dispatch(event)
++                    if hasattr(handler, "dispatch"):
++                        handler.dispatch(event)
++                    else:
++                        handler(event)
+         event_queue.task_done()
+diff --git a/src/watchdog/observers/polling.py b/src/watchdog/observers/polling.py
+index 5f6ddb1..9192ecc 100644
+--- a/src/watchdog/observers/polling.py
++++ b/src/watchdog/observers/polling.py
+@@ -55,10 +55,12 @@ def __init__(
+         *,
+         timeout: float = DEFAULT_EMITTER_TIMEOUT,
+         event_filter: list[type[FileSystemEvent]] | None = None,
+-        stat: Callable[[str], os.stat_result] = os.stat,
++        stat: Callable[[str], os.stat_result] = os.lstat,
+         listdir: Callable[[str | None], Iterator[os.DirEntry]] = os.scandir,
++        emit_on_start: bool = False,
+     ) -> None:
+         super().__init__(event_queue, watch, timeout=timeout, event_filter=event_filter)
++        self._emit_on_start = emit_on_start
+         self._snapshot: DirectorySnapshot = EmptyDirectorySnapshot()
+         self._lock = threading.Lock()
+         self._take_snapshot: Callable[[], DirectorySnapshot] = lambda: DirectorySnapshot(
+@@ -70,6 +72,37 @@ def __init__(
+ 
+     def on_thread_start(self) -> None:
+         self._snapshot = self._take_snapshot()
++        if self._emit_on_start:
++            self._queue_snapshot_events(DirectorySnapshotDiff(EmptyDirectorySnapshot(), self._snapshot))
++
++    def _queue_snapshot_events(self, events: DirectorySnapshotDiff) -> None:
++        # Files.
++        if self._event_filter is not None:
++            from watchdog.events import FileClosedEvent
++
++            emit_flush_events = FileClosedEvent in self._event_filter
++        else:
++            emit_flush_events = False
++        for src_path in events.files_deleted:
++            self.queue_event(FileDeletedEvent(src_path))
++        for src_path in events.files_modified:
++            self.queue_event(FileModifiedEvent(src_path))
++            if emit_flush_events:
++                self.queue_event(FileClosedEvent(src_path))
++        for src_path in events.files_created:
++            self.queue_event(FileCreatedEvent(src_path))
++        for src_path, dest_path in events.files_moved:
++            self.queue_event(FileMovedEvent(src_path, dest_path))
++
++        # Directories.
++        for src_path in events.dirs_deleted:
++            self.queue_event(DirDeletedEvent(src_path))
++        for src_path in events.dirs_modified:
++            self.queue_event(DirModifiedEvent(src_path))
++        for src_path in events.dirs_created:
++            self.queue_event(DirCreatedEvent(src_path))
++        for src_path, dest_path in events.dirs_moved:
++            self.queue_event(DirMovedEvent(src_path, dest_path))
+ 
+     def queue_events(self, timeout: float) -> None:
+         # We don't want to hit the disk continuously.
+@@ -85,33 +118,16 @@ def queue_events(self, timeout: float) -> None:
+             # Update snapshot.
+             try:
+                 new_snapshot = self._take_snapshot()
+-            except OSError:
++            except FileNotFoundError:
+                 self.queue_event(DirDeletedEvent(self.watch.path))
+                 self.stop()
+                 return
++            except OSError:
++                return
+ 
+             events = DirectorySnapshotDiff(self._snapshot, new_snapshot)
+             self._snapshot = new_snapshot
+-
+-            # Files.
+-            for src_path in events.files_deleted:
+-                self.queue_event(FileDeletedEvent(src_path))
+-            for src_path in events.files_modified:
+-                self.queue_event(FileModifiedEvent(src_path))
+-            for src_path in events.files_created:
+-                self.queue_event(FileCreatedEvent(src_path))
+-            for src_path, dest_path in events.files_moved:
+-                self.queue_event(FileMovedEvent(src_path, dest_path))
+-
+-            # Directories.
+-            for src_path in events.dirs_deleted:
+-                self.queue_event(DirDeletedEvent(src_path))
+-            for src_path in events.dirs_modified:
+-                self.queue_event(DirModifiedEvent(src_path))
+-            for src_path in events.dirs_created:
+-                self.queue_event(DirCreatedEvent(src_path))
+-            for src_path, dest_path in events.dirs_moved:
+-                self.queue_event(DirMovedEvent(src_path, dest_path))
++            self._queue_snapshot_events(events)
+ 
+ 
+ class PollingObserver(BaseObserver):
+diff --git a/src/watchdog/utils/event_debouncer.py b/src/watchdog/utils/event_debouncer.py
+index d956973..a6c5eeb 100644
+--- a/src/watchdog/utils/event_debouncer.py
++++ b/src/watchdog/utils/event_debouncer.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ import logging
++import time
+ import threading
+ from typing import TYPE_CHECKING
+ 
+@@ -54,13 +55,18 @@ def run(self) -> None:
+ 
+                 if self.debounce_interval_seconds:
+                     # Wait for additional events (or shutdown) until the debounce interval passes.
++                    debounce_deadline = time.monotonic() + self.debounce_interval_seconds
+                     while self.should_keep_running():
+-                        if not self._cond.wait(timeout=self.debounce_interval_seconds):
++                        timeout = debounce_deadline - time.monotonic()
++                        if timeout <= 0 or not self._cond.wait(timeout=timeout):
+                             break
+ 
+-                if not self.should_keep_running():
++                if not self.should_keep_running() and not self._events:
+                     break
+ 
+                 events = self._events
+                 self._events = []
+                 self.events_callback(events)
++
++                if not self.should_keep_running():
++                    break

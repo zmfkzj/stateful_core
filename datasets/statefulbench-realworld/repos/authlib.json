@@ -1,0 +1,173 @@
+{
+  "repository": "authlib/authlib",
+  "issue_snapshot": "issues/authlib.json",
+  "tasks": [
+    {
+      "key": "client-session-780-refresh-grant",
+      "kind": "bug",
+      "sources": ["https://github.com/authlib/authlib/issues/780"],
+      "source_hash": "58a0e9441c5d8fa5c3ba0091b759d1a55a3b311421e992f9c49bc5f8316711c0",
+      "prompt": "Implement the synchronous remote-app extension of open issue #780 in authlib.integrations.base_client.sync_app.OAuth2Base._get_oauth_client. When configuring a token-endpoint-only OAuth client without grant_type and without access_token_params, classify it as client_credentials before constructing the session so an expired client-credentials token can refresh on a resource request. Do not override explicit grant_type, authorization-code configuration, or parameterized grants; do not send a resource bearer token to the token endpoint.",
+      "acceptance": [
+        "A token-endpoint-only remote app with no explicit grant_type classifies the grant as client_credentials.",
+        "An expired client-credentials token refreshes during a resource request without directing that request to the token endpoint.",
+        "The factory session is deterministically closed after the request scope."
+      ],
+      "overlap_anchors": [{"path": "authlib/integrations/base_client/sync_app.py", "symbol": "authlib.integrations.base_client.sync_app.OAuth2Base._get_oauth_client"}],
+      "evaluator": "evaluators/authlib/client-session-780-refresh-grant.py",
+      "reference_patch": "references/authlib/client-session-780-refresh-grant.patch"
+    },
+    {
+      "key": "client-session-822-reusable-client",
+      "kind": "feature",
+      "sources": ["https://github.com/authlib/authlib/issues/822"],
+      "source_hash": "120f62c304d67f9309a17a6a3651c228a8220e6aad32f78d8c0a79afc41250d7",
+      "prompt": "Implement the synchronous reusable-session extension of open issue #822 in authlib.integrations.base_client.sync_app.OAuth2Base._get_oauth_client. Add OAuth2Mixin.client(token=None, request=None) as a context manager that yields one authenticated OAuth client for multiple resource calls. Obtain a token through the existing request-token callback when none is supplied, reject a missing token before yielding, bind it through _get_oauth_client, and always close the client on exit. Keep callbacks, token updates, request authentication, and one-shot requests intact; do not add an async API.",
+      "acceptance": [
+        "with app.client(token=token) yields one OAuth session for multiple resource calls.",
+        "A missing supplied or request-backed token raises MissingTokenError before a session is created.",
+        "The client closes on context exit and resource calls do not invoke the token-update callback."
+      ],
+      "overlap_anchors": [{"path": "authlib/integrations/base_client/sync_app.py", "symbol": "authlib.integrations.base_client.sync_app.OAuth2Base._get_oauth_client"}],
+      "evaluator": "evaluators/authlib/client-session-822-reusable-client.py",
+      "reference_patch": "references/authlib/client-session-822-reusable-client.patch"
+    },
+    {
+      "key": "refresh-policy-783-access-token-params",
+      "kind": "bug",
+      "sources": ["https://github.com/authlib/authlib/issues/783"],
+      "source_hash": "9c278fdbd9bdd7caad6734604b652acab09a6ce54633904c452e61e2741d672c",
+      "prompt": "Fix Authlib issue #783 in authlib.oauth2.client.OAuth2Client.ensure_active_token. When an expired client-credentials token is automatically renewed, forward registered metadata access_token_params to fetch_token without mutating them. Keep the automatic grant_type fixed to client_credentials even if metadata contains another grant_type, and preserve OAuth errors and update_token's prior-access-token argument.",
+      "acceptance": [
+        "Expired client-credentials renewal sends registered access_token_params such as audience.",
+        "Metadata grant_type cannot override client_credentials and the metadata mapping is not mutated.",
+        "OAuth token errors propagate and a successful renewal retains the update_token callback contract."
+      ],
+      "overlap_anchors": [{"path": "authlib/oauth2/client.py", "symbol": "authlib.oauth2.client.OAuth2Client.ensure_active_token"}],
+      "evaluator": "evaluators/authlib/refresh-policy-783-access-token-params.py",
+      "reference_patch": "references/authlib/refresh-policy-783-access-token-params.patch"
+    },
+    {
+      "key": "refresh-policy-632-disable-auto-refresh",
+      "kind": "feature",
+      "sources": ["https://github.com/authlib/authlib/issues/632"],
+      "source_hash": "7610c1dd1c642d7a6415d32130a988c1fd652097e2c2b0a1bb94d39038b81533",
+      "prompt": "Implement Authlib issue #632 in authlib.oauth2.client.OAuth2Client.ensure_active_token. Honor token_auto_update=False metadata as an opt-out for automatic handling of an expired token: return False before refresh-token or client-credentials endpoint calls. Keep default automatic behavior and errors unchanged; explicit refresh_token remains available.",
+      "acceptance": [
+        "token_auto_update=False returns False for an expired token without a token-endpoint request.",
+        "The opt-out wins when refresh_token and token_endpoint are both present.",
+        "Default client-credentials renewal and explicit refresh_token behavior remain available."
+      ],
+      "overlap_anchors": [{"path": "authlib/oauth2/client.py", "symbol": "authlib.oauth2.client.OAuth2Client.ensure_active_token"}],
+      "evaluator": "evaluators/authlib/refresh-policy-632-disable-auto-refresh.py",
+      "reference_patch": "references/authlib/refresh-policy-632-disable-auto-refresh.patch"
+    },
+    {
+      "key": "fetch-token-660-explicit-client-credentials",
+      "kind": "bug",
+      "sources": ["https://github.com/authlib/authlib/issues/660"],
+      "source_hash": "0de5f771a207d8b41450e86427dc6f9e566f9d9ef0737b70227eb2005dc02c93",
+      "prompt": "Use open issue #660 as the strict-overlap substitution for #699, whose configured-client authentication behavior is already present at the pinned base. Fix authlib.oauth2.client.OAuth2Client.fetch_token so an explicit client_credentials fetch retains that grant type in metadata for later renewal. Keep configured client credentials as default authentication and preserve a caller-supplied auth override unchanged.",
+      "acceptance": [
+        "An explicit client_credentials fetch records the grant policy and a later expired-token renewal uses the configured endpoint.",
+        "Automatic renewal uses configured client credentials with client_secret_basic authentication.",
+        "A caller-supplied client_secret_post auth object remains authoritative."
+      ],
+      "overlap_anchors": [{"path": "authlib/oauth2/client.py", "symbol": "authlib.oauth2.client.OAuth2Client.fetch_token"}],
+      "evaluator": "evaluators/authlib/fetch-token-660-explicit-client-credentials.py",
+      "reference_patch": "references/authlib/fetch-token-660-explicit-client-credentials.patch"
+    },
+    {
+      "key": "fetch-token-678-callback-url",
+      "kind": "bug",
+      "sources": ["https://github.com/authlib/authlib/issues/678"],
+      "source_hash": "e4d6ae5ba9816188b02ac0acd295b1fc4f82ac9cfe0ceddb5fb2a1c6f6b61a31",
+      "prompt": "Use open issue #678 as the strict-overlap substitution for #819, whose async convenience methods cannot share OAuth2Client.fetch_token. Fix authlib.oauth2.client.OAuth2Client.fetch_token to accept a distinct callback URL containing exactly one authorization-code query parameter when a token_endpoint is configured. Parse it with standard URL handling, preserve state validation, reject fragment and duplicate codes, recognize OAuth error callbacks before a token request can send client credentials, and leave the configured endpoint and its own query intact rather than using the issue's unsafe string splitting.",
+      "acceptance": [
+        "An encoded query code in a callback URL exchanges at the configured token endpoint.",
+        "A callback state mismatch raises MismatchingStateException before a token request.",
+        "An OAuth error callback raises OAuth2Error before a token request can send configured client credentials.",
+        "Fragment codes and duplicate query code parameters are rejected before a token request while the configured endpoint remains unchanged."
+      ],
+      "overlap_anchors": [{"path": "authlib/oauth2/client.py", "symbol": "authlib.oauth2.client.OAuth2Client.fetch_token"}],
+      "evaluator": "evaluators/authlib/fetch-token-678-callback-url.py",
+      "reference_patch": "references/authlib/fetch-token-678-callback-url.patch"
+    },
+    {
+      "key": "async-client-650-client-credentials",
+      "kind": "bug",
+      "sources": ["https://github.com/authlib/authlib/issues/650"],
+      "source_hash": "814c7f9776268e103336a404e3c58ef8dcf3708a6e7856934f938fcbc8728fed",
+      "prompt": "Implement Authlib issue #650 in authlib.integrations.httpx_client.oauth2_client.AsyncOAuth2Client._fetch_token. Preserve the explicit endpoint argument before GET query rewriting. After a successful explicit client-credentials fetch, retain that original endpoint only when metadata has no token_endpoint so an expired token can be fetched automatically. Do not overwrite a configured endpoint or record endpoint metadata for an OAuth-error response.",
+      "acceptance": [
+        "A successful GET fetch_token(url) records the original URL, without generated token parameters, only when no token_endpoint is configured.",
+        "An expired client_credentials token is re-fetched with POST at that clean endpoint before the protected request.",
+        "An explicit fetch from a different URL leaves the configured token_endpoint unchanged.",
+        "An OAuth-error response records no token_endpoint metadata.",
+        "The awaited update callback receives the new token and old access token."
+      ],
+      "overlap_anchors": [{"path": "authlib/integrations/httpx_client/oauth2_client.py", "symbol": "authlib.integrations.httpx_client.oauth2_client.AsyncOAuth2Client._fetch_token"}],
+      "evaluator": "evaluators/authlib/async-client-650-client-credentials.py",
+      "reference_patch": "references/authlib/async-client-650-client-credentials.patch"
+    },
+    {
+      "key": "async-client-619-async-hooks",
+      "kind": "feature",
+      "sources": ["https://github.com/authlib/authlib/issues/619"],
+      "source_hash": "c93cd2a5c356f4c5c73cb582de01d086763d57dc04b46cb669c1880b65f6a6ad",
+      "prompt": "Implement the strict-overlap #619 extension in authlib.integrations.httpx_client.oauth2_client.AsyncOAuth2Client._fetch_token. The broad issue asks for async compliance hooks, but synchronous refresh_token_request cannot share this coroutine; scope the feature to access_token_response hooks on the automatic #650 client-credentials path. Await awaitable hook results before parsing, preserve synchronous results, and let hook exceptions propagate unchanged.",
+      "acceptance": [
+        "An async access_token_response hook is awaited before its response is parsed.",
+        "A synchronous hook result still replaces the response exactly.",
+        "Hook exceptions propagate without token parsing and the async client remains context-manageable."
+      ],
+      "overlap_anchors": [{"path": "authlib/integrations/httpx_client/oauth2_client.py", "symbol": "authlib.integrations.httpx_client.oauth2_client.AsyncOAuth2Client._fetch_token"}],
+      "evaluator": "evaluators/authlib/async-client-619-async-hooks.py",
+      "reference_patch": "references/authlib/async-client-619-async-hooks.patch"
+    },
+    {
+      "key": "validator-741-max-age",
+      "kind": "feature",
+      "sources": ["https://github.com/authlib/authlib/issues/741"],
+      "source_hash": "175f3df300f6ac00a02604b2e70515e323b0272678b9e90fc42ac4fab604beec",
+      "prompt": "Use open issue #741 as the exact-anchor replacement for planned #609, whose JWT validator cannot overlap this hook. Implement authlib.oidc.core.grants.code.OpenIDCode.validate_openid_authorization_request to normalize explicit OIDC max_age to a non-negative integer before authorization and consent hooks. Preserve zero and nonce validation; reject empty, signed, fractional, non-ASCII, and non-numeric values with InvalidRequestError.",
+      "acceptance": [
+        "A decimal max_age is normalized once to request.max_age as an integer before authorization and consent hooks.",
+        "max_age=0 is valid.",
+        "Malformed max_age input raises InvalidRequestError and nonce validation remains intact."
+      ],
+      "overlap_anchors": [{"path": "authlib/oidc/core/grants/code.py", "symbol": "authlib.oidc.core.grants.code.OpenIDCode.validate_openid_authorization_request"}],
+      "evaluator": "evaluators/authlib/validator-741-max-age.py",
+      "reference_patch": "references/authlib/validator-741-max-age.patch"
+    },
+    {
+      "key": "validator-744-acr-values",
+      "kind": "feature",
+      "sources": ["https://github.com/authlib/authlib/issues/744"],
+      "source_hash": "df2385f9be68f3a9c66f589f7291927da3b8ad3b59df879722bd12418384039a",
+      "prompt": "Use open issue #744 as the exact-anchor replacement for planned #756, whose ResourceProtector extraction cannot overlap this hook. Implement authlib.oidc.core.grants.code.OpenIDCode.validate_openid_authorization_request to normalize explicit OIDC acr_values into an ordered tuple before authorization and consent hooks. Split whitespace without empty values, preserve preference order, reject explicit empty or non-string input with InvalidRequestError, and keep nonce validation intact.",
+      "acceptance": [
+        "Supplied acr_values becomes an ordered tuple on the request before authorization and consent hooks.",
+        "Whitespace separates values without empty entries or reordered preferences.",
+        "Explicit empty or non-string acr_values raises InvalidRequestError and nonce validation remains intact."
+      ],
+      "overlap_anchors": [{"path": "authlib/oidc/core/grants/code.py", "symbol": "authlib.oidc.core.grants.code.OpenIDCode.validate_openid_authorization_request"}],
+      "evaluator": "evaluators/authlib/validator-744-acr-values.py",
+      "reference_patch": "references/authlib/validator-744-acr-values.patch"
+    }
+  ],
+  "final_prompt": "You are the integration reviewer for the Authlib corpus. Run every listed evaluator against the shared checkout after all ten task patches are applied. Fix every evaluator failure while preserving all task contracts, resolve same-symbol edits without discarding either behavior, and finish only when every evaluator passes.",
+  "evaluators": [
+    "evaluators/authlib/client-session-780-refresh-grant.py",
+    "evaluators/authlib/client-session-822-reusable-client.py",
+    "evaluators/authlib/refresh-policy-783-access-token-params.py",
+    "evaluators/authlib/refresh-policy-632-disable-auto-refresh.py",
+    "evaluators/authlib/fetch-token-660-explicit-client-credentials.py",
+    "evaluators/authlib/fetch-token-678-callback-url.py",
+    "evaluators/authlib/async-client-650-client-credentials.py",
+    "evaluators/authlib/async-client-619-async-hooks.py",
+    "evaluators/authlib/validator-741-max-age.py",
+    "evaluators/authlib/validator-744-acr-values.py"
+  ],
+  "integrated_reference_patch": "references/authlib/integrated.patch"
+}

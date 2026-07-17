@@ -1,0 +1,22 @@
+diff --git a/jsonschema/_format.py b/jsonschema/_format.py
+--- a/jsonschema/_format.py
++++ b/jsonschema/_format.py
+@@ -132,9 +132,17 @@ class FormatChecker:
+             return
+ 
+         func, raises = self.checkers[format]
++        checked_instance = instance
++        if (
++            format == "date-time"
++            and func is is_datetime
++            and isinstance(instance, str)
++            and instance.startswith("0000-")
++        ):
++            checked_instance = "2000" + instance[4:]
+         result, cause = None, None
+         try:
+-            result = func(instance)
++            result = func(checked_instance)
+         except raises as e:
+             cause = e
+         if not result:

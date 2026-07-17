@@ -9,8 +9,8 @@ use std::{
 };
 
 use crate::{
-    GlobalPaths, ServerRuntime, get_json, runtime_has_required_identity,
-    runtime_identity_matches_pid, write_global_runtime_file,
+    GlobalPaths, ServerRuntime, runtime_has_required_identity, runtime_identity_matches_pid,
+    write_global_runtime_file,
 };
 
 const START_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
@@ -34,7 +34,7 @@ impl Default for ServerStartOptions {
             port: 43873,
             token: None,
             workspace_id: "local".to_string(),
-            coordination_mode: "enforcement".to_string(),
+            coordination_mode: "awareness".to_string(),
         }
     }
 }
@@ -68,7 +68,7 @@ where
 
 pub fn ensure_server(paths: &GlobalPaths) -> anyhow::Result<ServerRuntime> {
     if let Some(runtime) = read_runtime_file(paths)? {
-        if runtime_is_healthy(&runtime) {
+        if runtime_is_reusable(&runtime) {
             return Ok(runtime);
         }
     }
@@ -76,7 +76,7 @@ pub fn ensure_server(paths: &GlobalPaths) -> anyhow::Result<ServerRuntime> {
     {
         let _lock = acquire_start_lock(paths)?;
         if let Some(runtime) = read_runtime_file(paths)? {
-            if runtime_is_healthy(&runtime) {
+            if runtime_is_reusable(&runtime) {
                 return Ok(runtime);
             }
             retire_incompatible_runtime(paths, &runtime)?;
@@ -101,7 +101,7 @@ fn ensure_current_server_with_options(
     options: &ServerStartOptions,
 ) -> anyhow::Result<ServerRuntime> {
     if let Some(runtime) = read_runtime_file(paths)? {
-        if runtime_is_healthy(&runtime) {
+        if runtime_is_reusable(&runtime) {
             ensure_runtime_matches_options(&runtime, options)?;
             return Ok(runtime);
         }
@@ -110,7 +110,7 @@ fn ensure_current_server_with_options(
     {
         let _lock = acquire_start_lock(paths)?;
         if let Some(runtime) = read_runtime_file(paths)? {
-            if runtime_is_healthy(&runtime) {
+            if runtime_is_reusable(&runtime) {
                 ensure_runtime_matches_options(&runtime, options)?;
                 return Ok(runtime);
             }
@@ -158,32 +158,18 @@ where
 }
 
 pub fn runtime_is_healthy(runtime: &ServerRuntime) -> bool {
-    runtime_is_basic_healthy(runtime) && runtime_has_required_identity(runtime)
+    runtime_is_basic_healthy(runtime)
+}
+
+fn runtime_is_reusable(runtime: &ServerRuntime) -> bool {
+    runtime_is_basic_healthy(runtime)
+        && (runtime.pid == 0
+            || (runtime_identity_matches_pid(runtime).unwrap_or(false)
+                && pid_matches_current_exe(runtime.pid).unwrap_or(false)))
 }
 
 fn runtime_is_basic_healthy(runtime: &ServerRuntime) -> bool {
-    let Ok(health) = get_json(runtime, "/health") else {
-        return false;
-    };
-    if health.status_code != 200 {
-        return false;
-    }
-
-    let Ok(current) = get_json(runtime, "/v1/current") else {
-        return false;
-    };
-    if current.status_code != 200 {
-        return false;
-    }
-
-    serde_json::from_str::<serde_json::Value>(&current.body)
-        .ok()
-        .and_then(|body| {
-            let status = body.get("status")?.as_str()?;
-            let current = body.get("current")?;
-            Some(status == "ok" && current.is_object())
-        })
-        .unwrap_or(false)
+    runtime_has_required_identity(runtime)
 }
 
 pub fn stop_server(paths: &GlobalPaths) -> anyhow::Result<()> {
@@ -206,10 +192,10 @@ pub fn stop_server(paths: &GlobalPaths) -> anyhow::Result<()> {
 pub fn restart_server(paths: &GlobalPaths) -> anyhow::Result<ServerRuntime> {
     let runtime = read_runtime_file(paths)?
         .ok_or_else(|| anyhow::anyhow!("no stateful server runtime file found to restart"))?;
+    let options = server_start_options_from_runtime(&runtime)?;
     if runtime.pid == 0 {
         return Err(remote_runtime_cannot_be_killed(&runtime));
     }
-    let options = server_start_options_from_runtime(&runtime)?;
     stop_server(paths)?;
     ensure_server_with_options(paths, options)
 }
@@ -230,7 +216,7 @@ pub fn server_start_options_from_runtime(
         port,
         token: Some(runtime.token.clone()),
         workspace_id: runtime.workspace_id.clone(),
-        coordination_mode: "enforcement".to_string(),
+        coordination_mode: runtime.coordination_mode.clone(),
     })
 }
 
@@ -281,14 +267,20 @@ fn retire_incompatible_runtime(paths: &GlobalPaths, runtime: &ServerRuntime) -> 
         return terminate_runtime(paths, runtime);
     }
 
-    anyhow::bail!(
-        "existing stateful server pid {} is reachable but does not support required runtime capabilities; stop it with the matching stateful binary and retry",
-        runtime.pid
-    )
+    let _ = fs::remove_file(&paths.server_json);
+    Ok(())
 }
 
 fn terminate_runtime(paths: &GlobalPaths, runtime: &ServerRuntime) -> anyhow::Result<()> {
-    let status = Command::new("kill").arg(runtime.pid.to_string()).status()?;
+    if !runtime_identity_matches_pid(runtime)? || !pid_matches_current_exe(runtime.pid)? {
+        anyhow::bail!(
+            "refusing to stop unverified stateful server pid {}",
+            runtime.pid
+        );
+    }
+    let status = Command::new("/bin/kill")
+        .arg(runtime.pid.to_string())
+        .status()?;
     if !status.success() {
         anyhow::bail!("failed to stop stateful server pid {}", runtime.pid);
     }
@@ -433,6 +425,7 @@ fn ensure_runtime_matches_options(
     if runtime.base_url == expected_base_url
         && token_matches
         && runtime.workspace_id == options.workspace_id
+        && runtime.coordination_mode == options.coordination_mode
     {
         return Ok(());
     }
@@ -510,26 +503,53 @@ fn remove_stale_lock(path: &Path) -> anyhow::Result<bool> {
 }
 
 fn pid_matches_current_exe(pid: u32) -> anyhow::Result<bool> {
-    let output = Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "command="])
-        .output()?;
-    if !output.status.success() {
-        return Ok(false);
-    }
-
-    let command = String::from_utf8(output.stdout)?;
-    let current_exe = std::env::current_exe()?;
-    let Some(current_exe_name) = current_exe.file_name().and_then(|name| name.to_str()) else {
+    let Some(executable) = live_executable_path(pid)? else {
         return Ok(false);
     };
+    let current_exe = std::env::current_exe()?;
+    Ok(executable_path_matches_current_exe(
+        &executable,
+        &current_exe,
+    ))
+}
 
-    Ok(command.contains(current_exe.to_string_lossy().as_ref())
-        || command.split_whitespace().next().is_some_and(|program| {
-            Path::new(program)
-                .file_name()
-                .and_then(|name| name.to_str())
-                == Some(current_exe_name)
-        }))
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn live_executable_path(pid: u32) -> anyhow::Result<Option<std::path::PathBuf>> {
+    match fs::read_link(format!("/proc/{pid}/exe")) {
+        Ok(path) => Ok(Some(path)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn live_executable_path(pid: u32) -> anyhow::Result<Option<std::path::PathBuf>> {
+    let output = Command::new("/bin/ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output()?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let path = std::path::PathBuf::from(String::from_utf8(output.stdout)?.trim());
+    Ok(path.is_absolute().then_some(path))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+fn live_executable_path(_pid: u32) -> anyhow::Result<Option<std::path::PathBuf>> {
+    Ok(None)
+}
+
+fn executable_path_matches_current_exe(executable: &Path, current_exe: &Path) -> bool {
+    if !executable.is_absolute() {
+        return false;
+    }
+    let Ok(executable) = executable.canonicalize() else {
+        return false;
+    };
+    let Ok(current_exe) = current_exe.canonicalize() else {
+        return false;
+    };
+    executable == current_exe
 }
 
 struct StartLock {
@@ -620,17 +640,10 @@ mod tests {
             .arg("5")
             .spawn()
             .expect("sleep child should spawn");
-        let fake = FakeHttpServer::start(vec![
-            fake_response(200, "ok"),
-            fake_response(200, r#"{"status":"ok","current":{}}"#),
-            fake_response(
-                200,
-                format!(
-                    r#"{{"status":"ok","pid":{},"protocol_version":"stateful.v1","capabilities":["authorize.write_directory"]}}"#,
-                    child.id()
-                ),
-            ),
-        ]);
+        let fake = FakeHttpServer::start(vec![fake_response(
+            200,
+            r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":42,"workspace_id":"w1","workspace_version":1,"capabilities":["presence"]}"#,
+        )]);
         let delayed_runtime = ServerRuntime::new(fake.base_url(), "token", "w1", child.id());
         let delayed_paths = paths.clone();
         thread::spawn(move || {
@@ -646,6 +659,90 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn mismatched_identity_runtime_is_retired_without_reuse_or_signal() {
+        let home = temp_home("stateful-retire-mismatched-runtime");
+        let paths = GlobalPaths::new(&home);
+        let identity = r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":42,"workspace_id":"w1","workspace_version":1,"capabilities":["presence"]}"#;
+        let fake = FakeHttpServer::start(vec![
+            fake_response(200, identity),
+            fake_response(200, identity),
+            fake_response(200, identity),
+            fake_response(200, identity),
+        ]);
+        let runtime = ServerRuntime::new(fake.base_url(), "token", "w1", std::process::id());
+        write_global_runtime_file(&paths, &runtime).expect("runtime should write");
+
+        assert!(
+            !runtime_is_reusable(&runtime),
+            "an endpoint with a different live identity pid must not be reusable"
+        );
+        retire_incompatible_runtime(&paths, &runtime)
+            .expect("unproved runtime should be retired without signaling its pid");
+        assert!(
+            !paths.server_json.exists(),
+            "retiring an unproved runtime must remove only the stale runtime file"
+        );
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn executable_proof_rejects_different_absolute_binary_with_same_basename() {
+        let root = temp_home("stateful-executable-proof");
+        let expected = root.join("expected").join("stateful");
+        let different = root.join("different").join("stateful");
+        fs::create_dir_all(expected.parent().expect("expected parent"))
+            .expect("parent should create");
+        fs::create_dir_all(different.parent().expect("different parent"))
+            .expect("parent should create");
+        fs::write(&expected, "expected").expect("expected executable marker should write");
+        fs::write(&different, "different").expect("different executable marker should write");
+
+        assert!(
+            !executable_path_matches_current_exe(&different, &expected),
+            "matching only the basename must never prove executable ownership"
+        );
+        assert!(
+            executable_path_matches_current_exe(&expected, &expected),
+            "the exact canonical executable path should prove ownership"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[test]
+    fn current_process_exact_executable_path_proves_ownership() {
+        assert!(
+            pid_matches_current_exe(std::process::id()).expect("current process should inspect"),
+            "the running test binary must prove only through its exact live executable path"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copied_same_basename_child_never_proves_executable_ownership() {
+        let root = temp_home("stateful-same-basename-child");
+        let name = std::env::current_exe()
+            .expect("current executable should resolve")
+            .file_name()
+            .expect("current executable should have a basename")
+            .to_owned();
+        let copied_sleep = root.join(name);
+        fs::copy("/bin/sleep", &copied_sleep).expect("sleep binary should copy");
+        let mut child = Command::new(&copied_sleep)
+            .arg("5")
+            .spawn()
+            .expect("copied sleep child should start");
+
+        assert!(
+            !pid_matches_current_exe(child.id()).expect("child executable should inspect"),
+            "a different absolute executable with the same basename must not prove ownership"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = fs::remove_dir_all(root);
     }
 
     fn temp_home(name: &str) -> std::path::PathBuf {

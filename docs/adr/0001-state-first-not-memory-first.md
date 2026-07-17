@@ -1,99 +1,83 @@
 # ADR 0001: Current-state first, not memory-first
 
-Status: Proposed
+Status: Accepted
 
 ## Context
 
-Agent memory systems are useful for recalling prior information, but they do not
-solve live coordination. A retrieved memory can describe what happened before.
-It cannot reliably show what another session, agent, or human is doing in the
-same codebase right now.
+Memory can recall prior work, but it cannot reliably establish what another
+agent or human is doing in the shared checkout now. Live coordination needs
+fresh presence, read-time evidence, and a final handoff rather than a
+best-effort reconstruction from transcripts or model memory.
 
-The practical v1 need is current-state coordination:
-
-- active session status
-- declared reservation
-- advisory resource claims
-- root agent, subagent, human, and system actor attribution
-- next planned action
-- freshness through heartbeat and TTL
-- reservation and conflict checks before important tool calls
-- final status for handoff
+The historical V1 proposal framed this need around long-lived reservations and
+broad write authorization. That proposal is historical only. The accepted V2
+runtime treats current state as a live, expiring operational view and retains a
+canonical indefinite event journal for history.
 
 ## Decision
 
-`stateful_core` will focus first on current-state coordination for coding
-agents.
+`stateful_core` is current-state first:
 
-The canonical unit is active, expiring coordination state. The first
-integration target is:
+- **Presence** communicates active goal, phase, plan, resources, and nearby
+  activity.
+- **Freshness** is based on a complete exact read observation and is checked at
+  the mutation boundary; it is not a claim hash or write-time provenance.
+- **Handoff** is an explicit finalized outcome with useful result, next action,
+  or blocker; cleanup activity is not a handoff.
+- **Journal history** is serialized V2 evidence, including expiration and
+  recovery, rather than an age-pruned substitute for live state.
+- **Memory** may inform investigation but never authorizes a current write or
+  makes stale activity fresh.
 
-```text
-Codex lifecycle hooks
-+ native Stateful coordination tools
-+ state server
-```
+The runtime accepts the `stateful.v2` envelope on `/v2/**`. Context is rendered
+as a versioned delivery and acknowledged explicitly, so delivery reflects
+versioned state rather than a once-per-session prompt marker. Current state is
+a briefing, not a task scheduler: an orchestrator or human assigns work and Git
+integrates it.
 
-Long-term memory can provide background context, but it does not own live
-coordination truth and cannot directly authorize or block actions.
+## Concrete Implementation Evidence
 
-V1 blocks supported write actions unless the session has active reservation with
-matching file or directory scope. Abstract task, test, port, or migration reservation
-can be recorded as context but does not authorize writes.
+The decision is implemented at head by these shipped surfaces:
 
-The default reservation TTL is 15 minutes. Heartbeats may extend active reservation up to
-a 60-minute maximum from declaration. Blocked or finalized work does not
-authorize writes.
-
-The original V1 hardening target denied Bash command text as an authorization
-source and explored a constrained read-only hook path. The current
-implementation supersedes that target: Codex raw Bash is denied with sandbox
-guidance, and OMP raw Bash is blocked unless it uses the trusted wrapper.
-Repo-external shell work must use `stateful sandbox run --fs external --purpose ...`.
-OMP native `edit`/`write` can auto-declare/claim the exact tool-visible file
-scope for the default simple-write path when no explicit reservation id is
-supplied and the only denial is missing reservation/scope. Other repo file edit
-authorization starts with native edit tools such as Codex `apply_patch` or Edit
-after exact reservation and a successful same-reservation file claim, where target paths can
-be checked before writing, or with `--fs write-targets` wrapper calls that
-declare explicit repo-relative targets after reservation and same-reservation
-claim. Raw Bash test commands are not allowlisted; use
-`stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>`
-so disposable artifacts stay under `/tmp/stateful/<session>/<purpose>/`.
-
-Overrides are never automatic. A blocked write can proceed only when the user
-explicitly instructs the current agent to allow a specific resource override.
-The user owns the judgment and responsibility for that exception.
-Overrides apply only to active claim conflicts and are scoped to the current
-agent, current turn, and specific resource.
-
-Subagents may write only within the parent session's active valid reservation scope,
-but their activity and claims are attributed to the subagent actor.
+- `crates/stateful-server/src/routes_v2.rs` routes session registration,
+  presence updates, exact-read start/completion, write completion/recovery,
+  finalization, context rendering/acknowledgement, `/v2/current`, and
+  `/v2/events`.
+- `crates/stateful-cli/src/hook.rs` posts V2 session, presence, exact-read, and
+  finalization lifecycle records and renders then acknowledges context.
+- `crates/stateful-core/src/freshness.rs` models stable, missing, expired,
+  changed, and unstable read observations. The V2 authorization path treats
+  non-stable or incomplete evidence as missing, while a changed previously
+  stable exact observation requires reread in either mode.
+- `crates/stateful-core/src/journal.rs` defines the serialized V2 event
+  families, including `Handoff`, `Context`, `HumanAcknowledgement`, and
+  `Recovery`.
+- `crates/stateful-cli/tests/v2_two_session.rs` exercises V2 presence,
+  exact-read, context, human-change, and finalization behavior between two
+  sessions.
 
 ## Consequences
 
 Positive:
 
-- Clear v1 product boundary.
-- Direct value for multi-agent and multi-session coding.
-- Freshness is explicit through TTL and heartbeat.
-- Reservation and conflict checks can run before supported Codex tool calls.
-- Forking Codex can be delayed until hook limitations are proven.
+- Operators can see nearby work and handoffs without mistaking old memory for
+  live authority.
+- Exact rereads repair stale evidence at the resource boundary.
+- The event journal supplies durable audit and recovery evidence without making
+  expired presence block new work.
 
 Negative:
 
-- The model is narrower than a generic state control plane.
-- Codex hooks are a guardrail, not a complete enforcement boundary.
-- Human activity requires additional observation beyond Codex hooks.
-- Advisory claims reduce collisions but do not guarantee exclusive access.
-- Requiring reservation before writes adds workflow friction.
-- Override handling requires clear audit records because the user is taking
-  explicit responsibility for the exception.
+- Presence is only useful when integrations publish and agents use it.
+- Current state does not allocate tasks, merge branches, or replace source
+  control review.
+- A context briefing can be stale by the next write, so the write boundary still
+  checks freshness and the narrow safety conditions.
 
 ## Boundary Rule
 
 ```text
 Memory recalls the past.
 Current state coordinates the present.
-Only fresh coordination state should influence live conflict decisions.
+Only fresh exact evidence may support a live write decision.
 ```

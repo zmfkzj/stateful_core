@@ -1,0 +1,44 @@
+use crate::commands;
+use axum::{
+    Router,
+    routing::{get, post},
+};
+
+pub(crate) fn router() -> Router<crate::ServerConfig> {
+    Router::new()
+        .route("/v2/session/register", post(commands::session_register))
+        .route("/v2/presence/update", post(commands::presence_update))
+        .route("/v2/read/start", post(commands::read_start))
+        .route("/v2/read/complete", post(commands::read_complete))
+        .route("/v2/write/complete", post(commands::write_complete))
+        .route("/v2/write/recover", post(commands::write_recover))
+        .route("/v2/activity/finalize", post(commands::activity_finalize))
+        .route(
+            "/v2/reservation/declare",
+            post(commands::reservation_declare),
+        )
+        .route(
+            "/v2/reservation/request",
+            post(commands::reservation_request),
+        )
+        .route("/v2/reservation/claim", post(commands::reservation_claim))
+        .route("/v2/reservation/cancel", post(commands::reservation_cancel))
+        .route("/v2/claim/acquire", post(commands::claim_acquire))
+        .route("/v2/claim/release", post(commands::claim_release))
+        .route("/v2/authorize", post(commands::authorize))
+        .route("/v2/human/observe", post(commands::human_observe))
+        .route("/v2/human/save-check", post(commands::human_save_check))
+        .route("/v2/reconcile/ack", post(commands::reconcile_ack))
+        .route("/v2/context/render", post(commands::context_render))
+        .route("/v2/context/ack", post(commands::context_ack))
+        .route("/v2/notifications/poll", post(commands::notifications_poll))
+        .route("/v2/resume/next", post(commands::resume_next))
+        .route("/v2/outbox/sync", post(commands::outbox_sync))
+        .route("/v2/current", get(commands::current))
+        .route("/v2/events", get(commands::events))
+        .route(
+            "/v2/notifications/stream",
+            get(commands::notifications_stream),
+        )
+        .route("/v2/runtime/identity", get(commands::runtime_identity))
+}

@@ -1,324 +1,352 @@
-use super::*;
+use crate::{
+    CommandOutcome, CommandPlan, CurrentAggregate, ProjectionReader, Store, StoreError,
+    StoreResult,
+    reservations::{
+        expired, normalized_scope, record_from_current, scopes_conflict, timestamp, typed_records,
+    },
+};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use stateful_core::{
+    ActorType, AgentIdentity, EventData, EventPayload, NewEvent, RequestEnvelope, WriteFenceEvent,
+};
+use std::collections::HashSet;
+use time::{Duration, OffsetDateTime};
+use uuid::Uuid;
+
+const WRITE_FENCE_TTL: Duration = Duration::minutes(5);
+const FENCE_ATTRIBUTION_GRACE: Duration = Duration::seconds(2);
+
+fn unknown_actor_id() -> String {
+    "unknown".into()
+}
+
+fn unknown_actor_type() -> ActorType {
+    ActorType::Unknown
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WriteFenceAcquire {
+    pub paths: Vec<String>,
+    pub action: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WriteFenceRelease {
+    pub fence_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WriteFenceRecord {
+    pub fence_id: String,
+    pub agent_id: String,
+    #[serde(default = "unknown_actor_id")]
+    pub actor_id: String,
+    #[serde(default = "unknown_actor_type")]
+    pub actor_type: ActorType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_actor_id: Option<String>,
+    #[serde(default)]
+    pub initiating_actor_known: bool,
+    pub workspace_id: String,
+    pub relative_path: String,
+    pub action: String,
+    pub status: String,
+    pub acquired_at: String,
+    pub expires_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released_at: Option<String>,
+    #[serde(default)]
+    pub origin_event_seq: u64,
+}
+
+impl WriteFenceRecord {
+    pub(crate) fn is_owned_by(&self, agent: &AgentIdentity) -> bool {
+        self.initiating_actor_known
+            && self.agent_id == agent.agent_id
+            && self.actor_id == agent.actor_id
+            && self.actor_type == agent.actor_type
+            && self.owner_id == agent.owner_id
+            && self.parent_agent_id == agent.parent_agent_id
+            && self.parent_actor_id == agent.parent_actor_id
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WriteFenceAcquireResult {
+    pub fences: Vec<WriteFenceRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<WriteFenceConflict>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WriteFenceConflict {
+    pub path: String,
+    pub owner_agent_id: String,
+}
 
 impl Store {
     pub fn acquire_write_fences(
         &self,
-        agent_id: impl AsRef<str>,
-        workspace_id: impl AsRef<str>,
-        paths: &[String],
-        action: impl AsRef<str>,
-    ) -> StoreResult<()> {
-        let agent_id = agent_id.as_ref().to_string();
-        let workspace_id = workspace_id.as_ref().to_string();
-        let paths = paths.to_vec();
-        let action = action.as_ref().to_string();
-        self.store_transaction(move |store| {
-            store.acquire_write_fences_inner(&agent_id, &workspace_id, &paths, &action)
-        })
-    }
-
-    fn acquire_write_fences_inner(
-        &self,
-        agent_id: &str,
-        workspace_id: &str,
-        paths: &[String],
-        action: &str,
-    ) -> StoreResult<()> {
-        self.expire_stale_write_fences_inner()?;
-        let paths: Vec<String> = paths
-            .iter()
-            .map(normalize_relative_path)
-            .filter(|path| !path.is_empty())
-            .collect();
-        let now = now_timestamp();
-        let expires_at = timestamp_after(&now, WRITE_FENCE_TTL_SECONDS)?;
-
-        for path in &paths {
-            if let Some(owner_agent_id) =
-                self.active_write_fence_owner_except(workspace_id, path, agent_id)?
-            {
-                return Err(StoreError::WriteFenceConflict {
-                    path: path.clone(),
-                    owner_agent_id,
+        request: &RequestEnvelope<WriteFenceAcquire>,
+    ) -> StoreResult<CommandOutcome<WriteFenceAcquireResult>> {
+        let now = self.clock.now();
+        let payload = request.payload.clone();
+        self.execute_command(request, "write_fence.acquire", |reader| {
+            if payload.paths.is_empty() {
+                return Err(StoreError::MissingScope);
+            }
+            let mut paths = payload
+                .paths
+                .iter()
+                .map(|path| normalized_scope(path))
+                .collect::<StoreResult<Vec<_>>>()?;
+            paths.sort();
+            paths.dedup();
+            let existing = typed_records::<WriteFenceRecord>(
+                reader,
+                CurrentAggregate::WriteFence,
+                &request.workspace.workspace_id,
+            )?;
+            if let Some(conflict) = existing.iter().find(|fence| {
+                fence.status == "active"
+                    && !expired(&fence.expires_at, now)
+                    && !fence.is_owned_by(&request.agent)
+                    && paths
+                        .iter()
+                        .any(|path| scopes_conflict(&fence.relative_path, path))
+            }) {
+                let conflict = WriteFenceConflict {
+                    path: conflict.relative_path.clone(),
+                    owner_agent_id: conflict.agent_id.clone(),
+                };
+                return Ok(CommandPlan {
+                    events: Vec::new(),
+                    response: WriteFenceAcquireResult {
+                        fences: Vec::new(),
+                        conflict: Some(conflict),
+                    },
+                    http_status: 409,
                 });
             }
-        }
-
-        for path in paths {
-            let updated = self.conn.execute(
-                "UPDATE write_fences
-                 SET expires_at = ?1, action = ?2
-                 WHERE agent_id = ?3
-                   AND workspace_id = ?4
-                   AND relative_path = ?5
-                   AND released_at IS NULL
-                   AND expires_at > ?6",
-                params![expires_at, action, agent_id, workspace_id, path, now],
-            )?;
-            if updated == 0 {
-                self.conn.execute(
-                    "INSERT INTO write_fences (
-                        fence_id, agent_id, workspace_id, relative_path, action,
-                        acquired_at, expires_at, released_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
-                    params![
-                        Uuid::new_v4().to_string(),
-                        agent_id,
-                        workspace_id,
-                        path,
-                        action,
+            let mut events = Vec::new();
+            let mut fences = Vec::new();
+            for path in paths {
+                if let Some(mut fence) = existing
+                    .iter()
+                    .find(|fence| {
+                        fence.status == "active"
+                            && !expired(&fence.expires_at, now)
+                            && fence.agent_id == request.agent.agent_id
+                            && fence.relative_path == path
+                    })
+                    .cloned()
+                {
+                    if !fence.is_owned_by(&request.agent) {
+                        return Err(StoreError::ClaimOwnerMismatch);
+                    }
+                    fence.action = payload.action.clone();
+                    fence.expires_at = timestamp(now + WRITE_FENCE_TTL)?;
+                    events.push(fence_event(
+                        request,
+                        events.len() as u32,
                         now,
-                        expires_at
-                    ],
-                )?;
+                        WriteFenceEvent::Acquired,
+                        &fence,
+                    )?);
+                    fences.push(fence);
+                    continue;
+                }
+                let fence = WriteFenceRecord {
+                    fence_id: Uuid::new_v4().to_string(),
+                    agent_id: request.agent.agent_id.clone(),
+                    actor_id: request.agent.actor_id.clone(),
+                    actor_type: request.agent.actor_type.clone(),
+                    owner_id: request.agent.owner_id.clone(),
+                    parent_agent_id: request.agent.parent_agent_id.clone(),
+                    parent_actor_id: request.agent.parent_actor_id.clone(),
+                    initiating_actor_known: true,
+                    workspace_id: request.workspace.workspace_id.clone(),
+                    relative_path: path,
+                    action: payload.action.clone(),
+                    status: "active".into(),
+                    acquired_at: timestamp(now)?,
+                    expires_at: timestamp(now + WRITE_FENCE_TTL)?,
+                    released_at: None,
+                    origin_event_seq: 0,
+                };
+                events.push(fence_event(
+                    request,
+                    events.len() as u32,
+                    now,
+                    WriteFenceEvent::Acquired,
+                    &fence,
+                )?);
+                fences.push(fence);
             }
-        }
-        Ok(())
-    }
-
-    pub fn active_write_fence_owner(
-        &self,
-        workspace_id: impl AsRef<str>,
-        path: impl AsRef<str>,
-    ) -> StoreResult<Option<String>> {
-        self.expire_stale_write_fences_inner()?;
-        self.active_write_fence_owner_inner(
-            workspace_id.as_ref(),
-            &normalize_relative_path(path.as_ref()),
-        )
-    }
-
-    fn active_write_fence_owner_except(
-        &self,
-        workspace_id: &str,
-        path: &str,
-        except_agent_id: &str,
-    ) -> StoreResult<Option<String>> {
-        let now = now_timestamp();
-        self.conn
-            .query_row(
-                "SELECT agent_id
-                 FROM write_fences
-                 WHERE workspace_id = ?1
-                   AND relative_path = ?2
-                   AND agent_id <> ?3
-                   AND released_at IS NULL
-                   AND expires_at > ?4
-                 ORDER BY acquired_at
-                 LIMIT 1",
-                params![workspace_id, path, except_agent_id, now],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(StoreError::from)
-    }
-
-    fn active_write_fence_owner_inner(
-        &self,
-        workspace_id: &str,
-        path: &str,
-    ) -> StoreResult<Option<String>> {
-        let now = now_timestamp();
-        self.conn
-            .query_row(
-                "SELECT agent_id
-                 FROM write_fences
-                 WHERE workspace_id = ?1
-                   AND relative_path = ?2
-                   AND released_at IS NULL
-                   AND expires_at > ?3
-                 ORDER BY acquired_at
-                 LIMIT 1",
-                params![workspace_id, path, now],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(StoreError::from)
-    }
-
-    pub fn write_fence_owner_for_observation(
-        &self,
-        workspace_id: impl AsRef<str>,
-        path: impl AsRef<str>,
-        observed_at: impl AsRef<str>,
-    ) -> StoreResult<Option<String>> {
-        let workspace_id = workspace_id.as_ref();
-        let path = normalize_relative_path(path.as_ref());
-        let observed_at = observed_at.as_ref();
-        let grace_start = timestamp_after(observed_at, -WRITE_FENCE_RELEASE_GRACE_SECONDS)?;
-        self.conn
-            .query_row(
-                "SELECT agent_id
-                 FROM write_fences
-                 WHERE workspace_id = ?1
-                   AND relative_path = ?2
-                   AND acquired_at <= ?3
-                   AND expires_at >= ?3
-                   AND (released_at IS NULL OR released_at >= ?4)
-                 ORDER BY acquired_at DESC
-                 LIMIT 1",
-                params![workspace_id, path, observed_at, grace_start],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(StoreError::from)
+            Ok(CommandPlan {
+                events,
+                response: WriteFenceAcquireResult {
+                    fences,
+                    conflict: None,
+                },
+                http_status: 200,
+            })
+        })
     }
 
     pub fn release_write_fences(
         &self,
-        agent_id: impl AsRef<str>,
-        workspace_id: impl AsRef<str>,
-        path: impl AsRef<str>,
-    ) -> StoreResult<u64> {
-        let agent_id = agent_id.as_ref().to_string();
-        let workspace_id = workspace_id.as_ref().to_string();
-        let path = normalize_relative_path(path.as_ref());
-        self.store_transaction(move |store| {
-            store.release_write_fences_inner(&agent_id, &workspace_id, &path)
+        request: &RequestEnvelope<WriteFenceRelease>,
+    ) -> StoreResult<CommandOutcome<Vec<WriteFenceRecord>>> {
+        let now = self.clock.now();
+        let fence_ids = request.payload.fence_ids.clone();
+        self.execute_command(request, "write_fence.release", |reader| {
+            let existing = typed_records::<WriteFenceRecord>(
+                reader,
+                CurrentAggregate::WriteFence,
+                &request.workspace.workspace_id,
+            )?;
+            let mut released = Vec::new();
+            let mut events = Vec::new();
+            let mut processed = HashSet::with_capacity(fence_ids.len());
+            for fence_id in &fence_ids {
+                if !processed.insert(fence_id) {
+                    continue;
+                }
+                let mut fence = existing
+                    .iter()
+                    .find(|fence| fence.fence_id == *fence_id)
+                    .cloned()
+                    .ok_or(StoreError::ClaimNotFound)?;
+                if !fence.is_owned_by(&request.agent) {
+                    return Err(StoreError::ClaimOwnerMismatch);
+                }
+                if fence.status == "active" {
+                    fence.status = "released".into();
+                    fence.released_at = Some(timestamp(now)?);
+                    events.push(fence_event(
+                        request,
+                        events.len() as u32,
+                        now,
+                        WriteFenceEvent::Released,
+                        &fence,
+                    )?);
+                }
+                released.push(fence);
+            }
+            Ok(CommandPlan {
+                events,
+                response: released,
+                http_status: 200,
+            })
         })
     }
 
-    pub(crate) fn release_write_fences_inner(
+    pub fn expire_write_fences(
         &self,
-        agent_id: &str,
-        workspace_id: &str,
-        path: &str,
-    ) -> StoreResult<u64> {
-        let released_at = now_timestamp();
-        Ok(self.conn.execute(
-            "UPDATE write_fences
-             SET released_at = ?1
-             WHERE agent_id = ?2
-               AND workspace_id = ?3
-               AND relative_path = ?4
-               AND released_at IS NULL",
-            params![released_at, agent_id, workspace_id, path],
-        )? as u64)
-    }
-
-    pub fn release_session_write_fences(
-        &self,
-        agent_id: impl AsRef<str>,
-        workspace_id: impl AsRef<str>,
-    ) -> StoreResult<u64> {
-        let agent_id = agent_id.as_ref().to_string();
-        let workspace_id = workspace_id.as_ref().to_string();
-        self.store_transaction(move |store| {
-            store.release_session_write_fences_inner(&agent_id, &workspace_id)
+        request: &RequestEnvelope<()>,
+    ) -> StoreResult<CommandOutcome<Vec<String>>> {
+        let now = self.clock.now();
+        self.execute_command(request, "write_fence.expire", |reader| {
+            let mut events = Vec::new();
+            let mut expired_fences = Vec::new();
+            for mut fence in typed_records::<WriteFenceRecord>(
+                reader,
+                CurrentAggregate::WriteFence,
+                &request.workspace.workspace_id,
+            )? {
+                if fence.status == "active" && expired(&fence.expires_at, now) {
+                    fence.status = "expired".into();
+                    fence.released_at = Some(timestamp(now)?);
+                    expired_fences.push(fence.fence_id.clone());
+                    events.push(fence_event(
+                        request,
+                        events.len() as u32,
+                        now,
+                        WriteFenceEvent::Expired,
+                        &fence,
+                    )?);
+                }
+            }
+            Ok(CommandPlan {
+                events,
+                response: expired_fences,
+                http_status: 200,
+            })
         })
     }
 
-    pub(crate) fn release_session_write_fences_inner(
+    pub fn write_fence(
         &self,
-        agent_id: &str,
         workspace_id: &str,
-    ) -> StoreResult<u64> {
-        let released_at = now_timestamp();
-        Ok(self.conn.execute(
-            "UPDATE write_fences
-             SET released_at = ?1
-             WHERE agent_id = ?2
-               AND workspace_id = ?3
-               AND released_at IS NULL",
-            params![released_at, agent_id, workspace_id],
-        )? as u64)
+        fence_id: &str,
+    ) -> StoreResult<Option<WriteFenceRecord>> {
+        self.current_records(CurrentAggregate::WriteFence, workspace_id)?
+            .into_iter()
+            .map(record_from_current::<WriteFenceRecord>)
+            .collect::<StoreResult<Vec<_>>>()?
+            .into_iter()
+            .find(|fence| fence.fence_id == fence_id)
+            .map(Ok)
+            .transpose()
     }
+}
 
-    pub fn fence_windows_for_path(
-        &self,
-        workspace_id: impl AsRef<str>,
-        path: impl AsRef<str>,
-        since: impl AsRef<str>,
-    ) -> StoreResult<Vec<(String, String, Option<String>)>> {
-        let workspace_id = workspace_id.as_ref();
-        let path = normalize_relative_path(path.as_ref());
-        let since = since.as_ref();
-        let mut statement = self.conn.prepare(
-            "SELECT agent_id, acquired_at, released_at
-             FROM write_fences
-             WHERE workspace_id = ?1
-               AND relative_path = ?2
-               AND acquired_at >= ?3
-             ORDER BY acquired_at",
-        )?;
-        Ok(statement
-            .query_map(params![workspace_id, path, since], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?)
-    }
+pub(crate) fn active_fence_owner(
+    reader: &dyn ProjectionReader,
+    workspace_id: &str,
+    path: &str,
+    observed_at: OffsetDateTime,
+) -> StoreResult<Option<String>> {
+    Ok(
+        typed_records::<WriteFenceRecord>(reader, CurrentAggregate::WriteFence, workspace_id)?
+            .into_iter()
+            .find(|fence| {
+                (fence.status == "active"
+                    && parse_before_or_at(&fence.acquired_at, observed_at)
+                    && parse_after_or_at(&fence.expires_at, observed_at)
+                    || fence.status == "released"
+                        && fence
+                            .released_at
+                            .as_deref()
+                            .and_then(|released| crate::reservations::parse_time(released).ok())
+                            .is_some_and(|released| {
+                                observed_at >= released
+                                    && observed_at <= released + FENCE_ATTRIBUTION_GRACE
+                            }))
+                    && scopes_conflict(&fence.relative_path, path)
+            })
+            .map(|fence| fence.agent_id),
+    )
+}
 
-    pub(crate) fn live_write_fence_items(
-        &self,
-        workspace_filter: Option<&str>,
-        identity_filter: CurrentStateIdentityFilter<'_>,
-        resource_filter: Option<&str>,
-    ) -> StoreResult<Vec<CurrentItem>> {
-        let now = now_timestamp();
-        let mut statement = self.conn.prepare(
-            "SELECT agent_id, workspace_id, relative_path, action, acquired_at, expires_at
-             FROM write_fences
-             WHERE released_at IS NULL
-               AND expires_at > ?1
-             ORDER BY relative_path, acquired_at",
-        )?;
-        let rows = statement.query_map([&now], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-            ))
-        })?;
+fn parse_before_or_at(value: &str, observed_at: OffsetDateTime) -> bool {
+    crate::reservations::parse_time(value).is_ok_and(|time| time <= observed_at)
+}
 
-        let mut items = Vec::new();
-        for row in rows {
-            let (agent_id, workspace_id, relative_path, action, acquired_at, expires_at) = row?;
-            if workspace_filter.is_some_and(|filter| filter != workspace_id) {
-                continue;
-            }
-            if identity_filter.exclude_agent_id == Some(agent_id.as_str()) {
-                continue;
-            }
-            if !resource_matches_filter(&relative_path, resource_filter) {
-                continue;
-            }
+fn parse_after_or_at(value: &str, observed_at: OffsetDateTime) -> bool {
+    crate::reservations::parse_time(value).is_ok_and(|time| time >= observed_at)
+}
 
-            items.push(
-                CurrentItem::new(
-                    CurrentItemKind::Claim,
-                    CurrentSeverity::Warn,
-                    CurrentFreshness::Live,
-                    relative_path.clone(),
-                    action.clone(),
-                    format!("write in flight by {agent_id}"),
-                )
-                .with_agent(agent_id)
-                .with_workspace(workspace_id)
-                .with_evidence_kind(CurrentEvidenceKind::ClaimOnly)
-                .with_source_ref(AGENT_CONTEXT_SCOPE_SOURCE_REF)
-                .with_observed_at(acquired_at)
-                .with_expires_at(Some(expires_at)),
-            );
-        }
-        Ok(items)
-    }
-
-    fn expire_stale_write_fences_inner(&self) -> StoreResult<()> {
-        let now = now_timestamp();
-        self.conn.execute(
-            "UPDATE write_fences
-             SET released_at = expires_at
-             WHERE released_at IS NULL
-               AND expires_at <= ?1",
-            [&now],
-        )?;
-        Ok(())
-    }
+pub(crate) fn fence_event<T>(
+    request: &RequestEnvelope<T>,
+    ordinal: u32,
+    now: OffsetDateTime,
+    variant: fn(EventData) -> WriteFenceEvent,
+    fence: &WriteFenceRecord,
+) -> StoreResult<NewEvent> {
+    let mut data = EventData::new(&fence.fence_id);
+    data.data = json!({"write_fence": fence});
+    NewEvent::new(
+        request.request_id,
+        ordinal,
+        now,
+        EventPayload::WriteFence(variant(data)),
+    )
+    .map_err(StoreError::from)
 }

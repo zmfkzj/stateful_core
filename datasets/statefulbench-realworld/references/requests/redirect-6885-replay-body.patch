@@ -1,0 +1,20 @@
+diff --git a/src/requests/sessions.py b/src/requests/sessions.py
+--- a/src/requests/sessions.py
++++ b/src/requests/sessions.py
+@@ -31,6 +31,7 @@ from .exceptions import (
+     ChunkedEncodingError,
+     ContentDecodingError,
+     InvalidSchema,
++    SSLError,
+     TooManyRedirects,
+ )
+ from .hooks import default_hooks, dispatch_hook
+@@ -210,7 +211,7 @@ class SessionRedirectMixin:
+ 
+             try:
+                 resp.content  # Consume socket so it can be released
+-            except (ChunkedEncodingError, ContentDecodingError, RuntimeError):
++            except (ChunkedEncodingError, ContentDecodingError, RuntimeError, SSLError):
+                 resp.raw.read(decode_content=False)
+ 
+             if len(resp.history) >= self.max_redirects:

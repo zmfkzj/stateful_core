@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ActivityPhase {
+pub enum PresencePhase {
     Exploring,
     Editing,
     Testing,
@@ -12,7 +12,7 @@ pub enum ActivityPhase {
     Failed,
 }
 
-impl ActivityPhase {
+impl PresencePhase {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Exploring => "exploring",
@@ -95,7 +95,7 @@ impl ScopeSet {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PolicyState {
     scopes: Option<ScopeSet>,
-    phase: Option<ActivityPhase>,
+    phase: Option<PresencePhase>,
 }
 
 impl PolicyState {
@@ -114,7 +114,7 @@ impl PolicyState {
         self
     }
 
-    pub fn with_activity_phase(mut self, phase: ActivityPhase) -> Self {
+    pub fn with_presence_phase(mut self, phase: PresencePhase) -> Self {
         self.phase = Some(phase);
         self
     }

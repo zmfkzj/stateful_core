@@ -1,4 +1,6 @@
 # Reservation-Scoped Concurrency Control
+> **Historical / superseded.** This V1 design record is retained for decision history and is not authority for the shipped runtime. Use [Current-State Coordination](current-state-coordination.md), [Usage Reference](usage-reference.md), and [State Model](state-model.md) for canonical V2 behavior.
+
 
 This document defines the coordination model behind `stateful_core`.
 

@@ -8,10 +8,17 @@ use std::{
 use stateful_core::normalize_relative_path;
 
 use crate::{
-    GlobalPaths, ProtocolEnvelopeArgs, RepoIdentity, discover_runtime_with_optional_global,
-    effective_workspace_id_for_repo, post_json, protocol_envelope, repo_identity_for_enabled_repo,
+    GlobalPaths, RepoIdentity, discover_runtime_with_optional_global,
+    effective_workspace_id_for_repo, hook::write_lifecycle, repo_identity_for_enabled_repo,
 };
 
+const COMMIT_WRITE_LIFECYCLE: write_lifecycle::LifecycleSource = write_lifecycle::LifecycleSource {
+    source_kind: stateful_core::SourceKind::Cli,
+    start_event: "commit_authorize",
+    start_ref: "stateful.commit",
+    complete_event: "commit_authorize_complete",
+    complete_ref: "stateful.commit",
+};
 pub type AuthorizePath = Box<dyn Fn(&str, &str) -> anyhow::Result<()> + Send + Sync>;
 
 pub struct CommitRequest {
@@ -45,14 +52,26 @@ pub fn run_structured_commit(request: CommitRequest) -> anyhow::Result<CommitRes
         .map(|path| commit_target(&request.repo_root, path))
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    for target in &targets {
-        authorize_path(&request, target)?;
+    if request.authorize.is_none() {
+        replay_pending_commit_writes(&request)?;
     }
 
-    let temporary_index = TemporaryIndex::create(&request.repo_root)?;
-    let commit_message = TemporaryCommitMessage::create(message)?;
-    let disabled_hooks = TemporaryHooksDir::create()?;
+    let mut lifecycles = Vec::new();
+    for target in &targets {
+        match authorize_path(&request, target) {
+            Ok(Some(lifecycle)) => lifecycles.push(lifecycle),
+            Ok(None) => {}
+            Err(error) => {
+                complete_commit_lifecycles(&lifecycles, true)?;
+                return Err(error);
+            }
+        }
+    }
+
     let result = (|| -> anyhow::Result<CommitResult> {
+        let temporary_index = TemporaryIndex::create(&request.repo_root)?;
+        let commit_message = TemporaryCommitMessage::create(message)?;
+        let disabled_hooks = TemporaryHooksDir::create()?;
         let mut add_args = vec!["add", "--force", "--"];
         add_args.extend(paths.iter().map(String::as_str));
         git_status_with_index(&request.repo_root, &add_args, Some(&temporary_index.path))?;
@@ -94,12 +113,12 @@ pub fn run_structured_commit(request: CommitRequest) -> anyhow::Result<CommitRes
         })
     })();
 
-    match result {
-        Ok(result) => {
-            restore_committed_paths_to_head(&request.repo_root, &paths)?;
-            Ok(result)
-        }
-        Err(error) => Err(error),
+    complete_commit_lifecycles(&lifecycles, result.is_err())?;
+    if let Ok(result) = result {
+        restore_committed_paths_to_head(&request.repo_root, &paths)?;
+        Ok(result)
+    } else {
+        result
     }
 }
 
@@ -194,9 +213,42 @@ fn deny_unrelated_staged_changes_with_index(
     Ok(())
 }
 
-fn authorize_path(request: &CommitRequest, target: &CommitTarget) -> anyhow::Result<()> {
+struct CommitLifecycle {
+    paths: GlobalPaths,
+    runtime: crate::ServerRuntime,
+    agent_id: String,
+    workspace_id: String,
+    identity: Option<RepoIdentity>,
+    repo_root: PathBuf,
+    operation_id: String,
+}
+
+fn complete_commit_lifecycles(lifecycles: &[CommitLifecycle], failed: bool) -> anyhow::Result<()> {
+    for lifecycle in lifecycles {
+        write_lifecycle::complete(
+            &lifecycle.paths,
+            &lifecycle.runtime,
+            &lifecycle.agent_id,
+            &lifecycle.workspace_id,
+            lifecycle.identity.as_ref(),
+            None,
+            None,
+            &lifecycle.repo_root,
+            &lifecycle.operation_id,
+            failed,
+            &COMMIT_WRITE_LIFECYCLE,
+        )?;
+    }
+    Ok(())
+}
+
+fn authorize_path(
+    request: &CommitRequest,
+    target: &CommitTarget,
+) -> anyhow::Result<Option<CommitLifecycle>> {
     if let Some(authorize) = &request.authorize {
-        return authorize(target.action, &target.path);
+        authorize(target.action, &target.path)?;
+        return Ok(None);
     }
 
     let agent_id = request
@@ -204,48 +256,54 @@ fn authorize_path(request: &CommitRequest, target: &CommitTarget) -> anyhow::Res
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("stateful commit requires a current agent id"))?;
     let runtime = discover_runtime_with_optional_global(&request.repo_root)?;
-    let identity = GlobalPaths::from_env()
-        .ok()
-        .and_then(|paths| repo_identity_for_enabled_repo(&paths, &request.repo_root).ok());
+    let paths = GlobalPaths::from_env()?;
+    let identity = repo_identity_for_enabled_repo(&paths, &request.repo_root).ok();
     let workspace_id = commit_workspace_id(
         request.workspace_id.as_deref(),
         runtime.workspace_id.as_str(),
         identity.as_ref(),
     );
-    let body = protocol_envelope(ProtocolEnvelopeArgs {
-        runtime: &runtime,
-        request_id: uuid::Uuid::new_v4().to_string(),
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let authorization = write_lifecycle::authorize(
+        &paths,
+        &runtime,
+        agent_id,
+        &workspace_id,
+        identity.as_ref(),
+        None,
+        None,
+        &operation_id,
+        target.action,
+        vec![(
+            target.path.clone(),
+            stateful_core::fingerprint_path(&request.repo_root.join(&target.path))?,
+        )],
+        None,
+        Vec::new(),
+        &COMMIT_WRITE_LIFECYCLE,
+    )?;
+    let lifecycle = CommitLifecycle {
+        paths,
+        runtime,
         agent_id: agent_id.to_string(),
         workspace_id,
         identity,
-        source_kind: "cli",
-        event: "commit_authorize",
-        source_ref: "stateful-commit",
-        source_tool_name: None,
-        payload: serde_json::json!({
-            "action": target.action,
-            "path": target.path,
-        }),
-    });
-    let response = post_json(&runtime, "/v1/authorize", &body)?;
-
-    if !(200..300).contains(&response.status_code) {
-        anyhow::bail!(
-            "stateful commit authorization failed with HTTP {}: {}",
-            response.status_code,
-            response.body
-        );
+        repo_root: request.repo_root.clone(),
+        operation_id,
+    };
+    if let Some(decision) = authorization.decision
+        && decision.decision == stateful_core::DecisionKind::Deny
+    {
+        complete_commit_lifecycles(std::slice::from_ref(&lifecycle), true)?;
+        anyhow::bail!("{}: {}", decision.reason_code, decision.message);
     }
+    Ok(Some(lifecycle))
+}
 
-    let decision = serde_json::from_str::<CommitAuthorizeDecision>(&response.body)?;
-    if decision.decision != "allow" {
-        anyhow::bail!(
-            "{}",
-            decision.required_next_action.unwrap_or(decision.message)
-        );
-    }
-
-    Ok(())
+fn replay_pending_commit_writes(request: &CommitRequest) -> anyhow::Result<()> {
+    let runtime = discover_runtime_with_optional_global(&request.repo_root)?;
+    let paths = GlobalPaths::from_env()?;
+    write_lifecycle::replay_pending(&paths, &runtime, &request.repo_root)
 }
 
 fn commit_workspace_id(
@@ -276,46 +334,6 @@ fn commit_target(repo_root: &Path, path: &str) -> anyhow::Result<CommitTarget> {
         path: path.to_string(),
         action,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::repo_registry::RepoIdentity;
-
-    #[test]
-    fn commit_authorization_defaults_local_runtime_to_repo_workspace() {
-        let identity = RepoIdentity {
-            repo_id: "repo-abc123".to_string(),
-            worktree_id: "repo-abc123".to_string(),
-            root: "/repo".to_string(),
-            branch: "main".to_string(),
-        };
-
-        assert_eq!(
-            commit_workspace_id(None, "local", Some(&identity)),
-            "workspace-abc123"
-        );
-    }
-
-    #[test]
-    fn commit_authorization_preserves_explicit_workspace_and_derives_default_remote_workspace() {
-        let identity = RepoIdentity {
-            repo_id: "repo-abc123".to_string(),
-            worktree_id: "repo-abc123".to_string(),
-            root: "/repo".to_string(),
-            branch: "main".to_string(),
-        };
-
-        assert_eq!(
-            commit_workspace_id(Some("manual"), "local", Some(&identity)),
-            "manual"
-        );
-        assert_eq!(
-            commit_workspace_id(None, "shared", Some(&identity)),
-            "workspace-abc123"
-        );
-    }
 }
 
 fn is_missing_tracked_file(repo_root: &Path, path: &str) -> anyhow::Result<bool> {
@@ -745,11 +763,42 @@ fn sanitize_git_environment(command: &mut Command) {
         }
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repo_registry::RepoIdentity;
 
-#[derive(Debug, serde::Deserialize)]
-struct CommitAuthorizeDecision {
-    decision: String,
-    message: String,
-    #[serde(default)]
-    required_next_action: Option<String>,
+    #[test]
+    fn commit_authorization_defaults_local_runtime_to_repo_workspace() {
+        let identity = RepoIdentity {
+            repo_id: "repo-abc123".to_string(),
+            worktree_id: "repo-abc123".to_string(),
+            root: "/repo".to_string(),
+            branch: "main".to_string(),
+        };
+
+        assert_eq!(
+            commit_workspace_id(None, "local", Some(&identity)),
+            "workspace-abc123"
+        );
+    }
+
+    #[test]
+    fn commit_authorization_preserves_explicit_workspace_and_derives_default_remote_workspace() {
+        let identity = RepoIdentity {
+            repo_id: "repo-abc123".to_string(),
+            worktree_id: "repo-abc123".to_string(),
+            root: "/repo".to_string(),
+            branch: "main".to_string(),
+        };
+
+        assert_eq!(
+            commit_workspace_id(Some("manual"), "local", Some(&identity)),
+            "manual"
+        );
+        assert_eq!(
+            commit_workspace_id(None, "shared", Some(&identity)),
+            "workspace-abc123"
+        );
+    }
 }

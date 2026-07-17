@@ -1,0 +1,12 @@
+diff --git a/src/xdist/scheduler/loadscope.py b/src/xdist/scheduler/loadscope.py
+--- a/src/xdist/scheduler/loadscope.py
++++ b/src/xdist/scheduler/loadscope.py
+@@ -320,4 +320,8 @@ class LoadScopeScheduling:
+         if node.shutting_down:
+             return
+ 
++        # A restarted worker must never receive a completed work unit.
++        while self.workqueue and all(next(iter(self.workqueue.values())).values()):
++            self.workqueue.popitem(last=False)
++
+         # Check that more work is available

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import arg_after, load_script
+from .conftest import arg_after, load_script
 
 
 def test_codex_pair_agent_help_omits_stateful_session_arguments():
@@ -144,6 +144,20 @@ command = "stale-stateful"
     mod.prepare_codex_environment(no_state_env, source_env={"PATH": "/bin", "STATEFUL_NESTED_CODEX_HOME_ROOT": str(tmp_path / "nested-codex-homes")})
     assert not (no_state_home / "config.toml").exists()
     assert not (no_state_home / "skills/stateful-command-policy/SKILL.md").exists()
+
+def test_codex_pair_agent_policy_fallback_keeps_v2_awareness_guidance(monkeypatch):
+    mod = load_script("codex_pair_agent.py")
+    monkeypatch.setattr(mod.Path, "is_file", lambda _: False)
+
+    skill = mod.command_policy_skill_text()
+
+    assert "Awareness is the default coordination mode." in skill
+    assert "Enforcement is opt-in only." in skill
+    assert "active presence, complete exact-read freshness, and handoff context" in skill
+    assert "then declare a task-level reservation" not in skill
+    assert "acquire same-agent claims before native edits" not in skill
+    assert "Enforcement is the default" not in skill
+    assert "/v1/" not in skill
 
 
 def test_codex_pair_agent_resume_and_empty_stop():

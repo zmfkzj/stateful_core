@@ -31,19 +31,17 @@ COMMAND_POLICY_SKILL_PATH = Path("skills") / COMMAND_POLICY_SKILL / "SKILL.md"
 STATEFUL_BENCH_CONFIG_MARKER = "# stateful-bench nested Codex integration"
 FALLBACK_COMMAND_POLICY_SKILL = """---
 name: stateful-command-policy
-description: Detailed procedure for using Stateful coordination tools, claims, sandbox profiles, and hook-denial recovery after a Stateful rule or denial says this policy applies
+description: Detailed V2 procedure for Stateful native coordination tools and recovery after a Stateful rule, warning, or denial says this policy applies
 ---
 
 # Stateful Command Policy
 
-This skill is the procedural manual. Rules and hook denials decide when Stateful
-policy applies. First inspect current state with the active Stateful tool names,
-then declare a task-level reservation covering the known file set and acquire
-same-agent claims before native edits. Use canonical names in guidance
-(`state_current_read`, `state_reservation_declare`, `state_claim_acquire`) and
-switch to runtime-specific aliases only when those are the active tool names.
-Do not run legacy `stateful mcp call` through Bash. Use the sandbox-run wrappers
-printed by hook denials for shell commands.
+Use this policy for Stateful V2 coordination; hooks guard writes and command-shaped work.
+- Awareness is the default coordination mode.
+- Enforcement is opt-in only.
+- The product center is active presence, complete exact-read freshness, and handoff context.
+- The `stateful.v2` envelope and `/v2/**` routes are runtime protocol, not a model-facing HTTP API; use the active native tools rather than constructing requests.
+- Read the warning or denial before retrying. Freshness failures require rereading and reconciling the current contents.
 """
 RESUME_PROMPT = """\
 The previous Codex exec turn stopped because of a token/context limit.

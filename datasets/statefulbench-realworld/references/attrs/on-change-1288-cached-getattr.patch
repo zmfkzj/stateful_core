@@ -1,0 +1,65 @@
+diff --git a/src/attr/_make.py b/src/attr/_make.py
+--- a/src/attr/_make.py
++++ b/src/attr/_make.py
+@@ -918,26 +918,37 @@ class _ClassBuilder:
+ 
+         # Collect methods with a `__class__` reference that are shadowed in the new class.
+         # To know to update them.
+         additional_closure_functions_to_update = []
++
++        class _SlottedCachedProperty:
++            def __init__(self, slot, func):
++                self.slot = slot
++                self.func = func
++
++            def __get__(self, instance, owner=None):
++                if instance is None:
++                    return self
++
++                try:
++                    return self.slot.__get__(instance, owner)
++                except AttributeError:
++                    value = self.func(instance)
++                    self.slot.__set__(instance, value)
++                    return value
++
++            def __set__(self, instance, value):
++                self.slot.__set__(instance, value)
++
++            def __delete__(self, instance):
++                self.slot.__delete__(instance)
++
+         if cached_properties:
+-            class_annotations = _get_annotations(self._cls)
+             for name, func in cached_properties.items():
+                 # Add cached properties to names for slotting.
+                 names += (name,)
+                 # Clear out function from class to avoid clashing.
+                 del cd[name]
+                 additional_closure_functions_to_update.append(func)
+-                annotation = inspect.signature(func).return_annotation
+-                if annotation is not inspect.Parameter.empty:
+-                    class_annotations[name] = annotation
+-
+-            original_getattr = cd.get("__getattr__")
+-            if original_getattr is not None:
+-                additional_closure_functions_to_update.append(original_getattr)
+-
+-            cd["__getattr__"] = _make_cached_property_getattr(
+-                cached_properties, original_getattr, self._cls
+-            )
+ 
+         # We only add the names of attributes that aren't inherited.
+         # Setting __slots__ to inherited attributes wastes memory.
+@@ -963,6 +974,11 @@ class _ClassBuilder:
+         # Create new class based on old class and our methods.
+         cls = type(self._cls)(self._cls.__name__, self._cls.__bases__, cd)
+ 
++        for name, func in cached_properties.items():
++            slot = getattr(cls, name)
++            slot = getattr(slot, "slot", slot)
++            setattr(cls, name, _SlottedCachedProperty(slot, func))
++
+         # The following is a fix for
+         # <https://github.com/python-attrs/attrs/issues/102>.
+         # If a method mentions `__class__` or uses the no-arg super(), the

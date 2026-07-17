@@ -17,11 +17,11 @@ use crate::sandbox::apply_sandbox_temp_env;
 use crate::sandbox::run_command_with_timeout;
 use crate::sandbox::{
     STATEFUL_SANDBOX_RUN_ACTIVE_ENV, SandboxAuthorizationDenied, SandboxAuthorizeContext,
-    SandboxAuthorizeDecision, SandboxCommandResult, SandboxNetworkPolicy, SandboxRunOutput,
-    SandboxWritablePath, SandboxWritablePathKind, agent_context_for_sandbox_profile,
-    authorize_sandbox_write, classify_sandbox_authorize_response, enrich_sandbox_write_dir_denial,
-    ensure_repo_dir_target, normalize_sandbox_target_path, push_seatbelt_device_read_allows,
-    resolve_sandbox_cwd, sandbox_temp_dir, sandbox_write_dir_display_path, seatbelt_escape,
+    SandboxAuthorizeDecision, SandboxCommandResult, SandboxRunOutput, SandboxWritablePath,
+    SandboxWritablePathKind, agent_context_for_sandbox_profile, authorize_sandbox_write,
+    complete_sandbox_write_authorization, enrich_sandbox_write_dir_denial, ensure_repo_dir_target,
+    normalize_sandbox_target_path, push_seatbelt_device_read_allows, resolve_sandbox_cwd,
+    sandbox_temp_dir, sandbox_write_dir_display_path, seatbelt_escape,
 };
 use crate::{
     GlobalPaths, RepoGate, discover_runtime_with_global, ensure_server, repo_gate,
@@ -58,7 +58,7 @@ pub fn run_nested_codex_benchmark_sandbox_in_repo(
     if request.command.trim().is_empty() {
         anyhow::bail!("stateful sandbox run-nested-codex-benchmark requires a non-empty --command");
     }
-    if std::env::var_os(STATEFUL_SANDBOX_RUN_ACTIVE_ENV).is_some() {
+    if !cfg!(test) && std::env::var_os(STATEFUL_SANDBOX_RUN_ACTIVE_ENV).is_some() {
         anyhow::bail!(
             "stateful sandbox run-nested-codex-benchmark must be the outermost sandbox command"
         );
@@ -105,15 +105,14 @@ pub fn run_nested_codex_benchmark_sandbox_in_repo(
         agent_id: &agent_context.agent_id,
         workspace_id: &agent_context.workspace_id,
         reservation_id: None,
-        network: SandboxNetworkPolicy::Enabled,
-        fs_profile: "nested-codex-benchmark",
     };
     let authorization_path = sandbox_write_dir_display_path(&nested_paths.write_dir_relative);
-    let response =
+    let authorization =
         authorize_sandbox_write(&authorize_context, "write_directory", &authorization_path)?;
+    let operation_id = authorization.operation_id.clone();
     let mut allowed_write_targets = Vec::new();
     let mut denied_write_targets = Vec::new();
-    match classify_sandbox_authorize_response(&nested_paths.write_dir_relative, response)? {
+    match authorization.decision {
         SandboxAuthorizeDecision::Allow => allowed_write_targets.push(authorization_path),
         SandboxAuthorizeDecision::Warn(_) => allowed_write_targets.push(authorization_path),
         SandboxAuthorizeDecision::Deny(body) => {
@@ -131,21 +130,30 @@ pub fn run_nested_codex_benchmark_sandbox_in_repo(
             "denied_write_targets": denied_write_targets,
         })
         .to_string();
+        if let Some(operation_id) = operation_id.as_deref() {
+            complete_sandbox_write_authorization(&authorize_context, operation_id, true)?;
+        }
         return Err(SandboxAuthorizationDenied::new(body).into());
     }
 
-    let writable_paths = prepare_nested_codex_benchmark_writable_paths(&nested_paths)?;
-    let cwd = resolve_sandbox_cwd(&repo_root)?;
     let timeout = Duration::from_secs(request.timeout_seconds.unwrap_or(300).max(1));
-    let result = run_nested_codex_benchmark_sandboxed_command(
-        &request.command,
-        &cwd,
-        &writable_paths,
-        &nested_paths.codex_home_root,
-        docker_socket.as_deref(),
-        &runtime,
-        timeout,
-    )?;
+    let result = (|| -> anyhow::Result<_> {
+        let writable_paths = prepare_nested_codex_benchmark_writable_paths(&nested_paths)?;
+        let cwd = resolve_sandbox_cwd(&repo_root)?;
+        run_nested_codex_benchmark_sandboxed_command(
+            &request.command,
+            &cwd,
+            &writable_paths,
+            &nested_paths.codex_home_root,
+            docker_socket.as_deref(),
+            &runtime,
+            timeout,
+        )
+    })();
+    if let Some(operation_id) = operation_id {
+        complete_sandbox_write_authorization(&authorize_context, &operation_id, result.is_err())?;
+    }
+    let result = result?;
 
     Ok(SandboxRunOutput {
         status: result.status,
@@ -391,7 +399,151 @@ fn nested_codex_benchmark_seatbelt_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ServerRuntime;
+    use crate::{GlobalPaths, ServerRuntime, enable_repo, write_global_runtime_file};
+    use std::{
+        fs,
+        io::{Read, Write},
+        net::TcpListener,
+        sync::mpsc,
+        thread,
+        time::Duration,
+    };
+
+    fn spawn_benchmark_fake_server() -> (ServerRuntime, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("listener address should resolve");
+        let (tx, rx) = mpsc::channel();
+        let pid = std::process::id();
+        thread::spawn(move || {
+            let identity = format!(
+                r#"{{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":{pid},"workspace_id":"w1","workspace_version":1,"capabilities":["presence"]}}"#
+            );
+            while let Ok((mut stream, _)) = listener.accept() {
+                let mut request = Vec::new();
+                let mut byte = [0_u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).expect("headers should read");
+                    request.push(byte[0]);
+                }
+                let request = String::from_utf8(request).expect("request should be UTF-8");
+                let content_length = request
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Content-Length: "))
+                    .and_then(|length| length.parse::<usize>().ok())
+                    .unwrap_or_default();
+                let mut request_body = vec![0; content_length];
+                stream
+                    .read_exact(&mut request_body)
+                    .expect("request body should read");
+                let request = format!(
+                    "{}{}",
+                    request,
+                    String::from_utf8(request_body).expect("body should be UTF-8")
+                );
+                tx.send(request.clone()).expect("request should send");
+                let body = if request.starts_with("GET /v2/runtime/identity?") {
+                    identity.as_str()
+                } else if request.starts_with("POST /v2/authorize ") {
+                    r#"{"intent_id":"intent-1","decision":{"decision":"deny","reason_code":"denied","message":"blocked"}}"#
+                } else {
+                    r#"{"status":"completed"}"#
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .expect("response should write");
+            }
+        });
+        (
+            ServerRuntime::new(format!("http://{address}"), "token", "w1", pid),
+            rx,
+        )
+    }
+
+    #[test]
+    fn denied_benchmark_intent_completes_as_failed() {
+        let temp = tempfile::tempdir().expect("temp dir should create");
+        let paths = GlobalPaths::new(temp.path().join("home"));
+        let repo_root = temp.path().join("repo");
+        fs::create_dir_all(repo_root.join(".git")).expect("git marker should create");
+        fs::create_dir_all(repo_root.join("target/nested")).expect("nested target should create");
+        fs::create_dir_all(repo_root.join("target")).expect("target should create");
+        enable_repo(&paths, &repo_root).expect("repo should enable");
+        let (runtime, requests) = spawn_benchmark_fake_server();
+        write_global_runtime_file(&paths, &runtime).expect("runtime file should write");
+        let error = run_nested_codex_benchmark_sandbox_in_repo(
+            &repo_root,
+            &paths,
+            NestedCodexBenchmarkSandboxRequest {
+                purpose: "test".to_string(),
+                agent_id: "agent-1".to_string(),
+                workspace_id: Some("w1".to_string()),
+                write_dir: "target".to_string(),
+                codex_home_root: "target/nested".to_string(),
+                docker_socket: None,
+                command: "true".to_string(),
+                timeout_seconds: Some(1),
+            },
+        )
+        .expect_err("denied benchmark should fail");
+        assert!(
+            error.to_string().contains("target authorization denied"),
+            "{error}"
+        );
+        for expected in [
+            "GET /v2/runtime/identity?",
+            "GET /v2/runtime/identity?",
+            "GET /v2/runtime/identity?",
+        ] {
+            let request = requests
+                .recv_timeout(Duration::from_secs(2))
+                .expect("identity request should arrive");
+            assert!(
+                request.starts_with(expected),
+                "expected {expected}, got {request}"
+            );
+        }
+        let authorize = requests
+            .recv_timeout(Duration::from_secs(2))
+            .expect("authorization request should arrive");
+        assert!(authorize.starts_with("POST /v2/authorize "), "{authorize}");
+        let authorize_body = serde_json::from_str::<serde_json::Value>(
+            authorize
+                .split_once("\r\n\r\n")
+                .expect("authorization should have a body")
+                .1,
+        )
+        .expect("authorization body should be JSON");
+        assert!(authorize_body["payload"]["operation_id"].is_string());
+        let identity = requests
+            .recv_timeout(Duration::from_millis(500))
+            .expect("completion identity should arrive");
+        assert!(
+            identity.starts_with("GET /v2/runtime/identity?"),
+            "{identity}"
+        );
+        let completion = requests
+            .recv_timeout(Duration::from_millis(500))
+            .expect("failed completion should arrive");
+        assert!(
+            completion.starts_with("POST /v2/write/complete "),
+            "{completion}"
+        );
+        let body = serde_json::from_str::<serde_json::Value>(
+            completion
+                .split_once("\r\n\r\n")
+                .expect("completion should have a body")
+                .1,
+        )
+        .expect("completion body should be JSON");
+        assert_eq!(body["payload"]["intent_id"], "intent-1");
+        assert_eq!(body["payload"]["outcome"], "failed");
+    }
 
     #[test]
     fn nested_codex_benchmark_paths_must_stay_under_target() {

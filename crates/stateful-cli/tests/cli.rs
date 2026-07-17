@@ -1,4 +1,5 @@
 use clap::Parser;
+use serde_json::json;
 use stateful_cli::{
     Cli, CodexSandboxMode, Command, GlobalPaths, HookCommand, HookRuntime, InstallAgent,
     NotificationsCommand, OmpInstallOptions, ReconcileCommand, ReposCommand, ResumeCommand,
@@ -6,7 +7,119 @@ use stateful_cli::{
     ToolsCommand, WatchCommand, allow_tool_for_repo, apply_omp_install, doctor_report_with_global,
     enable_repo, record_unclassified_tool_for_repo,
 };
-use std::{fs, path::PathBuf, process::Command as ProcessCommand};
+use stateful_core::{
+    ActorType, AgentIdentity, AuthorizationEvent, EventData, EventPayload, NewEvent,
+    RequestEnvelope, SourceKind, SourceRef, WorkspaceIdentity,
+};
+use stateful_store::{CommandPlan, Store};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command as ProcessCommand,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use time::OffsetDateTime;
+use uuid::Uuid;
+fn journal_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .expect("journal path should have a filename");
+    path.with_file_name(format!("{}{suffix}", file_name.to_string_lossy()))
+}
+
+fn journal_wal_path(path: &Path) -> PathBuf {
+    journal_sidecar_path(path, "-wal")
+}
+
+fn journal_baseline_path(path: &Path) -> PathBuf {
+    journal_sidecar_path(path, ".doctor-baseline.json")
+}
+
+fn journal_file_len(path: &Path) -> u64 {
+    fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
+}
+
+fn journal_footprint(path: &Path) -> u64 {
+    journal_file_len(path).saturating_add(journal_file_len(&journal_wal_path(path)))
+}
+
+fn append_journal_event(store: &Store) {
+    let request_id = Uuid::new_v4();
+    let now = OffsetDateTime::now_utc();
+    let request = RequestEnvelope::new(
+        request_id,
+        now,
+        AgentIdentity {
+            agent_id: "doctor-test-agent".into(),
+            turn_id: Some("doctor-test-turn".into()),
+            actor_id: "doctor-test-actor".into(),
+            actor_type: ActorType::Agent,
+            owner_id: None,
+            parent_agent_id: None,
+            parent_actor_id: None,
+        },
+        WorkspaceIdentity {
+            root: "/doctor-test-repo".into(),
+            workspace_id: "doctor-test-workspace".into(),
+            repo_id: "doctor-test-repo".into(),
+            worktree_id: "doctor-test-worktree".into(),
+            branch: "main".into(),
+        },
+        SourceRef {
+            kind: SourceKind::Cli,
+            event: "doctor-test".into(),
+            tool_name: None,
+            source_ref: "doctor-diagnostic-fixture".into(),
+        },
+        json!({"intent": "doctor-diagnostic-fixture"}),
+    )
+    .expect("test request should be valid");
+    let event = NewEvent::new(
+        request_id,
+        0,
+        now,
+        EventPayload::Authorization(AuthorizationEvent::Allowed(EventData::new(
+            "doctor-diagnostic-fixture",
+        ))),
+    )
+    .expect("test event should be valid");
+
+    store
+        .execute_command(&request, "doctor.test", |_| {
+            Ok(CommandPlan {
+                events: vec![event],
+                response: json!({"request_id": request_id}),
+                http_status: 201,
+            })
+        })
+        .expect("persistent command should append to the journal");
+}
+
+fn write_journal_baseline(path: &Path, observed_at_unix_seconds: u64, footprint_bytes: u64) {
+    fs::write(
+        path,
+        serde_json::to_vec(&json!({
+            "observed_at_unix_seconds": observed_at_unix_seconds,
+            "footprint_bytes": footprint_bytes,
+        }))
+        .expect("baseline fixture should serialize"),
+    )
+    .expect("baseline fixture should write");
+}
+
+fn assert_journal_baseline(path: &Path, footprint_bytes: u64) {
+    let baseline: serde_json::Value =
+        serde_json::from_slice(&fs::read(path).expect("baseline should exist"))
+            .expect("baseline should be valid JSON");
+    assert_eq!(
+        baseline
+            .get("footprint_bytes")
+            .and_then(serde_json::Value::as_u64),
+        Some(footprint_bytes)
+    );
+}
 
 #[test]
 fn parses_sandbox_run_read_only_defaults() {
@@ -161,6 +274,294 @@ fn doctor_labels_legacy_hooks_json_without_counting_it_as_installed() {
     assert!(report.legacy_hooks_json);
     assert!(report.legacy_repo_state_db);
     assert!(!report.installed);
+}
+
+#[test]
+fn doctor_reports_journal_size_rows_types_time_range_growth_and_threshold() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should create");
+    let repo = temp_dir.path().join("repo");
+    fs::create_dir_all(repo.join(".git")).expect("git marker should write");
+    let paths = GlobalPaths::new(temp_dir.path().join("home"));
+    Store::open(&paths.state_db).expect("journal should initialize");
+
+    let report = serde_json::to_value(doctor_report_with_global(&repo, &paths))
+        .expect("doctor report should serialize");
+    let journal = report
+        .get("journal")
+        .expect("doctor should include sanitized journal diagnostics");
+    for field in [
+        "size_bytes",
+        "rows",
+        "event_types",
+        "time_range",
+        "growth_bytes",
+        "growth_status",
+        "threshold_bytes",
+    ] {
+        assert!(
+            journal.get(field).is_some(),
+            "journal diagnostic missing {field}"
+        );
+    }
+    assert_eq!(
+        journal
+            .get("growth_status")
+            .and_then(serde_json::Value::as_str),
+        Some("baseline_captured")
+    );
+    assert_eq!(
+        journal
+            .get("growth_bytes")
+            .and_then(serde_json::Value::as_u64),
+        Some(0)
+    );
+    assert!(report.get("runtime").is_some());
+    assert!(report.get("capabilities").is_some());
+}
+#[test]
+fn doctor_counts_main_and_wal_footprint_without_mutating_them() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should create");
+    let repo = temp_dir.path().join("repo");
+    fs::create_dir_all(repo.join(".git")).expect("git marker should write");
+    let paths = GlobalPaths::new(temp_dir.path().join("home"));
+    let store = Store::open(&paths.state_db).expect("journal should initialize");
+    append_journal_event(&store);
+    let wal_path = journal_wal_path(&paths.state_db);
+    let main_before = fs::read(&paths.state_db).expect("main database should be readable");
+    let wal_before = fs::read(&wal_path).expect("live WAL should be readable");
+    assert!(
+        !wal_before.is_empty(),
+        "persistent store mutation should retain a live WAL"
+    );
+    let footprint_before = journal_footprint(&paths.state_db);
+
+    let report = serde_json::to_value(doctor_report_with_global(&repo, &paths))
+        .expect("doctor report should serialize");
+
+    assert_eq!(
+        report
+            .pointer("/journal/size_bytes")
+            .and_then(serde_json::Value::as_u64),
+        Some(footprint_before)
+    );
+    assert_eq!(
+        fs::read(&paths.state_db).expect("main database should remain readable"),
+        main_before,
+        "doctor must not alter main database bytes"
+    );
+    assert_eq!(
+        fs::read(&wal_path).expect("live WAL should remain readable"),
+        wal_before,
+        "doctor must not alter WAL bytes"
+    );
+}
+
+#[test]
+fn doctor_captures_then_measures_recent_physical_growth() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should create");
+    let repo = temp_dir.path().join("repo");
+    fs::create_dir_all(repo.join(".git")).expect("git marker should write");
+    let paths = GlobalPaths::new(temp_dir.path().join("home"));
+    let store = Store::open(&paths.state_db).expect("journal should initialize");
+    let baseline_path = journal_baseline_path(&paths.state_db);
+    let before = journal_footprint(&paths.state_db);
+
+    let first = serde_json::to_value(doctor_report_with_global(&repo, &paths))
+        .expect("first doctor report should serialize");
+    assert_eq!(
+        first
+            .pointer("/journal/growth_status")
+            .and_then(serde_json::Value::as_str),
+        Some("baseline_captured")
+    );
+    assert_eq!(
+        first
+            .pointer("/journal/growth_bytes")
+            .and_then(serde_json::Value::as_u64),
+        Some(0)
+    );
+    assert_journal_baseline(&baseline_path, before);
+
+    append_journal_event(&store);
+    let after_mutation = journal_footprint(&paths.state_db);
+    assert!(
+        after_mutation > before,
+        "real persistent-store mutation should grow the physical footprint"
+    );
+    let main_after_mutation =
+        fs::read(&paths.state_db).expect("main database should be readable after mutation");
+    let wal_path = journal_wal_path(&paths.state_db);
+    let wal_after_mutation =
+        fs::read(&wal_path).expect("live WAL should be readable after mutation");
+
+    let second = serde_json::to_value(doctor_report_with_global(&repo, &paths))
+        .expect("second doctor report should serialize");
+
+    assert_eq!(
+        second
+            .pointer("/journal/growth_status")
+            .and_then(serde_json::Value::as_str),
+        Some("measured")
+    );
+    assert_eq!(
+        second
+            .pointer("/journal/growth_bytes")
+            .and_then(serde_json::Value::as_u64),
+        Some(after_mutation.saturating_sub(before))
+    );
+    assert_eq!(
+        fs::read(&paths.state_db).expect("main database should remain readable"),
+        main_after_mutation,
+        "doctor must not alter main database bytes"
+    );
+    assert_eq!(
+        fs::read(&wal_path).expect("live WAL should remain readable"),
+        wal_after_mutation,
+        "doctor must not alter WAL bytes"
+    );
+    assert!(
+        !serde_json::to_string(&second)
+            .expect("doctor report should serialize to text")
+            .contains("doctor-diagnostic-fixture"),
+        "doctor diagnostics must remain sanitized"
+    );
+}
+
+#[test]
+fn doctor_recaptures_corrupt_future_and_expired_baselines() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should create");
+    let repo = temp_dir.path().join("repo");
+    fs::create_dir_all(repo.join(".git")).expect("git marker should write");
+    let paths = GlobalPaths::new(temp_dir.path().join("home"));
+    let store = Store::open(&paths.state_db).expect("journal should initialize");
+    append_journal_event(&store);
+    let baseline_path = journal_baseline_path(&paths.state_db);
+    let footprint = journal_footprint(&paths.state_db);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after the Unix epoch")
+        .as_secs();
+
+    fs::write(&baseline_path, "{not-json").expect("corrupt baseline fixture should write");
+    let corrupt = serde_json::to_value(doctor_report_with_global(&repo, &paths))
+        .expect("doctor should tolerate a corrupt baseline");
+    assert_eq!(
+        corrupt
+            .pointer("/journal/growth_status")
+            .and_then(serde_json::Value::as_str),
+        Some("baseline_captured")
+    );
+    assert_journal_baseline(&baseline_path, footprint);
+
+    write_journal_baseline(
+        &baseline_path,
+        now.saturating_add(Duration::from_secs(3600).as_secs()),
+        1,
+    );
+    let future = serde_json::to_value(doctor_report_with_global(&repo, &paths))
+        .expect("doctor should tolerate a future baseline");
+    assert_eq!(
+        future
+            .pointer("/journal/growth_status")
+            .and_then(serde_json::Value::as_str),
+        Some("baseline_captured")
+    );
+    assert_journal_baseline(&baseline_path, footprint);
+
+    write_journal_baseline(
+        &baseline_path,
+        now.saturating_sub(Duration::from_secs(24 * 60 * 60 + 1).as_secs()),
+        1,
+    );
+    let expired = serde_json::to_value(doctor_report_with_global(&repo, &paths))
+        .expect("doctor should tolerate an expired baseline");
+    assert_eq!(
+        expired
+            .pointer("/journal/growth_status")
+            .and_then(serde_json::Value::as_str),
+        Some("baseline_captured")
+    );
+    assert_journal_baseline(&baseline_path, footprint);
+}
+#[test]
+fn doctor_does_not_claim_a_baseline_when_atomic_replacement_fails() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should create");
+    let repo = temp_dir.path().join("repo");
+    fs::create_dir_all(repo.join(".git")).expect("git marker should write");
+    let paths = GlobalPaths::new(temp_dir.path().join("home"));
+    Store::open(&paths.state_db).expect("journal should initialize");
+    fs::create_dir(journal_baseline_path(&paths.state_db))
+        .expect("baseline path should be blocked by a directory");
+
+    let report = serde_json::to_value(doctor_report_with_global(&repo, &paths))
+        .expect("doctor should tolerate baseline replacement failure");
+
+    assert_eq!(
+        report
+            .pointer("/journal/growth_status")
+            .and_then(serde_json::Value::as_str),
+        Some("baseline_write_failed")
+    );
+}
+
+#[test]
+fn doctor_warns_at_default_five_hundred_twelve_mib_without_pruning() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should create");
+    let repo = temp_dir.path().join("repo");
+    fs::create_dir_all(repo.join(".git")).expect("git marker should write");
+    let paths = GlobalPaths::new(temp_dir.path().join("home"));
+    Store::open(&paths.state_db).expect("journal should initialize");
+    let wal_path = journal_wal_path(&paths.state_db);
+    let wal_before = fs::read(&wal_path).unwrap_or_default();
+    let before = journal_file_len(&paths.state_db);
+    let target_main_len = (512_u64 * 1024 * 1024).saturating_sub(wal_before.len() as u64);
+    assert!(
+        before < target_main_len,
+        "fixture must grow the main database"
+    );
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(&paths.state_db)
+        .expect("journal should open");
+    file.set_len(target_main_len)
+        .expect("journal should extend to threshold");
+    let main_before = fs::read(&paths.state_db).expect("main database should be readable");
+    assert_eq!(
+        journal_footprint(&paths.state_db),
+        512 * 1024 * 1024,
+        "threshold fixture should use the exact current footprint"
+    );
+
+    let report = serde_json::to_value(doctor_report_with_global(&repo, &paths))
+        .expect("doctor report should serialize");
+    assert_eq!(
+        report
+            .pointer("/journal/threshold_bytes")
+            .and_then(serde_json::Value::as_u64),
+        Some(512 * 1024 * 1024)
+    );
+    assert_eq!(
+        report
+            .pointer("/journal/size_bytes")
+            .and_then(serde_json::Value::as_u64),
+        Some(512 * 1024 * 1024)
+    );
+    assert_eq!(
+        report
+            .pointer("/journal/warning")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        fs::read(&paths.state_db).expect("main database should remain readable"),
+        main_before,
+        "doctor must not prune or vacuum the journal"
+    );
+    assert_eq!(
+        fs::read(&wal_path).unwrap_or_default(),
+        wal_before,
+        "doctor must not alter the WAL"
+    );
 }
 
 #[test]
@@ -1009,12 +1410,14 @@ fn tools_list_prints_allowed_and_unclassified_tools() {
             "parallel_tool_calls",
             "lsp",
             "glob",
+            "goal",
             "ask",
             "ast_grep",
             "browser",
             "find",
             "generate_image",
             "grep",
+            "hub",
             "irc",
             "job",
             "read",
@@ -1182,8 +1585,8 @@ fn reservation_declare_command_requires_at_least_one_file() {
 }
 
 #[test]
-fn reservation_claim_command_parses_wait_id() {
-    let cli = Cli::try_parse_from([
+fn reservation_claim_command_requires_granted_path() {
+    let error = Cli::try_parse_from([
         "stateful",
         "reservation",
         "claim",
@@ -1194,6 +1597,31 @@ fn reservation_claim_command_parses_wait_id() {
         "--wait-id",
         "wait-1",
     ])
+    .expect_err("reservation claim without granted path should fail");
+
+    assert!(
+        error.to_string().contains("--path"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn reservation_claim_command_preserves_wait_id_and_granted_path() {
+    let cli = Cli::try_parse_from([
+        "stateful",
+        "reservation",
+        "claim",
+        "--agent-id",
+        "agent-a",
+        "--workspace-id",
+        "w1",
+        "--reservation-id",
+        "reservation-a",
+        "--wait-id",
+        "wait-1",
+        "--path",
+        "src/auth.ts",
+    ])
     .expect("reservation claim command should parse");
 
     assert!(matches!(
@@ -1201,11 +1629,14 @@ fn reservation_claim_command_parses_wait_id() {
         Command::Reservation(stateful_cli::ReservationCommand::Claim {
             ref agent_id,
             ref workspace_id,
+            ref reservation_id,
             ref wait_id,
-            ..
+            ref path,
         }) if agent_id.as_deref() == Some("agent-a")
             && workspace_id.as_deref() == Some("w1")
+            && reservation_id.as_deref() == Some("reservation-a")
             && wait_id == "wait-1"
+            && path == "src/auth.ts"
     ));
 }
 
@@ -1219,6 +1650,8 @@ fn reservation_claim_command_parses_reservation_id() {
         "reservation-a",
         "--wait-id",
         "wait-1",
+        "--path",
+        "src/auth.ts",
     ])
     .expect("claim command should parse");
 
@@ -1227,8 +1660,11 @@ fn reservation_claim_command_parses_reservation_id() {
         Command::Reservation(stateful_cli::ReservationCommand::Claim {
             ref reservation_id,
             ref wait_id,
+            ref path,
             ..
-        }) if reservation_id.as_deref() == Some("reservation-a") && wait_id == "wait-1"
+        }) if reservation_id.as_deref() == Some("reservation-a")
+            && wait_id == "wait-1"
+            && path == "src/auth.ts"
     ));
 }
 
@@ -1273,7 +1709,7 @@ fn reservation_request_command_parses_request_id_action_and_path() {
 }
 
 #[test]
-fn reservation_cancel_command_parses_request_id() {
+fn reservation_cancel_command_parses_wait_id() {
     let cli = Cli::try_parse_from([
         "stateful",
         "reservation",
@@ -1282,8 +1718,8 @@ fn reservation_cancel_command_parses_request_id() {
         "s1",
         "--workspace-id",
         "w1",
-        "--request-id",
-        "request-1",
+        "--wait-id",
+        "wait-1",
     ])
     .expect("reservation cancel command should parse");
 
@@ -1292,10 +1728,10 @@ fn reservation_cancel_command_parses_request_id() {
         Command::Reservation(stateful_cli::ReservationCommand::Cancel {
             ref agent_id,
             ref workspace_id,
-            ref request_id,
+            ref wait_id,
         }) if agent_id.as_deref() == Some("s1")
             && workspace_id.as_deref() == Some("w1")
-            && request_id == "request-1"
+            && wait_id == "wait-1"
     ));
 }
 

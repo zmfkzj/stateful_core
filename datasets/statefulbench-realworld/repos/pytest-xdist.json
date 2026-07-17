@@ -1,0 +1,190 @@
+{
+  "repository": "pytest-dev/pytest-xdist",
+  "issue_snapshot": "issues/pytest-xdist.json",
+  "tasks": [
+    {
+      "key": "loadscope-1083-single-worker-order",
+      "kind": "bug",
+      "sources": ["https://github.com/pytest-dev/pytest-xdist/issues/1083"],
+      "source_hash": "52c804d685ddbd854ae015bddff1d454b6317f69f1a1bb0f06fbb90994ca60a3",
+      "prompt": "Fix issue #1083 in xdist.scheduler.loadscope.LoadScopeScheduling.schedule. For one loadscope worker, preserve the collector's scope order even when loadscope reordering is enabled: sorting scopes cannot improve parallel balance when only one worker exists and it can violate required test-family order. Keep the existing largest-scope-first behavior for multiple workers and preserve --no-loadscope-reorder behavior.",
+      "acceptance": [
+        "With one loadscope worker and loadscopereorder enabled, the first collected scope is sent before a later, larger scope.",
+        "With two workers and loadscopereorder enabled, the larger scope remains first for initial balancing.",
+        "With --no-loadscope-reorder semantics, two workers receive scopes in collection order and every collected item remains scheduled exactly once.",
+        "The production change is confined to src/xdist/scheduler/loadscope.py in LoadScopeScheduling.schedule."
+      ],
+      "overlap_anchors": [{"path": "src/xdist/scheduler/loadscope.py", "symbol": "xdist.scheduler.loadscope.LoadScopeScheduling.schedule"}],
+      "evaluator": "evaluators/pytest-xdist/loadscope-1083-single-worker-order.py",
+      "reference_patch": "references/pytest-xdist/loadscope-1083-single-worker-order.patch"
+    },
+    {
+      "key": "loadscope-1040-controller-optout",
+      "kind": "feature",
+      "sources": ["https://github.com/pytest-dev/pytest-xdist/issues/1040"],
+      "source_hash": "7ec27b961ed3ca014154c104924653a3902ea1f38328f5821d55d5987296ac50",
+      "prompt": "Implement the explicitly benchmark-defined #1040 issue-family extension in xdist.scheduler.loadscope.LoadScopeScheduling.schedule. If config.option.loadscopecontroller exists, call it once for each collected nodeid while the controller builds loadscope work units. A truthy return means that callable ran the item on the controller, so do not enqueue it to any worker. A false return leaves normal scheduling untouched; absence of the optional callable preserves existing behavior. Do not claim this private callable is the public marker/CLI requested by #1040.",
+      "acceptance": [
+        "An optional loadscopecontroller callable is invoked exactly once for every collected nodeid in collection order; a truthy return means it ran that nodeid on the controller and excludes it from worker batches.",
+        "Nodeids for which the callable returns false remain in their normal scope work unit without duplication or omission.",
+        "Without loadscopecontroller, loadscope scheduling retains its existing behavior.",
+        "This is explicitly an issue-family extension because LoadScopeScheduling has nodeids rather than pytest Item marker data.",
+        "The production change is confined to src/xdist/scheduler/loadscope.py in LoadScopeScheduling.schedule."
+      ],
+      "overlap_anchors": [{"path": "src/xdist/scheduler/loadscope.py", "symbol": "xdist.scheduler.loadscope.LoadScopeScheduling.schedule"}],
+      "evaluator": "evaluators/pytest-xdist/loadscope-1040-controller-optout.py",
+      "reference_patch": "references/pytest-xdist/loadscope-1040-controller-optout.patch"
+    },
+    {
+      "key": "loadgroup-1323-restarted-worker",
+      "kind": "bug",
+      "sources": ["https://github.com/pytest-dev/pytest-xdist/issues/1323"],
+      "source_hash": "3c56e9be3f2725975acd80510b0d45d9773d7706274ed18884d4c2068fbf050b",
+      "prompt": "Fix pytest-xdist issue #1323 through LoadScopeScheduling._reschedule, the lifecycle hook inherited by LoadGroupScheduling. When a crashed loadgroup worker's workload is returned, discard completed work units before dispatching to its replacement. Never call send_runtest_some with an empty index list; preserve every incomplete grouped test for the replacement worker and let the scheduler finish normally.",
+      "acceptance": [
+        "A restarted LoadGroupScheduling worker receives only the pending test index, never an empty send_runtest_some request for a completed group.",
+        "Completed work units returned from a crashed worker are discarded before dispatch while the pending grouped work unit remains scheduled.",
+        "The replacement can report the pending test complete, after which tests_finished is true and has_pending is false.",
+        "The production change is in src/xdist/scheduler/loadscope.py at LoadScopeScheduling._reschedule, inherited by LoadGroupScheduling."
+      ],
+      "overlap_anchors": [{"path": "src/xdist/scheduler/loadscope.py", "symbol": "xdist.scheduler.loadscope.LoadScopeScheduling._reschedule"}],
+      "evaluator": "evaluators/pytest-xdist/loadgroup-1323-restarted-worker.py",
+      "reference_patch": "references/pytest-xdist/loadgroup-1323-restarted-worker.patch"
+    },
+    {
+      "key": "loadgroup-1314-idle-shutdown",
+      "kind": "feature",
+      "sources": ["https://github.com/pytest-dev/pytest-xdist/issues/1314"],
+      "source_hash": "a9ea38c02644b9feb0b52f5c1f541c91e801e97ebfa51d18fea323730ecb1780",
+      "prompt": "Implement issue #1314 in the LoadScopeScheduling._reschedule lifecycle inherited by LoadGroupScheduling. Do not treat WorkerController.shutdown as immediate process termination: it appends a FIFO shutdown command and sets shutting_down before the worker consumes it. Retain the empty-workqueue shutdown calls, including initial-distribution shutdown after every runtests command has been enqueued; removing them deadlocks a worker waiting for its next command. Make tests_finished false while any assigned grouped test remains pending, even when that worker already has a queued graceful shutdown marker.",
+      "acceptance": [
+        "After loadgroup dispatch exhausts the global queue, each assigned worker's runtests command precedes its queued shutdown marker, so every assigned grouped test remains runnable.",
+        "A queued graceful shutdown marker is not treated as premature termination and no post-final-report shutdown contract is required.",
+        "tests_finished remains false while either worker has a pending grouped test, then becomes true only after both assigned tests are reported complete.",
+        "The reference preserves the LoadScopeScheduling._reschedule shutdown path and updates its completion accounting without leaving pending work."
+      ],
+      "overlap_anchors": [{"path": "src/xdist/scheduler/loadscope.py", "symbol": "xdist.scheduler.loadscope.LoadScopeScheduling._reschedule"}],
+      "evaluator": "evaluators/pytest-xdist/loadgroup-1314-idle-shutdown.py",
+      "reference_patch": "references/pytest-xdist/loadgroup-1314-idle-shutdown.patch"
+    },
+    {
+      "key": "cmdline-1218-dist-precedence",
+      "kind": "bug",
+      "sources": ["https://github.com/pytest-dev/pytest-xdist/issues/1218"],
+      "source_hash": "9f5f0242f61a20c6622782052da003558fcd57ca24bbee7aa50c15fe98d11fad",
+      "prompt": "Fix open issue #1218 in xdist.plugin's --dist option parsing and pytest_cmdline_main. Track explicit --dist while parsing the option, rather than inspecting InvocationParams.args, so CLI, PYTEST_ADDOPTS, and ini addopts all preserve the configured distribution. Normalize an implicit default distribution mode to load for -n, but an explicitly supplied --dist value wins. In particular, retain --dist=worksteal with worker processes and let explicit --dist=no disable worker setup. Preserve -n0 as the disabling boundary. This benchmark-defined --dist=no case is an issue-family extension because the pinned base already preserves explicit non-no modes.",
+      "acceptance": [
+        "With -n 2 and no explicit --dist, pytest_cmdline_main normalizes dist to load and creates two popen tx entries.",
+        "With --dist=worksteal and -n 2, it retains worksteal and creates two popen tx entries.",
+        "With explicit --dist=no and -n 2 from the CLI, PYTEST_ADDOPTS, or ini addopts, it retains no, clears worker count and tx, rather than silently selecting load.",
+        "With -n 0 and an explicit distributed mode, it disables distribution and clears tx.",
+        "Production changes are limited to src/xdist/plugin.py's pytest_addoption parser declaration and pytest_cmdline_main normalization."
+      ],
+      "overlap_anchors": [
+        {"path": "src/xdist/plugin.py", "symbol": "xdist.plugin.pytest_addoption"},
+        {"path": "src/xdist/plugin.py", "symbol": "xdist.plugin.pytest_cmdline_main"}
+      ],
+      "evaluator": "evaluators/pytest-xdist/cmdline-1218-dist-precedence.py",
+      "reference_patch": "references/pytest-xdist/cmdline-1218-dist-precedence.patch"
+    },
+    {
+      "key": "cmdline-1221-auto-minus-one",
+      "kind": "feature",
+      "sources": ["https://github.com/pytest-dev/pytest-xdist/issues/1221"],
+      "source_hash": "9a4c4480ae8a85b4ac2c36bc671acd9ab7a4c715e52f1cf01e13aef9514bd331",
+      "prompt": "Implement open enhancement #1221 in xdist.plugin.pytest_cmdline_main. Accept exactly -n auto-1, call the automatic-worker hook exactly once, reserve one worker by subtracting one without going below zero, and then reuse the existing distribution normalization. Treat auto-2 and malformed auto expressions as invalid, and preserve --pdb forcing the worker count to zero without auto detection.",
+      "acceptance": [
+        "parse_numprocesses accepts auto-1 while rejecting auto-2, auto--1, and auto-one.",
+        "With an auto-worker hook result of 4, -n auto-1 becomes 3 workers, load distribution, and three popen tx entries.",
+        "With an auto-worker hook result of 1, -n auto-1 clamps at zero and disables distribution with no tx entries.",
+        "The automatic-worker hook is called exactly once for each non-pdb auto-1 resolution.",
+        "With --pdb, -n auto-1 disables workers without calling auto detection.",
+        "The production change is in src/xdist/plugin.py at xdist.plugin.pytest_cmdline_main."
+      ],
+      "overlap_anchors": [{"path": "src/xdist/plugin.py", "symbol": "xdist.plugin.pytest_cmdline_main"}],
+      "evaluator": "evaluators/pytest-xdist/cmdline-1221-auto-minus-one.py",
+      "reference_patch": "references/pytest-xdist/cmdline-1221-auto-minus-one.patch"
+    },
+    {
+      "key": "split-scope-1008-secondary-group",
+      "kind": "feature",
+      "sources": ["https://github.com/pytest-dev/pytest-xdist/issues/1008"],
+      "source_hash": "c8f835d677258cc9832eaadf26a34851929f2dd9b73e43f3ad3e286014b7053d",
+      "prompt": "Implement the benchmark-defined secondary load-group key extension in xdist.scheduler.loadscope.LoadScopeScheduling._split_scope. Issue #1008 requests a secondary distribution grouping for ungrouped loadgroup items, but does not specify an API or name loadscope. For this strict-overlap task, extend the existing xdist @group nodeid suffix convention: a top-level suffix after the final parametrization bracket is the scope key, while @ inside a parameter remains ordinary parameter text. Preserve normal loadscope grouping for untagged nodeids. This is an honest issue-family extension, not an upstream-specified public API.",
+      "acceptance": [
+        "A nodeid ending in a top-level @group suffix returns that group name as its work-unit key.",
+        "A class test ending in a top-level @group suffix also returns the group name rather than its class scope.",
+        "An @ character inside a parametrization id is not interpreted as a secondary group key.",
+        "An untagged nodeid keeps the existing module-or-class loadscope key.",
+        "The production change is in src/xdist/scheduler/loadscope.py at xdist.scheduler.loadscope.LoadScopeScheduling._split_scope."
+      ],
+      "overlap_anchors": [{"path": "src/xdist/scheduler/loadscope.py", "symbol": "xdist.scheduler.loadscope.LoadScopeScheduling._split_scope"}],
+      "evaluator": "evaluators/pytest-xdist/split-scope-1008-secondary-group.py",
+      "reference_patch": "references/pytest-xdist/split-scope-1008-secondary-group.patch"
+    },
+    {
+      "key": "split-scope-1335-param-separator",
+      "kind": "bug",
+      "sources": ["https://github.com/pytest-dev/pytest-xdist/issues/1335"],
+      "source_hash": "3d136de0be9310ad4efee000ccf3f34b808b6f9b5c0bead74500397426753ad4",
+      "prompt": "Fix issue #1335 in xdist.scheduler.loadscope.LoadScopeScheduling._split_scope. Derive the module-or-class scope before the first pytest parameter bracket, so :: inside a parameter id cannot become the rightmost separator. Preserve the existing unparametrized module, class, and doctest grouping behavior.",
+      "acceptance": [
+        "A function parameter id containing cafe:cafe::cafe groups at its test module rather than splitting inside the parameter.",
+        "A class method parameter id containing :: groups at its class scope.",
+        "A doctest-style package __init__.py nodeid with an IPv6 parameter groups at the package path.",
+        "An unparametrized function retains its existing module scope.",
+        "The production change is in src/xdist/scheduler/loadscope.py at xdist.scheduler.loadscope.LoadScopeScheduling._split_scope."
+      ],
+      "overlap_anchors": [{"path": "src/xdist/scheduler/loadscope.py", "symbol": "xdist.scheduler.loadscope.LoadScopeScheduling._split_scope"}],
+      "evaluator": "evaluators/pytest-xdist/split-scope-1335-param-separator.py",
+      "reference_patch": "references/pytest-xdist/split-scope-1335-param-separator.patch"
+    },
+    {
+      "key": "dsession-1278-nonzero-exit",
+      "kind": "bug",
+      "sources": ["https://github.com/pytest-dev/pytest-xdist/issues/1278"],
+      "source_hash": "6e0bd573d211c30bebe41b7d561b1e6d4fb54418dd706f2dc20f58a44f99b76c",
+      "prompt": "Fix open issue #1278 source-faithfully in xdist.dsession.DSession.worker_errordown, the process-down callback used when a worker terminates before sending workerfinished. An unclean direct process exit must retain the established worker-error lifecycle and, after the configured restart limit is exhausted, set a terminal failure signal instead of allowing a green session. Do not treat workerfinished exitstatus 1 as a crash: pytest_sessionfinish sends that event for ordinary failed tests. Preserve keyboard-interrupt, orderly workerfinished, and recoverable restart behavior.",
+      "acceptance": [
+        "An orderly workerfinished event with exitstatus 1 remains a normal completion: it emits exactly one error=None nodedown hook call, removes the worker, and neither shuts down nor restarts it.",
+        "A direct process-down error with restarting disabled emits exactly one non-None nodedown diagnostic, removes the dead worker, shuts the session down without a replacement, and sets a terminal failure signal.",
+        "Below the restart limit, a process-down error keeps the existing replacement-worker lifecycle and does not set the terminal failure signal.",
+        "The production change is confined to src/xdist/dsession.py at xdist.dsession.DSession.worker_errordown, so it composes with the #1219 pytest_sessionstart change."
+      ],
+      "overlap_anchors": [{"path": "src/xdist/dsession.py", "symbol": "xdist.dsession.DSession.worker_errordown"}, {"path": "src/xdist/dsession.py", "symbol": "xdist.dsession.DSession"}],
+      "evaluator": "evaluators/pytest-xdist/dsession-1278-nonzero-exit.py",
+      "reference_patch": "references/pytest-xdist/dsession-1278-nonzero-exit.patch"
+    },
+    {
+      "key": "dsession-1219-worker-ramp",
+      "kind": "feature",
+      "sources": ["https://github.com/pytest-dev/pytest-xdist/issues/1219"],
+      "source_hash": "fe8cce83aa026e7409d906376c87d64dfa847517e309b3184998596384cc82e6",
+      "prompt": "Implement the controller-side worker-startup extension of open issue #1219 in xdist.dsession.DSession.pytest_sessionstart. When the existing parsed --ramp duration is nonzero, invoke the normal pytest_xdist_setupnodes hook once and create workers in declared order, sleeping evenly between starts so the first and last starts span the configured duration. Keep the existing zero-ramp setup_nodes path unchanged; do not duplicate hook notifications or leak workers. Worker-side first-test delay remains in the frozen base.",
+      "acceptance": [
+        "With --ramp=6 and three worker specs, DSession starts worker indices 0, 1, and 2 in order and waits exactly 3 seconds between adjacent starts.",
+        "The lifecycle invokes pytest_xdist_setupnodes exactly once before individual starts, preserving the hook that NodeManager.setup_nodes normally emits.",
+        "All started nodes are retained as active nodes after session startup.",
+        "With a zero ramp, DSession continues through NodeManager.setup_nodes without individual starts, sleeps, or duplicate setup-hook calls.",
+        "The production change is contained in src/xdist/dsession.py inside xdist.dsession.DSession and has no live-process evaluator dependency."
+      ],
+      "overlap_anchors": [{"path": "src/xdist/dsession.py", "symbol": "xdist.dsession.DSession"}],
+      "evaluator": "evaluators/pytest-xdist/dsession-1219-worker-ramp.py",
+      "reference_patch": "references/pytest-xdist/dsession-1219-worker-ramp.patch"
+    }
+  ],
+  "final_prompt": "Integrate the ten pytest-xdist tasks on the pinned base. Preserve every accepted behavior, resolve overlapping changes in src/xdist/scheduler/loadscope.py, src/xdist/plugin.py, and src/xdist/dsession.py, and run every listed evaluator before finishing.",
+  "evaluators": [
+    "evaluators/pytest-xdist/loadscope-1083-single-worker-order.py",
+    "evaluators/pytest-xdist/loadscope-1040-controller-optout.py",
+    "evaluators/pytest-xdist/loadgroup-1323-restarted-worker.py",
+    "evaluators/pytest-xdist/loadgroup-1314-idle-shutdown.py",
+    "evaluators/pytest-xdist/cmdline-1218-dist-precedence.py",
+    "evaluators/pytest-xdist/cmdline-1221-auto-minus-one.py",
+    "evaluators/pytest-xdist/split-scope-1008-secondary-group.py",
+    "evaluators/pytest-xdist/split-scope-1335-param-separator.py",
+    "evaluators/pytest-xdist/dsession-1278-nonzero-exit.py",
+    "evaluators/pytest-xdist/dsession-1219-worker-ramp.py"
+  ],
+  "integrated_reference_patch": "references/pytest-xdist/integrated.patch"
+}

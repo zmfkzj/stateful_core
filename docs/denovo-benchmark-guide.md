@@ -1,6 +1,6 @@
 # DeNovoSWE Benchmark Guide
 
-Last updated: 2026-07-03.
+Last updated: 2026-07-17.
 
 This guide records the protocol we use when running DeNovoSWE through
 `stateful-bench`. It follows the official AweAgent DeNovoSWE recipe/task
@@ -62,10 +62,12 @@ rule for any stateful/no-state claim:
 - Keep the same instance set, shard boundaries, model, prompt version,
   temperature, context window, max turns, evaluator settings, and runtime
   limits across compared conditions.
+- Give every trial a fresh run ID, output directory, and isolated OMP home; do
+  not reuse or merge rows from an earlier invocation.
 - Report mean score and success rate across the three trials.
 - Include per-trial values or standard deviation when comparing small samples.
-- Label smoke tests, debug runs, interrupted runs, or one-off runs as
-  non-comparable.
+- Label credit-free smoke tests, debug runs, interrupted runs, or one-off runs
+  as descriptive/non-comparable.
 
 `--eval-iters N` repeats the evaluator and averages evaluation output. It does
 not replace independent agent trials, because it does not rerun the agent
@@ -148,8 +150,12 @@ stateful:off,subagent:on
 stateful:on,subagent:on
 ```
 
-When the experiment is specifically about subagent behavior, a reduced paired
-matrix is acceptable:
+`stateful:on` starts V2's default awareness mode: presence, freshness,
+handoff, rendered context, and advisory intent, with the shipped thin hard
+stops. It does not imply enforcement; an enforcement experiment must be
+explicitly configured and reported separately. When the experiment is
+specifically about subagent behavior, the reduced paired matrix below is
+acceptable:
 
 ```text
 stateful:off,subagent:on
@@ -174,63 +180,21 @@ subagent spawn count for both Codex and OMP `subagent:on` runs. Treat that
 prompt addition as a declared behavior-test condition axis; do not reuse it as
 normal scored comparison policy or general patch-quality guidance.
 
-### Coordination-Mode Arms
+### Coordination-Mode Scope
 
-[ADR 0002](adr/0002-presence-first-not-lock-first.md) records the
-presence-first product direction. Coordination-focused comparisons now have three
-implemented arms:
+DeNovoSWE conditions are not StatefulBench real-world arms. Do not rename
+`stateful:on` as a default enforcement condition or infer the real-world
+three-arm contract from it. The real-world runner alone uses the explicit
+`sequential`, `parallel-off`, and opt-in `parallel-on` arms; its on arm starts
+awareness and requires its own fresh `linux/arm64` image, qualification receipt,
+and six-tool identity. See
+`docs/statefulbench-realworld-design.md#qualification-and-launch-gates`.
 
-```text
-A: no-state     no Stateful server/extension rails
-B: awareness    presence/context warnings, hard safety denials when checked, no queue/claim blocking
-C: stateful     default enforcement with reservation/claim/queue blocking
-```
-
-Use the checked-in forced-overlap harness for coordination-mode behavior, not
-incidental DeNovo same-file collisions:
-
-```text
-crates/stateful-bench/scripts/overlap_manifest_generator.py
-crates/stateful-bench/scripts/overlap_omp_agent.py
-crates/stateful-bench/scripts/overlap_harness.py
-stateful-bench run --mode no-state|awareness|stateful
-stateful-bench compare --awareness-run-dir <dir>
-```
-
-Generate one manifest with a fixed seed, then run all arms with the same
-manifest, model, image/runtime, `--jobs`, timeout, and instance order. The
-checked-in manifest generator creates `exact_file_overlap` pairs over `doc.txt`
-so every arm sees the same forced same-file pressure. Do not wait for DeNovoSWE
-to produce emergent same-file collisions; ordinary small-N DeNovo runs may have
-too few overlaps to measure coordination behavior, and null results there can be
-underpowered rather than dispositive.
-
-The checked-in harness and comparison report directly measure only artifacts
-they can observe: uncoordinated same-file collisions, lost edit events, denied
-writes, coordinated blocks, authorization warnings, warned writes that were
-applied, wait events, preserved/missing expected edits, false blocks, missed
-conflicts, wall time, and token/tool overhead when the agent logs expose usage.
-`manual_intervention_count` is read only if a harness result supplies it; the
-checked-in overlap harness writes `0` and does not observe real human/manual
-interventions. Duplicated-investigation time is not observable in this harness;
-mark it omitted/N.A. rather than inventing a proxy.
-
-Comparison reports label evidence kind. `synthetic_fixture` validates report
-plumbing only. Product efficacy claims require `paired_agent_run` evidence from
-the forced-overlap harness, enough paired-valid samples, and overhead reporting.
-The checked-in [2026-07-03 forced-overlap result](benchmarks/2026-07-03-forced-overlap-three-arm.md)
-is a three-arm plumbing/smoke result with no differentiated safety outcome, not
-final efficacy evidence.
-
-Fable5's review cautions against overgeneralizing Cursor's large-N convoy
-evidence to small-N shared-checkout tests. Use Cursor as a warning against broad
-waits and task-scale locks, not as proof that every enforcement claim is bad or
-that every small-N null result validates the pivot.
-
-The registered hypothesis is that arm B keeps arm C's safety metrics while
-spending less waiting and complexity. If that holds, claim machinery shrinks to
-thin safety fences; if arm C is meaningfully safer, the fences stay and the
-result documents why.
+The checked-in forced-overlap harness remains useful for explicitly labeled
+synthetic behavior work, but a smoke fixture or a single model rollout is not
+causal, statistical, safety, or product-quality evidence. Keep its manifest,
+model/image/runtime, jobs, timeout, and instance order fixed across comparisons,
+and report only the artifacts it actually observes.
 
 ## Success Criteria
 
@@ -253,18 +217,18 @@ samples, report every trial plus mean and variance or standard deviation.
 Docker OMP runs execute the agent in a dedicated container instead of using the
 host OMP binary. For `stateful:on`, the adapter uses `/home/stateful` as the
 container runtime home so the isolated OMP `stateful` profile and extension path
-are visible in the container. It rewrites the mounted `$STATEFUL_HOME/config.yml`
-repo registry and `repos/*.json` metadata from host workspace paths to the
-container workspace path `/workspace`.
+are visible in the container. The resulting coordination mode is the V2 default
+awareness mode; enforcement is not implied. It rewrites the mounted
+`$STATEFUL_HOME/config.yml` repo registry and `repos/*.json` metadata from host
+workspace paths to the container workspace path `/workspace`.
 
-Use lifecycle events to distinguish a valid stateful-on Docker run from an OMP
-process that merely completed. A successful stateful-on Docker smoke run should
-show `SessionRegistered`, repeated `SessionHeartbeat`, and `ActivityFinalized`
-events for the nested OMP session. The verified run
-`r110-denovo-one-omp-docker-stateful-onoff-subagent-on` completed the
-stateful-off/stateful-on subagent-on pair with that event sequence. Treat missing
-registration, no heartbeat, or missing finalization as lifecycle evidence
-failure, not as a model-quality result.
+Use lifecycle events to distinguish a valid awareness-enabled Docker run from an
+OMP process that merely completed. A new V2 `stateful:on` Docker smoke run should
+show `presence.registered`, repeated `presence.heartbeat`, and
+`presence.finalized` events for the nested OMP session; a completed handoff also
+emits `handoff.finalized`. Do not treat legacy lifecycle labels as V2 evidence.
+Treat missing registration, no heartbeat, or missing finalization as lifecycle
+evidence failure, not as a model-quality result.
 
 Captured orchestration traces now keep the raw `orchestration-trace.json` for
 audit while condition and progress reports carry compact summary fields:
@@ -278,8 +242,8 @@ type, path, or heartbeat gap.
 
 Lifecycle troubleshooting checklist:
 
-- `SessionRegistered` alone is insufficient. Require subsequent nested
-  `SessionHeartbeat` events and `ActivityFinalized` before treating the
+- `presence.registered` alone is insufficient. Require subsequent nested
+  `presence.heartbeat` events and `presence.finalized` before treating the
   stateful-on condition as a valid rollout.
 - If `codex-command.json` or `results.jsonl` shows `omp exited 1` with runtime
   under a few seconds, empty `patch.diff`, and zero subagent spawns, inspect
@@ -327,6 +291,8 @@ Every report should state:
 - whether the run completed or was interrupted
 - whether reported numbers come from `denovo-report.json`,
   `comparison.json`, or raw `results.jsonl`
+- whether the run used a fresh output directory and isolated OMP home, with no
+  reused rows
 - whether any rows have `finish_reason: "benchmark-contamination"`; these rows
   are invalid/non-scored rollouts, not model-quality failures. Record the
   contamination `kind` (`upstream-worktree` or `upstream-source-access`) and the

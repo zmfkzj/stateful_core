@@ -1,9 +1,11 @@
 use clap::{Parser, Subcommand, ValueEnum};
+use stateful_core::{ActorType, SourceKind};
 use std::{
     io::Write,
     net::SocketAddr,
     path::{Path, PathBuf},
     str::FromStr,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 mod codex_benchmark;
@@ -55,14 +57,16 @@ pub use repo_registry::{
 };
 pub use runtime::{
     AgentContext, HttpResponse, ProtocolEnvelopeArgs, ReservationCancelArgs, ReservationClaimArgs,
-    ReservationDeclareArgs, ReservationRequestArgs, ServerRuntime, cancel_reservation_via_http,
-    claim_reservation_via_http, declare_reservation_via_http, discover_runtime,
-    discover_runtime_with_global, discover_runtime_with_optional_global, get_json,
-    global_state_db_path, post_json, protocol_envelope, request_reservation_via_http,
-    reservation_cancel_protocol_body, reservation_claim_protocol_body,
-    reservation_declare_protocol_body, reservation_request_protocol_body,
-    runtime_env_override_is_configured, runtime_from_remote, runtime_has_required_identity,
-    runtime_identity_matches_pid, validate_agent_id, write_global_runtime_file, write_runtime_file,
+    ReservationDeclareArgs, ReservationRequestArgs, RuntimeOrigin, ServerRuntime,
+    cancel_reservation_via_http, claim_reservation_via_http, declare_reservation_via_http,
+    discover_runtime, discover_runtime_with_global, discover_runtime_with_optional_global,
+    get_json, get_v2, global_state_db_path, post_json, post_v2, post_v2_raw, protocol_envelope,
+    replay_v2_request, request_reservation_via_http, reservation_cancel_protocol_body,
+    reservation_claim_protocol_body, reservation_declare_protocol_body,
+    reservation_request_protocol_body, resolve_runtime_origin, runtime_env_override_is_configured,
+    runtime_from_remote, runtime_has_required_identity, runtime_identity_matches_pid,
+    runtime_origin_for_authorization, runtime_status, v2_query_envelope, v2_query_for_runtime,
+    v2_request_envelope, validate_agent_id, write_global_runtime_file, write_runtime_file,
 };
 pub use sandbox::{SandboxFsProfile, SandboxNetworkPolicy};
 pub use server_lifecycle::{
@@ -104,7 +108,7 @@ pub enum Command {
         token: Option<String>,
         #[arg(long, default_value = "local")]
         workspace_id: String,
-        #[arg(long, default_value = "enforcement", value_parser = ["enforcement", "awareness"])]
+        #[arg(long, default_value = "awareness", value_parser = ["enforcement", "awareness"])]
         coordination_mode: String,
     },
     Status,
@@ -191,7 +195,7 @@ pub enum ServerCommand {
         token: Option<String>,
         #[arg(long, default_value = "local")]
         workspace_id: String,
-        #[arg(long, default_value = "enforcement", value_parser = ["enforcement", "awareness"])]
+        #[arg(long, default_value = "awareness", value_parser = ["enforcement", "awareness"])]
         coordination_mode: String,
     },
     Restart,
@@ -379,6 +383,8 @@ pub enum ReservationCommand {
         reservation_id: Option<String>,
         #[arg(long)]
         wait_id: String,
+        #[arg(long)]
+        path: String,
     },
     Cancel {
         #[arg(long = "agent-id")]
@@ -386,7 +392,7 @@ pub enum ReservationCommand {
         #[arg(long = "workspace-id")]
         workspace_id: Option<String>,
         #[arg(long)]
-        request_id: String,
+        wait_id: String,
     },
 }
 
@@ -626,14 +632,42 @@ pub fn run() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::Current => {
-            let (_repo_root, runtime) = discover_runtime_for_current_dir()?;
-            let response = get_json(&runtime, "/v1/current")?;
-            print_http_response(response)?;
+            let (repo_root, runtime) = discover_runtime_for_current_dir()?;
+            let identity = GlobalPaths::from_env()
+                .ok()
+                .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok());
+            let workspace_id = query_workspace_id(&runtime, identity.as_ref());
+            let request = v2_query_for_runtime(
+                uuid::Uuid::new_v4(),
+                "stateful-cli".to_string(),
+                workspace_id,
+                identity,
+                SourceKind::Cli,
+                "current",
+                "stateful-cli",
+                None,
+                serde_json::json!({}),
+            )?;
+            print_http_response(get_v2(&runtime, "/v2/current", &request)?)?;
         }
         Command::Events => {
-            let (_repo_root, runtime) = discover_runtime_for_current_dir()?;
-            let response = get_json(&runtime, "/v1/events")?;
-            print_http_response(response)?;
+            let (repo_root, runtime) = discover_runtime_for_current_dir()?;
+            let identity = GlobalPaths::from_env()
+                .ok()
+                .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok());
+            let workspace_id = query_workspace_id(&runtime, identity.as_ref());
+            let request = v2_query_for_runtime(
+                uuid::Uuid::new_v4(),
+                "stateful-cli".to_string(),
+                workspace_id,
+                identity,
+                SourceKind::Cli,
+                "events",
+                "stateful-cli",
+                None,
+                serde_json::json!({ "limit": 100 }),
+            )?;
+            print_http_response(get_v2(&runtime, "/v2/events", &request)?)?;
         }
         Command::SyncOutbox => {
             let synced = sync_outbox_in_repo(current_repo_root_or_current_dir()?)?;
@@ -846,15 +880,22 @@ pub fn run() -> anyhow::Result<()> {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
             let (agent_id, workspace_id) =
                 resolve_agent_workspace(repo_root.as_path(), &runtime, agent_id, workspace_id)?;
-            let response = post_json(
-                &runtime,
-                "/v1/notifications/poll",
-                &serde_json::json!({
-                    "agent_id": agent_id,
-                    "workspace_id": workspace_id,
-                }),
+            let identity = GlobalPaths::from_env()
+                .ok()
+                .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok());
+            let request = v2_request_envelope(
+                uuid::Uuid::new_v4(),
+                agent_id,
+                workspace_id,
+                identity,
+                ActorType::Agent,
+                SourceKind::Cli,
+                "notifications_poll",
+                "stateful-cli",
+                None,
+                serde_json::json!({}),
             )?;
-            print_http_response(response)?;
+            print_http_response(post_v2(&runtime, "/v2/notifications/poll", &request)?)?;
         }
         Command::Resume(ResumeCommand::Next {
             agent_id,
@@ -863,15 +904,22 @@ pub fn run() -> anyhow::Result<()> {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
             let (agent_id, workspace_id) =
                 resolve_agent_workspace(repo_root.as_path(), &runtime, agent_id, workspace_id)?;
-            let response = post_json(
-                &runtime,
-                "/v1/resume/next",
-                &serde_json::json!({
-                    "agent_id": agent_id,
-                    "workspace_id": workspace_id,
-                }),
+            let identity = GlobalPaths::from_env()
+                .ok()
+                .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok());
+            let request = v2_request_envelope(
+                uuid::Uuid::new_v4(),
+                agent_id,
+                workspace_id,
+                identity,
+                ActorType::Agent,
+                SourceKind::Cli,
+                "resume_next",
+                "stateful-cli",
+                None,
+                serde_json::json!({}),
             )?;
-            print_http_response(response)?;
+            print_http_response(post_v2(&runtime, "/v2/resume/next", &request)?)?;
         }
         Command::Reservation(ReservationCommand::Declare {
             agent_id,
@@ -885,6 +933,7 @@ pub fn run() -> anyhow::Result<()> {
             let response = declare_reservation_via_http(
                 &runtime,
                 ReservationDeclareArgs {
+                    request_id: uuid::Uuid::new_v4(),
                     agent_id,
                     workspace_id,
                     purpose,
@@ -911,9 +960,9 @@ pub fn run() -> anyhow::Result<()> {
             let response = request_reservation_via_http(
                 &runtime,
                 ReservationRequestArgs {
+                    request_id: uuid::Uuid::parse_str(&request_id)?,
                     agent_id,
                     workspace_id,
-                    request_id,
                     reservation_id,
                     action,
                     path,
@@ -929,6 +978,7 @@ pub fn run() -> anyhow::Result<()> {
             agent_id,
             workspace_id,
             wait_id,
+            path,
             reservation_id,
         }) => {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
@@ -937,9 +987,11 @@ pub fn run() -> anyhow::Result<()> {
             claim_reservation_via_http(
                 &runtime,
                 ReservationClaimArgs {
+                    request_id: uuid::Uuid::new_v4(),
                     agent_id,
                     workspace_id,
                     wait_id,
+                    relative_path: path,
                     reservation_id,
                     identity: GlobalPaths::from_env()
                         .ok()
@@ -951,7 +1003,7 @@ pub fn run() -> anyhow::Result<()> {
         Command::Reservation(ReservationCommand::Cancel {
             agent_id,
             workspace_id,
-            request_id,
+            wait_id,
         }) => {
             let (repo_root, runtime) = discover_runtime_for_current_dir()?;
             let (agent_id, workspace_id) =
@@ -959,9 +1011,10 @@ pub fn run() -> anyhow::Result<()> {
             cancel_reservation_via_http(
                 &runtime,
                 ReservationCancelArgs {
+                    request_id: uuid::Uuid::new_v4(),
                     agent_id,
                     workspace_id,
-                    request_id,
+                    wait_id,
                     identity: GlobalPaths::from_env()
                         .ok()
                         .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok()),
@@ -985,28 +1038,28 @@ pub fn run() -> anyhow::Result<()> {
                 Some(agent_id.clone()),
                 workspace_id,
             )?;
-            let body = protocol_envelope(ProtocolEnvelopeArgs {
-                runtime: &runtime,
-                request_id: uuid::Uuid::new_v4().to_string(),
+            let identity = GlobalPaths::from_env()
+                .ok()
+                .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok());
+            let request = v2_request_envelope(
+                uuid::Uuid::new_v4(),
                 agent_id,
                 workspace_id,
-                identity: GlobalPaths::from_env()
-                    .ok()
-                    .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok()),
-                source_kind: "watcher",
-                event: "file_saved",
-                source_ref: "stateful-human-observe",
-                source_tool_name: None,
-                payload: serde_json::json!({
-                    "path": path,
+                identity,
+                ActorType::Human,
+                SourceKind::Watcher,
+                "human_observe",
+                "stateful-human-observe",
+                None,
+                serde_json::json!({
+                    "relative_path": path,
                     "kind": kind,
                     "confidence": confidence,
                     "source": source,
                     "summary": summary
                 }),
-            });
-            let response = post_json(&runtime, "/v1/human/observe", &body)?;
-            print_http_response(response)?;
+            )?;
+            print_http_response(post_v2(&runtime, "/v2/human/observe", &request)?)?;
         }
         Command::Human(HumanCommand::SaveCheck {
             paths,
@@ -1022,15 +1075,22 @@ pub fn run() -> anyhow::Result<()> {
                     })
                     .unwrap_or_else(|| runtime.workspace_id.clone())
             });
-            let response = post_json(
-                &runtime,
-                "/v1/human/save-check",
-                &serde_json::json!({
-                    "workspace_id": workspace_id,
-                    "paths": paths
-                }),
+            let identity = GlobalPaths::from_env()
+                .ok()
+                .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok());
+            let request = v2_request_envelope(
+                uuid::Uuid::new_v4(),
+                "human-watcher".to_string(),
+                workspace_id,
+                identity,
+                ActorType::Human,
+                SourceKind::Cli,
+                "human_save_check",
+                "stateful-human-save-check",
+                None,
+                serde_json::json!({ "paths": paths }),
             )?;
-            print_http_response(response)?;
+            print_http_response(post_v2(&runtime, "/v2/human/save-check", &request)?)?;
         }
         Command::Reconcile(ReconcileCommand::Ack {
             resources,
@@ -1049,21 +1109,29 @@ pub fn run() -> anyhow::Result<()> {
                 Some(agent_id.clone()),
                 workspace_id,
             )?;
-            let response = post_json(
-                &runtime,
-                "/v1/reconcile/ack",
-                &serde_json::json!({
-                    "agent_id": agent_id,
-                    "workspace_id": workspace_id,
-                    "reservation_id": reservation_id,
+            let identity = GlobalPaths::from_env()
+                .ok()
+                .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok());
+            let request = v2_request_envelope(
+                uuid::Uuid::new_v4(),
+                agent_id,
+                workspace_id,
+                identity,
+                ActorType::Agent,
+                SourceKind::Cli,
+                "reconcile_ack",
+                "stateful-reconcile-ack",
+                None,
+                serde_json::json!({
                     "decision": decision,
                     "files_reread": files_reread,
                     "human_change_summary": summary,
                     "resources": resources,
+                    "reservation_id": reservation_id,
                     "conflict_with_plan": conflict_with_plan
                 }),
             )?;
-            print_http_response(response)?;
+            print_http_response(post_v2(&runtime, "/v2/reconcile/ack", &request)?)?;
         }
         Command::Watch(WatchCommand::Run { repo }) => {
             watch::run_watch(repo)?;
@@ -1105,6 +1173,10 @@ fn resolve_agent_workspace(
     Ok((agent_id, workspace_id))
 }
 
+fn query_workspace_id(runtime: &ServerRuntime, identity: Option<&RepoIdentity>) -> String {
+    effective_workspace_id_for_repo(&runtime.workspace_id, identity)
+}
+
 fn print_http_response(response: HttpResponse) -> anyhow::Result<()> {
     println!("{}", response.body);
     if !(200..300).contains(&response.status_code) {
@@ -1131,7 +1203,8 @@ fn run_server(
         workspace_id: workspace_id.clone(),
         coordination_mode: coordination_mode.clone(),
     };
-    let runtime = ServerRuntime::new(&base_url, &token, workspace_id, std::process::id());
+    let mut runtime = ServerRuntime::new(&base_url, &token, workspace_id, std::process::id());
+    runtime.coordination_mode = coordination_mode.clone();
     let store = stateful_store::Store::open(global_state_db_path(&paths))?;
 
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
@@ -1156,6 +1229,38 @@ pub fn state_db_path(repo_root: impl AsRef<Path>) -> std::path::PathBuf {
     repo_root.as_ref().join(".stateful_core").join("state.db")
 }
 
+const DEFAULT_DOCTOR_JOURNAL_THRESHOLD_BYTES: u64 = 512 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DoctorJournalTimeRange {
+    pub earliest: Option<String>,
+    pub latest: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DoctorJournalDiagnostics {
+    pub available: bool,
+    pub size_bytes: u64,
+    pub rows: u64,
+    pub event_types: Vec<String>,
+    pub time_range: DoctorJournalTimeRange,
+    pub growth_bytes: u64,
+    pub growth_status: String,
+    pub threshold_bytes: u64,
+    pub warning: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DoctorRuntimeDiagnostics {
+    pub configured: bool,
+    pub ready: bool,
+    pub protocol_version: Option<String>,
+    pub journal_schema_version: Option<u64>,
+    pub replay_status: String,
+    pub capabilities: Vec<String>,
+    pub coordination_mode: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DoctorReport {
     pub installed: bool,
@@ -1168,7 +1273,171 @@ pub struct DoctorReport {
     pub global_state_db: bool,
     pub repo_enabled: bool,
     pub global_paths_error: Option<String>,
+    pub journal: DoctorJournalDiagnostics,
+    pub runtime: DoctorRuntimeDiagnostics,
+    pub capabilities: Vec<String>,
+    pub coordination_mode: Option<String>,
     pub global_registry_error: Option<String>,
+}
+
+fn doctor_journal_threshold_bytes() -> u64 {
+    std::env::var("STATEFUL_DOCTOR_JOURNAL_THRESHOLD_BYTES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_DOCTOR_JOURNAL_THRESHOLD_BYTES)
+}
+
+const DOCTOR_JOURNAL_BASELINE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct DoctorJournalBaseline {
+    observed_at_unix_seconds: u64,
+    footprint_bytes: u64,
+}
+
+fn doctor_journal_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut file_name = path.file_name().unwrap_or_default().to_os_string();
+    file_name.push(suffix);
+    path.with_file_name(file_name)
+}
+
+fn doctor_journal_footprint_bytes(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
+        .saturating_add(
+            std::fs::metadata(doctor_journal_sidecar_path(path, "-wal"))
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+        )
+}
+
+fn doctor_journal_baseline_path(path: &Path) -> PathBuf {
+    doctor_journal_sidecar_path(path, ".doctor-baseline.json")
+}
+
+fn doctor_journal_baseline_is_recent(baseline: &DoctorJournalBaseline, now: SystemTime) -> bool {
+    UNIX_EPOCH
+        .checked_add(Duration::from_secs(baseline.observed_at_unix_seconds))
+        .and_then(|observed_at| now.duration_since(observed_at).ok())
+        .is_some_and(|age| age <= DOCTOR_JOURNAL_BASELINE_MAX_AGE)
+}
+
+fn write_doctor_journal_baseline(path: &Path, baseline: &DoctorJournalBaseline) -> bool {
+    let Ok(contents) = serde_json::to_vec(baseline) else {
+        return false;
+    };
+    let temp_path = doctor_journal_sidecar_path(path, &format!(".{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
+        file.write_all(&contents)?;
+        file.sync_all()?;
+        std::fs::rename(&temp_path, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temp_path);
+        return false;
+    }
+    true
+}
+
+fn doctor_journal_diagnostics(path: &Path) -> DoctorJournalDiagnostics {
+    let threshold_bytes = doctor_journal_threshold_bytes();
+    let size_bytes = doctor_journal_footprint_bytes(path);
+    let baseline_path = doctor_journal_baseline_path(path);
+    let now = SystemTime::now();
+    let baseline = std::fs::read(&baseline_path)
+        .ok()
+        .and_then(|contents| serde_json::from_slice::<DoctorJournalBaseline>(&contents).ok())
+        .filter(|baseline| doctor_journal_baseline_is_recent(baseline, now));
+    let has_recent_baseline = baseline.is_some();
+    let (growth_bytes, growth_status) = match baseline {
+        Some(baseline) => (
+            size_bytes.saturating_sub(baseline.footprint_bytes),
+            "measured".to_string(),
+        ),
+        None => (0, "baseline_captured".to_string()),
+    };
+    let default = DoctorJournalDiagnostics {
+        available: false,
+        size_bytes,
+        rows: 0,
+        event_types: Vec::new(),
+        time_range: DoctorJournalTimeRange {
+            earliest: None,
+            latest: None,
+        },
+        growth_bytes,
+        growth_status,
+        threshold_bytes,
+        warning: size_bytes >= threshold_bytes,
+    };
+    let mut report = match stateful_store::inspect_journal(path) {
+        Ok(journal) => DoctorJournalDiagnostics {
+            available: true,
+            rows: journal.rows,
+            event_types: journal.event_types,
+            time_range: DoctorJournalTimeRange {
+                earliest: journal.earliest,
+                latest: journal.latest,
+            },
+            ..default
+        },
+        Err(_) => default,
+    };
+    let observed_at_unix_seconds = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let baseline_written = write_doctor_journal_baseline(
+        &baseline_path,
+        &DoctorJournalBaseline {
+            observed_at_unix_seconds,
+            footprint_bytes: size_bytes,
+        },
+    );
+    if !has_recent_baseline && !baseline_written {
+        report.growth_status = "baseline_write_failed".to_string();
+    }
+    report
+}
+
+fn doctor_runtime_diagnostics(paths: &GlobalPaths) -> DoctorRuntimeDiagnostics {
+    let configured_runtime = std::fs::read_to_string(&paths.server_json)
+        .ok()
+        .and_then(|contents| serde_json::from_str::<ServerRuntime>(&contents).ok());
+    let Some(runtime) = configured_runtime else {
+        return DoctorRuntimeDiagnostics {
+            configured: false,
+            ready: false,
+            protocol_version: None,
+            journal_schema_version: None,
+            replay_status: "unavailable".to_string(),
+            capabilities: Vec::new(),
+            coordination_mode: None,
+        };
+    };
+    let Ok(status) = runtime_status(&runtime) else {
+        return DoctorRuntimeDiagnostics {
+            configured: true,
+            ready: false,
+            protocol_version: Some(runtime.protocol_version),
+            journal_schema_version: None,
+            replay_status: "unavailable".to_string(),
+            capabilities: Vec::new(),
+            coordination_mode: None,
+        };
+    };
+    let ready = status.protocol_version == "stateful.v2" && status.journal_schema_version == 2;
+    DoctorRuntimeDiagnostics {
+        configured: true,
+        ready,
+        protocol_version: Some(status.protocol_version),
+        journal_schema_version: Some(status.journal_schema_version),
+        replay_status: if ready { "ready" } else { "unavailable" }.to_string(),
+        capabilities: status.capabilities,
+        coordination_mode: Some(status.coordination_mode),
+    }
 }
 
 pub fn doctor_report(repo_root: impl AsRef<Path>) -> DoctorReport {
@@ -1199,6 +1468,10 @@ pub fn doctor_report_with_global(repo_root: impl AsRef<Path>, paths: &GlobalPath
         Ok(registry) => (registry.is_enabled(repo_root), None),
         Err(error) => (false, Some(error.to_string())),
     };
+    let journal = doctor_journal_diagnostics(&paths.state_db);
+    let runtime = doctor_runtime_diagnostics(paths);
+    let capabilities = runtime.capabilities.clone();
+    let coordination_mode = runtime.coordination_mode.clone();
 
     DoctorReport {
         installed: (codex_config_toml || paths.config_yml.is_file()) && config_yml,
@@ -1211,6 +1484,10 @@ pub fn doctor_report_with_global(repo_root: impl AsRef<Path>, paths: &GlobalPath
         global_state_db: paths.state_db.is_file(),
         repo_enabled,
         global_paths_error: None,
+        journal,
+        runtime,
+        capabilities,
+        coordination_mode,
         global_registry_error,
     }
 }
@@ -1267,7 +1544,7 @@ fn default_config_yml() -> &'static str {
     r#"# stateful-core repo policy config
 # These are informational target defaults for this repository.
 # Runtime loading of these keys is not yet shipped.
-protocol_version: stateful.v1
+protocol_version: stateful.v2
 intent_ttl_seconds: 900
 intent_max_seconds: 3600
 claim_ttl_seconds: 300
@@ -1347,5 +1624,42 @@ mod tests {
         assert_eq!(rendered.stderr, b"");
         assert_eq!(body["status"], "ok");
         assert_eq!(body["processes"], serde_json::json!([{ "pid": 202 }]));
+    }
+    #[test]
+    fn current_and_events_query_the_enabled_repo_workspace_identity() {
+        let runtime = ServerRuntime::new("http://127.0.0.1:43873", "token", "local", 0);
+        let identity = RepoIdentity {
+            repo_id: "repo-abc123".to_string(),
+            worktree_id: "worktree-def456".to_string(),
+            root: "/repo".to_string(),
+            branch: "main".to_string(),
+        };
+
+        assert_eq!(
+            query_workspace_id(&runtime, Some(&identity)),
+            effective_workspace_id_for_repo("local", Some(&identity)),
+            "enabled repo queries must use the hook workspace derivation"
+        );
+        assert_eq!(
+            query_workspace_id(&runtime, None),
+            "local",
+            "outside a repository queries retain the global workspace"
+        );
+        let request = v2_query_for_runtime(
+            uuid::Uuid::new_v4(),
+            "stateful-cli".to_string(),
+            query_workspace_id(&runtime, Some(&identity)),
+            Some(identity),
+            SourceKind::Cli,
+            "current",
+            "stateful-cli",
+            None,
+            serde_json::json!({}),
+        )
+        .expect("enabled repo query should build");
+        let body = serde_json::to_value(request).expect("query should serialize");
+        assert_eq!(body["workspace_id"], "workspace-worktree-def456");
+        assert_eq!(body["repo_id"], "repo-abc123");
+        assert_eq!(body["worktree_id"], "worktree-def456");
     }
 }

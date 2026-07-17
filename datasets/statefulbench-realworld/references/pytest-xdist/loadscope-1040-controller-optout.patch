@@ -1,0 +1,18 @@
+diff --git a/src/xdist/scheduler/loadscope.py b/src/xdist/scheduler/loadscope.py
+--- a/src/xdist/scheduler/loadscope.py
++++ b/src/xdist/scheduler/loadscope.py
+@@ -364,9 +364,14 @@ class LoadScopeScheduling:
+         if not self.collection:
+             return
+ 
++        controller_runner = getattr(self.config.option, "loadscopecontroller", None)
++
+         # Determine chunks of work (scopes)
+         unsorted_workqueue: dict[str, dict[str, bool]] = {}
+         for nodeid in self.collection:
++            if controller_runner is not None and controller_runner(nodeid):
++                continue
++
+             scope = self._split_scope(nodeid)
+             work_unit = unsorted_workqueue.setdefault(scope, {})
+             work_unit[nodeid] = False

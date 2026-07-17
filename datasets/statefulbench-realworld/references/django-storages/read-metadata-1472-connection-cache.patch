@@ -1,0 +1,60 @@
+--- a/storages/backends/s3.py
++++ b/storages/backends/s3.py
+@@ -310,6 +310,7 @@ class S3Storage(CompressStorageMixin, BaseStorage):
+     # If config provided in subclass, signature_version and addressing_style
+     # settings/args are ignored.
+     config = None
++    _connection_cache = threading.local()
+ 
+     _signers = {}  # noqa: RUF012
+ 
+@@ -457,15 +458,41 @@ class S3Storage(CompressStorageMixin, BaseStorage):
+ 
+     @property
+     def connection(self):
+         connection = getattr(self._connections, "connection", None)
+         if connection is None:
+-            session = self._create_session()
+-            self._connections.connection = session.resource(
+-                "s3",
+-                region_name=self.region_name,
+-                use_ssl=self.use_ssl,
+-                endpoint_url=self.endpoint_url,
+-                config=self.client_config,
+-                verify=self.verify,
++            def freeze(value):
++                if isinstance(value, dict):
++                    return tuple(
++                        sorted((key, freeze(item)) for key, item in value.items())
++                    )
++                if isinstance(value, (list, tuple)):
++                    return tuple(freeze(item) for item in value)
++                return value
++
++            cache_key = (
++                self.session_profile,
++                self.access_key,
++                self.secret_key,
++                self.security_token,
++                self.region_name,
++                self.use_ssl,
++                self.endpoint_url,
++                self.verify,
++                freeze(self.client_config.__dict__),
+             )
++            connections = getattr(self._connection_cache, "connections", {})
++            connection = connections.get(cache_key)
++            if connection is None:
++                session = self._create_session()
++                connection = session.resource(
++                    "s3",
++                    region_name=self.region_name,
++                    use_ssl=self.use_ssl,
++                    endpoint_url=self.endpoint_url,
++                    config=self.client_config,
++                    verify=self.verify,
++                )
++                connections[cache_key] = connection
++                self._connection_cache.connections = connections
++            self._connections.connection = connection
+         return self._connections.connection

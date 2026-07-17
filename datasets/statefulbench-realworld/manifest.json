@@ -1,0 +1,162 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-11T10:13:40Z",
+  "repositories": [
+    {
+      "key": "requests",
+      "requested_url": "https://github.com/psf/requests",
+      "canonical_url": "https://github.com/psf/requests",
+      "commit": "f361ead047be5cb873174218582f7d8b9fcd9f49",
+      "archive_url": "https://github.com/psf/requests/archive/f361ead047be5cb873174218582f7d8b9fcd9f49.tar.gz",
+      "archive_sha256": "7f60df8524d7a042f604a4176cc64777f6543037ab96dc4adaaabff55ada28fd",
+      "python": "3.14.6",
+      "setup": ["python", "-m", "pip", "install", "--group", "test", "-e", "."],
+      "suite": ["python", "-m", "pytest", "-q", "--deselect=tests/test_requests.py::TestRequests::test_empty_stream_with_auth_does_not_set_content_length_header", "--deselect=tests/test_requests.py::TestRequests::test_invalid_ssl_certificate_files", "--deselect=tests/test_requests.py::TestRequests::test_cookie_quote_wrapped"],
+      "metadata": {
+        "exclusions": {
+          "--deselect=tests/test_requests.py::TestRequests::test_empty_stream_with_auth_does_not_set_content_length_header": "Pinned Requests task contract restores chunked/no-Content-Length handling for authenticated empty seekable streams; upstream test asserts the superseded behavior.",
+          "--deselect=tests/test_requests.py::TestRequests::test_invalid_ssl_certificate_files": "Pinned Requests task contract requires structured FileNotFoundError for all missing certificate forms; upstream test asserts legacy IOError text.",
+          "--deselect=tests/test_requests.py::TestRequests::test_cookie_quote_wrapped": "Pinned Requests task contract preserves byte-for-byte escaped cookie quotes; upstream test asserts the superseded unwrapped value."
+        }
+      },
+      "corpus": "repos/requests.json"
+    },
+    {
+      "key": "jsonschema",
+      "requested_url": "https://github.com/python-jsonschema/jsonschema",
+      "canonical_url": "https://github.com/python-jsonschema/jsonschema",
+      "commit": "97c044c48d6c6c08f88142ad27edc590f2a2cb07",
+      "archive_url": "https://github.com/python-jsonschema/jsonschema/archive/97c044c48d6c6c08f88142ad27edc590f2a2cb07.tar.gz",
+      "archive_sha256": "1d5bef7a24de2bec70a7840fef22cbaa5b169cf5159a0194635a7720eaa19a75",
+      "python": "3.14.6",
+      "setup": ["python", "-m", "pip", "install", "--group", "test", "-e", ".", "pytest"],
+      "suite": ["python", "-m", "pytest", "-q", "--deselect=jsonschema/tests/test_validators.py::TestValidationErrorDetails::test_anyOf", "--deselect=jsonschema/tests/test_validators.py::TestValidationErrorDetails::test_type", "--deselect=jsonschema/tests/test_validators.py::TestValidationErrorDetails::test_ref_sibling"],
+      "metadata": {
+        "exclusions": {
+          "--deselect=jsonschema/tests/test_validators.py::TestValidationErrorDetails::test_anyOf": "Pinned jsonschema task contract includes the parent branch index in child relative_schema_path; upstream test asserts the superseded root-relative path.",
+          "--deselect=jsonschema/tests/test_validators.py::TestValidationErrorDetails::test_type": "Pinned jsonschema task contract includes the parent branch index in child relative_schema_path; upstream test asserts the superseded root-relative path.",
+          "--deselect=jsonschema/tests/test_validators.py::TestValidationErrorDetails::test_ref_sibling": "Pinned jsonschema task contract retains referenced-child relative_schema_path; upstream test asserts the superseded root/reference-site path."
+        }
+      },
+      "corpus": "repos/jsonschema.json"
+    },
+    {
+      "key": "pytest-asyncio",
+      "requested_url": "https://github.com/pytest-dev/pytest-asyncio",
+      "canonical_url": "https://github.com/pytest-dev/pytest-asyncio",
+      "commit": "66253978d8518925d3f5d2c12615fd7005b63080",
+      "archive_url": "https://github.com/pytest-dev/pytest-asyncio/archive/66253978d8518925d3f5d2c12615fd7005b63080.tar.gz",
+      "archive_sha256": "6715e3e9991cce7fb56ab50e19ceee46c5528ed4817ff9375eab8ab23612cf1d",
+      "python": "3.14.6",
+      "setup": ["python", "-m", "pip", "install", "-e", ".[testing]", "pytest==8.4.2"],
+      "suite": ["python", "-m", "pytest", "-q", "--deselect=tests/test_set_event_loop.py::test_asyncio_run_after_async_fixture_does_not_leak_loop"],
+      "metadata": {
+        "exclusions": {
+          "--deselect=tests/test_set_event_loop.py::test_asyncio_run_after_async_fixture_does_not_leak_loop": "Pinned CPython 3.14.6 with every supported pytest version reproduces pytest-asyncio's duplicate-plugin warning, promoted to error by this upstream test."
+        }
+      },
+      "corpus": "repos/pytest-asyncio.json"
+    },
+    {
+      "key": "pytest-xdist",
+      "requested_url": "https://github.com/pytest-dev/pytest-xdist",
+      "canonical_url": "https://github.com/pytest-dev/pytest-xdist",
+      "commit": "f63b6a25b4eb932385c6ee4651eac5c08fbd3a20",
+      "archive_url": "https://github.com/pytest-dev/pytest-xdist/archive/f63b6a25b4eb932385c6ee4651eac5c08fbd3a20.tar.gz",
+      "archive_sha256": "d035858bc41d5aa126e54a3edf8af4a4e871d0b7e5383211da767ab50ad6d511",
+      "python": "3.14.6",
+      "setup": ["python", "-m", "pip", "install", "-e", ".[testing]", "pytest==8.4.2"],
+      "suite": ["python", "-m", "pytest", "-q"],
+      "corpus": "repos/pytest-xdist.json"
+    },
+    {
+      "key": "click",
+      "requested_url": "https://github.com/pallets/click",
+      "canonical_url": "https://github.com/pallets/click",
+      "commit": "b67832c2167e5b0ff6764a8c04a0a9087e697b5a",
+      "archive_url": "https://github.com/pallets/click/archive/b67832c2167e5b0ff6764a8c04a0a9087e697b5a.tar.gz",
+      "archive_sha256": "bc2f89f9b4687d51ca6ff592f6de34a9f8f97c49b4637c84eabd6a8df16ed1d2",
+      "python": "3.14.6",
+      "setup": ["python", "-m", "pip", "install", "--group", "tests", "-e", "."],
+      "suite": ["python", "-m", "pytest", "-q"],
+      "corpus": "repos/click.json"
+    },
+    {
+      "key": "django-storages",
+      "requested_url": "https://github.com/jschneier/django-storages",
+      "canonical_url": "https://github.com/jschneier/django-storages",
+      "commit": "ca89a94a7462a2423df460e7bfd5f847457042ca",
+      "archive_url": "https://github.com/jschneier/django-storages/archive/ca89a94a7462a2423df460e7bfd5f847457042ca.tar.gz",
+      "archive_sha256": "e0a0a36d3b1470776b6463e5dcd44c805fd31ccd3090110ea16936c176d90fab",
+      "python": "3.14.6",
+      "setup": ["python", "-m", "pip", "install", "-e", ".[azure,boto3,dropbox,google,libcloud,sftp]", "cryptography", "moto", "pytest", "pytest-cov", "rsa"],
+      "suite": ["python", "-m", "pytest", "-q", "--deselect=tests/test_s3.py::S3StorageTests::test_auth_config", "--deselect=tests/test_s3.py::S3StorageTests::test_pickle_with_bucket", "--deselect=tests/test_s3.py::S3StorageTests::test_security_token", "--deselect=tests/test_s3.py::S3StorageTests::test_url_unsigned"],
+      "environment": {"DJANGO_SETTINGS_MODULE": "tests.settings", "AWS_CONFIG_FILE": "tests/no_such_file.conf"},
+      "metadata": {
+        "exclusions": {
+          "--deselect=tests/test_s3.py::S3StorageTests::test_auth_config": "Pinned django-storages task contract removes legacy credential aliases; upstream test asserts the superseded behavior.",
+          "--deselect=tests/test_s3.py::S3StorageTests::test_pickle_with_bucket": "Pinned django-storages task contract defines the cache/pickle model; upstream test asserts the superseded behavior.",
+          "--deselect=tests/test_s3.py::S3StorageTests::test_security_token": "Pinned django-storages task contract removes the token alias; upstream test asserts the superseded behavior.",
+          "--deselect=tests/test_s3.py::S3StorageTests::test_url_unsigned": "Pinned django-storages task contract defines unsigned URL endpoint behavior; upstream test asserts the superseded behavior."
+        }
+      },
+      "corpus": "repos/django-storages.json"
+    },
+    {
+      "key": "attrs",
+      "requested_url": "https://github.com/python-attrs/attrs",
+      "canonical_url": "https://github.com/python-attrs/attrs",
+      "commit": "45de9beb093d2142517ab7d1ebda6522e3d3c4ac",
+      "archive_url": "https://github.com/python-attrs/attrs/archive/45de9beb093d2142517ab7d1ebda6522e3d3c4ac.tar.gz",
+      "archive_sha256": "b330a639611e08fcfd54baaf3780d364c5e9bec44ab33fda961f0fe6956daffd",
+      "python": "3.14.6",
+      "setup": ["python", "-m", "pip", "install", "--group", "tests", "-e", "."],
+      "suite": ["python", "-m", "pytest", "-q"],
+      "environment": {"SETUPTOOLS_SCM_PRETEND_VERSION": "26.1.1.dev24"},
+      "corpus": "repos/attrs.json"
+    },
+    {
+      "key": "watchdog",
+      "requested_url": "https://github.com/gorakhargosh/watchdog",
+      "canonical_url": "https://github.com/gorakhargosh/watchdog",
+      "commit": "c9edf3296d9edb9afded6adfaf3987e87ca8f928",
+      "archive_url": "https://github.com/gorakhargosh/watchdog/archive/c9edf3296d9edb9afded6adfaf3987e87ca8f928.tar.gz",
+      "archive_sha256": "a6e12fd17e2706161733cf111e7cd899a15b7e8a8f66540239c57e1a60d3d40d",
+      "python": "3.14.6",
+      "setup": ["python", "-m", "pip", "install", "-r", "requirements-tests.txt", "-e", ".[watchmedo]"],
+      "suite": ["python", "-m", "pytest", "-q", "-p", "no:cov", "-o", "addopts=--showlocals -vvv", "--ignore=tests/test_emitter.py", "--ignore=tests/test_fsevents.py", "--deselect=tests/test_0_watchmedo.py::test_tricks_from_file"],
+      "metadata": {
+        "exclusions": {
+          "--ignore=tests/test_emitter.py": "Pinned CPython 3.14.6 on the macOS sandbox crashes Watchdog's FSEvents-backed emitter tests.",
+          "--ignore=tests/test_fsevents.py": "Pinned CPython 3.14.6 on the macOS sandbox cannot run native FSEvents stream tests without a crash.",
+          "--deselect=tests/test_0_watchmedo.py::test_tricks_from_file": "Pinned CPython 3.14.6 on the macOS sandbox crashes test_tricks_from_file."
+        }
+      },
+      "corpus": "repos/watchdog.json"
+    },
+    {
+      "key": "pendulum",
+      "requested_url": "https://github.com/sdispater/pendulum",
+      "canonical_url": "https://github.com/python-pendulum/pendulum",
+      "commit": "5ad098bc7b74d660679f0606673728042b9d4aca",
+      "archive_url": "https://github.com/python-pendulum/pendulum/archive/5ad098bc7b74d660679f0606673728042b9d4aca.tar.gz",
+      "archive_sha256": "d49ad8f8c6f43a18c3744dec61730fb369cf91dc77bb1c23df3360ae76d11397",
+      "python": "3.14.6",
+      "setup": ["python", "-m", "pip", "install", "-e", ".[test]", "pytest", "pytest-benchmark"],
+      "suite": ["python", "-m", "pytest", "-q"],
+      "corpus": "repos/pendulum.json"
+    },
+    {
+      "key": "authlib",
+      "requested_url": "https://github.com/authlib/authlib",
+      "canonical_url": "https://github.com/authlib/authlib",
+      "commit": "5cb26721a39f74a196304e90fa5ae8d31925fd4a",
+      "archive_url": "https://github.com/authlib/authlib/archive/5cb26721a39f74a196304e90fa5ae8d31925fd4a.tar.gz",
+      "archive_sha256": "c7e7818a31fd3ee7be4e370786974f92eb6c4f90f24efeeb6d3ea02fb0aca6e2",
+      "python": "3.14.6",
+      "setup": ["python", "-m", "pip", "install", "--group", "dev", "--group", "clients", "--group", "django", "--group", "flask", "--group", "jose", "-e", ".", "joserfc==1.6.1"],
+      "suite": ["python", "-m", "pytest", "-q"],
+      "corpus": "repos/authlib.json"
+    }
+  ]
+}

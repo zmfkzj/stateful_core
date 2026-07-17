@@ -1,0 +1,23 @@
+diff --git a/authlib/oidc/core/grants/code.py b/authlib/oidc/core/grants/code.py
+--- a/authlib/oidc/core/grants/code.py
++++ b/authlib/oidc/core/grants/code.py
+@@ -143,7 +143,18 @@ class OpenIDCode(OpenIDToken):
+         raise NotImplementedError()
+ 
+     def validate_openid_authorization_request(self, grant, redirect_uri):
+-        validate_nonce(grant.request, self.exists_nonce, self.require_nonce)
++        request = grant.request
++        validate_nonce(request, self.exists_nonce, self.require_nonce)
++
++        max_age = request.payload.data.get("max_age")
++        if max_age is not None:
++            if not isinstance(max_age, str) or not (
++                max_age.isascii() and max_age.isdecimal()
++            ):
++                from authlib.oauth2.rfc6749 import InvalidRequestError
++
++                raise InvalidRequestError("Invalid 'max_age' parameter.")
++            request.max_age = int(max_age)
+ 
+     def __call__(self, grant):
+         grant.register_hook("after_create_token_response", self.process_token)

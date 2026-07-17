@@ -1,0 +1,14 @@
+diff --git a/src/attr/_make.py b/src/attr/_make.py
+--- a/src/attr/_make.py
++++ b/src/attr/_make.py
+@@ -814,7 +814,9 @@ class _ClassBuilder:
+             getattr(cls, "__attrs_init_subclass__", None)
+             and "__attrs_init_subclass__" not in cls.__dict__
+         ):
+-            cls.__attrs_init_subclass__()
++            cls.__attrs_init_subclass__(
++                **cls.__dict__.get("__attrs_init_subclass_kwargs__", {})
++            )
+ 
+         return cls
+ 

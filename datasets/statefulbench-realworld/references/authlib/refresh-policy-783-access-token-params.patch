@@ -1,0 +1,15 @@
+diff --git a/authlib/oauth2/client.py b/authlib/oauth2/client.py
+--- a/authlib/oauth2/client.py
++++ b/authlib/oauth2/client.py
+@@ -309,7 +309,9 @@ class OAuth2Client:
+             self.refresh_token(url, refresh_token=refresh_token)
+             return True
+         elif self.metadata.get("grant_type") == "client_credentials":
+             access_token = token["access_token"]
+-            new_token = self.fetch_token(url, grant_type="client_credentials")
++            params = dict(self.metadata.get("access_token_params") or {})
++            params["grant_type"] = "client_credentials"
++            new_token = self.fetch_token(url, **params)
+             if self.update_token:
+                 self.update_token(new_token, access_token=access_token)
+             return True

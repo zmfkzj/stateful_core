@@ -1,0 +1,28 @@
+diff --git a/src/watchdog/observers/api.py b/src/watchdog/observers/api.py
+--- a/src/watchdog/observers/api.py
++++ b/src/watchdog/observers/api.py
+@@ -304,6 +304,6 @@ class BaseObserver(EventDispatcher):
+     def schedule(
+         self,
+-        event_handler: FileSystemEventHandler,
++        event_handler: FileSystemEventHandler | None,
+         path: str | Path,
+         *,
+         recursive: bool = False,
+@@ -338,6 +338,7 @@ class BaseObserver(EventDispatcher):
+         """
+         with self._lock:
+             watch = ObservedWatch(path, recursive=recursive, event_filter=event_filter, follow_symlink=follow_symlink)
+-            self._add_handler_for_watch(event_handler, watch)
++            if event_handler is not None:
++                self._add_handler_for_watch(event_handler, watch)
+ 
+             # If we don't have an emitter for this watch already, create it.
+@@ -397,5 +398,5 @@ class BaseObserver(EventDispatcher):
+         """
+         with self._lock:
+             emitter = self._emitter_for_watch[watch]
+-            del self._handlers[watch]
++            self._handlers.pop(watch, None)
+             self._remove_emitter(emitter)
+             self._watches.remove(watch)

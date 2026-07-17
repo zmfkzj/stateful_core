@@ -100,7 +100,12 @@ fn install_yes_creates_global_files_and_database() {
     assert_eq!(registry, RepoRegistry::default());
 
     let store = stateful_store::Store::open(&fixture.paths.state_db).expect("store should open");
-    assert_eq!(store.event_count().expect("event count should load"), 0);
+    assert_eq!(
+        store
+            .journal_event_count()
+            .expect("event count should load"),
+        0
+    );
 }
 
 #[test]
@@ -137,7 +142,12 @@ fn install_codex_yes_creates_global_files_and_merges_codex_config() {
     assert_eq!(registry, RepoRegistry::default());
 
     let store = stateful_store::Store::open(&fixture.paths.state_db).expect("store should open");
-    assert_eq!(store.event_count().expect("event count should load"), 0);
+    assert_eq!(
+        store
+            .journal_event_count()
+            .expect("event count should load"),
+        0
+    );
 
     let first_config = fs::read_to_string(&fixture.codex_config).expect("codex config should read");
     assert!(first_config.contains("# stateful-core-global-install"));
@@ -165,6 +175,26 @@ fn install_codex_yes_creates_global_files_and_merges_codex_config() {
         "[[hooks.PostToolUse]]\nmatcher = \"Bash|apply_patch|Edit|Write|file_change|mcp__filesystem__.*\""
     ));
     assert_eq!(count(&first_config, "[features]"), 1);
+
+    let installed_policy = fs::read_to_string(
+        fixture
+            .codex_config_parent()
+            .join("skills/stateful-command-policy/SKILL.md"),
+    )
+    .expect("installed command policy should read");
+    let source_policy = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/stateful-command-policy/SKILL.md"),
+    )
+    .expect("source command policy should read");
+    assert_eq!(installed_policy, source_policy);
+    assert!(
+        installed_policy.contains("Awareness is the default coordination mode."),
+        "installed policy must make awareness the default"
+    );
+    assert!(
+        !installed_policy.contains("enforcement mode by default"),
+        "installed policy must not instruct enforcement by default"
+    );
 
     apply_codex_install(fixture.codex_options(true)).expect("install should be idempotent");
 
@@ -356,11 +386,13 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
     assert!(extension.contains("validateOmpLinePatchBases"));
     assert!(extension.contains("line === \"*** Begin Patch\""));
     assert!(extension.contains("import { spawnSync } from \"node:child_process\""));
-    assert!(extension.contains("import { createHash } from \"node:crypto\""));
+    assert!(extension.contains("import { createHash, randomUUID } from \"node:crypto\""));
     assert!(extension.contains(
         "import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from \"node:fs\""
     ));
-    assert!(extension.contains("import { delimiter, dirname, resolve } from \"node:path\""));
+    assert!(
+        extension.contains("import { delimiter, dirname, relative, resolve } from \"node:path\"")
+    );
     assert!(extension.contains("import { fileURLToPath } from \"node:url\""));
     assert!(
         extension
@@ -368,11 +400,11 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
     );
     assert!(extension.contains("process.env.HOME"));
     assert!(extension.contains(".omp/profiles/stateful/agent/config.yml"));
-    assert!(extension.contains("function startReservationStream(pi, stream)"));
-    assert!(extension.contains("/v1/notifications/stream?agent_id="));
-    assert!(extension.contains("let reservationStreamLastEventId = \"\";"));
+    assert!(extension.contains("function startContextStream(pi, stream)"));
+    assert!(extension.contains("/v2/notifications/stream?"));
+    assert!(extension.contains("let contextStreamLastEventId = \"\";"));
     assert!(extension.contains("if (line.startsWith(\"id:\")) id = line.slice(3).trim();"));
-    assert!(extension.contains("headers[\"last-event-id\"] = reservationStreamLastEventId;"));
+    assert!(extension.contains("headers[\"last-event-id\"] = contextStreamLastEventId;"));
     assert!(extension.contains("customType: \"stateful_reservation_ready\""));
     assert!(extension.contains("function notificationTargetsStreamAgent(notification, stream)"));
     assert!(
@@ -380,14 +412,13 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
             .contains("if (!notificationTargetsStreamAgent(notification, stream)) return true;")
     );
     assert!(extension.contains("return false;"));
-    assert!(extension.contains(
-        "deliverReservationNotification(pi, JSON.parse(data.join(\"\\n\")), stream) && id"
-    ));
+    assert!(extension.contains("processContextNotification(pi, notification, stream, event)"));
+    assert!(extension.contains("if (id) contextStreamLastEventId = id;"));
     assert!(extension.contains("purpose: \" + purpose.trim()"));
     assert!(extension.contains("const purpose = payload.purpose"));
     assert!(extension.contains("typeof purpose === \"string\" && purpose.trim().length > 0"));
-    assert!(extension.contains("startReservationStream(pi, result?.notifications_stream)"));
-    assert!(extension.contains("stopReservationStream();"));
+    assert!(extension.contains("startContextStream(pi, stream)"));
+    assert!(extension.contains("stopContextStream();"));
     assert!(extension.contains("ctx.ui.confirm"));
     assert!(extension.contains("const externalBashGrants = new Map()"));
     assert!(extension.contains("function externalGrantDescriptor(params)"));
@@ -707,7 +738,7 @@ fn install_codex_yes_creates_global_command_policy_skill() {
     assert!(command_policy_skill.contains("Support Files"));
     assert!(command_policy_skill.contains("state_reservation_declare"));
     assert!(command_policy_skill.contains("state_claim_acquire"));
-    assert!(command_policy_skill.contains("copy the exact active name"));
+    assert!(command_policy_skill.contains("Call only names shown in the active tool list"));
     for (name, marker) in [
         ("omp-tools.md", "Use OMP-Native Stateful Tools"),
         (

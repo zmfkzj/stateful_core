@@ -1,0 +1,20 @@
+diff --git a/storages/backends/s3.py b/storages/backends/s3.py
+--- a/storages/backends/s3.py
++++ b/storages/backends/s3.py
+@@ -467,7 +467,7 @@ def connection(self):
+                 use_ssl=self.use_ssl,
+                 endpoint_url=self.endpoint_url,
+                 config=self.client_config,
+-                verify=self.verify,
++                verify=False if self.verify == "False" else self.verify,
+             )
+         return self._connections.connection
+ 
+@@ -485,6 +485,6 @@ def unsigned_connection(self):
+                 use_ssl=self.use_ssl,
+                 endpoint_url=self.endpoint_url,
+                 config=config,
+-                verify=self.verify,
++                verify=False if self.verify == "False" else self.verify,
+             )
+         return self._unsigned_connections.connection

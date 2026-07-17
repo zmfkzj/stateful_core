@@ -1,0 +1,189 @@
+{
+  "repository": "pallets/click",
+  "issue_snapshot": "issues/click.json",
+  "tasks": [
+    {
+      "key": "formatting-3362-hyphen-usage",
+      "kind": "bug",
+      "sources": ["https://github.com/pallets/click/issues/3362"],
+      "source_hash": "b1d56dd9dc53f9c2d4503f03562c74ef5fbfef862811300624b9c1c0fdeb0b31",
+      "prompt": "Fix open issue #3362 in click.formatting.HelpFormatter.write_usage. At a width boundary, keep a hyphenated usage argument intact and move it to the next line rather than splitting it after a hyphen. Restrict this policy to usage rendering so ordinary help-text wrapping remains unchanged; preserve visible-width handling for ANSI-styled arguments and normal short options.",
+      "acceptance": [
+        "At width 65, the issue reproduction renders every long hyphenated option whole, on the five expected usage lines.",
+        "Usage wrapping does not split a hyphenated option merely because it exceeds the remaining line width.",
+        "ANSI-styled usage arguments continue to wrap by visible width and retain their style escape sequences.",
+        "The no-hyphen policy is limited to click.formatting.HelpFormatter.write_usage; generic wrap_text retains its default hyphen splitting."
+      ],
+      "overlap_anchors": [{"path": "src/click/formatting.py", "symbol": "click.formatting.HelpFormatter"}],
+      "evaluator": "evaluators/click/formatting-3362-hyphen-usage.py",
+      "reference_patch": "references/click/formatting-3362-hyphen-usage.patch"
+    },
+    {
+      "key": "formatting-3652-multiple-metavar",
+      "kind": "feature",
+      "sources": ["https://github.com/pallets/click/issues/3652"],
+      "source_hash": "69117bd1bcb2651ab69818275c6ab29199d6cc6ac9471c5af1d74bd17d93a670",
+      "prompt": "Implement open feature #3652 by making click.option(..., multiple=True) show an ellipsis after its option metavar in generated help. Put the presentation policy in click.formatting.HelpFormatter and call it from Option.get_help_record. Add exactly one ellipsis for a repeatable value option, but do not add a metavar or ellipsis to repeated flags, and leave single-value options unchanged.",
+      "acceptance": [
+        "A repeatable -t/--tag value option is rendered as -t, --tag TEXT... in generated help.",
+        "A repeatable composite --pair option remains rendered with one trailing ellipsis as --pair <TEXT INTEGER>....",
+        "A non-repeatable --single option remains --single TEXT with no ellipsis.",
+        "A repeated boolean flag remains -v, --verbose with no value metavar or ellipsis.",
+        "Option.get_help_record delegates metavar rendering to click.formatting.HelpFormatter.format_option_metavar, verified by replacing that formatter method with a sentinel."
+      ],
+      "overlap_anchors": [{"path": "src/click/formatting.py", "symbol": "click.formatting.HelpFormatter"}],
+      "evaluator": "evaluators/click/formatting-3652-multiple-metavar.py",
+      "reference_patch": "references/click/formatting-3652-multiple-metavar.patch"
+    },
+    {
+      "key": "context-2753-invoke-source",
+      "kind": "bug",
+      "sources": ["https://github.com/pallets/click/issues/2753"],
+      "source_hash": "a2fc75f2b857d00ccdcb8cb98d49fa600842bb787ecfa64192223672c5dd87b2",
+      "prompt": "Fix issue #2753 in click.core.Context. When Context.invoke creates a child context, record DEFAULT or DEFAULT_MAP for values it fills in. When Context.forward passes an exposed parameter, preserve the source already recorded by the calling context; an explicit invocation value without an existing source is COMMANDLINE. Preserve normal nested-context invocation and parameter conversion behavior.",
+      "acceptance": [
+        "Calling Context.invoke for an omitted option records ParameterSource.DEFAULT on the target context.",
+        "Calling Context.invoke with an explicit exposed parameter records ParameterSource.COMMANDLINE when no source exists on the caller.",
+        "Calling Context.forward from a command-line option records ParameterSource.COMMANDLINE on the target context rather than None.",
+        "Calling Context.forward from a default_map value records ParameterSource.DEFAULT_MAP on the target context.",
+        "The change is in src/click/core.py within click.core.Context and leaves parameter values and nested contexts intact."
+      ],
+      "overlap_anchors": [{"path": "src/click/core.py", "symbol": "click.core.Context"}],
+      "evaluator": "evaluators/click/context-2753-invoke-source.py",
+      "reference_patch": "references/click/context-2753-invoke-source.patch"
+    },
+    {
+      "key": "context-2783-dynamic-params",
+      "kind": "feature",
+      "sources": ["https://github.com/pallets/click/issues/2783"],
+      "source_hash": "ea0d022dd01384b41c638b73a748dbd36a5b68d659e49acf19cfeac697f019d2",
+      "prompt": "Implement issue #2783 as an explicit Context API extension. Add a context-local dynamic_params list of Parameter objects, have Command.get_params include those active-context parameters, and add Command.make_dynamic_context to parse the active context's retained arguments against them. Dynamic parsing must use a parsing-only Command with no_args_is_help disabled rather than instantiating a Group with its default help behavior, preserve the active context class and parent, and inherit the active context's default_map unless an explicit default_map is supplied. Context.command_path must query a parent command with that parent Context so dynamic parent parameters are attributed correctly. Retain normal Context cleanup semantics.",
+      "acceptance": [
+        "An eager callback can attach an Option to ctx.dynamic_params and Command.get_params(ctx) exposes it exactly once.",
+        "Command.make_dynamic_context parses an unknown retained option from ctx.args and reports ParameterSource.COMMANDLINE.",
+        "A Group's empty retained-arguments path can create a dynamic context with an inherited default_map without showing no-arguments help, and an explicit default_map overrides that inherited map.",
+        "A child command path includes its parent's dynamic parameter usage while a new child Context starts with an empty dynamic_params list.",
+        "The dynamic child inherits the active context as parent and preserves its context class, and close callbacks registered on a dynamic child run when it exits its context manager."
+      ],
+      "overlap_anchors": [{"path": "src/click/core.py", "symbol": "click.core.Context"}],
+      "evaluator": "evaluators/click/context-2783-dynamic-params.py",
+      "reference_patch": "references/click/context-2783-dynamic-params.patch"
+    },
+    {
+      "key": "group-2033-async-command",
+      "kind": "feature",
+      "sources": ["https://github.com/pallets/click/issues/2033"],
+      "source_hash": "52ef04fda7b3d82cf052f5d904ec61718818291d6d84b6805a25b40a52fd0624",
+      "prompt": "Implement open feature #2033 in click.core.Group.invoke. In normal and chain Group dispatch, await every awaitable parent Group callback and subcommand callback through asyncio.run so a normal synchronous CLI completes it, routes resolved subcommand values through result processing, preserves synchronous callbacks, and propagates callback exceptions. Since synchronous Group.invoke cannot re-enter an established event loop, fail with a Click UsageError and close a coroutine rather than leaking it; the #2360 task supplies the explicit embedding extension.",
+      "acceptance": [
+        "Async Group parent callbacks complete before normal and chain subcommands run under the ordinary synchronous CLI runner.",
+        "Async Group subcommands retain their active Click contexts and resolved values reach result processing.",
+        "Async chained subcommands produce the resolved result list for the Group result callback.",
+        "An exception raised by an async subcommand propagates to the caller and synchronous callbacks remain unchanged.",
+        "Nested invocation from an already-running loop raises Click UsageError without an unawaited-coroutine warning."
+      ],
+      "overlap_anchors": [{"path": "src/click/core.py", "symbol": "click.core.Group.invoke"}],
+      "evaluator": "evaluators/click/group-2033-async-command.py",
+      "reference_patch": "references/click/group-2033-async-command.patch"
+    },
+    {
+      "key": "group-2360-async-embedding",
+      "kind": "feature",
+      "sources": ["https://github.com/pallets/click/issues/2360"],
+      "source_hash": "d2f97dca1fa3cb01f84b65f30f626f00c69780947991152d8c4580219dbe7544",
+      "prompt": "Authorized substitution: planned bug #2402 is replaced by open feature #2360 because #2402 is a bug and cannot satisfy the two-feature Group pair. Implement #2360 as an explicit click.core.Group.invoke embedding extension. When an invoke_without_command Group callback or a Group result callback is awaitable while Click is called from an already-running asyncio loop, run it to completion in a joined worker thread under copied contextvars and the active Click context. Resolve the input before invoking an async result callback, return values, propagate errors, and do not leak an awaitable or attempt nested asyncio.run in the caller loop. Preserve direct synchronous values.",
+      "acceptance": [
+        "Awaitable invoke_without_command and result callbacks complete while the caller owns a running asyncio loop.",
+        "The worker retains both the active Click context and caller ContextVar values.",
+        "Resolved Group and subcommand values reach an async result callback, whose return value reaches the embedding caller.",
+        "Async result callback errors propagate unchanged and the joined worker emits no unawaited-coroutine RuntimeWarning.",
+        "The execution change is in click.core.Group.invoke."
+      ],
+      "overlap_anchors": [{"path": "src/click/core.py", "symbol": "click.core.Group.invoke"}],
+      "evaluator": "evaluators/click/group-2360-async-embedding.py",
+      "reference_patch": "references/click/group-2360-async-embedding.patch"
+    },
+    {
+      "key": "confirm-1370-piped-input",
+      "kind": "bug",
+      "sources": ["https://github.com/pallets/click/issues/1370"],
+      "source_hash": "9e274ab82567ba6335fb62df56778313ab4488ba483bfd3357ed6e9ab8242a2b",
+      "prompt": "Implement the explicit deterministic-input extension of open issue #1370 in click.termui.confirm. Add an optional input_stream TextIO argument. When supplied, emit the existing prompt to the configured output stream and read confirmation lines from input_stream rather than visible_prompt_func or a TTY; an exhausted stream must preserve confirm's Abort behavior. Preserve y/yes and n/no parsing, default handling, invalid-input retries, abort=True, prompt formatting, and the existing interactive path when input_stream is omitted.",
+      "acceptance": [
+        "confirm accepts an input_stream StringIO and returns True for a retried sequence such as maybe then YES without consulting visible_prompt_func or a terminal.",
+        "A blank line from input_stream selects the existing non-None default, and the emitted prompts retain the existing y/N or Y/n formatting.",
+        "An invalid streamed answer emits the existing invalid-input error and retries from the same stream.",
+        "A negative streamed answer with abort=True and an exhausted streamed input both raise click.Abort."
+      ],
+      "overlap_anchors": [{"path": "src/click/termui.py", "symbol": "click.termui.confirm"}],
+      "evaluator": "evaluators/click/confirm-1370-piped-input.py",
+      "reference_patch": "references/click/confirm-1370-piped-input.patch"
+    },
+    {
+      "key": "confirm-1411-custom-type",
+      "kind": "feature",
+      "sources": ["https://github.com/pallets/click/issues/1411"],
+      "source_hash": "807c31ea80b1a7347f1a035a146b991d042638d1e52dc5f47b875a225423f680",
+      "prompt": "Implement the explicit confirm conversion extension motivated by open issue #1411 in click.termui.confirm. Add an optional type argument for an instantiated ParamType that converts non-empty confirmation input to bool. On a UsageError, print its message through confirm's existing error channel and retry. Preserve the existing built-in yes/no parser when type is omitted, preserve blank default selection without calling the custom converter, and preserve abort=True for a custom False result.",
+      "acceptance": [
+        "confirm accepts an instantiated custom ParamType through type and returns its True conversion result for a non-empty answer.",
+        "A UsageError raised by that type is emitted as an Error message and confirm retries until the type converts an answer.",
+        "A custom False conversion with abort=True raises click.Abort.",
+        "A blank answer selects a non-None default without calling the custom type, and the type-omitted y/yes, n/no parser remains unchanged."
+      ],
+      "overlap_anchors": [{"path": "src/click/termui.py", "symbol": "click.termui.confirm"}],
+      "evaluator": "evaluators/click/confirm-1411-custom-type.py",
+      "reference_patch": "references/click/confirm-1411-custom-type.patch"
+    },
+    {
+      "key": "parser-2184-completion-context",
+      "kind": "bug",
+      "sources": ["https://github.com/pallets/click/issues/2184"],
+      "source_hash": "c0f15a30e17662db5d8ff291057f2acde9f24aba19d8e8fb8ec889d991cf9ae9",
+      "prompt": "Authorized substitution: planned #2847 is replaced by open bug #2184 because #2847 belongs to ShellComplete.get_completions, whereas this strict-overlap task must modify click.shell_completion._resolve_context. At every command context that _resolve_context builds, when shell completion receives a completed value followed by an option whose value is currently incomplete, build that context from the completed value instead of allowing the trailing option's missing value to abort resilient parsing. Preserve option completion routing and normal parsing behavior; do not move this policy to ShellComplete.get_completions.",
+      "acceptance": [
+        "A shell completion callback for --choice receives ctx.params with the preceding positional item value when completing flat known --choice <TAB>.",
+        "The same callback receives the preceding positional item value when completing cli sub known --choice <TAB>, proving every descended subcommand context trims its own incomplete option.",
+        "The trailing incomplete --choice option remains unset in either callback context rather than consuming a fabricated value.",
+        "The callback's empty completion result remains an empty completion result.",
+        "The production change is in src/click/shell_completion.py at click.shell_completion._resolve_context, not ShellComplete.get_completions."
+      ],
+      "overlap_anchors": [{"path": "src/click/shell_completion.py", "symbol": "click.shell_completion._resolve_context"}],
+      "evaluator": "evaluators/click/parser-2184-completion-context.py",
+      "reference_patch": "references/click/parser-2184-completion-context.patch"
+    },
+    {
+      "key": "parser-2614-default-callback",
+      "kind": "bug",
+      "sources": ["https://github.com/pallets/click/issues/2614"],
+      "source_hash": "85686adcdb9c12f5f6719eedddcf9c7366b1730c0a38b0b8732709370b8eadfe",
+      "prompt": "Authorized substitution: planned #2771 is replaced by open bug #2614 because #2771 requires click.core.Option and click.parser._OptionParser rather than the required shared click.shell_completion._resolve_context anchor. Completion must not invoke callable parameter defaults while creating every resilient parsing context, including descended subcommands. Keep command-line values and explicitly supplied nested default_map values available to completion callbacks, preserve normal parsing errors and option routing, and keep ordinary command invocation unchanged.",
+      "acceptance": [
+        "Creating completion context for a subcommand with a callable --config default does not invoke that callable.",
+        "The subcommand completion callback sees config and the incomplete choice option as unset rather than seeing the callable's computed result.",
+        "The callback's empty completion result remains an empty completion result.",
+        "An explicitly supplied nested default_map value remains visible to the subcommand completion callback without invoking the callable default.",
+        "An explicitly supplied nested --config command-line value remains visible to the completion callback without invoking the callable default.",
+        "A normal subcommand invocation still invokes the callable default exactly once.",
+        "The production change is in src/click/shell_completion.py at click.shell_completion._resolve_context."
+      ],
+      "overlap_anchors": [{"path": "src/click/shell_completion.py", "symbol": "click.shell_completion._resolve_context"}],
+      "evaluator": "evaluators/click/parser-2614-default-callback.py",
+      "reference_patch": "references/click/parser-2614-default-callback.patch"
+    }
+  ],
+  "final_prompt": "You are the integration reviewer for the Click corpus. Run every listed evaluator against the shared checkout after all ten task patches are applied. Fix every evaluator failure while preserving all task contracts, resolve same-symbol edits without discarding either behavior, and finish only when every evaluator passes.",
+  "evaluators": [
+    "evaluators/click/formatting-3362-hyphen-usage.py",
+    "evaluators/click/formatting-3652-multiple-metavar.py",
+    "evaluators/click/context-2753-invoke-source.py",
+    "evaluators/click/context-2783-dynamic-params.py",
+    "evaluators/click/group-2033-async-command.py",
+    "evaluators/click/group-2360-async-embedding.py",
+    "evaluators/click/confirm-1370-piped-input.py",
+    "evaluators/click/confirm-1411-custom-type.py",
+    "evaluators/click/parser-2184-completion-context.py",
+    "evaluators/click/parser-2614-default-callback.py"
+  ],
+  "integrated_reference_patch": "references/click/integrated.patch"
+}

@@ -12,7 +12,8 @@ SCRIPT_DIR = Path(__file__).resolve().parents[1]
 
 def load_script(name: str) -> ModuleType:
     path = SCRIPT_DIR / name
-    sys.path.insert(0, str(SCRIPT_DIR))
+    if str(SCRIPT_DIR) not in sys.path:
+        sys.path.insert(0, str(SCRIPT_DIR))
     spec = importlib.util.spec_from_file_location(f"{path.stem}_test", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

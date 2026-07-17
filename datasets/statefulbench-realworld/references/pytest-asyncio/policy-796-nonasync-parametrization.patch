@@ -1,0 +1,28 @@
+diff --git a/pytest_asyncio/plugin.py b/pytest_asyncio/plugin.py
+index 38b75e4..dbcb6ad 100644
+--- a/pytest_asyncio/plugin.py
++++ b/pytest_asyncio/plugin.py
+@@ -735,6 +742,14 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
+     asyncio_marker = _resolve_asyncio_marker(metafunc.definition)
+     if asyncio_marker is None:
+         return
++    policy_fixture_name = event_loop_policy.__name__
++    if policy_fixture_name not in metafunc.fixturenames:
++        metafunc.fixturenames.append(policy_fixture_name)
++        fixturedefs = metafunc.definition.session._fixturemanager.getfixturedefs(
++            policy_fixture_name, metafunc.definition
++        )
++        if fixturedefs is not None:
++            metafunc._arg2fixturedefs[policy_fixture_name] = fixturedefs
+     marker_loop_scope, marker_selected_factory_names = _parse_asyncio_marker(
+         asyncio_marker
+     )
+@@ -1074,7 +1081,7 @@ def _asyncio_loop_factory(request: FixtureRequest) -> LoopFactory | None:
+     return getattr(request, "param", None)
+ 
+ 
+-@pytest.fixture(scope="session", autouse=True)
++@pytest.fixture(scope="session")
+ def event_loop_policy() -> AbstractEventLoopPolicy:
+     """Return an instance of the policy used to create asyncio event loops."""
+     return _get_event_loop_policy()

@@ -107,11 +107,7 @@ fn server_join_invalid_token_fails_before_writing() {
     })
     .expect_err("invalid token should fail");
 
-    assert!(
-        error
-            .to_string()
-            .contains("valid stateful runtime identity")
-    );
+    assert!(error.to_string().contains("HTTP 401"));
     assert!(!fixture.paths.server_json.exists());
     assert!(!fixture.codex_config.exists());
 }
@@ -133,7 +129,7 @@ fn server_join_missing_capability_fails_before_writing() {
     })
     .expect_err("missing capability should fail");
 
-    assert!(error.to_string().contains("authorize.write_directory"));
+    assert!(error.to_string().contains("presence"));
     assert!(!fixture.paths.server_json.exists());
     assert!(!fixture.codex_config.exists());
 }
@@ -260,7 +256,7 @@ fn server_start_without_token_reuses_existing_runtime_token() {
         port: host.port(),
         token: None,
         workspace_id: "shared".to_string(),
-        coordination_mode: "enforcement".to_string(),
+        coordination_mode: "awareness".to_string(),
     })
     .expect("server start should reuse existing runtime");
 
@@ -287,7 +283,7 @@ fn server_start_explicit_host_and_workspace_are_reflected_in_join_command() {
         port: host.port(),
         token: Some("secret-token".to_string()),
         workspace_id: "w1".to_string(),
-        coordination_mode: "enforcement".to_string(),
+        coordination_mode: "awareness".to_string(),
     })
     .expect("server start should reuse existing runtime");
 
@@ -394,11 +390,7 @@ impl FakeRuntimeServer {
         let listener = TcpListener::bind("127.0.0.1:0").expect("fake runtime should bind");
         let addr = listener.local_addr().expect("fake addr should be known");
         thread::spawn(move || {
-            for response in [
-                http_response(200, r#"{"status":"ok"}"#),
-                http_response(200, r#"{"status":"ok","current":{}}"#),
-                identity_response(200),
-            ] {
+            for response in [identity_response(200)] {
                 if let Ok((mut stream, _)) = listener.accept() {
                     read_any_request(&mut stream);
                     stream
@@ -423,7 +415,7 @@ fn read_request(stream: &mut TcpStream) {
     let mut buffer = [0_u8; 1024];
     let bytes = stream.read(&mut buffer).expect("request should read");
     let request = String::from_utf8_lossy(&buffer[..bytes]);
-    assert!(request.contains("GET /v1/runtime/identity HTTP/1.1"));
+    assert!(request.contains("GET /v2/runtime/identity?"));
     assert!(
         request.contains("Authorization: Bearer secret-token")
             || request.contains("Authorization: Bearer bad-token")
@@ -448,14 +440,14 @@ fn identity_response_with_pid(status: u16, pid: u32) -> String {
 
 fn identity_body(pid: u32) -> String {
     format!(
-        "{{\"status\":\"ok\",\"pid\":{pid},\"protocol_version\":\"stateful.v1\",\"capabilities\":[\"authorize.write_directory\"]}}"
+        "{{\"protocol_version\":\"stateful.v2\",\"journal_schema_version\":2,\"coordination_mode\":\"awareness\",\"pid\":{pid},\"workspace_id\":\"w1\",\"workspace_version\":1,\"capabilities\":[\"presence\"]}}"
     )
 }
 
 fn identity_response_without_write_dir_capability() -> String {
     http_response(
         200,
-        r#"{"status":"ok","pid":9876,"protocol_version":"stateful.v1","capabilities":[]}"#,
+        r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":9876,"workspace_id":"w1","workspace_version":1,"capabilities":[]}"#,
     )
 }
 

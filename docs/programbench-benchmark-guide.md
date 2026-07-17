@@ -26,7 +26,9 @@ inside a separate agent container instead of on the host. The image must include
 The Docker container is the sandbox boundary, so the adapter sets
 `STATEFUL_OMP_SANDBOX=off` for the in-container `docker exec` by default. When
 Stateful is enabled, the agent container inherits the parent Stateful runtime
-environment so it uses the same server/token. The adapter copies the target
+environment so it uses the same server/token. A discovered parent runtime file
+supplies those credentials only when its `protocol_version` is exactly
+`stateful.v2`; no legacy runtime file is inherited. The adapter copies the target
 workspace into `/workspace`, runs Stateful install/enable and OMP, copies
 `/workspace` back to the host airlock, then uses the existing target container
 smoke compile and archive flow. Copy-back failures are reported as
@@ -57,38 +59,43 @@ the official repository package with Python 3.11.
 
 ## Stateful Comparison Matrix
 
-By default, `stateful-bench programbench run` compares Stateful off versus on
-with subagents enabled:
+By default, `stateful-bench programbench run` compares V2 awareness against no
+Stateful with subagents enabled:
 
 ```text
 stateful:off,subagent:on
 stateful:on,subagent:on
 ```
 
+`stateful:on` uses Stateful's default awareness mode: presence, freshness,
+handoff, rendered context, and advisory intent remain available while thin
+shipped hard stops still apply. Enforcement is opt-in and is not implied by
+this matrix. These are ProgramBench conditions, not the StatefulBench
+real-world runner's three `sequential`, `parallel-off`, and opt-in
+`parallel-on` arms; its `linux/arm64` qualification receipt and six-tool
+identity do not authorize this benchmark.
+
 Use the same instance set, model, image tag, max turns, timeout, and network
 policy across compared conditions. `--timeout-seconds` is passed to the Python
 adapter, and the Rust wrapper enforces that timeout plus a fixed 30-minute
-adapter lifecycle grace.
-Explicit `subagent:off`
-conditions still parse for diagnostic or backwards-compatible runs.
-
-For `stateful:on`, the adapter installs and enables Stateful where the agent
-runs: the host airlock for host CLI mode, or the separate OMP agent container
-when `--agent-docker-image` is set. The target ProgramBench container stays
-available for bundled `./executable` behavior checks and smoke compile.
+adapter lifecycle grace. Explicit `subagent:off` conditions still parse for
+diagnostic or backwards-compatible runs.
 
 
 ## Reliability and Reporting
 
 Use at least three independent trials per condition for stateful/control claims.
 Keep the same instance set or filter, model, Docker image, timeout, max turns,
-and network policy across compared conditions.
+and network policy across compared conditions. Give every invocation a new
+`--run-id`; do not append, merge, or reuse an existing run directory as a new
+trial.
 
 Reports should include each trial, mean, and standard deviation for the primary
 quality metric. Label smoke, debug, interrupted, or partial runs as
-non-comparable. Separate quality claims from efficiency claims: score/resolved
-count establish quality, while wall time, tokens, and score-per-cost metrics
-describe efficiency.
+non-comparable. A credit-free smoke or one model rollout is descriptive only,
+not behavioral-quality, causal, safety, statistical, or superiority evidence.
+Separate quality claims from efficiency claims: score/resolved count establish
+quality, while wall time, tokens, and score-per-cost metrics describe efficiency.
 
 ## Inference Rules
 
@@ -102,13 +109,21 @@ package-manager, source-control, or unrelated host filesystem work.
 
 ## Commands
 
+Set a fresh run ID before launching any model-backed command:
+
+```bash
+RUN_ID="pb-$(date -u +%Y%m%dT%H%M%SZ)"
+```
+
 Run a small Codex matrix over matching instances:
 
 ```bash
 stateful-bench programbench run \
-  --run-id pb-dev \
+  --run-id "$RUN_ID" \
   --agent codex-cli \
   --model gpt-5.4-mini \
+  --condition stateful:off,subagent:on \
+  --condition stateful:on,subagent:on \
   --filter 'ripgrep.*' \
   --max-instances 2
 ```
@@ -118,10 +133,12 @@ ProgramBench's target container as the compile/smoke-test boundary:
 
 ```bash
 stateful-bench programbench run \
-  --run-id pb-omp-docker \
+  --run-id "$RUN_ID" \
   --agent omp-cli \
   --model gpt-5.4-mini \
   --thinking high \
+  --condition stateful:off,subagent:on \
+  --condition stateful:on,subagent:on \
   --filter 'ripgrep.*' \
   --max-instances 2 \
   --agent-docker-image stateful-programbench-omp-agent:local
@@ -138,7 +155,7 @@ Evaluate the run with official ProgramBench tooling:
 
 ```bash
 stateful-bench programbench eval \
-  --run-dir .stateful_bench/programbench/runs/pb-dev \
+  --run-dir ".stateful_bench/programbench/runs/$RUN_ID" \
   --workers 4 \
   --branch-workers 2 \
   --docker-cpus 8
@@ -148,22 +165,22 @@ Write JSON reports for each compared condition:
 
 ```bash
 stateful-bench programbench report \
-  --condition-dir .stateful_bench/programbench/runs/pb-dev/conditions/stateful-off_subagent-on \
+  --condition-dir ".stateful_bench/programbench/runs/$RUN_ID/conditions/stateful-off_subagent-on" \
   --format json \
-  --output .stateful_bench/programbench/runs/pb-dev/reports/stateful-off_subagent-on.json
+  --output ".stateful_bench/programbench/runs/$RUN_ID/reports/stateful-off_subagent-on.json"
 
 stateful-bench programbench report \
-  --condition-dir .stateful_bench/programbench/runs/pb-dev/conditions/stateful-on_subagent-on \
+  --condition-dir ".stateful_bench/programbench/runs/$RUN_ID/conditions/stateful-on_subagent-on" \
   --format json \
-  --output .stateful_bench/programbench/runs/pb-dev/reports/stateful-on_subagent-on.json
+  --output ".stateful_bench/programbench/runs/$RUN_ID/reports/stateful-on_subagent-on.json"
 ```
 
 Compare two saved reports:
 
 ```bash
 stateful-bench programbench compare \
-  --report .stateful_bench/programbench/runs/pb-dev/reports/stateful-off_subagent-on.json \
-  --report .stateful_bench/programbench/runs/pb-dev/reports/stateful-on_subagent-on.json \
+  --report ".stateful_bench/programbench/runs/$RUN_ID/reports/stateful-off_subagent-on.json" \
+  --report ".stateful_bench/programbench/runs/$RUN_ID/reports/stateful-on_subagent-on.json" \
   --format markdown
 ```
 

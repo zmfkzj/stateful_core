@@ -1,0 +1,3544 @@
+from __future__ import annotations
+
+import argparse
+import ast
+import contextlib
+import copy
+import functools
+import hashlib
+import importlib.util
+import json
+import math
+import os
+import posixpath
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+from contextlib import nullcontext
+from dataclasses import replace
+from pathlib import Path
+from urllib import request
+from urllib.parse import urlsplit
+
+
+_LITE_PATH = Path(__file__).with_name("statefulbench_lite.py")
+_LITE_SPEC = importlib.util.spec_from_file_location("statefulbench_lite_for_realworld", _LITE_PATH)
+if _LITE_SPEC is None or _LITE_SPEC.loader is None:
+    raise RuntimeError(f"cannot import lite runner from {_LITE_PATH}")
+_LITE = importlib.util.module_from_spec(_LITE_SPEC)
+sys.modules[_LITE_SPEC.name] = _LITE
+_LITE_SPEC.loader.exec_module(_LITE)
+AgentHandle = _LITE.AgentHandle
+RunConfig = _LITE.RunConfig
+
+_DOCKER_PATH = Path(__file__).with_name("statefulbench_docker.py")
+_DOCKER_SPEC = importlib.util.spec_from_file_location("statefulbench_docker_for_realworld", _DOCKER_PATH)
+if _DOCKER_SPEC is None or _DOCKER_SPEC.loader is None:
+    raise RuntimeError(f"cannot import Docker runtime from {_DOCKER_PATH}")
+_DOCKER = importlib.util.module_from_spec(_DOCKER_SPEC)
+sys.modules[_DOCKER_SPEC.name] = _DOCKER
+_DOCKER_SPEC.loader.exec_module(_DOCKER)
+
+_DIAGNOSTICS_PATH = Path(__file__).with_name("statefulbench_container_diagnostics.py")
+_DIAGNOSTICS_SPEC = importlib.util.spec_from_file_location(
+    "statefulbench_container_diagnostics_for_realworld", _DIAGNOSTICS_PATH
+)
+if _DIAGNOSTICS_SPEC is None or _DIAGNOSTICS_SPEC.loader is None:
+    raise RuntimeError(f"cannot import diagnostics helper from {_DIAGNOSTICS_PATH}")
+_DIAGNOSTICS = importlib.util.module_from_spec(_DIAGNOSTICS_SPEC)
+sys.modules[_DIAGNOSTICS_SPEC.name] = _DIAGNOSTICS
+_DIAGNOSTICS_SPEC.loader.exec_module(_DIAGNOSTICS)
+
+
+_REPOSITORY_FIELDS = frozenset(
+    {
+        "key",
+        "requested_url",
+        "canonical_url",
+        "commit",
+        "archive_url",
+        "archive_sha256",
+        "python",
+        "setup",
+        "suite",
+        "corpus",
+    }
+)
+_OPTIONAL_REPOSITORY_FIELDS = frozenset({"environment", "metadata"})
+_ENVIRONMENT_NAME = re.compile(r"[A-Z_][A-Z0-9_]*")
+_PROTECTED_ENVIRONMENT_NAMES = frozenset(
+    {"HOME", "PIP_CACHE_DIR", "TMPDIR", "CARGO_HOME", "VIRTUAL_ENV", "PATH", "RUSTUP_HOME"}
+)
+_HEX_40 = re.compile(r"[0-9a-f]{40}")
+_HEX_64 = re.compile(r"[0-9a-f]{64}")
+_GITHUB_COMPONENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+
+_CORPUS_FIELDS = frozenset(
+    {
+        "repository",
+        "issue_snapshot",
+        "tasks",
+        "final_prompt",
+        "evaluators",
+        "integrated_reference_patch",
+    }
+)
+_TASK_FIELDS = frozenset(
+    {
+        "key",
+        "kind",
+        "sources",
+        "source_hash",
+        "prompt",
+        "acceptance",
+        "overlap_anchors",
+        "evaluator",
+        "reference_patch",
+    }
+)
+_ANCHOR_FIELDS = frozenset({"path", "symbol"})
+_STAGED_DATASET_ACTIVE = False
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def ensure_archive(repo: dict, cache_dir: Path, opener=request.urlopen) -> Path:
+    expected_sha256 = repo["archive_sha256"]
+    archive = cache_dir / f"{expected_sha256}.tar.gz"
+    if archive.exists():
+        if _sha256(archive) == expected_sha256:
+            return archive
+        raise ValueError("cached archive checksum mismatch")
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    digest = hashlib.sha256()
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=cache_dir,
+            prefix=f"{expected_sha256}.",
+            suffix=".tmp",
+            delete=False,
+        ) as output:
+            temporary = Path(output.name)
+            with opener(repo["archive_url"]) as response:
+                while chunk := response.read(1024 * 1024):
+                    output.write(chunk)
+                    digest.update(chunk)
+        if digest.hexdigest() != expected_sha256:
+            raise ValueError("downloaded archive checksum mismatch")
+        os.replace(temporary, archive)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return archive
+
+def _link_stays_within_root(member: tarfile.TarInfo, root: str) -> bool:
+    target = member.linkname
+    if posixpath.isabs(target):
+        return False
+    if member.issym():
+        target = posixpath.join(posixpath.dirname(member.name), target)
+    target = posixpath.normpath(target)
+    return target == root or target.startswith(f"{root}/")
+
+def _extracted_links_stay_within_root(root_directory: Path) -> bool:
+    try:
+        root = root_directory.resolve(strict=True)
+        if root_directory.is_symlink() or not root.is_dir():
+            return False
+        for path in root.rglob("*"):
+            if path.is_symlink() and not path.resolve().is_relative_to(root):
+                return False
+    except (OSError, RuntimeError):
+        return False
+    return True
+
+
+def extract_workspace(archive: Path, expected_sha256: str, destination: Path) -> None:
+    if destination.exists():
+        raise ValueError("workspace destination must be absent")
+    if _sha256(archive) != expected_sha256:
+        raise ValueError("archive checksum mismatch")
+
+    try:
+        with tarfile.open(archive, "r:gz") as source:
+            members = source.getmembers()
+            if any(member.name == "." or member.name.startswith("./") for member in members):
+                raise ValueError("archive contains unsafe members")
+            roots = {member.name.split("/", 1)[0] for member in members if member.name}
+            if len(roots) != 1:
+                raise ValueError("archive must contain exactly one root directory")
+            root = roots.pop()
+            if any(".." in member.name.split("/") for member in members):
+                raise ValueError("archive contains unsafe members")
+            if not any(member.name.rstrip("/") == root and member.isdir() for member in members):
+                raise ValueError("archive root must be a directory")
+            if any(
+                (member.issym() or member.islnk()) and not _link_stays_within_root(member, root)
+                for member in members
+            ):
+                raise ValueError("archive contains unsafe members")
+
+            with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
+                extracted = Path(temporary)
+                try:
+                    source.extractall(extracted, filter="data")
+                except tarfile.TarError as error:
+                    raise ValueError("archive contains unsafe members") from error
+                root_directory = extracted / root
+                if not _extracted_links_stay_within_root(root_directory):
+                    raise ValueError("archive contains unsafe members")
+                destination.mkdir()
+                for child in root_directory.iterdir():
+                    child.replace(destination / child.name)
+    except tarfile.TarError as error:
+        raise ValueError("archive contains unsafe members") from error
+
+
+def _require_string(entry: dict, field: str) -> str:
+    value = entry[field]
+    if type(value) is not str or not value:
+        raise ValueError(f"{field} must be a non-empty string")
+    return value
+
+
+def _require_key(entry: dict, field: str) -> str:
+    key = _require_string(entry, field)
+    if key in {".", ".."} or "/" in key or "\\" in key or Path(key).is_absolute():
+        raise ValueError(f"{field} must be a safe single-component key")
+    return key
+
+
+def verified_python(required: str) -> Path:
+    version = ".".join(str(part) for part in sys.version_info[:3])
+    if version != required:
+        raise ValueError(f"python version mismatch: manifest requires {required}, found {version}")
+    return Path(sys.executable).resolve()
+
+
+def _require_https_url(entry: dict, field: str) -> None:
+    value = _require_string(entry, field)
+    try:
+        parsed = urlsplit(value)
+        valid = (
+            parsed.scheme == "https"
+            and parsed.hostname is not None
+            and parsed.path
+            and not parsed.username
+            and not parsed.password
+            and not parsed.query
+            and not parsed.fragment
+        )
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError(f"{field} must be an HTTPS URL")
+
+
+def _github_repository(entry: dict) -> tuple[str, str]:
+    value = _require_string(entry, "canonical_url")
+    try:
+        parsed = urlsplit(value)
+        parts = parsed.path.split("/")
+        valid = (
+            parsed.scheme == "https"
+            and parsed.netloc == "github.com"
+            and not parsed.query
+            and not parsed.fragment
+            and len(parts) == 3
+            and not parts[0]
+            and all(_GITHUB_COMPONENT.fullmatch(part) for part in parts[1:])
+            and value == f"https://github.com/{parts[1]}/{parts[2]}"
+        )
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError("canonical_url must be an exact GitHub repository URL")
+    return parts[1], parts[2]
+
+
+def _require_archive_url(entry: dict, owner: str, repository: str, commit: str) -> None:
+    expected = f"https://github.com/{owner}/{repository}/archive/{commit}.tar.gz"
+    if _require_string(entry, "archive_url") != expected:
+        raise ValueError("archive_url must bind canonical_url and commit")
+
+
+def _require_argv(entry: dict, field: str) -> None:
+    value = entry[field]
+    if type(value) is not list or not value or any(type(part) is not str or not part for part in value):
+        raise ValueError(f"{field} must be a non-empty argv array")
+
+
+def _suite_exclusions(suite: list[str]) -> set[str]:
+    exclusions: set[str] = set()
+    for index, argument in enumerate(suite):
+        if argument in {"--deselect", "--ignore"}:
+            if (
+                index + 1 == len(suite)
+                or not suite[index + 1]
+                or suite[index + 1].startswith("--")
+            ):
+                raise ValueError("suite exclusions must have a value")
+            exclusion = f"{argument}={suite[index + 1]}"
+        elif argument.startswith(("--deselect=", "--ignore=")):
+            exclusion = argument
+        else:
+            continue
+        if exclusion.endswith("=") or exclusion in exclusions:
+            raise ValueError("suite exclusions must be unique")
+        exclusions.add(exclusion)
+    return exclusions
+
+
+def _require_suite_argv(entry: dict) -> None:
+    suite = entry["suite"]
+    _require_argv(entry, "suite")
+    if suite[:4] != ["python", "-m", "pytest", "-q"]:
+        raise ValueError("suite must be an audited pytest argv")
+    index = 4
+    if entry["key"] == "watchdog":
+        watchdog_options = ["-p", "no:cov", "-o", "addopts=--showlocals -vvv"]
+        if suite[index : index + len(watchdog_options)] != watchdog_options:
+            raise ValueError("suite must be an audited pytest argv")
+        index += len(watchdog_options)
+    while index < len(suite):
+        argument = suite[index]
+        if argument in {"--deselect", "--ignore"}:
+            if index + 1 == len(suite) or not suite[index + 1] or suite[index + 1].startswith("-"):
+                raise ValueError("suite exclusions must have a value")
+            index += 2
+        elif argument.startswith(("--deselect=", "--ignore=")):
+            index += 1
+        else:
+            raise ValueError("suite must be an audited pytest argv")
+
+
+
+def _require_environment(entry: dict) -> None:
+    if "environment" not in entry:
+        return
+    environment = entry["environment"]
+    if type(environment) is not dict:
+        raise ValueError("environment must be an object")
+    for name, value in environment.items():
+        if (
+            type(name) is not str
+            or not _ENVIRONMENT_NAME.fullmatch(name)
+            or name in _PROTECTED_ENVIRONMENT_NAMES
+            or name.startswith("PYTHON")
+            or type(value) is not str
+        ):
+            raise ValueError("environment contains an unsafe setting")
+
+def _require_metadata(entry: dict) -> None:
+    suite_exclusions = _suite_exclusions(entry["suite"])
+    if "metadata" not in entry:
+        if suite_exclusions:
+            raise ValueError("suite exclusions require metadata")
+        return
+    metadata = entry["metadata"]
+    if type(metadata) is not dict or set(metadata) != {"exclusions"}:
+        raise ValueError("metadata must contain only exclusions")
+    exclusions = metadata["exclusions"]
+    if type(exclusions) is not dict or not exclusions:
+        raise ValueError("metadata exclusions must be a non-empty object")
+    for exclusion, reason in exclusions.items():
+        if (
+            type(exclusion) is not str
+            or not exclusion.startswith(("--deselect=", "--ignore="))
+            or exclusion.endswith("=")
+            or exclusion not in suite_exclusions
+            or type(reason) is not str
+            or not reason
+        ):
+            raise ValueError("metadata exclusion must name a suite exclusion and reason")
+    if set(exclusions) != suite_exclusions:
+        raise ValueError("suite exclusions must exactly match metadata exclusions")
+
+
+def _validate_repository(entry: object, manifest_dir: Path, keys: set[str]) -> None:
+    if type(entry) is not dict:
+        raise ValueError("repository entry must be an object")
+    if not _REPOSITORY_FIELDS.issubset(entry) or set(entry) - _REPOSITORY_FIELDS - _OPTIONAL_REPOSITORY_FIELDS:
+        raise ValueError("repository entry fields are invalid")
+
+    key = _require_key(entry, "key")
+    if key in keys:
+        raise ValueError(f"duplicate repository key: {key}")
+    keys.add(key)
+
+    _require_https_url(entry, "requested_url")
+    commit = _require_string(entry, "commit")
+    if not _HEX_40.fullmatch(commit):
+        raise ValueError("commit has invalid SHA format")
+    owner, repository = _github_repository(entry)
+    _require_archive_url(entry, owner, repository, commit)
+    archive_sha256 = _require_string(entry, "archive_sha256")
+    if not _HEX_64.fullmatch(archive_sha256):
+        raise ValueError("archive_sha256 has invalid SHA format")
+    if _require_string(entry, "python") != "3.14.6":
+        raise ValueError("python must be 3.14.6")
+    _require_argv(entry, "setup")
+    _require_suite_argv(entry)
+    _require_environment(entry)
+    _require_metadata(entry)
+
+    corpus = Path(_require_string(entry, "corpus"))
+    resolved_corpus = (manifest_dir / corpus).resolve()
+    if corpus.is_absolute() or not resolved_corpus.is_relative_to(manifest_dir):
+        raise ValueError("corpus path must remain below the manifest directory")
+
+
+def load_manifest(path: Path) -> dict:
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError("manifest is not valid JSON") from error
+    if type(manifest) is not dict:
+        raise ValueError("manifest must be an object")
+    if set(manifest) != {"schema_version", "generated_at", "repositories"}:
+        raise ValueError("manifest fields are invalid")
+    if type(manifest["schema_version"]) is not int or manifest["schema_version"] != 1:
+        raise ValueError("schema_version must be 1")
+    if type(manifest["generated_at"]) is not str or not manifest["generated_at"]:
+        raise ValueError("generated_at must be a non-empty string")
+    repositories = manifest["repositories"]
+    if type(repositories) is not list or len(repositories) != 10:
+        raise ValueError("manifest must contain exactly ten repositories")
+
+    manifest_dir = path.parent.resolve()
+    keys: set[str] = set()
+    for entry in repositories:
+        _validate_repository(entry, manifest_dir, keys)
+    return manifest
+
+def _require_dataset_path(entry: dict, field: str, dataset_root: Path) -> None:
+    value = _require_string(entry, field)
+    candidate = Path(value)
+    resolved = (dataset_root / candidate).resolve()
+    if candidate.is_absolute() or not resolved.is_relative_to(dataset_root):
+        raise ValueError(f"{field} path must remain below the dataset root")
+
+
+
+def _canonical_evaluator_path(entry: dict, dataset_root: Path) -> Path:
+    value = _require_string(entry, "evaluator")
+    candidate = Path(value)
+    evaluators_root = (dataset_root / "evaluators").resolve()
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise ValueError("evaluator path must remain below the evaluators directory")
+    try:
+        relative = candidate.relative_to("evaluators")
+    except ValueError as error:
+        raise ValueError("evaluator path must remain below the evaluators directory") from error
+    if relative == Path("."):
+        raise ValueError("evaluator path must name a file below the evaluators directory")
+    resolved = (dataset_root / candidate).resolve()
+    if not resolved.is_relative_to(evaluators_root):
+        raise ValueError("evaluator path must remain below the evaluators directory")
+    return resolved
+
+def _canonical_github_issue_url(source: object) -> str:
+    if type(source) is not str or not source:
+        raise ValueError("sources must contain exactly one GitHub issue URL")
+    try:
+        parsed = urlsplit(source)
+        parts = parsed.path.split("/")
+        valid = (
+            parsed.scheme == "https"
+            and parsed.hostname == "github.com"
+            and parsed.port in (None, 443)
+            and not parsed.username
+            and not parsed.password
+            and not parsed.query
+            and not parsed.fragment
+            and len(parts) == 5
+            and parts[0] == ""
+            and _GITHUB_COMPONENT.fullmatch(parts[1])
+            and _GITHUB_COMPONENT.fullmatch(parts[2])
+            and parts[3] == "issues"
+            and parts[4].isdigit()
+        )
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError("sources must contain exactly one GitHub issue URL")
+    return f"https://github.com/{parts[1].lower()}/{parts[2].lower()}/issues/{int(parts[4])}"
+
+
+def _require_github_source(entry: dict) -> str:
+    sources = entry["sources"]
+    if type(sources) is not list or len(sources) != 1:
+        raise ValueError("sources must contain exactly one GitHub issue URL")
+    return _canonical_github_issue_url(sources[0])
+
+
+def _issue_bodies(path: Path) -> dict[str, object]:
+    try:
+        snapshot = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("issue snapshot is not valid JSON") from error
+    if type(snapshot) is list:
+        issues = snapshot
+    elif type(snapshot) is dict and type(snapshot.get("issues")) is list:
+        issues = snapshot["issues"]
+    else:
+        raise ValueError("issue snapshot must contain an issues array")
+
+    bodies: dict[str, object] = {}
+    for issue in issues:
+        if type(issue) is not dict:
+            raise ValueError("issue snapshot entries must be objects")
+        html_url = issue.get("html_url")
+        if type(html_url) is not str:
+            raise ValueError("issue snapshot source URL must be a string")
+        if urlsplit(html_url).path.split("/")[3:4] == ["pull"]:
+            continue
+        url = _canonical_github_issue_url(html_url)
+        if url in bodies:
+            raise ValueError(f"duplicate issue snapshot source: {url}")
+        bodies[url] = issue.get("body")
+    return bodies
+
+
+def _require_acceptance(entry: dict) -> None:
+    acceptance = entry["acceptance"]
+    if (
+        type(acceptance) is not list
+        or len(acceptance) < 3
+        or any(type(item) is not str or not item for item in acceptance)
+    ):
+        raise ValueError("acceptance must contain at least three non-empty strings")
+
+def _require_production_source_path(anchor: dict) -> str:
+    path = _require_string(anchor, "path")
+    candidate = Path(path)
+    parts = path.replace("\\", "/").split("/")
+    if (
+        candidate.is_absolute()
+        or ".." in candidate.parts
+        or candidate.suffix != ".py"
+        or {"docs", "tests", "generated"} & set(parts)
+        or candidate.name.startswith("test_")
+        or candidate.name == "conftest.py"
+    ):
+        raise ValueError("overlap anchor path must identify production Python source")
+    return path
+
+
+
+
+def _validate_task(
+    entry: object, dataset_root: Path, keys: set[str], issue_bodies: dict[str, str]
+) -> tuple[str, set[tuple[str, str]]]:
+    if type(entry) is not dict:
+        raise ValueError("task entry must be an object")
+    if set(entry) != _TASK_FIELDS:
+        raise ValueError("task entry fields are invalid")
+
+    key = _require_key(entry, "key")
+    if key in keys:
+        raise ValueError(f"duplicate task key: {key}")
+    keys.add(key)
+    if _require_string(entry, "kind") not in {"bug", "feature"}:
+        raise ValueError("kind must be bug or feature")
+    _require_string(entry, "prompt")
+    source = _require_github_source(entry)
+    source_hash = _require_string(entry, "source_hash")
+    if not _HEX_64.fullmatch(source_hash):
+        raise ValueError("source_hash has invalid SHA format")
+    if source not in issue_bodies:
+        raise ValueError(f"source is missing from issue snapshot: {source}")
+    body = issue_bodies[source]
+    if type(body) is not str:
+        raise ValueError(f"issue snapshot body must be a string: {source}")
+    if source_hash != hashlib.sha256(body.encode("utf-8")).hexdigest():
+        raise ValueError(f"source_hash does not match frozen issue body: {source}")
+    _require_acceptance(entry)
+    _canonical_evaluator_path(entry, dataset_root)
+    _require_dataset_path(entry, "reference_patch", dataset_root)
+
+    anchors = entry["overlap_anchors"]
+    if type(anchors) is not list or not anchors:
+        raise ValueError("overlap_anchors must be a non-empty array")
+    pairs: set[tuple[str, str]] = set()
+    for anchor in anchors:
+        if type(anchor) is not dict or set(anchor) != _ANCHOR_FIELDS:
+            raise ValueError("overlap_anchors entries must contain path and symbol")
+        pairs.add((_require_production_source_path(anchor), _require_string(anchor, "symbol")))
+    return key, pairs
+
+
+def load_corpus(path: Path) -> dict:
+    try:
+        corpus = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError("corpus is not valid JSON") from error
+    if type(corpus) is not dict:
+        raise ValueError("corpus must be an object")
+    if set(corpus) != _CORPUS_FIELDS:
+        raise ValueError("corpus fields are invalid")
+
+    _require_string(corpus, "repository")
+    _require_string(corpus, "final_prompt")
+    dataset_root = path.parent.parent.resolve()
+    _require_dataset_path(corpus, "issue_snapshot", dataset_root)
+    issue_snapshot = (dataset_root / corpus["issue_snapshot"]).resolve()
+    issue_bodies = _issue_bodies(issue_snapshot)
+    _require_dataset_path(corpus, "integrated_reference_patch", dataset_root)
+    evaluators = corpus["evaluators"]
+    if type(evaluators) is not list or not evaluators:
+        raise ValueError("evaluators must be a non-empty array")
+    for evaluator in evaluators:
+        if type(evaluator) is not str or not evaluator:
+            raise ValueError("evaluators must be a non-empty array")
+        _canonical_evaluator_path({"evaluator": evaluator}, dataset_root)
+
+    tasks = corpus["tasks"]
+    if type(tasks) is not list or len(tasks) != 10:
+        raise ValueError("corpus must contain exactly ten tasks")
+    keys: set[str] = set()
+    task_anchors = [
+        _validate_task(task, dataset_root, keys, issue_bodies) for task in tasks
+    ]
+    if evaluators != [task["evaluator"] for task in tasks]:
+        raise ValueError("evaluators must exactly match task evaluators")
+    kinds = [task["kind"] for task in tasks]
+    if kinds.count("bug") != 5 or kinds.count("feature") != 5:
+        raise ValueError("corpus must contain five bug and five feature tasks")
+
+    anchor_counts: dict[tuple[str, str], int] = {}
+    for _, anchors in task_anchors:
+        for anchor in anchors:
+            anchor_counts[anchor] = anchor_counts.get(anchor, 0) + 1
+    for key, anchors in task_anchors:
+        if not any(anchor_counts[anchor] > 1 for anchor in anchors):
+            raise ValueError(f"task has isolated overlap anchors: {key}")
+    return corpus
+
+
+
+
+def repo_entries(manifest: dict) -> tuple[dict, ...]:
+    if type(manifest) is not dict or type(manifest.get("repositories")) is not list:
+        raise ValueError("manifest repositories must be an array")
+    return tuple(manifest["repositories"])
+
+
+def _corpus_matches_repository(repo: dict, corpus: dict) -> bool:
+    return corpus["repository"] in {
+        repo["key"],
+        urlsplit(repo["canonical_url"]).path.strip("/"),
+    }
+
+
+def _run_logged(
+    argv: list[str],
+    cwd: Path,
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+    label: str,
+    *,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    completed = subprocess.run(
+        argv,
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        check=False,
+        encoding="utf-8",
+        errors="replace",
+    )
+    number = len(artifacts)
+    stdout = artifact_dir / f"{number:03d}.stdout.log"
+    stderr = artifact_dir / f"{number:03d}.stderr.log"
+    stdout.write_text(completed.stdout, encoding="utf-8")
+    stderr.write_text(completed.stderr, encoding="utf-8")
+    artifacts[label] = {"stdout": str(stdout), "stderr": str(stderr)}
+    return completed
+
+
+@functools.cache
+def _rust_tool_directories(workspace: Path | None) -> tuple[str, ...]:
+    rustup = shutil.which("rustup")
+    tool_paths: list[Path] = []
+    for executable in ("rustc", "cargo"):
+        resolved: Path | None = None
+        if rustup:
+            try:
+                completed = subprocess.run(
+                    [rustup, "which", executable],
+                    cwd=workspace,
+                    capture_output=True,
+                    check=False,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            except OSError:
+                completed = None
+            if completed is not None:
+                candidate = Path(completed.stdout.strip())
+                if completed.returncode == 0 and candidate.is_absolute():
+                    resolved = candidate.resolve()
+        if resolved is None:
+            candidate = shutil.which(executable)
+            if candidate:
+                resolved = Path(candidate).resolve()
+        if resolved is not None and resolved.is_file() and os.access(resolved, os.X_OK):
+            tool_paths.append(resolved)
+    return tuple(dict.fromkeys(str(path.parent) for path in tool_paths))
+
+
+def _sanitized_environment(
+    venv: Path | None = None,
+    workspace: Path | None = None,
+    pip_cache_dir: Path | None = None,
+) -> dict[str, str]:
+    path_parts = [str(venv / "bin")] if venv is not None else []
+    path_parts.extend(_rust_tool_directories(workspace))
+    path_parts.extend(os.defpath.split(os.pathsep))
+    env = {"PATH": os.pathsep.join(dict.fromkeys(path_parts))}
+    if venv is not None:
+        env["VIRTUAL_ENV"] = str(venv)
+    if workspace is not None:
+        runtime_root = workspace.parent / ".statefulbench-runtime"
+        locations = {
+            "HOME": runtime_root / "home",
+            "TMPDIR": runtime_root / "tmp",
+            "CARGO_HOME": runtime_root / "cargo-home",
+        }
+        for name, location in locations.items():
+            location.mkdir(parents=True, exist_ok=True)
+            env[name] = str(location)
+        pip_cache_dir = pip_cache_dir or runtime_root / "pip-cache"
+        pip_cache_dir.mkdir(parents=True, exist_ok=True)
+        env["PIP_CACHE_DIR"] = str(pip_cache_dir)
+    return env
+
+
+def _run_qualification_git(
+    argv: list[str],
+    cwd: Path,
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+    label: str,
+) -> subprocess.CompletedProcess[str]:
+    environment = _sanitized_environment(workspace=cwd)
+    environment.update(
+        {
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+        }
+    )
+    return _run_logged(
+        [
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.autocrlf=false",
+            "-c",
+            "core.whitespace=trailing-space,space-before-tab",
+            *argv,
+        ],
+        cwd,
+        artifacts,
+        artifact_dir,
+        label,
+        env=environment,
+    )
+
+
+def _repository_environment(repo: dict, environment: dict[str, str]) -> dict[str, str]:
+    return {**repo.get("environment", {}), **environment}
+
+
+def _venv_argv(argv: list[str], python: Path) -> list[str]:
+    if Path(argv[0]).name.startswith("python"):
+        return [str(python), *argv[1:]]
+    return argv
+
+
+@contextlib.contextmanager
+def _fresh_workspace(
+    repo: dict,
+    archive: Path,
+    cache_dir: Path,
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+    label: str,
+    pip_cache_dir: Path | None = None,
+):
+    interpreter = verified_python(repo["python"])
+    with tempfile.TemporaryDirectory(prefix="statefulbench-qualify-", dir=cache_dir) as temporary:
+        workspace = Path(temporary) / "workspace"
+        try:
+            extract_workspace(archive, repo["archive_sha256"], workspace)
+        except ValueError as error:
+            error_path = artifact_dir / f"{len(artifacts):03d}.extract.stderr.log"
+            error_path.write_text(f"{error}\n", encoding="utf-8")
+            artifacts[f"{label}:extract"] = {"stdout": "", "stderr": str(error_path)}
+            yield None
+            return
+        initialized = _run_qualification_git(
+            ["init"], workspace, artifacts, artifact_dir, f"{label}:git-init"
+        )
+        indexed = _run_qualification_git(
+            ["add", "-A"], workspace, artifacts, artifact_dir, f"{label}:git-add"
+        )
+        committed = _run_qualification_git(
+            [
+                "-c",
+                "user.email=statefulbench@local",
+                "-c",
+                "user.name=StatefulBench",
+                "commit",
+                "-m",
+                "seed workspace",
+            ],
+            workspace,
+            artifacts,
+            artifact_dir,
+            f"{label}:git-commit",
+        )
+        venv = workspace / ".statefulbench-venv"
+        created = _run_logged(
+            [str(interpreter), "-m", "venv", str(venv)],
+            workspace,
+            artifacts,
+            artifact_dir,
+            f"{label}:venv",
+            env=_sanitized_environment(workspace=workspace, pip_cache_dir=pip_cache_dir),
+        )
+        python = venv / "bin" / "python"
+        yield (
+            (
+                workspace,
+                python,
+                _repository_environment(
+                    repo, _sanitized_environment(venv, workspace, pip_cache_dir)
+                ),
+            )
+            if initialized.returncode == 0
+            and indexed.returncode == 0
+            and committed.returncode == 0
+            and created.returncode == 0
+            and python.is_file()
+            else None
+        )
+
+
+def _patch_hunks(diff: str) -> dict[str, list[tuple[int, int]]]:
+    hunks: dict[str, list[tuple[int, int]]] = {}
+    path: str | None = None
+    header = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+    for line in diff.splitlines():
+        if line.startswith("+++ b/"):
+            path = line[6:]
+        elif path is not None and (match := header.match(line)):
+            hunks.setdefault(path, []).append(
+                (int(match.group(1)), int(match.group(2) or 1))
+            )
+    return hunks
+
+
+def changed_anchor_symbols(
+    source: Path,
+    anchors: list[tuple[Path, str, str]],
+    hunks: list[tuple[int, int]],
+) -> set[str]:
+    try:
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return set()
+    ranges: dict[str, tuple[int, int]] = {}
+
+    class Symbols(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.scope: list[str] = []
+
+        def _record(self, name: str, node: ast.AST) -> None:
+            first = min(
+                (node.lineno, *(decorator.lineno for decorator in getattr(node, "decorator_list", ()))),
+            )
+            ranges[".".join((*self.scope, name))] = (first, node.end_lineno or node.lineno)
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            self._record(node.name, node)
+            self.scope.append(node.name)
+            self.generic_visit(node)
+            self.scope.pop()
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self._record(node.name, node)
+            self.scope.append(node.name)
+            self.generic_visit(node)
+            self.scope.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Assign(self, node: ast.Assign) -> None:
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    self._record(target.id, node)
+            self.generic_visit(node)
+
+        def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+            if isinstance(node.target, ast.Name):
+                self._record(node.target.id, node)
+            self.generic_visit(node)
+
+    Symbols().visit(tree)
+    changed: set[str] = set()
+    for anchor_source, path, symbol in anchors:
+        if anchor_source != source:
+            continue
+        target = symbol.split(maxsplit=1)[0]
+        matching_ranges = [
+            source_range
+            for local_name, source_range in ranges.items()
+            if target == local_name or target.endswith(f".{local_name}")
+        ]
+        if any(
+            count and start <= last and start + count - 1 >= first
+            for first, last in matching_ranges
+            for start, count in hunks
+        ):
+            changed.add(f"{path}:{symbol}")
+    return changed
+
+
+def _apply_patch(
+    workspace: Path,
+    patch: Path,
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+    label: str,
+) -> tuple[bool, dict[str, list[tuple[int, int]]]]:
+    applied = _run_qualification_git(
+        ["apply", "--index", "--whitespace=error-all", str(patch)],
+        workspace,
+        artifacts,
+        artifact_dir,
+        f"{label}:git-apply",
+    )
+    if applied.returncode != 0:
+        return False, {}
+    changed = _run_qualification_git(
+        ["diff", "--no-ext-diff", "--cached", "--unified=0"],
+        workspace,
+        artifacts,
+        artifact_dir,
+        f"{label}:git-diff",
+    )
+    return changed.returncode == 0, _patch_hunks(changed.stdout)
+
+
+def _run_setup(
+    repo: dict,
+    workspace: Path,
+    python: Path,
+    env: dict[str, str],
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+    label: str,
+) -> bool:
+    return (
+        _run_logged(
+            _venv_argv(repo["setup"], python),
+            workspace,
+            artifacts,
+            artifact_dir,
+            f"{label}:setup",
+            env=env,
+        ).returncode
+        == 0
+    )
+
+
+def _run_suite(
+    repo: dict,
+    workspace: Path,
+    python: Path,
+    env: dict[str, str],
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+    label: str,
+) -> bool:
+    return (
+        _run_logged(
+            _venv_argv(repo["suite"], python),
+            workspace,
+            artifacts,
+            artifact_dir,
+            f"{label}:upstream-suite",
+            env=env,
+        ).returncode
+        == 0
+    )
+
+
+def _run_evaluator(
+    evaluator: Path,
+    workspace: Path,
+    python: Path,
+    env: dict[str, str],
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+    label: str,
+) -> bool:
+    return (
+        _run_logged(
+            [str(python), str(evaluator), str(workspace)],
+            workspace,
+            artifacts,
+            artifact_dir,
+            f"{label}:evaluator",
+            env=env,
+        ).returncode
+        == 0
+    )
+
+
+def _qualify_base_suite(
+    repo: dict,
+    archive: Path,
+    cache_dir: Path,
+    pip_cache_dir: Path,
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+) -> bool:
+    with _fresh_workspace(
+        repo, archive, cache_dir, artifacts, artifact_dir, "base-suite", pip_cache_dir
+    ) as fresh:
+        if fresh is None:
+            return False
+        workspace, python, env = fresh
+        return _run_setup(
+            repo, workspace, python, env, artifacts, artifact_dir, "base-suite"
+        ) and _run_suite(
+            repo, workspace, python, env, artifacts, artifact_dir, "base-suite"
+        )
+
+
+def _qualify_task(
+    repo: dict,
+    task: dict,
+    dataset_root: Path,
+    archive: Path,
+    cache_dir: Path,
+    pip_cache_dir: Path,
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+) -> dict:
+    evaluator = dataset_root / task["evaluator"]
+    base_red = False
+    with _fresh_workspace(
+        repo,
+        archive,
+        cache_dir,
+        artifacts,
+        artifact_dir,
+        f"{task['key']}:base",
+        pip_cache_dir,
+    ) as fresh:
+        if fresh is not None:
+            workspace, python, env = fresh
+            base_red = _run_setup(
+                repo, workspace, python, env, artifacts, artifact_dir, f"{task['key']}:base"
+            ) and not _run_evaluator(
+                evaluator, workspace, python, env, artifacts, artifact_dir, f"{task['key']}:base"
+            )
+
+    reference_green = False
+    changed_hunks: dict[str, list[tuple[int, int]]] = {}
+    with _fresh_workspace(
+        repo,
+        archive,
+        cache_dir,
+        artifacts,
+        artifact_dir,
+        f"{task['key']}:reference",
+        pip_cache_dir,
+    ) as fresh:
+        if fresh is not None:
+            workspace, python, env = fresh
+            applied, changed_hunks = _apply_patch(
+                workspace,
+                dataset_root / task["reference_patch"],
+                artifacts,
+                artifact_dir,
+                f"{task['key']}:reference",
+            )
+            reference_green = applied and _run_setup(
+                repo, workspace, python, env, artifacts, artifact_dir, f"{task['key']}:reference"
+            )
+            if reference_green:
+                reference_green = _run_evaluator(
+                    evaluator, workspace, python, env, artifacts, artifact_dir, f"{task['key']}:reference"
+                )
+            changed_anchors = set().union(
+                *(
+                    changed_anchor_symbols(
+                        workspace / anchor["path"],
+                        [
+                            (
+                                workspace / candidate["path"],
+                                candidate["path"],
+                                candidate["symbol"],
+                            )
+                            for candidate in task["overlap_anchors"]
+                        ],
+                        changed_hunks.get(anchor["path"], []),
+                    )
+                    for anchor in task["overlap_anchors"]
+                )
+            )
+        else:
+            changed_anchors = set()
+    return {
+        "key": task["key"],
+        "base_red": base_red,
+        "reference_green": reference_green,
+        "changed_anchors": sorted(changed_anchors),
+    }
+
+
+def _qualify_integration(
+    repo: dict,
+    corpus: dict,
+    dataset_root: Path,
+    archive: Path,
+    cache_dir: Path,
+    pip_cache_dir: Path,
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+) -> tuple[bool, bool]:
+    integrated_green = False
+    upstream_green = False
+    with _fresh_workspace(
+        repo, archive, cache_dir, artifacts, artifact_dir, "integrated", pip_cache_dir
+    ) as fresh:
+        if fresh is not None:
+            workspace, python, env = fresh
+            applied, _ = _apply_patch(
+                workspace,
+                dataset_root / corpus["integrated_reference_patch"],
+                artifacts,
+                artifact_dir,
+                "integrated",
+            )
+            setup_green = applied and _run_setup(
+                repo, workspace, python, env, artifacts, artifact_dir, "integrated"
+            )
+            evaluator_results = [
+                _run_evaluator(
+                    dataset_root / evaluator,
+                    workspace,
+                    python,
+                    env,
+                    artifacts,
+                    artifact_dir,
+                    f"integrated:{index}",
+                )
+                for index, evaluator in enumerate(corpus["evaluators"])
+            ] if setup_green else []
+            integrated_green = setup_green and all(evaluator_results)
+            upstream_green = setup_green and _run_suite(
+                repo, workspace, python, env, artifacts, artifact_dir, "integrated"
+            )
+    return integrated_green, upstream_green
+
+
+def qualify_repository(repo: dict, corpus: dict, manifest_dir: Path, cache_dir: Path) -> dict:
+    qualification_root = (cache_dir / "qualification").resolve()
+    output_dir = (qualification_root / repo["key"]).resolve()
+    if not output_dir.is_relative_to(qualification_root):
+        raise ValueError("repository key escapes qualification output")
+    shutil.rmtree(output_dir, ignore_errors=True)
+    artifact_dir = output_dir / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    artifacts: dict[str, dict[str, str]] = {}
+    dataset_root = manifest_dir.resolve()
+    archive = ensure_archive(repo, cache_dir)
+    pip_cache_dir = cache_dir / "pip-cache"
+    pip_cache_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with tarfile.open(archive, "r:gz") as source:
+            source.getmembers()
+    except tarfile.TarError as error:
+        raise ValueError("archive is unreadable") from error
+    base_suite_green = _qualify_base_suite(
+        repo, archive, cache_dir, pip_cache_dir, artifacts, artifact_dir
+    )
+    tasks = [
+        _qualify_task(
+            repo,
+            task,
+            dataset_root,
+            archive,
+            cache_dir,
+            pip_cache_dir,
+            artifacts,
+            artifact_dir,
+        )
+        for task in corpus["tasks"]
+    ]
+    integrated_green, upstream_green = _qualify_integration(
+        repo,
+        corpus,
+        dataset_root,
+        archive,
+        cache_dir,
+        pip_cache_dir,
+        artifacts,
+        artifact_dir,
+    )
+    changed_sets = [set(task["changed_anchors"]) for task in tasks]
+    isolated_tasks = [
+        task["key"]
+        for index, task in enumerate(tasks)
+        if not any(
+            changed_sets[index] & other
+            for other_index, other in enumerate(changed_sets)
+            if other_index != index
+        )
+    ]
+    return {
+        "key": repo["key"],
+        "base_suite_green": base_suite_green,
+        "tasks": tasks,
+        "integrated_green": integrated_green,
+        "upstream_green": upstream_green,
+        "isolated_tasks": isolated_tasks,
+        "artifacts": artifacts,
+    }
+
+
+def _qualified(result: dict) -> bool:
+    return (
+        not result.get("error")
+        and result["base_suite_green"]
+        and all(task["base_red"] and task["reference_green"] for task in result["tasks"])
+        and result["integrated_green"]
+        and result["upstream_green"]
+        and not result["isolated_tasks"]
+    )
+
+
+def _runner_prompts(corpus: dict, arm_dir: Path) -> tuple[list[tuple[dict, Path]], Path]:
+    prompt_dir = arm_dir / "prompts"
+    prompt_dir.mkdir(parents=True, exist_ok=True)
+    tasks = []
+    for task in corpus["tasks"]:
+        prompt = prompt_dir / f"task-{task['key']}.prompt.txt"
+        prompt.write_text(
+            "You are working in a shared repository checkout. Other agents may edit concurrently.\n"
+            f"{task['prompt']}\n"
+            "Do not modify evaluator files.\n",
+            encoding="utf-8",
+        )
+        tasks.append((task, prompt))
+    final_prompt = prompt_dir / "final.prompt.txt"
+    specifications = "\n\n".join(
+        f"{task['key']}:\n{task['prompt']}" for task in corpus["tasks"]
+    )
+    final_prompt.write_text(
+        "You are the integration reviewer for this repository.\n"
+        f"{corpus['final_prompt']}\n\n"
+        "Evaluator scripts have been injected into .statefulbench-evaluators. "
+        "Run every evaluator and the upstream suite, then fix all failures.\n\n"
+        f"Task specifications:\n{specifications}\n",
+        encoding="utf-8",
+    )
+    return tasks, final_prompt
+
+
+def _inject_evaluators(corpus: dict, dataset_root: Path, workspace: Path) -> list[Path]:
+    injected = workspace / ".statefulbench-evaluators"
+    paths = []
+    for task in corpus["tasks"]:
+        source = _canonical_evaluator_path(task, dataset_root)
+        destination = injected / source.relative_to((dataset_root / "evaluators").resolve())
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.unlink(missing_ok=True)
+        shutil.copyfile(source, destination)
+        destination.chmod(0o444)
+        paths.append(source)
+    return paths
+
+def _agent_only_timing(
+    arm: str,
+    agents: list[dict],
+    task_started: float | None,
+    task_ended: float | None,
+) -> tuple[float, float, float]:
+    task_records = [record for record in agents if record["kind"] == "task"]
+    if arm == "sequential":
+        tasks_wall_time_s = sum(max(0.0, record["wall_time_s"]) for record in task_records)
+    else:
+        tasks_wall_time_s = (
+            0.0
+            if task_started is None or task_ended is None
+            else max(0.0, task_ended - task_started)
+        )
+    final_wall_time_s = next(
+        (
+            max(0.0, record["wall_time_s"])
+            for record in agents
+            if record["kind"] == "final"
+        ),
+        0.0,
+    )
+    return tasks_wall_time_s + final_wall_time_s, tasks_wall_time_s, final_wall_time_s
+
+def _nonnegative_int(value: object, label: str) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{label} is invalid")
+    return value
+
+
+def _coordination_snapshot_metrics(snapshot: object, phase: str) -> dict:
+    if type(snapshot) is not dict or type(snapshot.get("databases")) is not dict:
+        raise ValueError(f"coordination diagnostics are invalid at {phase}")
+    metrics = [
+        database["coordination_metrics"]
+        for database in snapshot["databases"].values()
+        if type(database) is dict and type(database.get("coordination_metrics")) is dict
+    ]
+    if len(metrics) != 1:
+        raise ValueError("exactly one coordination metrics database is required")
+    return _normalized_coordination_metrics(metrics[0])
+
+
+def _metric_counters(value: object, prefix: str = "") -> dict[str, int]:
+    if type(value) is not dict:
+        return {}
+    counters: dict[str, int] = {}
+    for key, item in value.items():
+        label = f"{prefix}.{key}" if prefix else key
+        if label in {
+            "journal.bytes_start",
+            "journal.bytes_end",
+            "journal.bytes_growth",
+            "waits.by_final_status",
+        }:
+            continue
+        if type(item) is int:
+            counters[label] = item
+        elif type(item) is dict:
+            counters.update(_metric_counters(item, label))
+    return counters
+
+
+def _require_monotonic_metrics(before: dict, after: dict) -> None:
+    before_counters = _metric_counters(before)
+    after_counters = _metric_counters(after)
+    if after["journal"]["bytes_end"] < before["journal"]["bytes_end"]:
+        raise ValueError("coordination journal bytes decreased across phases")
+    if any(after_counters.get(key, 0) < value for key, value in before_counters.items()):
+        raise ValueError("coordination counters decreased across phases")
+
+
+def _build_coordination_metrics(
+    arm: str, snapshots: dict[str, dict], agents: list[dict]
+) -> dict | None:
+    del agents
+    if arm != "parallel-on":
+        return None
+    if type(snapshots) is not dict:
+        raise ValueError("coordination diagnostics are invalid")
+    phase_metrics = [
+        _coordination_snapshot_metrics(snapshots.get(phase), phase)
+        for phase in _DOCKER.DIAGNOSTIC_PHASES
+    ]
+    for before, after in zip(phase_metrics, phase_metrics[1:]):
+        _require_monotonic_metrics(before, after)
+    start = phase_metrics[0]["journal"]["bytes_end"]
+    end = phase_metrics[-1]["journal"]["bytes_end"]
+    if end < start:
+        raise ValueError("coordination journal bytes decreased across phases")
+    metrics = copy.deepcopy(phase_metrics[-1])
+    metrics["journal"].update(
+        {"bytes_start": start, "bytes_end": end, "bytes_growth": end - start}
+    )
+    return _normalized_coordination_metrics(metrics)
+
+
+
+
+def _empty_run_result(
+    repo: dict,
+    arm: str,
+    trial: int,
+    error: str | None = None,
+    qualification: dict | None = None,
+) -> dict:
+    return {
+        "repository": repo["key"],
+        "arm": arm,
+        "trial": trial,
+        "cleared": False,
+        "error": error,
+        "arm_wall_time_s": 0.0,
+        "tasks_wall_time_s": 0.0,
+        "final_wall_time_s": 0.0,
+        "total_tokens": 0,
+        "total_tool_calls": 0,
+        "coordination_metrics": None,
+        "post_suite_ok": False,
+        "evaluators_ok": False,
+        "upstream_suite_ok": False,
+        "evaluator_results": [],
+        "agents": [],
+        "artifacts": {},
+        "qualification": qualification,
+        "runtime": {
+            "image_id": None,
+            "repo_digests": [],
+            "platform": None,
+            "server_platform": None,
+            "versions": {},
+        },
+        "container": {
+            "id": None,
+            "setup_wall_time_s": 0.0,
+            "teardown_wall_time_s": 0.0,
+            "removed": False,
+        },
+        "diagnostics": {
+            "snapshots": {},
+            "home_changes": [],
+            "error_classification": _DIAGNOSTICS.classify_runtime_failure(error),
+        },
+    }
+
+
+def _write_json_atomically(path: Path, value: dict) -> None:
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as output:
+            temporary = Path(output.name)
+            json.dump(value, output, indent=2)
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _receipt_path(cache_dir: Path, key: str) -> Path:
+    _require_key({"key": key}, "key")
+    root = (cache_dir / "qualification" / "receipts").resolve()
+    path = (root / f"{key}.json").resolve()
+    if not path.is_relative_to(root):
+        raise ValueError("repository key escapes qualification receipts")
+    return path
+
+
+def _runtime_provenance(runtime: _DOCKER.DockerRuntime) -> dict:
+    return {
+        "image": runtime.image,
+        "image_id": runtime.image_id,
+        "repo_digests": list(runtime.repo_digests),
+        "platform": runtime.platform,
+        "server_platform": runtime.server_platform,
+    }
+
+
+def _graded_input_hashes(corpus_path: Path, corpus: dict) -> dict[str, object]:
+    dataset_root = corpus_path.parent.parent.resolve()
+
+    def hashes(paths: list[str]) -> dict[str, str]:
+        return {
+            path: _sha256(dataset_root / path)
+            for path in sorted(paths)
+        }
+
+    return {
+        "issue_snapshot": hashes([corpus["issue_snapshot"]]),
+        "evaluators": hashes([task["evaluator"] for task in corpus["tasks"]]),
+        "reference_patches": hashes([task["reference_patch"] for task in corpus["tasks"]]),
+        "integrated_reference_patch": hashes([corpus["integrated_reference_patch"]]),
+    }
+
+
+def _require_graded_inputs(
+    corpus_path: Path, corpus: dict, expected: dict[str, object], phase: str
+) -> None:
+    if _graded_input_hashes(corpus_path, corpus) != expected:
+        raise RuntimeError(f"graded inputs changed {phase}")
+
+
+def _graded_input_paths(corpus_path: Path, corpus: dict) -> tuple[Path, ...]:
+    corpus_path = corpus_path.resolve()
+    dataset_root = corpus_path.parent.parent
+    values = [
+        corpus["issue_snapshot"],
+        *(task["evaluator"] for task in corpus["tasks"]),
+        *(task["reference_patch"] for task in corpus["tasks"]),
+        corpus["integrated_reference_patch"],
+        str(corpus_path.relative_to(dataset_root)),
+    ]
+    paths: list[Path] = []
+    for value in values:
+        relative = Path(value)
+        source = (dataset_root / relative).resolve()
+        if relative.is_absolute() or ".." in relative.parts or not source.is_relative_to(dataset_root):
+            raise ValueError("graded input path escapes dataset root")
+        if not source.is_file() or source.is_symlink():
+            raise ValueError("graded input must be a regular file")
+        paths.append(relative)
+    return tuple(dict.fromkeys(paths))
+
+
+@contextlib.contextmanager
+def _staged_graded_inputs(
+    corpus_path: Path, corpus: dict, expected: dict[str, object]
+):
+    corpus_path = corpus_path.resolve()
+    dataset_root = corpus_path.parent.parent
+    staged_root = Path(tempfile.mkdtemp(prefix="statefulbench-graded-inputs-"))
+    staged_root.chmod(0o700)
+    try:
+        for relative in _graded_input_paths(corpus_path, corpus):
+            source = (dataset_root / relative).resolve()
+            destination = staged_root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+            destination.chmod(0o600)
+        staged_corpus = staged_root / corpus_path.relative_to(dataset_root)
+        _require_graded_inputs(staged_corpus, corpus, expected, "while staging")
+        yield staged_root
+    finally:
+        shutil.rmtree(staged_root)
+
+
+@contextlib.contextmanager
+def _staged_dataset_tree(manifest_path: Path):
+    manifest_path = manifest_path.resolve()
+    source_root = manifest_path.parent
+    if not source_root.is_dir() or source_root.is_symlink():
+        raise ValueError("dataset root must be a real directory")
+    staged_root = Path(tempfile.mkdtemp(prefix="statefulbench-dataset-"))
+    staged_root.chmod(0o700)
+    try:
+        for base, directories, files in os.walk(source_root):
+            source_base = Path(base)
+            relative_base = source_base.relative_to(source_root)
+            destination_base = staged_root / relative_base
+            destination_base.mkdir(parents=True, exist_ok=True)
+            destination_base.chmod(0o700)
+            for directory in directories:
+                if (source_base / directory).is_symlink():
+                    raise ValueError("dataset contains a symlinked directory")
+            for filename in files:
+                source = source_base / filename
+                if not source.is_file() or source.is_symlink():
+                    raise ValueError("dataset contains a non-regular file")
+                destination = destination_base / filename
+                shutil.copyfile(source, destination)
+                destination.chmod(0o600)
+        staged_manifest = staged_root / manifest_path.name
+        if not staged_manifest.is_file():
+            raise ValueError("dataset manifest is unavailable after staging")
+        yield staged_manifest
+    finally:
+        shutil.rmtree(staged_root)
+
+
+def _capture_tool_provenance(probe, omp_binary: str, stateful_binary: str) -> dict[str, str]:
+    versions: dict[str, str] = {}
+    for name, command in (
+        ("python", ("python3", "--version")),
+        ("omp", (omp_binary, "--version")),
+        ("git", ("git", "--version")),
+        ("rustc", ("rustc", "--version")),
+        ("cargo", ("cargo", "--version")),
+    ):
+        completed = probe(*command)
+        value = completed.stdout.strip().splitlines()
+        if completed.returncode != 0 or not value:
+            raise RuntimeError(f"{name} version capture failed")
+        versions[name] = value[0]
+    stateful = probe("sha256sum", stateful_binary)
+    match = re.fullmatch(r"([0-9a-f]{64})\s+\S+\s*", stateful.stdout)
+    if stateful.returncode != 0 or match is None:
+        raise RuntimeError("stateful identity capture failed")
+    versions["stateful"] = f"sha256:{match.group(1)}"
+    return _require_tool_provenance(versions)
+
+
+_TOOL_PROVENANCE_KEYS = frozenset({"python", "omp", "stateful", "git", "rustc", "cargo"})
+
+
+def _require_tool_provenance(value: object) -> dict[str, str]:
+    if (
+        type(value) is not dict
+        or set(value) != _TOOL_PROVENANCE_KEYS
+        or any(type(item) is not str or not item for item in value.values())
+        or not _HEX_64.fullmatch(value["stateful"].removeprefix("sha256:"))
+        or not value["stateful"].startswith("sha256:")
+    ):
+        raise ValueError("tool_provenance must contain exact non-empty tool identities")
+    return dict(value)
+
+
+def _qualification_row_identity(receipt: dict | None) -> dict | None:
+    if receipt is None:
+        return None
+    fields = (
+        "manifest_sha256",
+        "corpus_sha256",
+        "archive_sha256",
+        "commit",
+        "image_id",
+        "platform",
+        "graded_inputs",
+        "tool_provenance",
+    )
+    if any(field not in receipt for field in fields):
+        raise ValueError("qualification receipt identity is incomplete")
+    return {field: receipt[field] for field in fields}
+
+
+def _qualification_tool_provenance() -> dict[str, str]:
+    return _capture_tool_provenance(
+        lambda *command: subprocess.run(command, capture_output=True, text=True, check=False),
+        "/usr/local/bin/omp",
+        "/usr/local/bin/stateful",
+    )
+
+
+def _diagnostic_artifact_paths(result: dict) -> dict[str, str]:
+    snapshots = result.get("diagnostics", {}).get("snapshots", {})
+    if type(snapshots) is not dict or not all(
+        phase in _DOCKER.DIAGNOSTIC_PHASES and type(path) is str
+        and path == _DOCKER.diagnostic_artifact_path(phase)
+        for phase, path in snapshots.items()
+    ):
+        raise ValueError("diagnostic artifact paths are malformed")
+    return dict(sorted(snapshots.items()))
+
+
+def validate_shared_home_evidence(
+    evidence: dict, container_id: str, expected_agents: set[str]
+) -> str | None:
+    snapshots = evidence.get("snapshots")
+    identities = evidence.get("agent_identities")
+    required = {"initialized", "before-tasks", "after-tasks", "after-final"}
+    if type(snapshots) is not dict or not required.issubset(snapshots):
+        return "missing shared HOME evidence"
+    if type(identities) is not dict or set(identities) != expected_agents:
+        return "missing shared HOME evidence"
+    expected_profile = "/home/stateful/.omp/profiles/stateful/agent"
+    for phase in required:
+        snapshot = snapshots[phase]
+        if (
+            type(snapshot) is not dict
+            or snapshot.get("schema_version") != 1
+            or snapshot.get("phase") != phase
+            or snapshot.get("home") != "/home/stateful"
+            or snapshot.get("per_agent_home_tree") is not False
+            or not isinstance(snapshot.get("files"), list)
+            or not isinstance(snapshot.get("databases"), dict)
+            or not isinstance(snapshot.get("lock_files"), list)
+            or not isinstance(snapshot.get("processes"), list)
+            or not all(
+                type(database) is dict and type(database.get("integrity")) is str
+                for database in snapshot["databases"].values()
+            )
+        ):
+            return "contradictory shared HOME evidence"
+        classification = _DIAGNOSTICS.classify_runtime_failure(None, snapshot)
+        if classification is not None:
+            return classification
+    for identity in identities.values():
+        if (
+            type(identity) is not dict
+            or identity.get("container_id") != container_id
+            or identity.get("home") != "/home/stateful"
+            or identity.get("profile") != expected_profile
+        ):
+            return "contradictory shared HOME evidence"
+    return None
+
+
+def _qualification_identity(
+    repo: dict,
+    manifest: Path,
+    corpus: Path,
+    runtime: _DOCKER.DockerRuntime,
+    tool_provenance: dict[str, str] | None = None,
+    graded_inputs: dict[str, object] | None = None,
+) -> dict:
+    identity = {
+        "key": repo["key"],
+        "manifest_sha256": _sha256(manifest),
+        "corpus_sha256": _sha256(corpus),
+        "graded_inputs": (
+            _graded_input_hashes(corpus, load_corpus(corpus))
+            if graded_inputs is None
+            else graded_inputs
+        ),
+        "archive_sha256": repo["archive_sha256"],
+        "commit": repo["commit"],
+        **_runtime_provenance(runtime),
+    }
+    if tool_provenance is not None:
+        identity["tool_provenance"] = _require_tool_provenance(tool_provenance)
+    return identity
+
+
+def write_qualification_receipt(
+    cache_dir: Path,
+    repo: dict,
+    manifest: Path,
+    corpus: Path,
+    runtime: _DOCKER.DockerRuntime,
+    *,
+    tool_provenance: dict[str, str],
+    graded_inputs: dict[str, object] | None = None,
+) -> dict:
+    path = _receipt_path(cache_dir, repo["key"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    receipt = {
+        **_qualification_identity(
+            repo, manifest, corpus, runtime, tool_provenance, graded_inputs
+        ),
+        "qualified_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "qualified": True,
+    }
+    _write_json_atomically(path, receipt)
+    return receipt
+
+
+def remove_qualification_receipt(cache_dir: Path, key: str) -> None:
+    _receipt_path(cache_dir, key).unlink(missing_ok=True)
+
+
+def load_qualification_receipt(
+    cache_dir: Path,
+    repo: dict,
+    manifest: Path,
+    corpus: Path,
+    runtime: _DOCKER.DockerRuntime,
+) -> dict:
+    path = _receipt_path(cache_dir, repo["key"])
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"qualification receipt is unavailable for {repo['key']}") from error
+    if type(receipt) is not dict or receipt.get("qualified") is not True:
+        raise ValueError(f"qualification receipt is invalid for {repo['key']}")
+    for field, expected in _qualification_identity(repo, manifest, corpus, runtime).items():
+        if receipt.get(field) != expected:
+            raise ValueError(f"qualification receipt {field} does not match current identity")
+    _require_tool_provenance(receipt.get("tool_provenance"))
+    return receipt
+
+
+def _run_result_directory(out_dir: Path, repository: str, arm: str, trial: int) -> Path:
+    return out_dir / repository / arm / f"trial-{trial}"
+
+
+def _create_run_result_directory(
+    out_dir: Path, repository: str, arm: str, trial: int
+) -> Path:
+    result_dir = _run_result_directory(out_dir, repository, arm, trial)
+    result_dir.mkdir(parents=True, exist_ok=False)
+    return result_dir
+
+
+def _write_run_result(out_dir: Path, result: dict) -> None:
+    result_dir = _run_result_directory(
+        out_dir, result["repository"], result["arm"], result["trial"]
+    )
+    if not result_dir.is_dir():
+        raise FileNotFoundError(result_dir)
+    _write_json_atomically(result_dir / "results.json", result)
+
+
+def _create_and_write_run_result(out_dir: Path, result: dict) -> None:
+    _create_run_result_directory(
+        out_dir, result["repository"], result["arm"], result["trial"]
+    )
+    _write_run_result(out_dir, result)
+
+
+def _require_fresh_run_result_directories(
+    out_dir: Path, repositories: tuple[dict, ...], arms: list[str], trials: int
+) -> None:
+    if out_dir.exists():
+        raise FileExistsError(f"run output directory already exists: {out_dir}")
+
+
+def _append_stage_cleanup_error(result: dict, error: str) -> None:
+    result["cleared"] = False
+    result["coordination_metrics"] = None
+    result["error"] = (
+        error if result.get("error") is None else f"{result['error']}; {error}"
+    )
+
+
+def _invalidate_stage_cleanup_receipts(cache_dir: Path) -> None:
+    root = cache_dir / "qualification" / "receipts"
+    for receipt in root.glob("*.json"):
+        receipt.unlink(missing_ok=True)
+
+
+def _downgrade_stage_cleanup_run(arguments, error: str) -> None:
+    summary_path = arguments.out / "summary.json"
+    try:
+        previous = json.loads(summary_path.read_text(encoding="utf-8"))
+        previous_rows = previous["arms"]
+        if type(previous_rows) is not list:
+            return
+    except (OSError, KeyError, TypeError, json.JSONDecodeError):
+        return
+    results = []
+    for previous_row in previous_rows:
+        if type(previous_row) is not dict:
+            continue
+        try:
+            path = (
+                arguments.out
+                / previous_row["repo"]
+                / previous_row["arm"]
+                / f"trial-{previous_row['trial']}"
+                / "results.json"
+            )
+            result = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, KeyError, TypeError, json.JSONDecodeError):
+            continue
+        if type(result) is not dict:
+            continue
+        _append_stage_cleanup_error(result, error)
+        _write_run_result(arguments.out, result)
+        results.append(result)
+    if not results:
+        return
+    scheduled = [
+        (aggregate["repo"], aggregate["arm"])
+        for aggregate in previous.get("aggregates", [])
+        if (
+            type(aggregate) is dict
+            and type(aggregate.get("repo")) is str
+            and type(aggregate.get("arm")) is str
+        )
+    ]
+    if not scheduled:
+        scheduled = list(
+            dict.fromkeys((result["repository"], result["arm"]) for result in results)
+        )
+    repositories = tuple(
+        {"key": repository} for repository in dict.fromkeys(repository for repository, _ in scheduled)
+    )
+    arms = list(dict.fromkeys(arm for _, arm in scheduled))
+    trials = max(result["trial"] for result in results)
+    summary = build_run_summary(repositories, arms, trials, "", "", results, "")
+    _write_json_atomically(summary_path, summary)
+
+
+def _arm_container_name(repo: dict, arm: str, trial: int) -> str:
+    return f"statefulbench-{repo['key']}-{arm}-{trial}"
+
+
+def _seed_shared_credential(_arm_dir: Path) -> Path | None:
+    target = Path(tempfile.mkdtemp(prefix="statefulbench-credential-"))
+    target.chmod(0o700)
+    try:
+        _LITE.copy_stateful_omp_agent_db(Path.home(), target)
+        credential = target / "agent.db"
+        if not credential.is_file():
+            shutil.rmtree(target)
+            return None
+        credential.chmod(0o600)
+        return credential
+    except BaseException:
+        shutil.rmtree(target, ignore_errors=True)
+        raise
+
+
+def _extract_arm_workspace(repo: dict, archive: Path, workspace: Path) -> Path:
+    shutil.rmtree(workspace, ignore_errors=True)
+    extract_workspace(archive, repo["archive_sha256"], workspace)
+    return workspace
+
+
+def _run_container_logged(
+    container: _DOCKER.ArmContainer,
+    argv: list[str],
+    env: dict[str, str],
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+    label: str,
+    *,
+    execute=_DOCKER.exec_in_container,
+    timeout_s: float | None = None,
+) -> subprocess.CompletedProcess[str]:
+    kwargs = {"check": False}
+    if timeout_s is not None:
+        kwargs["timeout_s"] = timeout_s
+    completed = execute(container, *argv, env=env, **kwargs)
+    number = len(artifacts)
+    stdout = artifact_dir / f"{number:03d}.stdout.log"
+    stderr = artifact_dir / f"{number:03d}.stderr.log"
+    stdout.write_text(completed.stdout, encoding="utf-8")
+    stderr.write_text(completed.stderr, encoding="utf-8")
+    artifacts[label] = {"stdout": f"artifacts/{stdout.name}", "stderr": f"artifacts/{stderr.name}"}
+    return completed
+
+
+def _prepare_container_repository(
+    repo: dict,
+    container: _DOCKER.ArmContainer,
+    env: dict[str, str],
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+    *,
+    execute=_DOCKER.exec_in_container,
+) -> tuple[Path, dict[str, str]] | None:
+    git = [
+        ["git", "init"],
+        ["git", "add", "-A"],
+        [
+            "git",
+            "-c",
+            "user.email=statefulbench@local",
+            "-c",
+            "user.name=StatefulBench",
+            "commit",
+            "-m",
+            "seed workspace",
+        ],
+    ]
+    for index, argv in enumerate(git):
+        if _run_container_logged(
+            container, argv, env, artifacts, artifact_dir, f"run:git-{index}", execute=execute
+        ).returncode != 0:
+            return None
+    python = Path("/workspace/.statefulbench-venv/bin/python")
+    if _run_container_logged(
+        container,
+        ["python3", "-m", "venv", str(python.parent.parent)],
+        env,
+        artifacts,
+        artifact_dir,
+        "run:venv",
+        execute=execute,
+    ).returncode != 0:
+        return None
+    repository_env = {
+        **_repository_environment(repo, env),
+        "VIRTUAL_ENV": str(python.parent.parent),
+        "PATH": f"{python.parent}:/opt/bun/bin:/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin",
+    }
+    if _run_container_logged(
+        container,
+        _venv_argv(repo["setup"], python),
+        repository_env,
+        artifacts,
+        artifact_dir,
+        "run:setup",
+        execute=execute,
+    ).returncode != 0:
+        return None
+    return python, repository_env
+
+
+def _inject_container_evaluators(
+    corpus: dict,
+    dataset_root: Path,
+    container: _DOCKER.ArmContainer,
+    env: dict[str, str],
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+    *,
+    execute=_DOCKER.exec_in_container,
+    copy=_DOCKER.copy_to_container,
+) -> None:
+    for task in corpus["tasks"]:
+        source = _canonical_evaluator_path(task, dataset_root)
+        relative = source.relative_to((dataset_root / "evaluators").resolve())
+        destination = f"/workspace/.statefulbench-evaluators/{relative}"
+        _run_container_logged(
+            container,
+            ["mkdir", "-p", str(Path(destination).parent)],
+            env,
+            artifacts,
+            artifact_dir,
+            f"{task['key']}:evaluator-dir",
+            execute=execute,
+        )
+        _run_container_logged(
+            container,
+            ["rm", "-f", destination],
+            env,
+            artifacts,
+            artifact_dir,
+            f"{task['key']}:evaluator-remove",
+            execute=execute,
+        )
+        copy(container, source, destination)
+        _run_container_logged(
+            container,
+            ["chmod", "0444", destination],
+            env,
+            artifacts,
+            artifact_dir,
+            f"{task['key']}:evaluator-mode",
+            execute=execute,
+        )
+
+
+def _run_container_post_agent_checks(
+    repo: dict,
+    corpus: dict,
+    dataset_root: Path,
+    container: _DOCKER.ArmContainer,
+    python: Path,
+    env: dict[str, str],
+    artifacts: dict[str, dict[str, str]],
+    artifact_dir: Path,
+    *,
+    execute=_DOCKER.exec_in_container,
+    copy=_DOCKER.copy_to_container,
+    inject: bool = True,
+) -> tuple[bool, bool, list[dict[str, bool | str]]]:
+    if inject:
+        _inject_container_evaluators(
+            corpus, dataset_root, container, env, artifacts, artifact_dir, execute=execute, copy=copy
+        )
+    evaluator_results = []
+    for task in corpus["tasks"]:
+        source = _canonical_evaluator_path(task, dataset_root)
+        relative = source.relative_to((dataset_root / "evaluators").resolve())
+        destination = f"/workspace/.statefulbench-evaluators/{relative}"
+        evaluator_results.append(
+            {
+                "key": task["key"],
+                "ok": (
+                    _run_container_logged(
+                        container,
+                        [str(python), destination, "/workspace"],
+                        env,
+                        artifacts,
+                        artifact_dir,
+                        f"{task['key']}:evaluator",
+                        execute=execute,
+                    ).returncode
+                    == 0
+                ),
+            }
+        )
+    suite_ok = (
+        _run_container_logged(
+            container,
+            _venv_argv(repo["suite"], python),
+            env,
+            artifacts,
+            artifact_dir,
+            "post-final:upstream-suite",
+            execute=execute,
+            timeout_s=900,
+        ).returncode
+        == 0
+    )
+    return all(result["ok"] for result in evaluator_results), suite_ok, evaluator_results
+
+
+def _run_container_repo_arm(
+    repo: dict,
+    corpus: dict,
+    dataset_root: Path,
+    cache_dir: Path,
+    out_dir: Path,
+    arm: str,
+    cfg: RunConfig,
+    *,
+    runtime: _DOCKER.DockerRuntime,
+    qualification_receipt: dict | None = None,
+    archive_loader,
+    arm_container_start,
+    arm_runtime_prepare,
+    arm_container_remove,
+    credential_seed,
+    workspace_materializer,
+    container_exec,
+    container_agent_launch,
+    container_agent_wait,
+    container_evaluator_inject,
+    container_post_checks,
+    container_diagnostics=_DOCKER.capture_home_snapshot,
+    container_inspect=_DOCKER.inspect_arm_container,
+) -> dict:
+    trial = cfg.trial
+    arm_dir = _create_run_result_directory(out_dir, repo["key"], arm, trial)
+    artifact_dir = arm_dir / "artifacts"
+    artifact_dir.mkdir(exist_ok=True)
+    artifacts: dict[str, dict[str, str]] = {}
+    tasks, final_prompt = _runner_prompts(corpus, arm_dir)
+    agents: list[dict] = []
+    pending: list[tuple[object, str]] = []
+    task_started: float | None = None
+    task_ended: float | None = None
+    arm_started: float | None = None
+    final_started: float | None = None
+    final_ended: float | None = None
+    evaluators_ok = False
+    evaluator_results: list[dict[str, bool | str]] = []
+    upstream_suite_ok = False
+    error: str | None = None
+    coordination_metrics: dict | None = None
+    container: _DOCKER.ArmContainer | None = None
+    container_removed = False
+    row_started = time.monotonic()
+    setup_started: float | None = None
+    setup_ended: float | None = None
+    teardown_started: float | None = None
+    teardown_ended: float | None = None
+    snapshots: dict[str, dict] = {}
+    agent_identities: dict[str, dict[str, str]] = {}
+    versions: dict[str, str] = {}
+    inter_agent_diagnostic_time_s = 0.0
+    phase_timestamps: dict[str, float] = {}
+    inspect_summary: dict | None = None
+    expected_tools = None
+    expected_inputs = None
+    if qualification_receipt is not None:
+        expected_tools = _require_tool_provenance(qualification_receipt.get("tool_provenance"))
+        expected_inputs = qualification_receipt.get("graded_inputs")
+        if type(expected_inputs) is not dict:
+            raise ValueError("qualification receipt graded_inputs is invalid")
+
+    def snapshot(phase: str) -> float:
+        started = time.monotonic()
+        snapshots[phase] = container_diagnostics(container, phase)
+        elapsed = max(0.0, time.monotonic() - started)
+        phase_timestamps[phase] = max(0.0, time.monotonic() - row_started)
+        return elapsed
+
+    def agent_identity(agent_id: str, env: dict[str, str]) -> None:
+        agent_identities[agent_id] = {
+            "container_id": container.container_id,
+            "home": env.get("HOME", ""),
+            "profile": env.get("PI_CODING_AGENT_DIR", ""),
+        }
+
+    def wait(handle: object, kind: str) -> tuple[dict, float]:
+        nonlocal container_removed
+        record, ended = container_agent_wait(container, handle, arm_dir, kind, cfg)
+        pending.remove((handle, kind))
+        container_removed = container_removed or bool(getattr(handle, "container_removed", False))
+        return record, ended
+
+    try:
+        archive = archive_loader(repo, cache_dir)
+        workspace = workspace_materializer(repo, archive, arm_dir / "workspace")
+        runtime_dir = arm_dir / "runtime"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        setup_started = time.monotonic()
+        container = arm_container_start(
+            runtime, _arm_container_name(repo, arm, trial), workspace, runtime_dir
+        )
+        credential = credential_seed(arm_dir) if credential_seed is not None else None
+        try:
+            common_env = arm_runtime_prepare(
+                container,
+                arm,
+                credential_db=credential,
+                omp_binary=cfg.omp_bin,
+                stateful_binary=cfg.stateful_binary or "/usr/local/bin/stateful",
+                activate_stateful=arm != "parallel-on",
+            )
+        finally:
+            if credential is not None:
+                shutil.rmtree(credential.parent)
+        inspect_summary = container_inspect(container)
+        if arm != "parallel-on":
+            snapshot("initialized")
+        container_repo = _prepare_container_repository(
+            repo, container, common_env, artifacts, artifact_dir, execute=container_exec
+        )
+        if container_repo is None:
+            raise RuntimeError("container repository setup failed")
+        python, environment = container_repo
+        if arm == "parallel-on":
+            common_env = arm_runtime_prepare(
+                container,
+                arm,
+                omp_binary=cfg.omp_bin,
+                stateful_binary=cfg.stateful_binary or "/usr/local/bin/stateful",
+            )
+            snapshot("initialized")
+        cfg.usage_from_log = _LITE.usage_from_log
+        versions = _capture_tool_provenance(
+            lambda *command: container_exec(
+                container, *command, env=common_env, check=False
+            ),
+            cfg.omp_bin,
+            cfg.stateful_binary or "/usr/local/bin/stateful",
+        )
+        if expected_tools is not None and versions != expected_tools:
+            raise RuntimeError("live tool provenance does not match qualification receipt")
+        snapshot("before-tasks")
+        setup_ended = time.monotonic()
+
+        def start(task: dict, prompt: Path) -> object:
+            nonlocal task_started, arm_started
+            handle = container_agent_launch(container, arm_dir, task["key"], prompt, cfg, environment)
+            agent_identity(task["key"], environment)
+            pending.append((handle, "task"))
+            started = getattr(handle, "started_monotonic", time.monotonic())
+            task_started = started if task_started is None else min(task_started, started)
+            arm_started = started if arm_started is None else min(arm_started, started)
+            return handle
+
+        if arm == "sequential":
+            for task, prompt in tasks:
+                record, ended = wait(start(task, prompt), "task")
+                agents.append(record)
+                if record["cleanup_error"] is not None:
+                    raise RuntimeError(
+                        f"task agent {record['agent_id']} cleanup failed: {record['cleanup_error']}"
+                    )
+                task_ended = ended
+        else:
+            handles = [start(task, prompt) for task, prompt in tasks]
+            for handle in handles:
+                record, ended = wait(handle, "task")
+                agents.append(record)
+                if record["cleanup_error"] is not None:
+                    raise RuntimeError(
+                        f"task agent {record['agent_id']} cleanup failed: {record['cleanup_error']}"
+                    )
+                task_ended = ended if task_ended is None else max(task_ended, ended)
+        inter_agent_diagnostic_time_s = snapshot("after-tasks")
+
+        if expected_inputs is not None:
+            _require_graded_inputs(
+                dataset_root / repo["corpus"],
+                corpus,
+                expected_inputs,
+                "before evaluator injection",
+            )
+        container_evaluator_inject(
+            corpus, dataset_root, container, environment, artifacts, artifact_dir
+        )
+        if expected_inputs is not None:
+            _require_graded_inputs(
+                dataset_root / repo["corpus"],
+                corpus,
+                expected_inputs,
+                "during evaluator injection",
+            )
+        final_handle = container_agent_launch(
+            container, arm_dir, "final", final_prompt, cfg, environment
+        )
+        agent_identity("final", environment)
+        pending.append((final_handle, "final"))
+        final_started = getattr(final_handle, "started_monotonic", time.monotonic())
+        arm_started = final_started if arm_started is None else min(arm_started, final_started)
+        final_record, final_ended = wait(final_handle, "final")
+        agents.append(final_record)
+        if final_record["cleanup_error"] is not None:
+            raise RuntimeError(
+                f"final agent {final_record['agent_id']} cleanup failed: {final_record['cleanup_error']}"
+            )
+        snapshot("after-final")
+        evidence_error = validate_shared_home_evidence(
+            {"snapshots": snapshots, "agent_identities": agent_identities},
+            container.container_id,
+            {task["key"] for task, _ in tasks} | {"final"},
+        )
+        if evidence_error is not None:
+            raise RuntimeError(evidence_error)
+        evaluators_ok, upstream_suite_ok, evaluator_results = container_post_checks(
+            repo,
+            corpus,
+            dataset_root,
+            container,
+            python,
+            environment,
+            artifacts,
+            artifact_dir,
+            inject=True,
+        )
+        snapshot("after-grading")
+    except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
+        error = str(exc)
+    finally:
+        for handle, kind in pending[:]:
+            try:
+                record, ended = wait(handle, kind)
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                continue
+            agents.append(record)
+            if kind == "task":
+                task_ended = ended if task_ended is None else max(task_ended, ended)
+            else:
+                final_ended = ended
+        if container is not None and not container_removed:
+            teardown_started = time.monotonic()
+            try:
+                snapshot("before-remove")
+            except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
+                error = str(exc) if error is None else f"{error}; {exc}"
+        if container is not None and not container_removed:
+            try:
+                arm_container_remove(container)
+                container_removed = True
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                error = str(exc) if error is None else f"{error}; {exc}"
+        if teardown_started is not None:
+            teardown_ended = time.monotonic()
+
+    post_suite_ok = evaluators_ok and upstream_suite_ok
+    arm_wall_time_s, tasks_wall_time_s, final_wall_time_s = _agent_only_timing(
+        arm, agents, task_started, task_ended
+    )
+    home_changes = [
+        {
+            "from": before,
+            "to": after,
+            "changes": _DIAGNOSTICS.snapshot_changes(snapshots[before], snapshots[after]),
+        }
+        for before, after in zip(_DOCKER.DIAGNOSTIC_PHASES, _DOCKER.DIAGNOSTIC_PHASES[1:])
+        if before in snapshots and after in snapshots
+    ]
+    diagnostic_error = validate_shared_home_evidence(
+        {"snapshots": snapshots, "agent_identities": agent_identities},
+        getattr(container, "container_id", "") if container is not None else "",
+        {task["key"] for task, _ in tasks} | {"final"},
+    )
+    if set(snapshots) != set(_DOCKER.DIAGNOSTIC_PHASES):
+        diagnostic_error = diagnostic_error or "missing shared HOME evidence"
+    for snapshot_value in snapshots.values():
+        classification = _DIAGNOSTICS.classify_runtime_failure(None, snapshot_value)
+        if classification is not None:
+            diagnostic_error = diagnostic_error or classification
+    if diagnostic_error is not None:
+        error = diagnostic_error if error is None else f"{error}; diagnostics: {diagnostic_error}"
+    error_classification = (
+        diagnostic_error
+        if diagnostic_error in {"sqlite_locked", "sqlite_malformed", "sqlite_unavailable"}
+        else _DIAGNOSTICS.classify_runtime_failure(error, snapshots.get("after-final"))
+    )
+    cleared = (
+        error is None
+        and post_suite_ok
+        and container_removed
+        and diagnostic_error is None
+        and len(agents) == len(tasks) + 1
+        and all(record["exit_code"] == 0 and not record["timed_out"] for record in agents)
+    )
+    if cleared:
+        try:
+            coordination_metrics = _build_coordination_metrics(arm, snapshots, agents)
+        except ValueError as exc:
+            error = str(exc)
+            cleared = False
+    if not cleared:
+        coordination_metrics = None
+    result = {
+        "repository": repo["key"],
+        "arm": arm,
+        "trial": trial,
+        "cleared": cleared,
+        "error": error,
+        "arm_wall_time_s": arm_wall_time_s,
+        "tasks_wall_time_s": tasks_wall_time_s,
+        "final_wall_time_s": final_wall_time_s,
+        "total_tokens": sum(record["total_tokens"] for record in agents),
+        "total_tool_calls": sum(record["tool_calls"] for record in agents),
+        "coordination_metrics": coordination_metrics,
+        "post_suite_ok": post_suite_ok,
+        "evaluators_ok": evaluators_ok,
+        "upstream_suite_ok": upstream_suite_ok,
+        "evaluator_results": evaluator_results,
+        "agents": agents,
+        "artifacts": artifacts,
+        "qualification": _qualification_row_identity(qualification_receipt),
+        "end_to_end_wall_time_s": max(0.0, time.monotonic() - row_started),
+        "runtime": {
+            "image_id": runtime.image_id,
+            "repo_digests": list(runtime.repo_digests),
+            "platform": runtime.platform,
+            "server_platform": runtime.server_platform,
+            "versions": versions,
+        },
+        "container": {
+            "id": getattr(container, "container_id", None),
+            "setup_wall_time_s": (
+                0.0
+                if setup_started is None or setup_ended is None
+                else max(0.0, setup_ended - setup_started)
+            ),
+            "teardown_wall_time_s": (
+                0.0
+                if teardown_started is None or teardown_ended is None
+                else max(0.0, teardown_ended - teardown_started)
+            ),
+            "removed": container_removed,
+            "inspect": inspect_summary,
+        },
+        "diagnostics": {
+            "snapshots": {
+                phase: _DOCKER.diagnostic_artifact_path(phase)
+                for phase in _DOCKER.DIAGNOSTIC_PHASES
+                if phase in snapshots
+            },
+            "home_changes": home_changes,
+            "agent_identities": agent_identities,
+            "error_classification": error_classification,
+            "phase_timestamps": phase_timestamps,
+        },
+    }
+    _write_run_result(out_dir, result)
+    return result
+
+
+def run_repo_arm(
+    repo: dict,
+    corpus: dict,
+    manifest_dir: Path,
+    cache_dir: Path,
+    out_dir: Path,
+    arm: str,
+    cfg: RunConfig,
+    *,
+    launch=None,
+    server=None,
+    workspace_factory=_fresh_workspace,
+    archive_loader=ensure_archive,
+    setup=_run_setup,
+    evaluator=_run_evaluator,
+    suite=_run_suite,
+    runtime: _DOCKER.DockerRuntime | None = None,
+    qualification_receipt: dict | None = None,
+    arm_container_start=_DOCKER.start_arm_container,
+    arm_runtime_prepare=_DOCKER.prepare_arm_runtime,
+    arm_container_remove=_DOCKER.remove_arm_container,
+    credential_seed=None,
+    workspace_materializer=_extract_arm_workspace,
+    container_exec=_DOCKER.exec_in_container,
+    container_agent_launch=_DOCKER.launch_agent,
+    container_agent_wait=_DOCKER.wait_agent,
+    container_evaluator_inject=_inject_container_evaluators,
+    container_post_checks=_run_container_post_agent_checks,
+    container_diagnostics=_DOCKER.capture_home_snapshot,
+    container_inspect=_DOCKER.inspect_arm_container,
+) -> dict:
+    if arm not in {"sequential", "parallel-off", "parallel-on"}:
+        raise ValueError(f"unknown arm: {arm}")
+    trial = cfg.trial
+    manifest_dir = manifest_dir.resolve()
+    cfg = replace(cfg, denied_read_paths=(manifest_dir,))
+    if runtime is not None:
+        return _run_container_repo_arm(
+            repo,
+            corpus,
+            manifest_dir,
+            cache_dir,
+            out_dir,
+            arm,
+            cfg,
+            qualification_receipt=qualification_receipt,
+            runtime=runtime,
+            archive_loader=archive_loader,
+            arm_container_start=arm_container_start,
+            arm_runtime_prepare=arm_runtime_prepare,
+            arm_container_remove=arm_container_remove,
+            credential_seed=credential_seed,
+            workspace_materializer=workspace_materializer,
+            container_exec=container_exec,
+            container_agent_launch=container_agent_launch,
+            container_agent_wait=container_agent_wait,
+            container_evaluator_inject=container_evaluator_inject,
+            container_post_checks=container_post_checks,
+            container_diagnostics=container_diagnostics,
+            container_inspect=container_inspect,
+        )
+    arm_dir = _create_run_result_directory(out_dir, repo["key"], arm, trial)
+    if launch is None:
+        result = _empty_run_result(
+            repo,
+            arm,
+            trial,
+            "Docker runtime is required for agent execution",
+            _qualification_row_identity(qualification_receipt),
+        )
+        _write_run_result(out_dir, result)
+        return result
+    if server is None:
+        server = _LITE.arm_stateful_server
+    if arm == "parallel-on" and not cfg.stateful_binary:
+        result = _empty_run_result(
+            repo,
+            arm,
+            trial,
+            "parallel-on is opt-in and requires a resolvable stateful binary",
+            _qualification_row_identity(qualification_receipt),
+        )
+        _write_run_result(out_dir, result)
+        return result
+
+    artifact_dir = arm_dir / "artifacts"
+    artifact_dir.mkdir(exist_ok=True)
+    artifacts: dict[str, dict[str, str]] = {}
+    tasks, final_prompt = _runner_prompts(corpus, arm_dir)
+    agents: list[dict] = []
+    task_started: float | None = None
+    task_ended: float | None = None
+    arm_started: float | None = None
+    final_started: float | None = None
+    final_ended: float | None = None
+    error: str | None = None
+    evaluators_ok = False
+    upstream_suite_ok = False
+    evaluator_results: list[dict[str, bool | str]] = []
+    pending: list[tuple[AgentHandle, str]] = []
+    arm_container: _DOCKER.ArmContainer | None = None
+
+
+    def wait(handle: AgentHandle, kind: str) -> tuple[dict, float]:
+        record, ended = _LITE._wait_agent(handle, arm_dir, kind, cfg)
+        pending.remove((handle, kind))
+        return record, ended
+
+    try:
+        archive = archive_loader(repo, cache_dir)
+        if runtime is not None:
+            workspace = workspace_materializer(repo, archive, arm_dir / "workspace")
+            runtime_dir = arm_dir / "runtime"
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            arm_container = arm_container_start(
+                runtime,
+                _arm_container_name(repo, arm, trial),
+                workspace,
+                runtime_dir,
+            )
+            credential = credential_seed(arm_dir) if credential_seed is not None else None
+            try:
+                common_env = arm_runtime_prepare(arm_container, arm, credential_db=credential)
+            finally:
+                if credential is not None:
+                    shutil.rmtree(credential.parent)
+            container_repo = _prepare_container_repository(
+                repo,
+                arm_container,
+                common_env,
+                artifacts,
+                artifact_dir,
+                execute=container_exec,
+            )
+            if container_repo is None:
+                raise RuntimeError("container repository setup failed")
+            raise RuntimeError("container agent execution is not implemented")
+        pip_cache_dir = cache_dir / "pip-cache"
+        pip_cache_dir.mkdir(parents=True, exist_ok=True)
+        with workspace_factory(
+            repo,
+            archive,
+            cache_dir,
+            artifacts,
+            artifact_dir,
+            f"run:{arm}:trial-{trial}",
+            pip_cache_dir,
+        ) as materialized:
+            if materialized is None:
+                raise RuntimeError("unable to create benchmark workspace")
+            workspace, python, env = materialized
+            common_env: dict[str, str] = {}
+            if runtime is not None:
+                runtime_dir = arm_dir / "runtime"
+                runtime_dir.mkdir(parents=True, exist_ok=True)
+                arm_container = arm_container_start(
+                    runtime,
+                    _arm_container_name(repo, arm, trial),
+                    workspace,
+                    runtime_dir,
+                )
+                credential = credential_seed(arm_dir) if credential_seed is not None else None
+                try:
+                    common_env = arm_runtime_prepare(arm_container, arm, credential_db=credential)
+                finally:
+                    if credential is not None:
+                        shutil.rmtree(credential.parent)
+            if runtime is not None:
+                raise RuntimeError("container agent execution is not implemented")
+            env = {**_repository_environment(repo, env), **common_env}
+            if not setup(repo, workspace, python, env, artifacts, artifact_dir, "run"):
+                raise RuntimeError("repository setup failed")
+            mode = "stateful" if arm == "parallel-on" else "no-state"
+            server_context = (
+                nullcontext({})
+                if runtime is not None
+                else server(arm_dir, cfg) if arm == "parallel-on" else nullcontext({})
+            )
+            with server_context as runtime_env:
+                runtime_cfg = replace(
+                    cfg,
+                    launch_env={
+                        name: value
+                        for name, value in env.items()
+                        if runtime is not None or name not in {"HOME", "RUSTUP_HOME"}
+                    },
+                    stateful_runtime_env=runtime_env or None,
+                )
+
+                def start(task: dict, prompt: Path) -> AgentHandle:
+                    nonlocal task_started, arm_started
+                    handle = launch(arm_dir, workspace, task["key"], prompt, mode, runtime_cfg)
+                    pending.append((handle, "task"))
+                    started = getattr(handle, "started_monotonic", time.monotonic())
+                    task_started = started if task_started is None else min(task_started, started)
+                    arm_started = started if arm_started is None else min(arm_started, started)
+                    return handle
+
+                if arm == "sequential":
+                    for task, prompt in tasks:
+                        record, ended = wait(start(task, prompt), "task")
+                        agents.append(record)
+                        if record["cleanup_error"] is not None:
+                            raise RuntimeError(
+                                f"task agent {record['agent_id']} cleanup failed: {record['cleanup_error']}"
+                            )
+                        task_ended = ended
+                else:
+                    handles = []
+                    for task, prompt in tasks:
+                        handles.append(start(task, prompt))
+                    for handle in handles:
+                        record, ended = wait(handle, "task")
+                        agents.append(record)
+                        if record["cleanup_error"] is not None:
+                            raise RuntimeError(
+                                f"task agent {record['agent_id']} cleanup failed: {record['cleanup_error']}"
+                            )
+                        task_ended = ended if task_ended is None else max(task_ended, ended)
+
+                evaluator_paths = _inject_evaluators(corpus, manifest_dir, workspace)
+                evaluator_hashes = {path: _sha256(path) for path in evaluator_paths}
+                final_handle = launch(arm_dir, workspace, "final", final_prompt, mode, runtime_cfg)
+                pending.append((final_handle, "final"))
+                final_started = getattr(final_handle, "started_monotonic", time.monotonic())
+                arm_started = final_started if arm_started is None else min(arm_started, final_started)
+                final_record, final_ended = wait(final_handle, "final")
+                agents.append(final_record)
+                if final_record["cleanup_error"] is not None:
+                    raise RuntimeError(f"final agent cleanup failed: {final_record['cleanup_error']}")
+
+                if any(_sha256(path) != digest for path, digest in evaluator_hashes.items()):
+                    raise RuntimeError("canonical evaluator changed during agent execution")
+                for path, (task, _) in zip(evaluator_paths, tasks, strict=True):
+                    evaluator_results.append(
+                        {
+                            "key": task["key"],
+                            "ok": evaluator(
+                                path,
+                                workspace,
+                                python,
+                                env,
+                                artifacts,
+                                artifact_dir,
+                                task["key"],
+                            ),
+                        }
+                    )
+                evaluators_ok = all(result["ok"] for result in evaluator_results)
+                upstream_suite_ok = suite(
+                    repo, workspace, python, env, artifacts, artifact_dir, "post-final"
+                )
+    except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
+        error = str(exc)
+    finally:
+        for handle, kind in pending[:]:
+            try:
+                record, ended = wait(handle, kind)
+            except (OSError, subprocess.SubprocessError):
+                continue
+            agents.append(record)
+            if kind == "task":
+                task_ended = ended if task_ended is None else max(task_ended, ended)
+            else:
+                final_ended = ended
+        if arm_container is not None:
+            try:
+                arm_container_remove(arm_container)
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                cleanup_error = str(exc)
+                error = cleanup_error if error is None else f"{error}; {cleanup_error}"
+
+    post_suite_ok = evaluators_ok and upstream_suite_ok
+    arm_wall_time_s, tasks_wall_time_s, final_wall_time_s = _agent_only_timing(
+        arm, agents, task_started, task_ended
+    )
+    result = {
+        "repository": repo["key"],
+        "arm": arm,
+        "trial": trial,
+        "cleared": (
+            error is None
+            and post_suite_ok
+            and len(agents) == len(tasks) + 1
+            and all(record["exit_code"] == 0 and not record["timed_out"] for record in agents)
+        ),
+        "error": error,
+        "arm_wall_time_s": arm_wall_time_s,
+        "tasks_wall_time_s": tasks_wall_time_s,
+        "final_wall_time_s": final_wall_time_s,
+        "total_tokens": sum(record["total_tokens"] for record in agents),
+        "total_tool_calls": sum(record["tool_calls"] for record in agents),
+        "coordination_metrics": None,
+        "post_suite_ok": post_suite_ok,
+        "evaluators_ok": evaluators_ok,
+        "upstream_suite_ok": upstream_suite_ok,
+        "evaluator_results": evaluator_results,
+        "agents": agents,
+        "artifacts": artifacts,
+    }
+    _write_run_result(out_dir, result)
+    return result
+
+
+def _failure_reason(result: dict) -> str | None:
+    if result.get("error") is not None:
+        return result["error"]
+    failures = []
+    for record in result.get("agents", []):
+        agent = f"{record['kind']} agent {record['agent_id']}"
+        if record["timed_out"]:
+            failures.append(f"{agent} timed out")
+        elif record["exit_code"] != 0:
+            failures.append(f"{agent} exited with code {record['exit_code']}")
+    if not result.get("evaluators_ok", True):
+        failed = [
+            status["key"]
+            for status in result.get("evaluator_results", [])
+            if not status["ok"]
+        ]
+        failures.append(
+            f"evaluator failed: {', '.join(failed)}" if failed else "evaluator failed"
+        )
+    if not result.get("upstream_suite_ok", True):
+        failures.append("upstream suite failed")
+    if failures:
+        return "; ".join(failures)
+    return "run did not clear" if not result["cleared"] else None
+
+
+def _report_row(result: dict) -> dict:
+    cleared = result["cleared"] is True
+    coordination_metrics = None
+    if cleared and result["arm"] == "parallel-on":
+        try:
+            coordination_metrics = _normalized_coordination_metrics(
+                result.get("coordination_metrics")
+            )
+        except ValueError:
+            cleared = False
+    return {
+        "repo": result["repository"],
+        "arm": result["arm"],
+        "trial": result["trial"],
+        "cleared": cleared,
+        "wall_time_s": result["arm_wall_time_s"],
+        "tokens": result["total_tokens"],
+        "tool_calls": result["total_tool_calls"],
+        "coordination_metrics": coordination_metrics,
+    }
+
+_V2_JOURNAL_EVENT_TYPES = frozenset(
+    {
+        "migration.started", "migration.legacy_audit_imported",
+        "migration.presence_snapshot_seeded", "migration.reservation_snapshot_seeded",
+        "migration.claim_snapshot_seeded", "migration.wait_snapshot_seeded",
+        "migration.write_fence_snapshot_seeded", "migration.human_observation_snapshot_seeded",
+        "migration.legacy_handoff_snapshot_seeded", "migration.delivery_snapshot_seeded",
+        "migration.validated", "migration.completed",
+        "presence.registered", "presence.heartbeat", "presence.goal_updated",
+        "presence.phase_updated", "presence.plan_updated", "presence.resources_updated",
+        "presence.tool_started", "presence.tool_completed", "presence.finalized",
+        "presence.expired",
+        "reservation.declared", "reservation.refreshed", "reservation.released",
+        "reservation.expired",
+        "claim.acquired", "claim.observation_refreshed", "claim.released", "claim.expired",
+        "wait.requested", "wait.became_claimable", "wait.claimed", "wait.cancelled",
+        "wait.expired",
+        "write_fence.acquired", "write_fence.conflict_observed", "write_fence.released",
+        "write_fence.expired",
+        "read_observation.started", "read_observation.stabilized",
+        "read_observation.unstable", "read_observation.aborted",
+        "read_observation.invalidated", "read_observation.expired",
+        "write_intent.started", "write_intent.committed", "write_intent.failed",
+        "write_intent.outcome_unknown", "write_intent.reconciled",
+        "human_observation.observed", "human_observation.reconciled",
+        "human_observation.expired", "human_acknowledgement.recorded",
+        "handoff.finalized", "handoff.expired",
+        "authorization.allowed", "authorization.warned", "authorization.denied",
+        "authorization.override_granted",
+        "context.rendered", "context.delivery_created",
+        "context.delivery_acknowledged", "context.delivery_superseded",
+        "notification.created", "notification.delivered", "notification.expired",
+        "notification.coalesced",
+        "recovery.queued", "recovery.attempted", "recovery.delivered", "recovery.failed",
+    }
+)
+_V2_NOTIFICATION_KINDS = frozenset(
+    {"context_invalidated", "reservation_granted", "scope_overlap"}
+)
+_V2_HANDOFF_STATUSES = frozenset({"done", "failed", "blocked", "cancelled", "unknown"})
+_V2_WARNED_REASON_CODES = frozenset(
+    {
+        "missing_read_provenance", "missing_reservation", "inactive_session_phase",
+        "scope_mismatch", "invalid_write_action", "missing_claim",
+        "coordination_conflict",
+    }
+)
+_V2_DENIED_REASON_CODES = frozenset(
+    {
+        "invalid_target", "unknown_write_outcome", "stale_observation",
+        "write_fence_conflict", "unreconciled_human_write", "missing_read_provenance",
+        "missing_reservation", "inactive_session_phase", "scope_mismatch",
+        "invalid_write_action", "missing_claim",
+    }
+)
+_V2_WAIT_STATUSES = frozenset({"queued", "claimable", "claimed", "canceled", "expired"})
+
+
+def _nonnegative_number(value: object, label: str) -> float:
+    if type(value) not in {int, float} or not math.isfinite(value) or value < 0:
+        raise ValueError(f"{label} is invalid")
+    return float(value)
+
+
+def _integer_map(value: object, label: str, allowed: frozenset[str]) -> dict[str, int]:
+    if type(value) is not dict:
+        raise ValueError(f"{label} is invalid")
+    result: dict[str, int] = {}
+    for key, count in value.items():
+        if type(key) is not str or key not in allowed:
+            raise ValueError(f"{label} is invalid")
+        result[key] = _nonnegative_int(count, f"{label}.{key}")
+    return dict(sorted(result.items()))
+
+
+def _integer_fields(value: object, label: str, fields: tuple[str, ...]) -> dict[str, int]:
+    if type(value) is not dict or set(value) != set(fields):
+        raise ValueError(f"{label} is invalid")
+    return {field: _nonnegative_int(value[field], f"{label}.{field}") for field in fields}
+
+
+def _sum_integer_maps(values: list[dict[str, int]]) -> dict[str, int]:
+    summed: dict[str, int] = {}
+    for value in values:
+        for key, count in value.items():
+            summed[key] = summed.get(key, 0) + count
+    return dict(sorted(summed.items()))
+
+
+def _normalized_coordination_metrics(value: object) -> dict:
+    required = {
+        "protocol_version",
+        "journal",
+        "presence",
+        "handoffs",
+        "read_observations",
+        "context",
+        "authorization",
+        "write_safety",
+        "notifications",
+        "waits",
+    }
+    if type(value) is not dict or set(value) != required or value["protocol_version"] != "stateful.v2":
+        raise ValueError("coordination metrics are invalid")
+
+    journal = value["journal"]
+    if type(journal) is not dict or set(journal) != {
+        "events",
+        "bytes_start",
+        "bytes_end",
+        "bytes_growth",
+        "by_event_type",
+    }:
+        raise ValueError("coordination journal is invalid")
+    normalized_journal = {
+        "events": _nonnegative_int(journal["events"], "coordination journal events"),
+        "bytes_start": _nonnegative_int(journal["bytes_start"], "coordination journal bytes start"),
+        "bytes_end": _nonnegative_int(journal["bytes_end"], "coordination journal bytes end"),
+        "bytes_growth": _nonnegative_int(journal["bytes_growth"], "coordination journal bytes growth"),
+        "by_event_type": _integer_map(
+            journal["by_event_type"], "coordination journal event types", _V2_JOURNAL_EVENT_TYPES
+        ),
+    }
+    if normalized_journal["bytes_growth"] != normalized_journal["bytes_end"] - normalized_journal["bytes_start"]:
+        raise ValueError("coordination journal is invalid")
+
+    presence = _integer_fields(
+        value["presence"],
+        "coordination presence",
+        ("registered", "expired", "finalized", "peak_active"),
+    )
+    handoffs = value["handoffs"]
+    if type(handoffs) is not dict or set(handoffs) != {
+        "explicit",
+        "fallback_stop",
+        "fallback_ttl",
+        "by_status",
+    }:
+        raise ValueError("coordination handoffs are invalid")
+    normalized_handoffs = {
+        "explicit": _nonnegative_int(handoffs["explicit"], "coordination handoffs.explicit"),
+        "fallback_stop": _nonnegative_int(
+            handoffs["fallback_stop"], "coordination handoffs.fallback_stop"
+        ),
+        "fallback_ttl": _nonnegative_int(
+            handoffs["fallback_ttl"], "coordination handoffs.fallback_ttl"
+        ),
+        "by_status": _integer_map(
+            handoffs["by_status"], "coordination handoff statuses", _V2_HANDOFF_STATUSES
+        ),
+    }
+    read_observations = _integer_fields(
+        value["read_observations"],
+        "coordination read observations",
+        ("started", "stable", "unstable", "aborted", "invalidated"),
+    )
+    context = _integer_fields(
+        value["context"],
+        "coordination context",
+        (
+            "versions",
+            "renders",
+            "deliveries",
+            "acks",
+            "redeliveries",
+            "coalesced",
+            "prompt_utf8_bytes",
+            "prompt_unicode_scalars",
+            "prompt_items",
+        ),
+    )
+    authorization = value["authorization"]
+    if type(authorization) is not dict or set(authorization) != {
+        "warned_by_reason",
+        "denied_by_reason",
+    }:
+        raise ValueError("coordination authorization is invalid")
+    write_safety = _integer_fields(
+        value["write_safety"],
+        "coordination write safety",
+        (
+            "fence_conflicts",
+            "unknown_outcomes",
+            "same_path_overlaps",
+            "cross_agent_overwrites",
+        ),
+    )
+    notifications = value["notifications"]
+    if type(notifications) is not dict or set(notifications) != {"by_kind"}:
+        raise ValueError("coordination notifications are invalid")
+
+    waits = value["waits"]
+    if type(waits) is not dict or set(waits) != {
+        "by_final_status",
+        "grant_wait_time_s",
+        "unmeasured_grants",
+    }:
+        raise ValueError("coordination waits are invalid")
+    wait_time = waits["grant_wait_time_s"]
+    if type(wait_time) is not dict or set(wait_time) != {"count", "total", "mean", "max"}:
+        raise ValueError("coordination grant wait time is invalid")
+    count = _nonnegative_int(wait_time["count"], "coordination grant count")
+    total = _nonnegative_number(wait_time["total"], "coordination grant total")
+    mean, maximum = wait_time["mean"], wait_time["max"]
+    if count == 0:
+        if total != 0.0 or mean is not None or maximum is not None:
+            raise ValueError("coordination grant wait time is invalid")
+    else:
+        mean = _nonnegative_number(mean, "coordination grant mean")
+        maximum = _nonnegative_number(maximum, "coordination grant maximum")
+        if mean != round(total / count, 6):
+            raise ValueError("coordination grant wait time is invalid")
+
+    return {
+        "protocol_version": "stateful.v2",
+        "journal": normalized_journal,
+        "presence": presence,
+        "handoffs": normalized_handoffs,
+        "read_observations": read_observations,
+        "context": context,
+        "authorization": {
+            "warned_by_reason": _integer_map(
+                authorization["warned_by_reason"],
+                "coordination warned reasons",
+                _V2_WARNED_REASON_CODES,
+            ),
+            "denied_by_reason": _integer_map(
+                authorization["denied_by_reason"],
+                "coordination denied reasons",
+                _V2_DENIED_REASON_CODES,
+            ),
+        },
+        "write_safety": write_safety,
+        "notifications": {
+            "by_kind": _integer_map(
+                notifications["by_kind"], "coordination notifications", _V2_NOTIFICATION_KINDS
+            )
+        },
+        "waits": {
+            "by_final_status": _integer_map(
+                waits["by_final_status"], "coordination wait statuses", _V2_WAIT_STATUSES
+            ),
+            "grant_wait_time_s": {
+                "count": count,
+                "total": total,
+                "mean": mean,
+                "max": maximum,
+            },
+            "unmeasured_grants": _nonnegative_int(
+                waits["unmeasured_grants"], "coordination unmeasured grants"
+            ),
+        },
+    }
+
+
+def _aggregate_coordination_metrics(
+    arm: str, rows: list[dict], trials: int
+) -> dict | None:
+    if (
+        arm != "parallel-on"
+        or type(rows) is not list
+        or type(trials) is not int
+        or trials < 1
+        or len(rows) != trials
+        or any(type(row) is not dict or row.get("cleared") is not True for row in rows)
+        or any(type(row.get("trial")) is not int for row in rows)
+        or {row["trial"] for row in rows} != set(range(1, trials + 1))
+    ):
+        return None
+    try:
+        metrics = [_normalized_coordination_metrics(row.get("coordination_metrics")) for row in rows]
+    except ValueError:
+        return None
+
+    def summed(group: str, fields: tuple[str, ...]) -> dict[str, int]:
+        return {
+            field: sum(metric[group][field] for metric in metrics)
+            for field in fields
+        }
+
+    waits = [metric["waits"]["grant_wait_time_s"] for metric in metrics]
+    count = sum(wait["count"] for wait in waits)
+    total = round(sum(wait["total"] for wait in waits), 6)
+    maxima = [wait["max"] for wait in waits if wait["max"] is not None]
+    return {
+        "protocol_version": "stateful.v2",
+        "journal": {
+            **summed("journal", ("events", "bytes_start", "bytes_end", "bytes_growth")),
+            "by_event_type": _sum_integer_maps(
+                [metric["journal"]["by_event_type"] for metric in metrics]
+            ),
+        },
+        "presence": summed("presence", ("registered", "expired", "finalized", "peak_active")),
+        "handoffs": {
+            **summed("handoffs", ("explicit", "fallback_stop", "fallback_ttl")),
+            "by_status": _sum_integer_maps(
+                [metric["handoffs"]["by_status"] for metric in metrics]
+            ),
+        },
+        "read_observations": summed(
+            "read_observations", ("started", "stable", "unstable", "aborted", "invalidated")
+        ),
+        "context": summed(
+            "context",
+            (
+                "versions",
+                "renders",
+                "deliveries",
+                "acks",
+                "redeliveries",
+                "coalesced",
+                "prompt_utf8_bytes",
+                "prompt_unicode_scalars",
+                "prompt_items",
+            ),
+        ),
+        "authorization": {
+            "warned_by_reason": _sum_integer_maps(
+                [metric["authorization"]["warned_by_reason"] for metric in metrics]
+            ),
+            "denied_by_reason": _sum_integer_maps(
+                [metric["authorization"]["denied_by_reason"] for metric in metrics]
+            ),
+        },
+        "write_safety": summed(
+            "write_safety",
+            ("fence_conflicts", "unknown_outcomes", "same_path_overlaps", "cross_agent_overwrites"),
+        ),
+        "notifications": {
+            "by_kind": _sum_integer_maps(
+                [metric["notifications"]["by_kind"] for metric in metrics]
+            )
+        },
+        "waits": {
+            "by_final_status": _sum_integer_maps(
+                [metric["waits"]["by_final_status"] for metric in metrics]
+            ),
+            "grant_wait_time_s": {
+                "count": count,
+                "total": total,
+                "mean": None if count == 0 else round(total / count, 6),
+                "max": None if count == 0 else max(maxima),
+            },
+            "unmeasured_grants": sum(
+                metric["waits"]["unmeasured_grants"] for metric in metrics
+            ),
+        },
+    }
+
+
+def build_run_summary(
+    repositories: tuple[dict, ...] | list[dict],
+    arms: list[str],
+    trials: int,
+    model: str,
+    thinking: str,
+    results: list[dict],
+    generated_at: str,
+) -> dict:
+    del model, thinking, generated_at
+    rows = [_report_row(result) for result in results]
+    aggregates = []
+    for repository in repositories:
+        key = repository["key"]
+        for arm in arms:
+            matching = [
+                row for row in rows if row["repo"] == key and row["arm"] == arm
+            ]
+            original_rows = [
+                result
+                for result in results
+                if result["repository"] == key and result["arm"] == arm
+            ]
+            provenances = {
+                (
+                    result.get("runtime", {}).get("image_id"),
+                    result.get("runtime", {}).get("platform"),
+                    result.get("runtime", {}).get("server_platform"),
+                    json.dumps(result.get("runtime", {}).get("versions", {}), sort_keys=True),
+                )
+                for result in original_rows
+            }
+            aggregates.append(
+                {
+                    "repo": key,
+                    "arm": arm,
+                    "row_count": len(matching),
+                    "cleared_count": sum(row["cleared"] for row in matching),
+                    "wall_time_s": sum(row["wall_time_s"] for row in matching),
+                    "tokens": sum(row["tokens"] for row in matching),
+                    "tool_calls": sum(row["tool_calls"] for row in matching),
+                    "coordination_metrics": (
+                        None
+                        if len(provenances) > 1
+                        else _aggregate_coordination_metrics(arm, matching, trials)
+                    ),
+                }
+            )
+    return {"arms": rows, "aggregates": aggregates}
+
+
+def _table(results: list[dict]) -> str:
+    lines = [
+        "| repository | arm | trial | cleared | wall_time_s | tokens | tool_calls | error |",
+        "| --- | --- | ---: | --- | ---: | ---: | ---: | --- |",
+    ]
+    for result in results:
+        row = _report_row(result)
+        failure = _failure_reason(result)
+        error = "" if failure is None else re.sub(r"\r\n?|\n", r"\\n", failure).replace("|", "\\|")
+        lines.append(
+            "| {repo} | {arm} | {trial} | {cleared} | {wall:.3f} | {tokens} | {tools} | {error} |".format(
+                repo=row["repo"],
+                arm=row["arm"],
+                trial=row["trial"],
+                cleared=row["cleared"],
+                wall=row["wall_time_s"],
+                tokens=row["tokens"],
+                tools=row["tool_calls"],
+                error=error,
+            )
+        )
+    return "\n".join(lines)
+
+
+def _parse_repositories(value: str) -> list[str]:
+    values = [item.strip() for item in value.split(",") if item.strip()]
+    if not values:
+        raise argparse.ArgumentTypeError("--repos must contain one or more repository keys")
+    return values
+
+
+def _inner_qualification_runtime(
+    image: str, docker_bin: str, manifest: Path, cache: Path
+) -> _DOCKER.DockerRuntime:
+    if not Path("/.dockerenv").is_file():
+        raise ValueError("inner qualification requires a Docker container marker")
+    if (
+        not manifest.resolve().is_relative_to(Path("/benchmark"))
+        and not _STAGED_DATASET_ACTIVE
+    ):
+        raise ValueError("inner qualification manifest must be under /benchmark")
+    if cache.resolve() != Path("/cache"):
+        raise ValueError("inner qualification cache must be /cache")
+    image_id = os.environ.get("STATEFULBENCH_IMAGE_ID")
+    platform = os.environ.get("STATEFULBENCH_IMAGE_PLATFORM")
+    server_platform = os.environ.get("STATEFULBENCH_SERVER_PLATFORM")
+    if not image_id or not image_id.startswith("sha256:"):
+        raise ValueError("inner qualification requires inspected image ID provenance")
+    if platform != "linux/arm64":
+        raise ValueError("inner qualification requires inspected linux/arm64 image provenance")
+    if not server_platform or not server_platform.startswith("linux/"):
+        raise ValueError("inner qualification requires Docker server platform provenance")
+    try:
+        repo_digests = json.loads(os.environ.get("STATEFULBENCH_IMAGE_REPO_DIGESTS", "[]"))
+    except json.JSONDecodeError as error:
+        raise ValueError("inner qualification has invalid image digest provenance") from error
+    if type(repo_digests) is not list or any(type(item) is not str for item in repo_digests):
+        raise ValueError("inner qualification has invalid image digest provenance")
+    return _DOCKER.DockerRuntime(
+        binary=docker_bin,
+        image=image,
+        image_id=image_id,
+        repo_digests=tuple(repo_digests),
+        platform=platform,
+        server_platform=server_platform,
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    commands = parser.add_subparsers(dest="command", required=True)
+    qualify = commands.add_parser(
+        "qualify", help="qualify archived real-world reference corpora"
+    )
+    qualify.add_argument("--manifest", type=Path, required=True)
+    qualify.add_argument("--cache", type=Path, required=True)
+    qualify.add_argument("--repo", action="append")
+    run = commands.add_parser(
+        "run", help="run real-world benchmark (parallel-on opt-in)"
+    )
+    run.add_argument("--manifest", type=Path, required=True)
+    run.add_argument("--cache", type=Path, required=True)
+    run.add_argument("--out", type=Path, required=True)
+    run.add_argument("--repos", type=_parse_repositories)
+    run.add_argument(
+        "--arms",
+        type=_LITE._parse_arms,
+        default=_LITE._parse_arms("sequential,parallel-off"),
+        help="comma-separated benchmark arms; parallel-on is opt-in",
+    )
+    run.add_argument("--trials", type=int, default=1)
+    run.add_argument("--model", default="openai-codex/gpt-5.6-terra")
+    run.add_argument("--thinking", default="high")
+    run.add_argument("--omp-bin", default="/usr/local/bin/omp")
+    run.add_argument("--stateful-binary", default="/usr/local/bin/stateful")
+    run.add_argument("--timeout-s", type=int, default=900)
+    for command in (qualify, run):
+        command.add_argument("--docker-bin", default="docker")
+        command.add_argument("--docker-image", required=True)
+    arguments = parser.parse_args(argv)
+    inner_qualification = (
+        arguments.command == "qualify"
+        and os.environ.get("STATEFULBENCH_DOCKER_INNER") == "qualification"
+    )
+    global _STAGED_DATASET_ACTIVE
+    if (
+        (
+            arguments.command == "run"
+            or (inner_qualification and Path("/.dockerenv").is_file())
+        )
+        and not _STAGED_DATASET_ACTIVE
+    ):
+        staged_argv = list(sys.argv[1:] if argv is None else argv)
+        try:
+            manifest_index = staged_argv.index("--manifest")
+        except ValueError as error:
+            raise ValueError("--manifest is required") from error
+        completed = False
+        try:
+            with _staged_dataset_tree(arguments.manifest) as staged_manifest:
+                staged_argv[manifest_index + 1] = str(staged_manifest)
+                _STAGED_DATASET_ACTIVE = True
+                try:
+                    status = main(staged_argv)
+                    completed = True
+                finally:
+                    _STAGED_DATASET_ACTIVE = False
+        except OSError as error:
+            if not completed:
+                raise
+            if arguments.command == "qualify":
+                _invalidate_stage_cleanup_receipts(arguments.cache)
+                print(f"Docker qualification failed: {error}", file=sys.stderr)
+            else:
+                _downgrade_stage_cleanup_run(arguments, str(error))
+                print(f"Docker run failed: {error}", file=sys.stderr)
+            return 1
+        return status
+    if arguments.command == "qualify" and not inner_qualification:
+        try:
+            repo_root = Path(__file__).resolve().parents[3]
+            manifest_path = arguments.manifest.resolve()
+            if not manifest_path.is_relative_to(repo_root):
+                raise ValueError("manifest must be inside the repository root")
+            if arguments.cache.resolve().is_relative_to(repo_root):
+                raise ValueError("cache must be outside the read-only repository root")
+            repositories = repo_entries(load_manifest(arguments.manifest))
+            wanted = tuple(arguments.repo or ())
+            selected = tuple(
+                repo for repo in repositories if not wanted or repo["key"] in set(wanted)
+            )
+            missing = sorted(set(wanted) - {repo["key"] for repo in selected})
+            if missing:
+                raise ValueError(f"unknown repository key: {', '.join(missing)}")
+            for repo in selected:
+                remove_qualification_receipt(arguments.cache, repo["key"])
+            runtime = _DOCKER.inspect_runtime(arguments.docker_bin, arguments.docker_image)
+            arguments.cache.mkdir(parents=True, exist_ok=True)
+            return _DOCKER.run_qualification_container(
+                runtime,
+                repo_root,
+                arguments.manifest,
+                arguments.cache,
+                tuple(repo["key"] for repo in selected),
+            )
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            print(f"Docker qualification failed: {error}", file=sys.stderr)
+            return 1
+
+    if arguments.command == "run":
+        if arguments.trials < 1:
+            parser.error("--trials must be at least 1")
+        if arguments.timeout_s < 1:
+            parser.error("--timeout-s must be at least 1")
+    else:
+        try:
+            runtime = _inner_qualification_runtime(
+                arguments.docker_image,
+                arguments.docker_bin,
+                arguments.manifest,
+                arguments.cache,
+            )
+        except ValueError as error:
+            print(f"Docker qualification failed: {error}", file=sys.stderr)
+            return 1
+
+    manifest = load_manifest(arguments.manifest)
+    dataset_root = arguments.manifest.parent.resolve()
+    repositories = repo_entries(manifest)
+    wanted = arguments.repos if arguments.command == "run" else arguments.repo
+    if wanted:
+        selected = tuple(repo for repo in repositories if repo["key"] in set(wanted))
+        missing = sorted(set(wanted) - {repo["key"] for repo in selected})
+        if missing:
+            parser.error(f"unknown repository key: {', '.join(missing)}")
+    else:
+        selected = repositories
+
+    if arguments.command == "run":
+        _require_fresh_run_result_directories(
+            arguments.out, selected, arguments.arms, arguments.trials
+        )
+        try:
+            runtime = _DOCKER.inspect_runtime(arguments.docker_bin, arguments.docker_image)
+        except (RuntimeError, ValueError) as error:
+            parser.error(str(error))
+        if (
+            arguments.omp_bin != "/usr/local/bin/omp"
+            or arguments.stateful_binary != "/usr/local/bin/stateful"
+        ):
+            parser.error(
+                "run requires image-qualified --omp-bin and --stateful-binary paths"
+            )
+        corpora: dict[str, dict] = {}
+        receipts: dict[str, dict] = {}
+        try:
+            for repo in selected:
+                corpus_path = dataset_root / repo["corpus"]
+                corpus = load_corpus(corpus_path)
+                if not _corpus_matches_repository(repo, corpus):
+                    raise ValueError("corpus repository does not match manifest key")
+                receipts[repo["key"]] = load_qualification_receipt(
+                    arguments.cache, repo, arguments.manifest, corpus_path, runtime
+                )
+                corpora[repo["key"]] = corpus
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            print(f"qualification receipt validation failed: {error}", file=sys.stderr)
+            return 1
+        cfg = RunConfig(
+            tasks=10,
+            timeout_s=arguments.timeout_s,
+            model=arguments.model,
+            thinking=arguments.thinking,
+            omp_bin=arguments.omp_bin,
+            stateful_binary=arguments.stateful_binary,
+            denied_read_paths=(dataset_root,),
+        )
+        results = []
+        for repo in selected:
+            corpus = corpora[repo["key"]]
+            repo_results: list[dict] = []
+            try:
+                with _staged_graded_inputs(
+                    dataset_root / repo["corpus"],
+                    corpus,
+                    receipts[repo["key"]]["graded_inputs"],
+                ) as staged_dataset_root:
+                    for trial in range(1, arguments.trials + 1):
+                        for arm in arguments.arms:
+                            try:
+                                result = run_repo_arm(
+                                    repo,
+                                    corpus,
+                                    staged_dataset_root,
+                                    arguments.cache,
+                                    arguments.out,
+                                    arm,
+                                    replace(cfg, trial=trial),
+                                    runtime=runtime,
+                                    qualification_receipt=receipts[repo["key"]],
+                                    credential_seed=_seed_shared_credential,
+                                )
+                            except FileExistsError:
+                                raise
+                            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                                result = _empty_run_result(
+                                    repo,
+                                    arm,
+                                    trial,
+                                    str(error),
+                                    _qualification_row_identity(receipts[repo["key"]]),
+                                )
+                                _create_and_write_run_result(arguments.out, result)
+                            else:
+                                _write_run_result(arguments.out, result)
+                            repo_results.append(result)
+                            results.append(result)
+            except FileExistsError:
+                raise
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                if repo_results:
+                    for result in repo_results:
+                        _append_stage_cleanup_error(result, str(error))
+                        _write_run_result(arguments.out, result)
+                else:
+                    for trial in range(1, arguments.trials + 1):
+                        for arm in arguments.arms:
+                            result = _empty_run_result(
+                                repo,
+                                arm,
+                                trial,
+                                str(error),
+                                _qualification_row_identity(receipts[repo["key"]]),
+                            )
+                            _create_and_write_run_result(arguments.out, result)
+                            results.append(result)
+        summary = build_run_summary(
+            selected,
+            arguments.arms,
+            arguments.trials,
+            cfg.model,
+            cfg.thinking,
+            results,
+            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        )
+        arguments.out.mkdir(parents=True, exist_ok=True)
+        _write_json_atomically(arguments.out / "summary.json", summary)
+        print(_table(results))
+        return 0 if results and all(result["cleared"] for result in results) else 1
+
+    try:
+        tool_provenance = _qualification_tool_provenance()
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        print(f"Docker qualification failed: {error}", file=sys.stderr)
+        return 1
+
+    results = []
+    for repo in selected:
+        remove_qualification_receipt(arguments.cache, repo["key"])
+        corpus_path = dataset_root / repo["corpus"]
+        try:
+            corpus = load_corpus(corpus_path)
+            if not _corpus_matches_repository(repo, corpus):
+                raise ValueError("corpus repository does not match manifest key")
+            admitted_inputs = _graded_input_hashes(corpus_path, corpus)
+            with _staged_graded_inputs(
+                corpus_path, corpus, admitted_inputs
+            ) as staged_dataset_root:
+                result = qualify_repository(
+                    repo, corpus, staged_dataset_root, arguments.cache
+                )
+            if _qualified(result):
+                write_qualification_receipt(
+                    arguments.cache,
+                    repo,
+                    arguments.manifest,
+                    corpus_path,
+                    runtime,
+                    tool_provenance=tool_provenance,
+                    graded_inputs=admitted_inputs,
+                )
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            result = {
+                "key": repo["key"],
+                "error": str(error),
+                "tasks": [],
+                "base_suite_green": False,
+                "integrated_green": False,
+                "upstream_green": False,
+                "isolated_tasks": [],
+                "artifacts": {},
+            }
+        results.append(result)
+    print(
+        json.dumps(
+            {
+                "runtime": _runtime_provenance(runtime),
+                "tool_provenance": tool_provenance,
+                "repositories": results,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0 if all(_qualified(result) for result in results) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

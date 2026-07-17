@@ -1,0 +1,43 @@
+diff --git a/authlib/oauth2/client.py b/authlib/oauth2/client.py
+--- a/authlib/oauth2/client.py
++++ b/authlib/oauth2/client.py
+@@ -1,3 +1,6 @@
++from urllib.parse import urlsplit
++
+ from authlib.common.security import generate_token
+ from authlib.common.urls import url_decode
++from .rfc6749.errors import MismatchingStateException
+ 
+@@ -212,6 +214,32 @@ class OAuth2Client:
+         state = state or self.state
+         # implicit  grant_type
+         authorization_response = kwargs.pop("authorization_response", None)
++        if authorization_response is None and url is not None:
++            token_endpoint = self.metadata.get("token_endpoint")
++            if token_endpoint and url != token_endpoint:
++                callback = urlsplit(url)
++                if callback.fragment:
++                    fragment = url_decode(callback.fragment)
++                    if any(key == "code" for key, _ in fragment):
++                        raise ValueError(
++                            "authorization code response must use query parameters"
++                        )
++                query = url_decode(callback.query)
++                code_count = sum(key == "code" for key, _ in query)
++                if code_count > 1:
++                    raise ValueError("authorization response has multiple code parameters")
++                params = dict(query)
++                if "error" in params:
++                    if state and params.get("state") != state:
++                        raise MismatchingStateException()
++                    raise self.oauth_error_class(
++                        error=params["error"],
++                        description=params.get("error_description"),
++                    )
++                if code_count:
++                    authorization_response = url
++                    url = None
++
+         if authorization_response and "#" in authorization_response:
+             return self.token_from_fragment(authorization_response, state)
+ 

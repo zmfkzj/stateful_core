@@ -1,0 +1,22 @@
+--- a/src/watchdog/utils/event_debouncer.py
++++ b/src/watchdog/utils/event_debouncer.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ import logging
++import time
+ import threading
+ from typing import TYPE_CHECKING
+ 
+@@ -54,8 +55,10 @@ class EventDebouncer(BaseThread):
+ 
+                 if self.debounce_interval_seconds:
+                     # Wait for additional events (or shutdown) until the debounce interval passes.
++                    debounce_deadline = time.monotonic() + self.debounce_interval_seconds
+                     while self.should_keep_running():
+-                        if not self._cond.wait(timeout=self.debounce_interval_seconds):
++                        timeout = debounce_deadline - time.monotonic()
++                        if timeout <= 0 or not self._cond.wait(timeout=timeout):
+                             break
+ 
+                 if not self.should_keep_running():
