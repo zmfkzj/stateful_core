@@ -1,7 +1,7 @@
 # Final Closure Task 6 Report
 
 ## Status
-- Implementation commit: `1e3a5e8` (`Bind write replay to runtime origin`).
+- Implementation commit: `9449940` (`Guard direct write lifecycle origin`).
 - Push: implementation and this report commit pushed to `origin/presence-first-event-journal-v2`.
 
 ## RED/GREEN
@@ -13,7 +13,7 @@
 - RED: `cargo test -p stateful-cli --test outbox sync_outbox_discards_deterministic_client_rejections` showed deterministic HTTP 400 records replayed forever.
 - GREEN: `cargo test -p stateful-cli --test hook` — 148 passed.
 - GREEN: `cargo test -p stateful-cli --test outbox` — 18 passed.
-- GREEN: `cargo test -p stateful-cli hook::write_lifecycle::tests` — 8 passed.
+- GREEN: `cargo test -p stateful-cli hook::write_lifecycle::tests` — 9 passed.
 - Review RED: a start and fallback completion were appended independently, allowing a crash-visible start-only outbox; generic heartbeat replay lost structured 404 status; recovery fell back to a triggering repository when no captured root existed.
 - Review GREEN: `cargo test -p stateful-cli durable_read_start_pair_persists_start_and_failed_completion_before_send` — the pair is atomically persisted before a dropped first response.
 - Review GREEN: `cargo test -p stateful-cli --test outbox sync_outbox_discards_a_structured_404_heartbeat_and_sends_the_next_record` — raw 404 is discarded and the following heartbeat record is sent.
@@ -25,6 +25,8 @@
 - Review GREEN: `cargo test -p stateful-cli pending_intent_bound_to_another_origin_is_not_replayed` — records persist their EnvOverride/Global/RepoLocal origin and a mismatch is retained without network delivery.
 - Fixture RED: strict runtime reuse correctly rejected test-only fake global runtimes with PID `42`, while isolated hook subprocesses had cleared environment and could not prove ownership.
 - Fixture GREEN: focused subprocess lifecycle regressions use the fixture runtime as an explicit environment override, preserving the intended fake-server contract under strict reuse.
+- Review RED: direct authorization retry, completion, and frozen release paths could reload a pending origin-A envelope and post it to current origin B.
+- Review GREEN: `cargo test -p stateful-cli direct_lifecycle_posts_reject_a_changed_runtime_origin_and_allow_same_origin_restart` — changed-origin retries preserve pending state with zero B requests; a restarted server in the same Global origin accepts the original frozen authorization.
 
 ## State-machine invariants
 - Read start and its failed fallback completion are serialized and atomically persisted as one pair under the global outbox lock before start dispatch; success removes both in one locked rewrite, while error leaves both for ordered replay.
@@ -32,6 +34,7 @@
 - Write recovery uses only an authorization-captured absolute root. Missing, relative, or `unknown` roots fail safely while preserving the pending intent and fences.
 - New write authorizations capture their actual canonical repository root before posting, independent of envelope identity; a bound legacy record may backfill a known absolute frozen authorization root, while an unbound record is never guessed.
 - Pending writes capture the selected runtime origin, not a process endpoint. Replay identifies the current trigger origin and sends only exact-origin records, preserving legacy unbound or mismatched records; matching Global and RepoLocal origins use current runtime discovery after restart.
+- Every direct authorization, completion, denial-release, and claim-release path checks the current runtime origin against the persisted origin before its first lifecycle POST; mismatch errors retain the pending record.
 - Hook subprocess fixtures expose their explicitly configured fake runtime as an environment override; this is test-only alignment with the production no-fallback runtime ownership policy.
 - Exact reads require successful, complete, untruncated raw full-file evidence. Nested line selectors are stripped from the lifecycle target and remain Partial.
 - Testing presence starts only after a recognized Bash command is permitted; Codex and OMP emit typed start/result envelopes and refresh heartbeat after their successful post-tool paths.
