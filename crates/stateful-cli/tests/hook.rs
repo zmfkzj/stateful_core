@@ -6243,12 +6243,25 @@ fn run_hook_subprocess_from_with_extra_env(
     extra_env: &[(&str, &str)],
 ) -> std::process::Output {
     let input = hook_input_with_test_operation_id(args, input);
+    let fixture_runtime = fs::read_to_string(&paths.server_json)
+        .ok()
+        .and_then(|contents| serde_json::from_str::<ServerRuntime>(&contents).ok());
+    let has_runtime_override = extra_env.iter().any(|(key, _)| {
+        *key == "STATEFUL_SERVER_URL" || *key == "STATEFUL_SERVER_TOKEN"
+    });
     let mut command = Command::new(env!("CARGO_BIN_EXE_stateful"));
     command
         .args(args)
         .current_dir(cwd)
         .env_clear()
         .env("STATEFUL_HOME", &paths.home);
+    if !has_runtime_override {
+        if let Some(runtime) = fixture_runtime {
+            command
+                .env("STATEFUL_SERVER_URL", runtime.base_url)
+                .env("STATEFUL_SERVER_TOKEN", runtime.token);
+        }
+    }
     for (key, value) in extra_env {
         command.env(key, value);
     }

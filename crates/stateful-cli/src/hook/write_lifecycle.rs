@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use stateful_core::{ActorType, ContentFingerprint, Decision, SourceKind, WriteIntentOutcome};
 
-use crate::{GlobalPaths, RepoIdentity, ServerRuntime};
+use crate::{GlobalPaths, RepoIdentity, RuntimeOrigin, ServerRuntime, runtime_origin_for_authorization};
 
 #[derive(Debug, Deserialize, Serialize)]
 struct PendingIntent {
@@ -18,6 +18,8 @@ struct PendingIntent {
     targets: Vec<String>,
     #[serde(default)]
     repo_root: String,
+    #[serde(default)]
+    runtime_origin: Option<RuntimeOrigin>,
     #[serde(default)]
     claim_ids: Vec<String>,
     #[serde(default)]
@@ -148,6 +150,7 @@ pub(crate) fn authorize_at_root(
         intent_id: None,
         authorization_request: authorization_request.clone(),
         repo_root: captured_repo_root.to_string_lossy().into_owned(),
+        runtime_origin: Some(runtime_origin_for_authorization(repo_root, paths, runtime)?),
         targets: targets.iter().map(|(path, _)| path.clone()).collect(),
         claim_ids,
         completion_request: None,
@@ -338,6 +341,7 @@ pub(crate) fn replay_pending(
     runtime: &ServerRuntime,
     _trigger_repo_root: &Path,
 ) -> anyhow::Result<()> {
+    let selected_origin = runtime_origin_for_authorization(_trigger_repo_root, paths, runtime)?;
     let root = paths.runtime_dir.join("write-intents");
     let agents = match fs::read_dir(&root) {
         Ok(agents) => agents,
@@ -375,7 +379,7 @@ pub(crate) fn replay_pending(
             if path.extension().is_none_or(|extension| extension != "json") {
                 continue;
             }
-            if let Err(error) = replay_pending_at(runtime, &path) {
+            if let Err(error) = replay_pending_at(runtime, &path, &selected_origin) {
                 failure.get_or_insert(error);
             }
         }
@@ -383,8 +387,15 @@ pub(crate) fn replay_pending(
     failure.map_or(Ok(()), Err)
 }
 
-fn replay_pending_at(runtime: &ServerRuntime, path: &Path) -> anyhow::Result<()> {
+fn replay_pending_at(
+    runtime: &ServerRuntime,
+    path: &Path,
+    selected_origin: &RuntimeOrigin,
+) -> anyhow::Result<()> {
     let mut intent: PendingIntent = serde_json::from_slice(&fs::read(path)?)?;
+    if intent.runtime_origin.as_ref() != Some(selected_origin) {
+        return Ok(());
+    }
     if intent.intent_id.is_none() {
         let response = post_frozen_authorization(runtime, &intent.authorization_request)?;
         if !(200..300).contains(&response.status_code) {
@@ -462,10 +473,10 @@ fn replay_pending_at(runtime: &ServerRuntime, path: &Path) -> anyhow::Result<()>
         intent.completed = true;
         save_pending_at(path, &intent)?;
     }
-        if intent.release_requests.is_empty() {
-            freeze_release_requests(&mut intent)?;
-            save_pending_at(path, &intent)?;
-        }
+    if intent.release_requests.is_empty() {
+        freeze_release_requests(&mut intent)?;
+        save_pending_at(path, &intent)?;
+    }
     while let Some(request) = intent.release_requests.first() {
         crate::replay_v2_request(runtime, "/v2/claim/release", request)?;
         intent.release_requests.remove(0);
@@ -590,6 +601,7 @@ mod tests {
             intent_id: Some("intent-1".to_string()),
             authorization_request: "{}".to_string(),
             repo_root: "/repo".to_string(),
+            runtime_origin: None,
             targets: vec!["target.txt".to_string()],
             claim_ids: vec!["claim-1".to_string()],
             completion_request: None,
@@ -627,6 +639,7 @@ mod tests {
         fs::create_dir_all(&repo_root).expect("repo should create");
         fs::write(repo_root.join("target.txt"), "after").expect("target should write");
         let (runtime, requests) = fake_server([Some(AUTHORIZED), None, Some(r#"{"status":"ok"}"#)]);
+        crate::write_global_runtime_file(&paths, &runtime).expect("global runtime should write");
 
         authorize_at_root(
             &paths,
@@ -693,6 +706,7 @@ mod tests {
             None,
             Some(r#"{"status":"ok"}"#),
         ]);
+        crate::write_global_runtime_file(&paths, &runtime).expect("global runtime should write");
 
         authorize_at_root(
             &paths,
@@ -770,6 +784,7 @@ mod tests {
             Some(AUTHORIZED),
             Some(r#"{"intent_id":"intent-1","operation_id":"operation-a"}"#),
         ]);
+        crate::write_global_runtime_file(&paths, &runtime).expect("global runtime should write");
         let identity = RepoIdentity {
             repo_id: "repo-a".to_string(),
             worktree_id: "worktree-a".to_string(),
@@ -822,6 +837,7 @@ mod tests {
             Some(AUTHORIZED),
             Some(r#"{"intent_id":"intent-1","operation_id":"operation-root"}"#),
         ]);
+        crate::write_global_runtime_file(&paths, &runtime).expect("global runtime should write");
         authorize_at_root(
             &paths,
             &runtime,
@@ -855,7 +871,7 @@ mod tests {
 
 
     #[test]
-    fn legacy_pending_intent_backfills_a_known_absolute_authorization_root() {
+    fn legacy_pending_intent_without_an_origin_is_preserved_without_replay() {
         let temp = tempfile::tempdir().expect("temp dir should create");
         let paths = GlobalPaths::new(temp.path().join("home"));
         let repo_root = temp.path().join("repo");
@@ -884,6 +900,7 @@ mod tests {
             intent_id: Some("intent-1".to_string()),
             authorization_request: serde_json::to_string(&authorization).expect("authorization should serialize"),
             repo_root: String::new(),
+            runtime_origin: None,
             targets: vec!["target.txt".to_string()],
             claim_ids: Vec::new(),
             completion_request: None,
@@ -892,12 +909,44 @@ mod tests {
             completed: false,
         };
         save_pending(&paths, "agent-1", "legacy-root", &pending).expect("legacy pending should save");
-        let (runtime, requests) = fake_server([Some(r#"{"intent_id":"intent-1","operation_id":"legacy-root"}"#)]);
+        let (runtime, requests) = fake_server([]);
+        crate::write_global_runtime_file(&paths, &runtime).expect("global runtime should write");
 
-        replay_pending(&paths, &runtime, &temp.path().join("other"))
-            .expect("known authorization root should backfill");
-        let _recovery = requests.recv().expect("recovery should arrive");
-        assert!(!pending_path(&paths, "agent-1", "legacy-root").exists());
+        replay_pending(&paths, &runtime, &repo_root)
+            .expect("unbound legacy pending must not interfere with current replay");
+        assert!(pending_path(&paths, "agent-1", "legacy-root").exists());
+        assert!(requests.try_recv().is_err(), "unbound pending must not be sent");
+    }
+
+    #[test]
+    fn pending_intent_bound_to_another_origin_is_not_replayed() {
+        let temp = tempfile::tempdir().expect("temp dir should create");
+        let paths = GlobalPaths::new(temp.path().join("home"));
+        let repo_a = temp.path().join("repo-a");
+        let repo_b = temp.path().join("repo-b");
+        fs::create_dir_all(&repo_a).expect("repo A should create");
+        fs::create_dir_all(&repo_b).expect("repo B should create");
+        let pending = PendingIntent {
+            intent_id: Some("intent-1".to_string()),
+            authorization_request: "{}".to_string(),
+            repo_root: repo_a.to_string_lossy().into_owned(),
+            runtime_origin: Some(RuntimeOrigin::RepoLocal {
+                repo_root: repo_a.canonicalize().expect("repo A should canonicalize").to_string_lossy().into_owned(),
+            }),
+            targets: Vec::new(),
+            claim_ids: Vec::new(),
+            completion_request: None,
+            recovery_request: None,
+            release_requests: Vec::new(),
+            completed: false,
+        };
+        save_pending(&paths, "agent-1", "other-origin", &pending).expect("pending should save");
+        let (runtime, requests) = fake_server([]);
+        crate::write_global_runtime_file(&paths, &runtime).expect("global runtime should write");
+
+        replay_pending(&paths, &runtime, &repo_b).expect("other-origin pending must not block");
+        assert!(pending_path(&paths, "agent-1", "other-origin").exists());
+        assert!(requests.try_recv().is_err(), "other-origin pending must not be sent");
     }
 
     #[test]
@@ -914,6 +963,7 @@ mod tests {
             None,
             Some(r#"{"status":"ok"}"#),
         ]);
+        crate::write_global_runtime_file(&paths, &runtime).expect("global runtime should write");
         let identity = RepoIdentity {
             repo_id: "repo-1".to_string(),
             worktree_id: "worktree-1".to_string(),
