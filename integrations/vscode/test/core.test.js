@@ -13,7 +13,7 @@ function jsonResponse(body, status = 200) {
   };
 }
 
-function vscodeHarness() {
+function vscodeHarness(workspaceFolders = [{ uri: { fsPath: '/repo' } }]) {
   const handlers = {};
   const status = {
     text: '',
@@ -29,7 +29,7 @@ function vscodeHarness() {
       showWarningMessage: async () => 'Continue',
     },
     workspace: {
-      workspaceFolders: [{ uri: { fsPath: '/repo' } }],
+      workspaceFolders,
       onDidOpenTextDocument: (handler) => {
         handlers.open = handler;
         return { dispose() {} };
@@ -65,7 +65,7 @@ function extension(vscode) {
   }
 }
 
-function writeRuntime(home) {
+function writeRuntime(home, workspaceId = 'workspace-1') {
   const runtimeDir = path.join(home, 'runtime');
   fs.mkdirSync(runtimeDir, { recursive: true });
   fs.writeFileSync(
@@ -73,7 +73,7 @@ function writeRuntime(home) {
     JSON.stringify({
       base_url: 'http://stateful.test',
       token: 'secret-token',
-      workspace_id: 'workspace-1',
+      workspace_id: workspaceId,
     }),
   );
 }
@@ -90,6 +90,26 @@ function core() {
 function tempDir() {
   fs.mkdirSync(os.tmpdir(), { recursive: true });
   return fs.mkdtempSync(path.join(os.tmpdir(), 'stateful-vscode-core-'));
+}
+
+function writeGitRepo(root, branch = 'main') {
+  fs.mkdirSync(path.join(root, '.git'), { recursive: true });
+  fs.writeFileSync(path.join(root, '.git', 'HEAD'), `ref: refs/heads/${branch}\n`);
+}
+
+function writeEnabledRepos(home, entries) {
+  fs.writeFileSync(
+    path.join(home, 'config.yml'),
+    `repos:\n${entries.map((entry) => [
+      `- repo_id: ${entry.repoId}`,
+      `  root: ${entry.root}`,
+      `  enabled: ${entry.enabled === false ? 'false' : 'true'}`,
+      '  enabled_at: "0"',
+      `  policy_config_path: ${path.join(entry.root, '.stateful', 'config.yml')}`,
+      '  allowed_tools:',
+      '  - task',
+    ].join('\n')).join('\n')}\n`,
+  );
 }
 
 test('readRuntimeFile parses server runtime discovery into active connection config', () => {
@@ -116,6 +136,33 @@ test('readRuntimeFile treats a missing runtime file as dormant fail-open state',
   const missingRuntimeFile = path.join(tempDir(), 'runtime', 'server.json');
 
   assert.deepStrictEqual(core().readRuntimeFile(missingRuntimeFile), { state: 'dormant' });
+});
+
+test('enabledRepoIdentity reads worktree HEAD metadata from installed config', () => {
+  const home = tempDir();
+  const root = fs.realpathSync(tempDir());
+  const gitdir = tempDir();
+  fs.writeFileSync(path.join(root, '.git'), `gitdir: ${gitdir}\n`);
+  fs.writeFileSync(path.join(gitdir, 'HEAD'), 'ref: refs/heads/feature/worktree\n');
+  writeEnabledRepos(home, [{ repoId: 'repo-worktree', root }]);
+
+  assert.deepStrictEqual(
+    core().enabledRepoIdentity(root, { STATEFUL_HOME: home }),
+    {
+      root,
+      repoId: 'repo-worktree',
+      worktreeId: 'repo-worktree',
+      branch: 'feature/worktree',
+    },
+  );
+});
+
+test('effectiveWorkspaceId matches Rust local runtime derivation', () => {
+  const identity = { worktreeId: 'repo-worktree' };
+  for (const runtimeWorkspaceId of ['local', 'shared', 'unknown']) {
+    assert.equal(core().effectiveWorkspaceId(runtimeWorkspaceId, identity), 'workspace-worktree');
+  }
+  assert.equal(core().effectiveWorkspaceId('remote-workspace', identity), 'remote-workspace');
 });
 
 
@@ -173,27 +220,13 @@ function v2Envelope(call) {
   return body;
 }
 
-function strictRuntimeIdentityResponse(url, options) {
+function strictRuntimeIdentityResponse(url, options, required) {
   const request = new URL(String(url));
   assert.equal(request.pathname, '/v2/runtime/identity');
   assert.equal(options.method, 'GET');
   assert.deepStrictEqual(options.headers, { authorization: 'Bearer secret-token' });
 
   const query = Object.fromEntries(request.searchParams);
-  const required = {
-    protocol_version: 'stateful.v2',
-    agent_id: 'ide-workspace-1',
-    actor_id: 'ide-workspace-1',
-    actor_type: 'human',
-    root: '/repo',
-    workspace_id: 'workspace-1',
-    repo_id: 'unknown',
-    worktree_id: 'unknown',
-    branch: 'unknown',
-    kind: 'ide',
-    event: 'runtime_identity',
-    source_ref: 'stateful.vscode',
-  };
   for (const [field, expected] of Object.entries(required)) {
     if (query[field] !== expected) {
       return jsonResponse({ error: `missing or invalid ${field}` }, 400);
@@ -210,17 +243,35 @@ function strictRuntimeIdentityResponse(url, options) {
 
 test('VS Code sends a complete V2 query envelope to the runtime identity route', async () => {
   const home = tempDir();
+  const repo = tempDir();
+  const root = fs.realpathSync(repo);
   const originalHome = process.env.STATEFUL_HOME;
   const originalFetch = global.fetch;
+  writeGitRepo(root);
   writeRuntime(home);
+  writeEnabledRepos(home, [{ repoId: 'repo-query', root }]);
   process.env.STATEFUL_HOME = home;
+  const required = {
+    protocol_version: 'stateful.v2',
+    agent_id: 'ide-workspace-1',
+    actor_id: 'ide-workspace-1',
+    actor_type: 'human',
+    root,
+    workspace_id: 'workspace-1',
+    repo_id: 'repo-query',
+    worktree_id: 'repo-query',
+    branch: 'main',
+    kind: 'ide',
+    event: 'runtime_identity',
+    source_ref: 'stateful.vscode',
+  };
   global.fetch = async (url, options = {}) =>
     new URL(String(url)).pathname === '/v2/runtime/identity'
-      ? strictRuntimeIdentityResponse(url, options)
+      ? strictRuntimeIdentityResponse(url, options, required)
       : jsonResponse({ blocked: false, observations: [] });
 
   try {
-    const harness = vscodeHarness();
+    const harness = vscodeHarness([{ uri: { fsPath: root } }]);
     await extension(harness.api).activate({ subscriptions: { push() {} } });
 
     assert.equal(typeof harness.handlers.willSave, 'function');
@@ -233,10 +284,14 @@ test('VS Code sends a complete V2 query envelope to the runtime identity route',
 
 test('VS Code uses the V2 runtime handshake and human request envelopes', async () => {
   const home = tempDir();
+  const repo = tempDir();
+  const root = fs.realpathSync(repo);
   const originalHome = process.env.STATEFUL_HOME;
   const originalFetch = global.fetch;
   const calls = [];
+  writeGitRepo(root);
   writeRuntime(home);
+  writeEnabledRepos(home, [{ repoId: 'repo-envelope', root }]);
   process.env.STATEFUL_HOME = home;
   global.fetch = async (url, options = {}) => {
     const call = { url: String(url), options };
@@ -261,16 +316,16 @@ test('VS Code uses the V2 runtime handshake and human request envelopes', async 
   };
 
   try {
-    const harness = vscodeHarness();
+    const harness = vscodeHarness([{ uri: { fsPath: root } }]);
     await extension(harness.api).activate({ subscriptions: { push() {} } });
     harness.handlers.open({
-      uri: { scheme: 'file', fsPath: '/repo/src/app.js' },
+      uri: { scheme: 'file', fsPath: path.join(root, 'src', 'app.js') },
       getText: () => 'const answer = 42;\n',
     });
     await settle();
     harness.handlers.willSave({
       document: {
-        uri: { scheme: 'file', fsPath: '/repo/src/app.js' },
+        uri: { scheme: 'file', fsPath: path.join(root, 'src', 'app.js') },
         getText: () => 'const answer = 42;\n',
       },
     });
@@ -289,11 +344,11 @@ test('VS Code uses the V2 runtime handshake and human request envelopes', async 
     const identity = {
       agent: { agent_id: 'ide-workspace-1', actor_id: 'ide-workspace-1', actor_type: 'human' },
       workspace: {
-        root: '/repo',
+        root,
         workspace_id: 'workspace-1',
-        repo_id: 'unknown',
-        worktree_id: 'unknown',
-        branch: 'unknown',
+        repo_id: 'repo-envelope',
+        worktree_id: 'repo-envelope',
+        branch: 'main',
       },
     };
     assert.deepStrictEqual(v2Envelope(calls[1]), {
@@ -339,14 +394,18 @@ test('VS Code uses the V2 runtime handshake and human request envelopes', async 
 
 test('VS Code fails save checks conservatively when V2 runtime identity is unsupported', async () => {
   const home = tempDir();
+  const repo = tempDir();
+  const root = fs.realpathSync(repo);
   const originalHome = process.env.STATEFUL_HOME;
   const originalFetch = global.fetch;
+  writeGitRepo(root);
   writeRuntime(home);
+  writeEnabledRepos(home, [{ repoId: 'repo-unsupported', root }]);
   process.env.STATEFUL_HOME = home;
   global.fetch = async () => jsonResponse({ protocol_version: 'unsupported' });
 
   try {
-    const harness = vscodeHarness();
+    const harness = vscodeHarness([{ uri: { fsPath: root } }]);
     await extension(harness.api).activate({ subscriptions: { push() {} } });
 
     assert.equal(
@@ -364,14 +423,18 @@ test('VS Code fails save checks conservatively when V2 runtime identity is unsup
 
 test('VS Code fails save checks conservatively when V2 runtime identity is missing', async () => {
   const home = tempDir();
+  const repo = tempDir();
+  const root = fs.realpathSync(repo);
   const originalHome = process.env.STATEFUL_HOME;
   const originalFetch = global.fetch;
+  writeGitRepo(root);
   writeRuntime(home);
+  writeEnabledRepos(home, [{ repoId: 'repo-missing', root }]);
   process.env.STATEFUL_HOME = home;
   global.fetch = async () => jsonResponse({});
 
   try {
-    const harness = vscodeHarness();
+    const harness = vscodeHarness([{ uri: { fsPath: root } }]);
     await extension(harness.api).activate({ subscriptions: { push() {} } });
 
     assert.equal(
@@ -380,6 +443,232 @@ test('VS Code fails save checks conservatively when V2 runtime identity is missi
     );
     assert.equal(harness.status.showCalls, 1);
     assert.equal(harness.handlers.willSave, undefined);
+  } finally {
+    global.fetch = originalFetch;
+    if (originalHome === undefined) delete process.env.STATEFUL_HOME;
+    else process.env.STATEFUL_HOME = originalHome;
+  }
+});
+
+test('VS Code derives enabled local repository identity for runtime and human envelopes', async () => {
+  const home = tempDir();
+  const repo = tempDir();
+  const root = fs.realpathSync(repo);
+  const originalHome = process.env.STATEFUL_HOME;
+  const originalFetch = global.fetch;
+  const calls = [];
+  writeGitRepo(root, 'feature/stateful');
+  writeRuntime(home, 'local');
+  writeEnabledRepos(home, [{ repoId: 'repo-primary', root }]);
+  process.env.STATEFUL_HOME = home;
+  global.fetch = async (url, options = {}) => {
+    const call = { url: String(url), options };
+    calls.push(call);
+    const request = new URL(call.url);
+    if (request.pathname === '/v2/runtime/identity') {
+      const query = Object.fromEntries(request.searchParams);
+      const expected = {
+        agent_id: 'ide-workspace-primary',
+        actor_id: 'ide-workspace-primary',
+        actor_type: 'human',
+        root,
+        workspace_id: 'workspace-primary',
+        repo_id: 'repo-primary',
+        worktree_id: 'repo-primary',
+        branch: 'feature/stateful',
+      };
+      return Object.entries(expected).every(([field, value]) => query[field] === value)
+        ? jsonResponse({ protocol_version: 'stateful.v2', journal_schema_version: 2, capabilities: ['presence'] })
+        : jsonResponse({ error: 'incorrect repository identity' }, 400);
+    }
+    return jsonResponse({ blocked: false, observations: [] });
+  };
+
+  try {
+    const harness = vscodeHarness([{ uri: { fsPath: root } }]);
+    await extension(harness.api).activate({ subscriptions: { push() {} } });
+    assert.equal(typeof harness.handlers.willSave, 'function');
+    harness.handlers.open({
+      uri: { scheme: 'file', fsPath: path.join(root, 'src', 'app.js') },
+      getText: () => 'const answer = 42;\n',
+    });
+    await settle();
+    harness.handlers.willSave({
+      document: {
+        uri: { scheme: 'file', fsPath: path.join(root, 'src', 'app.js') },
+        getText: () => 'const answer = 42;\n',
+      },
+    });
+    await settle();
+
+    const envelopes = calls
+      .filter((call) => call.options.method === 'POST')
+      .map((call) => JSON.parse(call.options.body));
+    assert.ok(envelopes.length >= 3);
+    for (const envelope of envelopes) {
+      assert.deepStrictEqual(envelope.agent, {
+        agent_id: 'ide-workspace-primary',
+        actor_id: 'ide-workspace-primary',
+        actor_type: 'human',
+      });
+      assert.deepStrictEqual(envelope.workspace, {
+        root,
+        workspace_id: 'workspace-primary',
+        repo_id: 'repo-primary',
+        worktree_id: 'repo-primary',
+        branch: 'feature/stateful',
+      });
+    }
+  } finally {
+    global.fetch = originalFetch;
+    if (originalHome === undefined) delete process.env.STATEFUL_HOME;
+    else process.env.STATEFUL_HOME = originalHome;
+  }
+});
+
+test('VS Code preserves an explicit non-local runtime workspace ID', async () => {
+  const home = tempDir();
+  const repo = tempDir();
+  const root = fs.realpathSync(repo);
+  const originalHome = process.env.STATEFUL_HOME;
+  const originalFetch = global.fetch;
+  const calls = [];
+  writeGitRepo(root);
+  writeRuntime(home, 'remote-workspace');
+  writeEnabledRepos(home, [{ repoId: 'repo-explicit', root }]);
+  process.env.STATEFUL_HOME = home;
+  global.fetch = async (url, options = {}) => {
+    const call = { url: String(url), options };
+    calls.push(call);
+    if (new URL(call.url).pathname === '/v2/runtime/identity') {
+      const query = Object.fromEntries(new URL(call.url).searchParams);
+      return query.workspace_id === 'remote-workspace'
+        && query.agent_id === 'ide-remote-workspace'
+        && query.repo_id === 'repo-explicit'
+        && query.worktree_id === 'repo-explicit'
+        ? jsonResponse({ protocol_version: 'stateful.v2', journal_schema_version: 2, capabilities: ['presence'] })
+        : jsonResponse({ error: 'incorrect explicit workspace identity' }, 400);
+    }
+    return jsonResponse({ blocked: false, observations: [] });
+  };
+
+  try {
+    const harness = vscodeHarness([{ uri: { fsPath: root } }]);
+    await extension(harness.api).activate({ subscriptions: { push() {} } });
+    assert.equal(typeof harness.handlers.willSave, 'function');
+    const probe = calls.find((call) => new URL(call.url).pathname === '/v2/human/save-check');
+    const envelope = JSON.parse(probe.options.body);
+    assert.equal(envelope.workspace.workspace_id, 'remote-workspace');
+    assert.equal(envelope.agent.agent_id, 'ide-remote-workspace');
+  } finally {
+    global.fetch = originalFetch;
+    if (originalHome === undefined) delete process.env.STATEFUL_HOME;
+    else process.env.STATEFUL_HOME = originalHome;
+  }
+});
+
+test('VS Code leaves disabled, malformed, and mismatched installed metadata dormant without posts', async () => {
+  const home = tempDir();
+  const disabledRoot = fs.realpathSync(tempDir());
+  const mismatchedRoot = fs.realpathSync(tempDir());
+  const staleRoot = path.join(home, 'stale-root');
+  const originalHome = process.env.STATEFUL_HOME;
+  const originalFetch = global.fetch;
+  const calls = [];
+  writeGitRepo(disabledRoot);
+  writeGitRepo(mismatchedRoot);
+  writeRuntime(home, 'local');
+  writeEnabledRepos(home, [
+    { repoId: 'repo-disabled', root: disabledRoot, enabled: false },
+    { repoId: 'repo-stale', root: staleRoot },
+  ]);
+  process.env.STATEFUL_HOME = home;
+  global.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), options });
+    return jsonResponse({ protocol_version: 'stateful.v2', journal_schema_version: 2, capabilities: ['presence'] });
+  };
+
+  try {
+    const harness = vscodeHarness([
+      { uri: { fsPath: disabledRoot } },
+      { uri: { fsPath: mismatchedRoot } },
+    ]);
+    await extension(harness.api).activate({ subscriptions: { push() {} } });
+    assert.deepStrictEqual(calls, []);
+    assert.equal(harness.handlers.willSave, undefined);
+    fs.writeFileSync(path.join(home, 'config.yml'), 'repos:\n- repo_id: \n');
+    const malformedHarness = vscodeHarness([{ uri: { fsPath: mismatchedRoot } }]);
+    await extension(malformedHarness.api).activate({ subscriptions: { push() {} } });
+    assert.deepStrictEqual(calls, []);
+    assert.equal(malformedHarness.handlers.willSave, undefined);
+  } finally {
+    global.fetch = originalFetch;
+    if (originalHome === undefined) delete process.env.STATEFUL_HOME;
+    else process.env.STATEFUL_HOME = originalHome;
+  }
+});
+
+test('VS Code keeps multi-root repository envelopes and low-confidence actors distinct', async () => {
+  const home = tempDir();
+  const firstRoot = fs.realpathSync(tempDir());
+  const secondRoot = fs.realpathSync(tempDir());
+  const originalHome = process.env.STATEFUL_HOME;
+  const originalFetch = global.fetch;
+  const calls = [];
+  writeGitRepo(firstRoot, 'first');
+  writeGitRepo(secondRoot, 'second');
+  writeRuntime(home, 'local');
+  writeEnabledRepos(home, [
+    { repoId: 'repo-first', root: firstRoot },
+    { repoId: 'repo-second', root: secondRoot },
+  ]);
+  process.env.STATEFUL_HOME = home;
+  global.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), options });
+    return jsonResponse({ protocol_version: 'stateful.v2', journal_schema_version: 2, capabilities: ['presence'], blocked: false, observations: [] });
+  };
+
+  try {
+    const harness = vscodeHarness([
+      { uri: { fsPath: firstRoot } },
+      { uri: { fsPath: secondRoot } },
+    ]);
+    await extension(harness.api).activate({ subscriptions: { push() {} } });
+    harness.handlers.open({
+      uri: { scheme: 'file', fsPath: path.join(firstRoot, 'src', 'app.js') },
+      getText: () => '',
+    });
+    harness.handlers.open({
+      uri: { scheme: 'file', fsPath: path.join(secondRoot, 'src', 'app.js') },
+      getText: () => '',
+    });
+    await settle();
+
+    const identities = calls
+      .filter((call) => call.options.method === 'POST')
+      .map((call) => JSON.parse(call.options.body))
+      .filter((envelope) => envelope.source.event === 'human_observe')
+      .map((envelope) => ({
+        agentId: envelope.agent.agent_id,
+        workspaceId: envelope.workspace.workspace_id,
+        repoId: envelope.workspace.repo_id,
+        root: envelope.workspace.root,
+      }))
+      .sort((left, right) => left.repoId.localeCompare(right.repoId));
+    assert.deepStrictEqual(identities, [
+      {
+        agentId: 'ide-workspace-first',
+        workspaceId: 'workspace-first',
+        repoId: 'repo-first',
+        root: firstRoot,
+      },
+      {
+        agentId: 'ide-workspace-second',
+        workspaceId: 'workspace-second',
+        repoId: 'repo-second',
+        root: secondRoot,
+      },
+    ]);
   } finally {
     global.fetch = originalFetch;
     if (originalHome === undefined) delete process.env.STATEFUL_HOME;

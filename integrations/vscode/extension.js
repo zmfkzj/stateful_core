@@ -18,40 +18,49 @@ async function activate(context) {
     warn(status, 'Stateful dormant: no runtime file');
     return;
   }
-  const folders = vscode.workspace.workspaceFolders || [];
-  try {
-    await runtimeIdentity(runtime, folders[0]?.uri.fsPath || 'unknown');
-  } catch {
-    warn(status, V2_RUNTIME_UNAVAILABLE);
-    return;
-  }
-
   const workspaces = [];
-  for (const folder of folders) {
-    const repoRoot = folder.uri.fsPath;
+  for (const folder of vscode.workspace.workspaceFolders || []) {
+    const identity = core.enabledRepoIdentity(folder.uri.fsPath);
+    if (!identity) continue;
+    const workspace = {
+      root: identity.root,
+      workspaceId: core.effectiveWorkspaceId(runtime.workspaceId, identity),
+      repoId: identity.repoId,
+      worktreeId: identity.worktreeId,
+      branch: identity.branch,
+    };
+    try {
+      await runtimeIdentity(runtime, workspace);
+    } catch {
+      warn(status, V2_RUNTIME_UNAVAILABLE);
+      return;
+    }
     try {
       const probe = await core.postJson(
         runtime,
         '/v2/human/save-check',
-        v2Envelope(runtime, repoRoot, { paths: [] }, 'human_save_check'),
+        v2Envelope(workspace, { paths: [] }, 'human_save_check'),
         1000,
       );
-      if (probe.ok) workspaces.push({ folder, repoRoot });
-    } catch (error) {
+      if (probe.ok) workspaces.push({ folder, workspace });
+    } catch {
       warn(status, 'Stateful dormant: save gate unavailable');
     }
   }
-  if (!workspaces.length) return;
+  if (!workspaces.length) {
+    warn(status, 'Stateful dormant: no enabled repository metadata');
+    return;
+  }
 
   const lastLowConfidencePost = new Map();
   const observeLow = (document, kind) => {
     const target = documentTarget(workspaces, document);
     if (!target) return;
-    const key = `${kind}:${target.relativePath}`;
+    const key = `${target.workspace.workspaceId}:${kind}:${target.relativePath}`;
     const now = Date.now();
     if ((lastLowConfidencePost.get(key) || 0) + THROTTLE_MS > now) return;
     lastLowConfidencePost.set(key, now);
-    postObserve(status, runtime, target.repoRoot, target.relativePath, kind, 'low');
+    postObserve(status, runtime, target.workspace, target.relativePath, kind, 'low');
   };
 
   context.subscriptions.push(
@@ -65,7 +74,7 @@ async function activate(context) {
     vscode.workspace.onDidSaveTextDocument((document) => {
       const target = documentTarget(workspaces, document);
       if (!target) return;
-      postObserve(status, runtime, target.repoRoot, target.relativePath, 'save', 'high');
+      postObserve(status, runtime, target.workspace, target.relativePath, 'save', 'high');
     }),
   );
 }
@@ -76,7 +85,7 @@ async function softSaveGate(status, runtime, target) {
     result = await core.postJson(
       runtime,
       '/v2/human/save-check',
-      v2Envelope(runtime, target.repoRoot, { paths: [target.relativePath] }, 'human_save_check'),
+      v2Envelope(target.workspace, { paths: [target.relativePath] }, 'human_save_check'),
       250,
     );
   } catch (error) {
@@ -98,14 +107,14 @@ async function softSaveGate(status, runtime, target) {
   if (choice === 'Revert file') {
     await vscode.commands.executeCommand('workbench.action.files.revert');
   }
-  postReconcile(status, runtime, target.repoRoot, {
+  postReconcile(status, runtime, target.workspace, {
     decision: 'ask_user',
     files_reread: [target.relativePath],
     human_change_summary: `VS Code save gate ${choice === 'Revert file' ? 'reverted' : 'continued'}`,
   });
 }
 
-function postObserve(status, runtime, repoRoot, relativePath, kind, confidence) {
+function postObserve(status, runtime, workspace, relativePath, kind, confidence) {
   const observation = {
     relative_path: relativePath,
     kind,
@@ -114,28 +123,28 @@ function postObserve(status, runtime, repoRoot, relativePath, kind, confidence) 
     summary: `VS Code ${kind}`,
   };
   void core
-    .postJson(runtime, '/v2/human/observe', v2Envelope(runtime, repoRoot, observation, 'human_observe'), 5000)
+    .postJson(runtime, '/v2/human/observe', v2Envelope(workspace, observation, 'human_observe'), 5000)
     .then((response) => {
       if (!response.ok) warn(status, `Stateful observe HTTP ${response.status}`);
     })
     .catch(() => warn(status, 'Stateful observe unavailable'));
 }
 
-function postReconcile(status, runtime, repoRoot, payload) {
+function postReconcile(status, runtime, workspace, payload) {
   void core
-    .postJson(runtime, '/v2/reconcile/ack', v2Envelope(runtime, repoRoot, payload, 'human_reconcile'), 5000)
+    .postJson(runtime, '/v2/reconcile/ack', v2Envelope(workspace, payload, 'human_reconcile'), 5000)
     .then((response) => {
       if (!response.ok) warn(status, `Stateful reconcile HTTP ${response.status}`);
     })
     .catch(() => warn(status, 'Stateful reconcile unavailable'));
 }
 
-async function runtimeIdentity(runtime, repoRoot) {
+async function runtimeIdentity(runtime, workspace) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 1000);
   try {
     const url = new URL('/v2/runtime/identity', runtime.baseUrl);
-    url.search = v2Query(runtime, repoRoot, 'runtime_identity');
+    url.search = v2Query(workspace, 'runtime_identity');
     const response = await fetch(url, {
       method: 'GET',
       headers: { authorization: `Bearer ${runtime.token}` },
@@ -161,8 +170,8 @@ async function runtimeIdentity(runtime, repoRoot) {
   }
 }
 
-function v2Query(runtime, repoRoot, event) {
-  const agentId = `ide-${runtime.workspaceId}`;
+function v2Query(workspace, event) {
+  const agentId = `ide-${workspace.workspaceId}`;
   return new URLSearchParams({
     protocol_version: 'stateful.v2',
     request_id: crypto.randomUUID(),
@@ -170,30 +179,30 @@ function v2Query(runtime, repoRoot, event) {
     agent_id: agentId,
     actor_id: agentId,
     actor_type: 'human',
-    root: repoRoot,
-    workspace_id: runtime.workspaceId,
-    repo_id: 'unknown',
-    worktree_id: 'unknown',
-    branch: 'unknown',
+    root: workspace.root,
+    workspace_id: workspace.workspaceId,
+    repo_id: workspace.repoId,
+    worktree_id: workspace.worktreeId,
+    branch: workspace.branch,
     kind: 'ide',
     event,
     source_ref: 'stateful.vscode',
   }).toString();
 }
 
-function v2Envelope(runtime, repoRoot, payload, event) {
-  const agentId = `ide-${runtime.workspaceId}`;
+function v2Envelope(workspace, payload, event) {
+  const agentId = `ide-${workspace.workspaceId}`;
   return {
     protocol_version: 'stateful.v2',
     request_id: crypto.randomUUID(),
     observed_at: new Date().toISOString(),
     agent: { agent_id: agentId, actor_id: agentId, actor_type: 'human' },
     workspace: {
-      root: repoRoot,
-      workspace_id: runtime.workspaceId,
-      repo_id: 'unknown',
-      worktree_id: 'unknown',
-      branch: 'unknown',
+      root: workspace.root,
+      workspace_id: workspace.workspaceId,
+      repo_id: workspace.repoId,
+      worktree_id: workspace.worktreeId,
+      branch: workspace.branch,
     },
     source: { kind: 'ide', event, source_ref: 'stateful.vscode' },
     payload,
@@ -203,9 +212,9 @@ function v2Envelope(runtime, repoRoot, payload, event) {
 function documentTarget(workspaces, document) {
   if (!document || document.uri.scheme !== 'file') return null;
   for (const workspace of workspaces) {
-    const relativePath = path.relative(workspace.repoRoot, document.uri.fsPath);
+    const relativePath = path.relative(workspace.workspace.root, document.uri.fsPath);
     if (!relativePath.startsWith('..') && !path.isAbsolute(relativePath)) {
-      return { repoRoot: workspace.repoRoot, relativePath: relativePath.split(path.sep).join('/') };
+      return { workspace: workspace.workspace, relativePath: relativePath.split(path.sep).join('/') };
     }
   }
   return null;

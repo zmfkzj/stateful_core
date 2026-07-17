@@ -694,9 +694,11 @@ function rememberLazyEditOperation(event, ctx, decision) {
   if (targets.length === 0 || !targets.every(safeLazyOperationTarget)) return "";
   const bases = readOperationBases(ctx.cwd, targets);
   if (!bases) return "";
+  const toolCallId = String(event?.toolCallId || "").trim();
+  if (!toolCallId) return "";
   const operationId = structuredLazyEditOperationId(decision) || nextLazyEditOperationId();
   lazyEditOperations.set(operationId, {
-    operation_id: operationId,
+    tool_call_id: toolCallId,
     agent_id: agentId(event, ctx),
     workspace_id: detectWorkspaceId(event, ctx),
     wait_id: structuredLazyWaitId(decision),
@@ -723,9 +725,11 @@ function rememberLazyWriteOperation(event, ctx, decision) {
   const targets = [target];
   const bases = readOperationBases(ctx.cwd, targets);
   if (!bases) return "";
+  const toolCallId = String(event?.toolCallId || "").trim();
+  if (!toolCallId) return "";
   const operationId = structuredLazyWriteOperationId(decision) || nextLazyWriteOperationId();
   lazyWriteOperations.set(operationId, {
-    operation_id: operationId,
+    tool_call_id: toolCallId,
     agent_id: agentId(event, ctx),
     workspace_id: detectWorkspaceId(event, ctx),
     wait_id: structuredLazyWaitId(decision),
@@ -1352,9 +1356,13 @@ export default function statefulOmpExtension(pi) {
 function state_reservation_claim(operation, ctx) {
   const waitId = String(operation?.wait_id || "").trim();
   if (!waitId) return { ok: true };
+  const relativePath = String(operation?.targets?.[0] || "").trim();
+  if (!safeLazyOperationTarget(relativePath)) {
+    return { ok: false, message: "state_reservation_claim missing normalized path" };
+  }
   const agentId = String(operation?.agent_id || "").trim();
   if (!agentId) return { ok: false, message: "state_reservation_claim missing agent_id" };
-  const args = ["reservation", "claim", "--agent-id", agentId, "--wait-id", waitId];
+  const args = ["reservation", "claim", "--agent-id", agentId, "--wait-id", waitId, "--path", relativePath];
   const workspaceId = firstString(operation?.workspace_id, detectWorkspaceId({}, ctx));
   if (workspaceId) args.push("--workspace-id", workspaceId);
   const reservationId = String(operation?.reservation_id || "").trim();
@@ -1391,6 +1399,8 @@ function state_reservation_claim(operation, ctx) {
       const claim = state_reservation_claim(operation, ctx);
       if (!claim.ok) return lazyToolResult("failed", claim.message, { operation_id: operationId, targets: operation.targets });
       const authorization = runStatefulHook("pre-tool-use", {
+        tool_call_id: operation.tool_call_id,
+        wait_id: operation.wait_id || undefined,
         agent_id: operation.agent_id,
         reservation_id: operation.reservation_id || undefined,
         cwd: operation.cwd || ctx.cwd,
@@ -1407,15 +1417,24 @@ function state_reservation_claim(operation, ctx) {
       } catch (error) {
         result = { status: "failed", message: error instanceof Error ? error.message : String(error) };
       }
-      if (result.status === "applied") {
-        lazyEditOperations.delete(operationId);
-        runStatefulHook("post-tool-use", {
-          agent_id: operation.agent_id,
-          cwd: operation.cwd || ctx.cwd,
-          tool_name: operation.tool_name,
-          tool_input: operation.tool_input,
-        });
-      }
+      if (result.status === "applied") lazyEditOperations.delete(operationId);
+      runStatefulHook("post-tool-use", {
+        agent_id: operation.agent_id,
+        tool_call_id: operation.tool_call_id,
+        reservation_id: operation.reservation_id || undefined,
+        wait_id: operation.wait_id || undefined,
+        cwd: operation.cwd || ctx.cwd,
+        tool_name: operation.tool_name,
+        tool_input: operation.tool_input,
+        is_error: result.status !== "applied",
+        is_complete: true,
+        exact_read_candidate: false,
+        result_metadata: {
+          status: result.status,
+          message: result.message,
+          targets: operation.targets,
+        },
+      });
       return lazyToolResult(result.status, result.message, { operation_id: operationId, targets: operation.targets });
     },
   });
@@ -1443,6 +1462,8 @@ function state_reservation_claim(operation, ctx) {
         reservation_id: operation.reservation_id || undefined,
         cwd: operation.cwd || ctx.cwd,
         yolo: true,
+        tool_call_id: operation.tool_call_id,
+        wait_id: operation.wait_id || undefined,
         tool_name: operation.tool_name,
         tool_input: operation.tool_input,
       });
@@ -1455,15 +1476,24 @@ function state_reservation_claim(operation, ctx) {
       } catch (error) {
         result = { status: "failed", message: error instanceof Error ? error.message : String(error) };
       }
-      if (result.status === "applied") {
-        lazyWriteOperations.delete(operationId);
-        runStatefulHook("post-tool-use", {
-          agent_id: operation.agent_id,
-          cwd: operation.cwd || ctx.cwd,
-          tool_name: operation.tool_name,
-          tool_input: operation.tool_input,
-        });
-      }
+      if (result.status === "applied") lazyWriteOperations.delete(operationId);
+      runStatefulHook("post-tool-use", {
+        agent_id: operation.agent_id,
+        tool_call_id: operation.tool_call_id,
+        reservation_id: operation.reservation_id || undefined,
+        wait_id: operation.wait_id || undefined,
+        cwd: operation.cwd || ctx.cwd,
+        tool_name: operation.tool_name,
+        tool_input: operation.tool_input,
+        is_error: result.status !== "applied",
+        is_complete: true,
+        exact_read_candidate: false,
+        result_metadata: {
+          status: result.status,
+          message: result.message,
+          targets: operation.targets,
+        },
+      });
       return lazyToolResult(result.status, result.message, { operation_id: operationId, targets: operation.targets });
     },
   });

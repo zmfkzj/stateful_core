@@ -31,8 +31,9 @@ function fakePi() {
   };
 }
 
-async function loadExtension(t, { decision = { decision: "allow" }, fetchImpl } = {}) {
+async function loadExtension(t, { decision = { decision: "allow" }, fetchImpl, claimRequiresPath = false } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "stateful-omp-extension-"));
+  const extensionContext = context(directory);
   const hookLog = join(directory, "hooks.jsonl");
   const statefulPath = join(directory, "stateful");
   const modulePath = join(directory, "stateful-omp-extension.mjs");
@@ -43,8 +44,13 @@ process.stdin.on("data", (chunk) => { input += chunk; });
 process.stdin.on("end", () => {
   const event = process.argv[4];
   const payload = JSON.parse(input || "{}");
-  appendFileSync(${JSON.stringify(hookLog)}, JSON.stringify({ event, payload }) + "\\n");
+  appendFileSync(${JSON.stringify(hookLog)}, JSON.stringify({ event, args: process.argv.slice(2), payload }) + "\\n");
   const decision = ${JSON.stringify(decision)};
+  if (${JSON.stringify(claimRequiresPath)} && process.argv[2] === "reservation" && process.argv[3] === "claim" && !process.argv.includes("--path")) {
+    process.stderr.write("reservation claim requires --path");
+    process.exitCode = 1;
+    return;
+  }
   if (event === "session-start") {
     process.stdout.write(JSON.stringify({
       decision: "allow",
@@ -61,7 +67,7 @@ process.stdin.on("end", () => {
     }));
     return;
   }
-  process.stdout.write(JSON.stringify(decision));
+  process.stdout.write(JSON.stringify(event === "pre-tool-use" && payload.yolo ? { decision: "allow" } : decision));
 });
 `;
   await writeFile(statefulPath, runner, { mode: 0o755 });
@@ -75,17 +81,17 @@ process.stdin.on("end", () => {
   t.after(async () => {
     const shutdown = pi.handlers.get("session_shutdown");
     if (shutdown) {
-      await shutdown({}, context());
+      await shutdown({}, extensionContext);
     }
     globalThis.fetch = previousFetch;
     await rm(directory, { recursive: true, force: true });
   });
-  return { extension, pi, hookLog };
+  return { extension, pi, hookLog, context: extensionContext, directory };
 }
 
-function context() {
+function context(cwd = "/workspace") {
   return {
-    cwd: "/workspace",
+    cwd,
     workspaceId: "workspace-1",
     sessionManager: {
       getSessionId: () => "00000000-0000-4000-8000-000000000011",
@@ -339,4 +345,113 @@ test("pre and post hooks retain the tool call ID and result metadata", async (t)
   assert.equal(post.is_complete, true);
   assert.equal(post.exact_read_candidate, true);
   assert.deepEqual(post.result_metadata, { truncated: false, bytes: 12 });
+});
+
+test("lazy edit resume preserves the original tool-call identity through both hooks", async (t) => {
+  const { pi, hookLog, context: extensionContext, directory } = await loadExtension(t, {
+    decision: {
+      decision: "block",
+      reason: "reservation pending",
+      wait: { wait_id: "wait-edit", reservation_id: "reservation-edit" },
+    },
+    claimRequiresPath: true,
+  });
+  await writeFile(join(directory, "resume-edit.js"), "before\n");
+  const input = { input: "[resume-edit.js#0000]\nSWAP 1.=1:\n+after" };
+
+  const blocked = await pi.handlers.get("tool_call")({
+    toolCallId: "original-edit-call",
+    toolName: "edit",
+    reservationId: "reservation-edit",
+    input,
+  }, extensionContext);
+  assert.equal(blocked.block, true);
+
+  const resumed = await pi.tools.get("lazy_edit_resume").execute(
+    "resume-edit-tool-call",
+    { operation_id: "wait-edit" },
+    undefined,
+    undefined,
+    extensionContext,
+  );
+  assert.equal(resumed.isError, false);
+  assert.equal(await readFile(join(directory, "resume-edit.js"), "utf8"), "after\n");
+
+  const recorded = await hooks(hookLog);
+  const claim = recorded.find(({ args }) => args?.[0] === "reservation" && args[1] === "claim");
+  assert.deepEqual(claim.args.slice(0, 8), [
+    "reservation",
+    "claim",
+    "--agent-id",
+    "omp-00000000-0000-4000-8000-000000000011",
+    "--wait-id",
+    "wait-edit",
+    "--path",
+    "resume-edit.js",
+  ]);
+  const resumedHooks = recorded.filter(({ event, payload }) => event === "pre-tool-use" && payload.yolo)
+    .concat(recorded.filter(({ event, payload }) => event === "post-tool-use" && payload.tool_call_id === "original-edit-call"));
+  assert.equal(resumedHooks.length, 2);
+  for (const { payload } of resumedHooks) {
+    assert.equal(payload.tool_call_id, "original-edit-call");
+    assert.equal(payload.wait_id, "wait-edit");
+    assert.equal(payload.reservation_id, "reservation-edit");
+    assert.deepEqual(payload.tool_input, input);
+  }
+  assert.equal(resumedHooks[1].payload.is_error, false);
+  assert.equal(resumedHooks[1].payload.is_complete, true);
+  assert.deepEqual(resumedHooks[1].payload.result_metadata, {
+    status: "applied",
+    message: "lazy edit applied",
+    targets: ["resume-edit.js"],
+  });
+});
+
+test("lazy write resume preserves the original tool-call identity through both hooks", async (t) => {
+  const { pi, hookLog, context: extensionContext, directory } = await loadExtension(t, {
+    decision: {
+      decision: "block",
+      reason: "reservation pending",
+      wait: { wait_id: "wait-write", reservation_id: "reservation-write" },
+    },
+    claimRequiresPath: true,
+  });
+  await writeFile(join(directory, "resume-write.js"), "before\n");
+  const input = { path: "resume-write.js", content: "after\n" };
+
+  const blocked = await pi.handlers.get("tool_call")({
+    toolCallId: "original-write-call",
+    toolName: "write",
+    reservationId: "reservation-write",
+    input,
+  }, extensionContext);
+  assert.equal(blocked.block, true);
+
+  const resumed = await pi.tools.get("lazy_write_resume").execute(
+    "resume-write-tool-call",
+    { operation_id: "wait-write" },
+    undefined,
+    undefined,
+    extensionContext,
+  );
+  assert.equal(resumed.isError, false);
+  assert.equal(await readFile(join(directory, "resume-write.js"), "utf8"), "after\n");
+
+  const recorded = await hooks(hookLog);
+  const resumedHooks = recorded.filter(({ event, payload }) => event === "pre-tool-use" && payload.yolo)
+    .concat(recorded.filter(({ event, payload }) => event === "post-tool-use" && payload.tool_call_id === "original-write-call"));
+  assert.equal(resumedHooks.length, 2);
+  for (const { payload } of resumedHooks) {
+    assert.equal(payload.tool_call_id, "original-write-call");
+    assert.equal(payload.wait_id, "wait-write");
+    assert.equal(payload.reservation_id, "reservation-write");
+    assert.deepEqual(payload.tool_input, input);
+  }
+  assert.equal(resumedHooks[1].payload.is_error, false);
+  assert.equal(resumedHooks[1].payload.is_complete, true);
+  assert.deepEqual(resumedHooks[1].payload.result_metadata, {
+    status: "applied",
+    message: "lazy write applied",
+    targets: ["resume-write.js"],
+  });
 });
