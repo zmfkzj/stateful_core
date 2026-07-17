@@ -1299,8 +1299,17 @@ class QualificationTests(unittest.TestCase):
             platform="linux/arm64",
         )
         stdout = io.StringIO()
+        run_logged = self.mod._run_logged
+
+        def without_pip(argv, *args, **kwargs):
+            # ponytail: unit fixtures install nothing; live Docker qualification covers pip.
+            if argv[1:3] == ["-m", "venv"]:
+                argv = [*argv[:3], "--without-pip", *argv[3:]]
+            return run_logged(argv, *args, **kwargs)
+
         with (
             mock.patch.dict(self.mod.os.environ, runtime_env, clear=False),
+            mock.patch.object(self.mod, "_run_logged", side_effect=without_pip),
             mock.patch.object(
                 self.mod, "_inner_qualification_runtime", return_value=runtime
             ),
