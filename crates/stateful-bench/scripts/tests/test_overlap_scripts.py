@@ -4,7 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from conftest import arg_after, load_script
+from .conftest import arg_after, load_script
 
 
 def test_overlap_manifest_generator_is_deterministic_and_pair_schema():

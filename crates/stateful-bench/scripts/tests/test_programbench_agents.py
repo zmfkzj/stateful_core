@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-from conftest import load_script
+from .conftest import load_script
 
 
 class FakeClock:

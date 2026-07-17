@@ -4,7 +4,7 @@ import json
 import sys
 from pathlib import Path
 
-from conftest import load_script, write_jsonl
+from .conftest import load_script, write_jsonl
 
 
 def condition(summary: dict, condition_id: str) -> dict:

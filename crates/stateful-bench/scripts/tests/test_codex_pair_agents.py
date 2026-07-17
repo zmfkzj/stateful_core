@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import arg_after, load_script
+from .conftest import arg_after, load_script
 
 
 def test_codex_pair_agent_help_omits_stateful_session_arguments():

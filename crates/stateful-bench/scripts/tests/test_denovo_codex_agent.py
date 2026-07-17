@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from conftest import arg_after, init_git_repo, load_script
+from .conftest import arg_after, init_git_repo, load_script
 
 
 @pytest.fixture
