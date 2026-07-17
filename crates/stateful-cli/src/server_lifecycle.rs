@@ -272,7 +272,15 @@ fn retire_incompatible_runtime(paths: &GlobalPaths, runtime: &ServerRuntime) -> 
 }
 
 fn terminate_runtime(paths: &GlobalPaths, runtime: &ServerRuntime) -> anyhow::Result<()> {
-    let status = Command::new("kill").arg(runtime.pid.to_string()).status()?;
+    if !runtime_identity_matches_pid(runtime)? || !pid_matches_current_exe(runtime.pid)? {
+        anyhow::bail!(
+            "refusing to stop unverified stateful server pid {}",
+            runtime.pid
+        );
+    }
+    let status = Command::new("/bin/kill")
+        .arg(runtime.pid.to_string())
+        .status()?;
     if !status.success() {
         anyhow::bail!("failed to stop stateful server pid {}", runtime.pid);
     }
@@ -495,16 +503,37 @@ fn remove_stale_lock(path: &Path) -> anyhow::Result<bool> {
 }
 
 fn pid_matches_current_exe(pid: u32) -> anyhow::Result<bool> {
-    let output = Command::new("ps")
+    let Some(executable) = live_executable_path(pid)? else {
+        return Ok(false);
+    };
+    let current_exe = std::env::current_exe()?;
+    Ok(executable_path_matches_current_exe(&executable, &current_exe))
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn live_executable_path(pid: u32) -> anyhow::Result<Option<std::path::PathBuf>> {
+    match fs::read_link(format!("/proc/{pid}/exe")) {
+        Ok(path) => Ok(Some(path)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn live_executable_path(pid: u32) -> anyhow::Result<Option<std::path::PathBuf>> {
+    let output = Command::new("/bin/ps")
         .args(["-p", &pid.to_string(), "-o", "comm="])
         .output()?;
     if !output.status.success() {
-        return Ok(false);
+        return Ok(None);
     }
+    let path = std::path::PathBuf::from(String::from_utf8(output.stdout)?.trim());
+    Ok(path.is_absolute().then_some(path))
+}
 
-    let executable = Path::new(String::from_utf8(output.stdout)?.trim()).to_path_buf();
-    let current_exe = std::env::current_exe()?;
-    Ok(executable_path_matches_current_exe(&executable, &current_exe))
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+fn live_executable_path(_pid: u32) -> anyhow::Result<Option<std::path::PathBuf>> {
+    Ok(None)
 }
 
 fn executable_path_matches_current_exe(executable: &Path, current_exe: &Path) -> bool {
@@ -679,6 +708,40 @@ mod tests {
             executable_path_matches_current_exe(&expected, &expected),
             "the exact canonical executable path should prove ownership"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[test]
+    fn current_process_exact_executable_path_proves_ownership() {
+        assert!(
+            pid_matches_current_exe(std::process::id()).expect("current process should inspect"),
+            "the running test binary must prove only through its exact live executable path"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copied_same_basename_child_never_proves_executable_ownership() {
+        let root = temp_home("stateful-same-basename-child");
+        let name = std::env::current_exe()
+            .expect("current executable should resolve")
+            .file_name()
+            .expect("current executable should have a basename")
+            .to_owned();
+        let copied_sleep = root.join(name);
+        fs::copy("/bin/sleep", &copied_sleep).expect("sleep binary should copy");
+        let mut child = Command::new(&copied_sleep)
+            .arg("5")
+            .spawn()
+            .expect("copied sleep child should start");
+
+        assert!(
+            !pid_matches_current_exe(child.id()).expect("child executable should inspect"),
+            "a different absolute executable with the same basename must not prove ownership"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
         let _ = fs::remove_dir_all(root);
     }
 
