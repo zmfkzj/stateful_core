@@ -1,48 +1,57 @@
-# Release Please Force-Tag Design
+# Release Please 1.0.0 Bootstrap Design
 
 ## Problem
 
-`release-please` 17.3.0 finds merged release PR #13 and sends its merge SHA
-`3bcc980b00bc61fd09d580de7d4970bc056899e1` as `target_commitish` to GitHub's
-Create Release API. GitHub returns 404 for that historical SHA even though it
-is an ancestor of `main`. Using `main` succeeds but would make the 0.1.1 tags
-point at 372 later commits.
+Merged release PR #13 is still labeled `autorelease: pending`. Release Please
+therefore retries its obsolete 0.1.1 release on every push. GitHub rejects the
+historical merge SHA when the Releases or Git Refs API tries to create tags.
+
+The four crates and `.release-please-manifest.json` are at 0.1.1, but no
+0.1.1 tags or GitHub Releases exist. The current `main` history already makes
+Release Please calculate 1.0.0 for all four linked packages.
 
 ## Decision
 
-Set `force-tag-creation` to `true` in `release-please-config.json`.
-Release Please will create each component tag at the release PR merge SHA before
-creating its GitHub Release. The Releases API then uses the existing tag instead
-of resolving the historical SHA.
+Skip 0.1.1 and make 1.0.0 the first GitHub release:
 
-Keep the approved `RELEASE_PLEASE_TOKEN` repository secret. The workflow already
-prefers it and requires no YAML change.
+- Remove `autorelease: pending` from PR #13. No 0.1.1 tags or releases will
+  exist.
+- Set `force-tag-creation` to `true` in `release-please-config.json`.
+- Let Release Please create the 1.0.0 release PR so Cargo manifests,
+  `.release-please-manifest.json`, and changelogs stay synchronized.
+- Merge only after confirming every managed package is 1.0.0.
+- Keep the approved `RELEASE_PLEASE_TOKEN` repository secret.
 
 ## Flow
 
-1. Release Please finds a merged release PR.
-2. It creates each component tag at that PR's merge SHA.
-3. It creates each GitHub Release from the existing tag.
-4. It applies the normal release labels and continues managing release PRs.
+1. Remove the pending label from merged PR #13.
+2. Push the force-tag configuration.
+3. Release Please opens a new 1.0.0 PR from current `main`.
+4. Verify the four Cargo versions, release manifest, and changelogs.
+5. Merge the reviewed release PR.
+6. Release Please creates four tags at the new merge SHA, then four GitHub
+   Releases.
 
-A failed partial run remains safe to retry because existing tags and releases
-are reused by Release Please.
+If GitHub rejects tag creation for the new merge SHA, create the same four tags
+with the verified Git-over-SSH path and rerun Release Please. Existing tags make
+release creation retry-safe.
 
 ## Verification
 
-Push the configuration change and require the `release-please` workflow to pass.
-Confirm these releases exist and each tag resolves to `3bcc980b00bc61fd09d580de7d4970bc056899e1`:
+Require the release workflow to pass after both the configuration push and the
+release PR merge. Confirm these releases exist and all tags resolve to the new
+release PR merge SHA:
 
-- `stateful-core-v0.1.1`
-- `stateful-store-v0.1.1`
-- `stateful-server-v0.1.1`
-- `stateful-cli-v0.1.1`
+- `stateful-core-v1.0.0`
+- `stateful-store-v1.0.0`
+- `stateful-server-v1.0.0`
+- `stateful-cli-v1.0.0`
 
-No product tests are needed; the observable contract is the live GitHub release
-and tag state.
+Confirm no `stateful-*-v0.1.1` tags or releases were created.
 
 ## Non-goals
 
-- Retargeting 0.1.1 to current `main`.
-- Adding a custom tag-creation workflow step.
-- Changing package versions or release notes.
+- Publishing 0.1.1.
+- Retargeting an old release to current `main`.
+- Adding a custom tag-creation workflow step unless the built-in option fails.
+- Publishing crates to an external package registry.

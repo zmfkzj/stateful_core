@@ -1,35 +1,57 @@
-# Release Please Force-Tag Implementation Plan
+# Release Please 1.0.0 Bootstrap Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make release-please create component tags before GitHub Releases so historical release PR merge SHAs remain valid release targets.
+**Goal:** Skip the blocked 0.1.1 release and create synchronized 1.0.0 tags and GitHub Releases for the four managed crates.
 
-**Architecture:** Enable release-please's built-in `force-tag-creation` option in the existing manifest configuration. Keep the approved `RELEASE_PLEASE_TOKEN`; no workflow or application code changes are needed. The live GitHub workflow and resulting tags/releases are the observable verification.
+**Architecture:** Remove the stale pending label from release PR #13, then enable Release Please's built-in force-tag option. Release Please remains responsible for updating Cargo manifests, `.release-please-manifest.json`, and changelogs in a reviewed 1.0.0 release PR. Keep the approved `RELEASE_PLEASE_TOKEN`.
 
-**Tech Stack:** release-please 17.3.0, GitHub Actions, GitHub Releases API, JSON
+**Tech Stack:** release-please 17.3.0, GitHub Actions, GitHub CLI, Git, JSON
 
 ## Global Constraints
 
-- All 0.1.1 component tags must resolve to `3bcc980b00bc61fd09d580de7d4970bc056899e1`.
+- Do not create any `stateful-*-v0.1.1` tags or releases.
+- All four managed crates must start their GitHub release history at 1.0.0.
 - Keep the approved `RELEASE_PLEASE_TOKEN` repository secret.
-- Do not retarget 0.1.1 to current `main`.
-- Do not add a custom tag-creation workflow step.
-- Do not change package versions or release notes.
+- Do not hand-edit package versions or changelogs; review Release Please's PR.
+- Do not publish crates to an external package registry.
 
 ---
 
-### Task 1: Enable force-tag creation and verify the release
+### Task 1: Retire the blocked 0.1.1 candidate
+
+**Files:** None.
+
+**Interfaces:**
+- Consumes: merged PR #13 with `autorelease: pending`.
+- Produces: no pending merged release PR, allowing a new release PR.
+
+- [ ] **Step 1: Remove the pending label**
+
+```bash
+gh pr edit 13 --remove-label "autorelease: pending"
+```
+
+- [ ] **Step 2: Verify 0.1.1 is skipped**
+
+```bash
+gh pr view 13 --json labels --jq '[.labels[].name]'
+gh release list --limit 100
+```
+
+Expected: PR #13 has no `autorelease: pending` label and no
+`stateful-*-v0.1.1` release exists.
+
+### Task 2: Enable force-tag creation
 
 **Files:**
 - Modify: `release-please-config.json:3-4`
 
 **Interfaces:**
-- Consumes: release-please manifest configuration and merged release PR #13.
-- Produces: four `stateful-*-v0.1.1` tags and matching GitHub Releases.
+- Consumes: the existing release-please manifest configuration.
+- Produces: tag creation before release creation for future release PRs.
 
-- [ ] **Step 1: Add the built-in configuration option**
-
-Change the top of `release-please-config.json` to:
+- [ ] **Step 1: Add the built-in option**
 
 ```json
 {
@@ -39,9 +61,7 @@ Change the top of `release-please-config.json` to:
   "bump-minor-pre-major": true,
 ```
 
-- [ ] **Step 2: Validate the JSON configuration**
-
-Run:
+- [ ] **Step 2: Validate the JSON**
 
 ```bash
 python3 -m json.tool release-please-config.json
@@ -49,7 +69,7 @@ python3 -m json.tool release-please-config.json
 
 Expected: exit code 0 and formatted JSON output.
 
-- [ ] **Step 3: Commit and push only the configuration**
+- [ ] **Step 3: Commit and push the configuration**
 
 ```bash
 git add release-please-config.json
@@ -57,33 +77,80 @@ git commit -m "fix: create release tags before releases"
 git push
 ```
 
-Expected: one commit containing only `release-please-config.json` reaches `main`.
+Expected: the configuration reaches `main` and triggers release-please.
 
-- [ ] **Step 4: Require the release workflow to pass**
+### Task 3: Review the generated 1.0.0 release PR
 
-Run:
+**Files:** Release Please must update these on its branch:
+- `.release-please-manifest.json`
+- `crates/stateful-core/Cargo.toml`
+- `crates/stateful-store/Cargo.toml`
+- `crates/stateful-server/Cargo.toml`
+- `crates/stateful-cli/Cargo.toml`
+- Four managed crate changelogs
+
+**Interfaces:**
+- Consumes: current `main` and the force-tag configuration.
+- Produces: a reviewed release PR with all managed versions at 1.0.0.
+
+- [ ] **Step 1: Require the workflow to pass**
 
 ```bash
-gh run list --workflow release-please.yml --limit 1 --json databaseId,status,conclusion,url
 gh run watch "$(gh run list --workflow release-please.yml --limit 1 --json databaseId --jq '.[0].databaseId')" --exit-status
 ```
 
-Expected: the newest run completes with `conclusion: success`.
+Expected: success and one open Release Please PR.
 
-- [ ] **Step 5: Verify releases and tag targets**
-
-Run:
+- [ ] **Step 2: Identify and inspect the PR**
 
 ```bash
-gh release view stateful-core-v0.1.1 --json tagName,url
-gh release view stateful-store-v0.1.1 --json tagName,url
-gh release view stateful-server-v0.1.1 --json tagName,url
-gh release view stateful-cli-v0.1.1 --json tagName,url
-
-gh api repos/zmfkzj/stateful_core/git/ref/tags/stateful-core-v0.1.1 --jq .object.sha
-gh api repos/zmfkzj/stateful_core/git/ref/tags/stateful-store-v0.1.1 --jq .object.sha
-gh api repos/zmfkzj/stateful_core/git/ref/tags/stateful-server-v0.1.1 --jq .object.sha
-gh api repos/zmfkzj/stateful_core/git/ref/tags/stateful-cli-v0.1.1 --jq .object.sha
+RELEASE_PR="$(gh pr list --state open --json number,headRefName --jq '.[] | select(.headRefName | contains("release-please")) | .number')"
+gh pr view "$RELEASE_PR" --json number,title,files,url
+gh pr diff "$RELEASE_PR"
 ```
 
-Expected: all four releases exist and every SHA equals `3bcc980b00bc61fd09d580de7d4970bc056899e1`.
+Expected: title and diff describe 1.0.0; all four Cargo versions and all four
+manifest entries are 1.0.0; changelogs contain the intended current history.
+
+- [ ] **Step 3: Obtain explicit approval before merge**
+
+Present the PR URL and verified version files. Do not merge until the user
+chooses the merge strategy.
+
+### Task 4: Merge and verify 1.0.0
+
+**Files:** None locally.
+
+**Interfaces:**
+- Consumes: the approved 1.0.0 release PR.
+- Produces: four 1.0.0 tags and four GitHub Releases.
+
+- [ ] **Step 1: Merge with the user-selected strategy**
+
+Use `gh pr merge` with the explicitly selected merge strategy.
+
+- [ ] **Step 2: Require the post-merge workflow to pass**
+
+```bash
+gh run watch "$(gh run list --workflow release-please.yml --limit 1 --json databaseId --jq '.[0].databaseId')" --exit-status
+```
+
+- [ ] **Step 3: Verify releases and tag targets**
+
+```bash
+RELEASE_SHA="$(gh pr view "$RELEASE_PR" --json mergeCommit --jq '.mergeCommit.oid')"
+gh release view stateful-core-v1.0.0 --json tagName,url
+gh release view stateful-store-v1.0.0 --json tagName,url
+gh release view stateful-server-v1.0.0 --json tagName,url
+gh release view stateful-cli-v1.0.0 --json tagName,url
+gh api repos/zmfkzj/stateful_core/git/ref/tags/stateful-core-v1.0.0 --jq .object.sha
+gh api repos/zmfkzj/stateful_core/git/ref/tags/stateful-store-v1.0.0 --jq .object.sha
+gh api repos/zmfkzj/stateful_core/git/ref/tags/stateful-server-v1.0.0 --jq .object.sha
+gh api repos/zmfkzj/stateful_core/git/ref/tags/stateful-cli-v1.0.0 --jq .object.sha
+```
+
+Expected: all four releases exist and every tag SHA equals `$RELEASE_SHA`.
+
+If built-in tag creation fails, fetch the merge commit, create the four
+`stateful-*-v1.0.0` tags locally at `$RELEASE_SHA`, push those tags over SSH,
+and rerun the failed release-please workflow. Do not retarget the tags.
