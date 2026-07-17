@@ -1,7 +1,7 @@
 use std::{
     ffi::OsStr,
     fs,
-    io::{self, Read},
+    io::{self, Read, Write},
     path::{Component, Path, PathBuf},
 };
 
@@ -225,10 +225,14 @@ fn run_codex_hook(command: HookCommand) -> anyhow::Result<()> {
         HookCommand::SessionStart => {
             let mut input = String::new();
             io::stdin().read_to_string(&mut input)?;
-            match handle_session_start_context_in_repo(&input, hook_start_dir(&input)?) {
-                Ok(prompt_text) if !prompt_text.is_empty() => println!("{prompt_text}"),
-                Ok(_) => {}
-                Err(error) => eprintln!("stateful session-start warning: {error}"),
+            let stdout = io::stdout();
+            let mut output = stdout.lock();
+            if let Err(error) = handle_session_start_context_in_repo(
+                &input,
+                hook_start_dir(&input)?,
+                Some(&mut output),
+            ) {
+                eprintln!("stateful session-start warning: {error}");
             }
         }
         HookCommand::PostToolUse => {
@@ -241,10 +245,14 @@ fn run_codex_hook(command: HookCommand) -> anyhow::Result<()> {
         HookCommand::UserPromptSubmit => {
             let mut input = String::new();
             io::stdin().read_to_string(&mut input)?;
-            match handle_user_prompt_submit_in_repo(&input, hook_start_dir(&input)?) {
-                Ok(prompt_text) if !prompt_text.is_empty() => println!("{prompt_text}"),
-                Ok(_) => {}
-                Err(error) => eprintln!("stateful user-prompt-submit warning: {error}"),
+            let stdout = io::stdout();
+            let mut output = stdout.lock();
+            if let Err(error) = handle_user_prompt_submit_in_repo_with_writer(
+                &input,
+                hook_start_dir(&input)?,
+                Some(&mut output),
+            ) {
+                eprintln!("stateful user-prompt-submit warning: {error}");
             }
         }
         HookCommand::Stop => {
@@ -1359,13 +1367,14 @@ pub fn handle_session_start_in_repo(
     input: &str,
     repo_root: impl AsRef<Path>,
 ) -> anyhow::Result<()> {
-    let _ = handle_session_start_context_in_repo(input, repo_root)?;
+    let _ = handle_session_start_context_in_repo(input, repo_root, None)?;
     Ok(())
 }
 
 fn handle_session_start_context_in_repo(
     input: &str,
     repo_root: impl AsRef<Path>,
+    writer: Option<&mut dyn Write>,
 ) -> anyhow::Result<String> {
     let start = hook_start_dir_or(input, repo_root.as_ref());
     let paths = GlobalPaths::from_env()?;
@@ -1386,7 +1395,7 @@ fn handle_session_start_context_in_repo(
     if let Err(error) = sync_outbox_with_runtime(&paths, &runtime) {
         eprintln!("stateful lifecycle outbox replay warning: {error}");
     }
-    handle_session_start_with_runtime(input, &runtime, Some(&identity))
+    handle_session_start_with_runtime(input, &runtime, Some(&identity), writer)
 }
 
 pub fn handle_post_tool_use_in_repo(
@@ -1427,6 +1436,14 @@ pub fn handle_user_prompt_submit_in_repo(
     input: &str,
     repo_root: impl AsRef<Path>,
 ) -> anyhow::Result<String> {
+    handle_user_prompt_submit_in_repo_with_writer(input, repo_root, None)
+}
+
+fn handle_user_prompt_submit_in_repo_with_writer(
+    input: &str,
+    repo_root: impl AsRef<Path>,
+    writer: Option<&mut dyn Write>,
+) -> anyhow::Result<String> {
     let start = hook_start_dir_or(input, repo_root.as_ref());
     let paths = GlobalPaths::from_env()?;
     let repo_root = match repo_gate(&paths, start)? {
@@ -1443,7 +1460,7 @@ pub fn handle_user_prompt_submit_in_repo(
     let _ = sync_outbox_with_runtime(&paths, &runtime);
     let input: input::CodexUserPrompt = serde_json::from_str(input)?;
     input.validate()?;
-    handle_user_prompt_submit_with_runtime(&input, &runtime, Some(&identity))
+    handle_user_prompt_submit_with_runtime(&input, &runtime, Some(&identity), writer)
 }
 
 pub fn handle_stop_in_repo(input: &str, repo_root: impl AsRef<Path>) -> anyhow::Result<()> {
@@ -1468,6 +1485,7 @@ fn handle_session_start_with_runtime(
     input: &str,
     runtime: &ServerRuntime,
     identity: Option<&RepoIdentity>,
+    writer: Option<&mut dyn Write>,
 ) -> anyhow::Result<String> {
     let input: input::CodexSessionStart = serde_json::from_str(input)?;
     input.validate()?;
@@ -1485,14 +1503,55 @@ fn handle_session_start_with_runtime(
         json!({ "first_prompt": input.first_prompt() }),
     )?;
     crate::post_v2(runtime, "/v2/session/register", &registration)?;
-    delivery::render_and_ack_context(
+    let context = delivery::render_context(
         runtime,
         &input.agent_id,
         &workspace_id,
         identity,
         "codex_session_start",
         "hook:codex_session_start",
-    )
+    )?;
+    finish_context_delivery(
+        writer,
+        runtime,
+        &input.agent_id,
+        &workspace_id,
+        identity,
+        "hook:codex_session_start",
+        &context,
+    )?;
+    Ok(context.prompt_text)
+}
+
+fn finish_context_delivery(
+    writer: Option<&mut dyn Write>,
+    runtime: &ServerRuntime,
+    agent_id: &str,
+    workspace_id: &str,
+    identity: Option<&RepoIdentity>,
+    source_ref: &str,
+    context: &delivery::RenderedContext,
+) -> anyhow::Result<()> {
+    match writer {
+        Some(writer) => delivery::write_and_ack_context(writer, context, || {
+            delivery::acknowledge_context(
+                runtime,
+                agent_id,
+                workspace_id,
+                identity,
+                source_ref,
+                context,
+            )
+        }),
+        None => delivery::acknowledge_context(
+            runtime,
+            agent_id,
+            workspace_id,
+            identity,
+            source_ref,
+            context,
+        ),
+    }
 }
 
 fn handle_post_tool_use_with_runtime(
@@ -1546,6 +1605,7 @@ fn handle_user_prompt_submit_with_runtime(
     input: &input::CodexUserPrompt,
     runtime: &ServerRuntime,
     identity: Option<&RepoIdentity>,
+    writer: Option<&mut dyn Write>,
 ) -> anyhow::Result<String> {
     let workspace_id = effective_workspace_id(runtime, identity);
     if let Some(prompt) = input.prompt()
@@ -1568,7 +1628,7 @@ fn handle_user_prompt_submit_with_runtime(
         )?;
         crate::post_v2(runtime, "/v2/presence/update", &update)?;
     }
-    let prompt_text = delivery::render_and_ack_context(
+    let mut context = delivery::render_context(
         runtime,
         &input.agent_id,
         &workspace_id,
@@ -1576,11 +1636,19 @@ fn handle_user_prompt_submit_with_runtime(
         "codex_user_prompt",
         "hook:codex_user_prompt",
     )?;
-    Ok(if prompt_text.trim().is_empty() {
-        String::new()
-    } else {
-        with_stateful_command_policy_reminder(prompt_text)
-    })
+    if !context.prompt_text.trim().is_empty() {
+        context.prompt_text = with_stateful_command_policy_reminder(context.prompt_text);
+    }
+    finish_context_delivery(
+        writer,
+        runtime,
+        &input.agent_id,
+        &workspace_id,
+        identity,
+        "hook:codex_user_prompt",
+        &context,
+    )?;
+    Ok(context.prompt_text)
 }
 
 fn with_stateful_command_policy_reminder(prompt_text: String) -> String {

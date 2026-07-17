@@ -1432,9 +1432,10 @@ function state_reservation_claim(operation, _ctx) {
         tool_name: operation.tool_name,
         tool_input: operation.tool_input,
       });
-      if (authorization.decision !== "allow") {
+      if (authorization.decision !== "allow" && authorization.decision !== "warn") {
         return lazyToolResult("failed", authorization.reason || "stateful authorization denied lazy edit resume", { operation_id: operationId, authorization });
       }
+      if (authorization.decision === "warn") deliverCoordinationWarning(pi, { payload: { message: authorization.message } });
       let result;
       try {
         result = applyOmpLinePatch(operation.cwd || ctx.cwd, operation.tool_input?.input || "", operation.bases);
@@ -1490,9 +1491,10 @@ function state_reservation_claim(operation, _ctx) {
         tool_name: operation.tool_name,
         tool_input: operation.tool_input,
       });
-      if (authorization.decision !== "allow") {
+      if (authorization.decision !== "allow" && authorization.decision !== "warn") {
         return lazyToolResult("failed", authorization.reason || "stateful authorization denied lazy write resume", { operation_id: operationId, authorization });
       }
+      if (authorization.decision === "warn") deliverCoordinationWarning(pi, { payload: { message: authorization.message } });
       let result;
       try {
         result = applyOmpWrite(operation.cwd || ctx.cwd, operation);
@@ -1669,6 +1671,11 @@ function state_reservation_claim(operation, _ctx) {
       is_error: event?.isError === true,
       is_complete: event?.isComplete !== false && event?.complete !== false,
       exact_read_candidate: exactReadCandidate(event),
+      is_truncated: event?.truncated === true
+        || event?.isTruncated === true
+        || resultMetadata?.truncated === true
+        || resultMetadata?.is_truncated === true
+        || resultMetadata?.isTruncated === true,
       result_metadata: resultMetadata,
     });
     if (activeContextStream) {

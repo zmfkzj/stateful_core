@@ -549,6 +549,77 @@ fn omp_raw_reads_use_the_underlying_file_for_lifecycle_fingerprints() {
 }
 
 #[test]
+fn omp_truncated_raw_read_completes_without_baseline() {
+    let temp = tempfile::tempdir().expect("temp dir should create");
+    let paths = GlobalPaths::new(temp.path().join("home"));
+    let repo_root = temp.path().join("repo");
+    fs::create_dir_all(repo_root.join("src")).expect("repo source should create");
+    fs::write(repo_root.join("src/read.txt"), "contents\n").expect("read fixture should write");
+    enable_test_repo(&paths, &repo_root);
+    let identity = r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":42,"workspace_id":"w1","workspace_version":1,"capabilities":["presence"]}"#;
+    let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
+        identity,
+        identity,
+        r#"{"status":"started"}"#,
+        identity,
+        identity,
+        r#"{"status":"updated"}"#,
+        identity,
+        r#"{"status":"completed"}"#,
+    ]);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
+    let input = serde_json::json!({
+        "agent_id": "omp-agent-1",
+        "workspace_id": runtime.workspace_id,
+        "cwd": repo_root,
+        "operation_id": "omp-read-truncated-1",
+        "exact_read_candidate": false,
+        "is_truncated": true,
+        "tool_name": "read",
+        "tool_input": { "path": "src/read.txt:raw" }
+    })
+    .to_string();
+
+    let pre = run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "pre-tool-use"], &input);
+    assert!(pre.status.success(), "{}", String::from_utf8_lossy(&pre.stderr));
+    for _ in 0..2 {
+        assert!(rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("read-start identity should arrive")
+            .starts_with("GET /v2/runtime/identity?"));
+    }
+    assert!(rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("read start should arrive")
+        .starts_with("POST /v2/read/start "));
+
+    let post = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "omp", "post-tool-use"],
+        &input,
+    );
+    assert!(post.status.success(), "{}", String::from_utf8_lossy(&post.stderr));
+    let requests = (0..5)
+        .map(|_| rx.recv_timeout(Duration::from_secs(2)).expect("post-read request should arrive"))
+        .collect::<Vec<_>>();
+    let complete = requests
+        .iter()
+        .find(|request| request.starts_with("POST /v2/read/complete "))
+        .map(|request| request_json_body(request))
+        .expect("truncated read completion should arrive");
+    assert_eq!(complete["payload"]["classification"], "truncated");
+    assert!(complete["payload"].get("after").is_none());
+    let update = requests
+        .iter()
+        .find(|request| request.starts_with("POST /v2/presence/update "))
+        .map(|request| request_json_body(request))
+        .expect("truncated presence update should arrive");
+    assert_eq!(update["payload"]["kind"], "tool_result");
+    assert_eq!(update["payload"]["outcome"], "truncated");
+}
+
+#[test]
 fn omp_namespaced_nested_raw_read_selectors_use_file_target_and_are_partial() {
     for selector in [
         "src/read.txt:2-4",

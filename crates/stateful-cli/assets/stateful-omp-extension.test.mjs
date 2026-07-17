@@ -31,7 +31,7 @@ function fakePi() {
   };
 }
 
-async function loadExtension(t, { decision = { decision: "allow" }, fetchImpl, claimRequiresPath = false, claimAlwaysFails = false } = {}) {
+async function loadExtension(t, { decision = { decision: "allow" }, yoloDecision = { decision: "allow" }, fetchImpl, claimRequiresPath = false, claimAlwaysFails = false } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "stateful-omp-extension-"));
   await mkdir(join(directory, ".git"));
   const extensionContext = context(directory);
@@ -73,7 +73,7 @@ process.stdin.on("end", () => {
     }));
     return;
   }
-  process.stdout.write(JSON.stringify(event === "pre-tool-use" && payload.yolo ? { decision: "allow" } : decision));
+  process.stdout.write(JSON.stringify(event === "pre-tool-use" && payload.yolo ? ${JSON.stringify(yoloDecision)} : decision));
 });
 `;
   await writeFile(statefulPath, runner, { mode: 0o755 });
@@ -353,6 +353,24 @@ test("pre and post hooks retain the tool call ID and result metadata", async (t)
   assert.deepEqual(post.result_metadata, { truncated: false, bytes: 12 });
 });
 
+test("truncated raw OMP reads report top-level truncation", async (t) => {
+  const { pi, hookLog } = await loadExtension(t);
+  const event = {
+    toolCallId: "call-truncated",
+    toolName: "functions.read",
+    input: { path: "src/lib.rs:raw" },
+    isError: false,
+    isComplete: true,
+    resultMetadata: { truncated: true },
+  };
+  await pi.handlers.get("tool_call")(event, context());
+  await pi.handlers.get("tool_result")(event, context());
+  const recorded = await hooks(hookLog);
+  const post = recorded.find(({ event: name }) => name === "post-tool-use").payload;
+  assert.equal(post.exact_read_candidate, false);
+  assert.equal(post.is_truncated, true);
+});
+
 test("lazy edit resume preserves the original tool-call identity through both hooks", async (t) => {
   const { extension, pi, hookLog, context: extensionContext, directory } = await loadExtension(t, {
     decision: {
@@ -461,6 +479,48 @@ test("lazy write resume preserves the original tool-call identity through both h
     wait_id: "wait-write",
     reservation_id: "reservation-write",
   });
+});
+
+test("lazy write resume executes through a yolo warning and completes the original call", async (t) => {
+  const { extension, pi, hookLog, context: extensionContext, directory } = await loadExtension(t, {
+    decision: { decision: "block", reason: "reservation pending", wait: { wait_id: "wait-warn", reservation_id: "reservation-warn" } },
+    yoloDecision: { decision: "warn", message: "overlapping work" },
+    claimRequiresPath: true,
+  });
+  const input = { path: "resume-warn.js", content: "after\n" };
+  const blocked = await pi.handlers.get("tool_call")({
+    toolCallId: "original-warn-call",
+    toolName: "write",
+    reservationId: "reservation-warn",
+    input,
+  }, extensionContext);
+  assert.equal(blocked.block, true);
+  assert.equal(extension.bindGrantedLazyReservation({
+    kind: "reservation_granted",
+    payload: { wait_id: "wait-warn", reservation_id: "reservation-warn" },
+  }), true);
+
+  const resumed = await pi.tools.get("lazy_write_resume").execute(
+    "resume-warn-tool-call",
+    { operation_id: "wait-warn" },
+    undefined,
+    undefined,
+    extensionContext,
+  );
+  assert.equal(resumed.isError, false);
+  assert.equal(await readFile(join(directory, "resume-warn.js"), "utf8"), "after\n");
+  assert.deepEqual(pi.messages, [{
+    message: { customType: "stateful_coordination_warning", content: "overlapping work", display: true },
+    options: { deliverAs: "nextTurn" },
+  }]);
+
+  const recorded = await hooks(hookLog);
+  const pre = recorded.find(({ event, payload }) => event === "pre-tool-use" && payload.yolo);
+  const post = recorded.find(({ event, payload }) => event === "post-tool-use" && payload.tool_call_id === "original-warn-call");
+  assert.equal(pre.payload.tool_call_id, "original-warn-call");
+  assert.equal(post.payload.tool_call_id, "original-warn-call");
+  assert.equal(post.payload.is_error, false);
+  assert.equal(post.payload.is_complete, true);
 });
 
 test("lazy write resume uses its granted subdirectory reservation without a redundant claim", async (t) => {
