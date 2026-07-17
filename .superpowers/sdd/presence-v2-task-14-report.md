@@ -2,7 +2,7 @@
 
 ## Result
 
-Implementation and the local credit-free test surface are complete. Docker qualification and the Docker E2E gate are blocked because no Docker daemon/socket is available on this host; no image identity or qualification receipt was fabricated.
+Implementation, the local credit-free test surface, immutable `linux/arm64` image qualification, and the credit-free Docker E2E gate are complete.
 
 ## TDD evidence
 
@@ -19,6 +19,8 @@ Implementation and the local credit-free test surface are complete. Docker quali
   - 190 passed, 1 skipped (the opt-in Docker E2E, pending the image).
 - `stateful sandbox run --fs build --network enabled --write-dir stateful-bench-v2-cargo-green-network --command 'cargo test -p stateful-bench'`
   - 140 passed.
+- `STATEFULBENCH_DOCKER_TEST_IMAGE=statefulbench-realworld:presence-v2 python3 -m unittest discover -s crates/stateful-bench/scripts/tests -t crates/stateful-bench/scripts -p "test_statefulbench_docker.py" -v`
+  - 47 tests passed, including the opt-in Docker E2E, against the qualified image.
 
 The first Rust invocation with `--network disabled` had one unrelated sandbox-only failure: the DeNovo proxy test could not bind a local TCP socket. The rerun above allowed sockets and passed.
 
@@ -42,17 +44,21 @@ An unrestricted `unittest discover` invocation found five unrelated modules requ
 
 ## Docker gate status
 
-The prescribed build command could not start: `/Users/arthur/.colima/default/docker.sock` does not exist, and `stateful sandbox process find --name docker` returned `[]`. Therefore:
+The current checkout was built once as `statefulbench-realworld:presence-v2`. Because the external sandbox correctly denied Docker Buildx writes under `$HOME/.docker`, the successful build set `BUILDX_CONFIG` inside the declared benchmark write directory. Inspection returned:
 
-- image ID/platform/repository digests: unavailable;
-- `requests` qualification receipt: not run;
-- credit-free Docker E2E with `STATEFULBENCH_DOCKER_TEST_IMAGE=statefulbench-realworld:presence-v2`: not run.
+- image ID: `sha256:14512ad1c659d399d2b6fd190634be1c563889fef9499c7527714796b3a8c170`;
+- platform: `linux/arm64`;
+- repository digest: `statefulbench-realworld@sha256:14512ad1c659d399d2b6fd190634be1c563889fef9499c7527714796b3a8c170`.
 
-No model-backed benchmark was launched. `git status --short` showed no changes under `datasets/statefulbench-realworld/`.
+`requests` qualification exited 0. The receipt at `$HOME/.cache/statefulbench-realworld-presence-v2/cache/qualification/receipts/requests.json` records `qualified: true`, the same image identity/platform/digest, all graded-input hashes, archive and corpus hashes, and the six-tool map.
+
+The first credit-free E2E invocation exposed a missing sandbox temporary-directory prerequisite and failed before test setup. After creating the declared write directory's `.stateful-tmp`, the fresh invocation exited 0 with all 47 tests passing, including `DockerEndToEndTests.test_all_arms_share_home_grade_and_cleanup` and the V2 diagnostic contract tests.
+
+No model-backed benchmark was launched. The frozen dataset was not edited.
 
 ## Checklist review
 
-Steps 1–4 are evidenced above. Steps 5–7 require a running Docker daemon and must be rerun in sequence with one inspected `linux/arm64` image before this task can be declared fully qualified. Step 8 remains pending that gate.
+Steps 1–7 are now evidenced. Step 8 is this report-only closure commit and push; no implementation or frozen-corpus file changed during the Docker gate.
 
 ## P1 admission finding closure
 
@@ -82,4 +88,4 @@ Steps 1–4 are evidenced above. Steps 5–7 require a running Docker daemon and
 - `stateful sandbox run --fs build --network disabled --write-dir benchmark-admission-green-docker-final2 --command 'python3 -m unittest discover -s crates/stateful-bench/scripts/tests -t crates/stateful-bench/scripts -p test_statefulbench_docker.py -v'`
   - 47 tests passed; 1 opt-in Docker E2E skipped.
 
-Docker qualification receipts and the immutable-image E2E still await parent execution. No receipt, image identity, or Docker result was fabricated.
+Docker qualification and the immutable-image credit-free E2E are complete against the identity recorded above. No receipt, image identity, or result was inferred or fabricated.
