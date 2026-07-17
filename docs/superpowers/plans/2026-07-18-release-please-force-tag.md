@@ -45,13 +45,15 @@ Expected: PR #13 has no `autorelease: pending` label and no
 ### Task 2: Enable force-tag creation
 
 **Files:**
-- Modify: `release-please-config.json:3-4`
+- Modify: `release-please-config.json:3-8`
 
 **Interfaces:**
 - Consumes: the existing release-please manifest configuration.
 - Produces: tag creation before release creation for future release PRs.
+- Removes: the static `group-pull-request-title-pattern` that cannot be parsed
+  after the grouped PR is merged.
 
-- [ ] **Step 1: Add the built-in option**
+- [ ] **Step 1: Add the built-in option and remove the custom group title**
 
 ```json
 {
@@ -59,6 +61,12 @@ Expected: PR #13 has no `autorelease: pending` label and no
   "release-type": "rust",
   "force-tag-creation": true,
   "bump-minor-pre-major": true,
+```
+
+Delete this configuration entry:
+
+```json
+"group-pull-request-title-pattern": "chore: release stateful workspace"
 ```
 
 - [ ] **Step 2: Validate the JSON**
@@ -100,6 +108,7 @@ gh run watch "$(gh run list --workflow release-please.yml --limit 1 --json datab
 ```
 
 Expected: success and one open Release Please PR.
+The generated PR title must be the parseable default `chore: release main`.
 
 - [ ] **Step 2: Identify and inspect the PR**
 
