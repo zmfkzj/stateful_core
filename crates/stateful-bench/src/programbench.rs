@@ -1436,6 +1436,7 @@ pub fn run_programbench_eval(options: ProgramBenchEvalOptions) -> Result<()> {
 struct ParentStatefulRuntimeFile {
     base_url: String,
     token: String,
+    protocol_version: String,
 }
 
 fn inherit_parent_stateful_runtime_env(
@@ -1463,6 +1464,12 @@ fn inherit_parent_stateful_runtime_env_from_file(
         .with_context(|| format!("failed to read Stateful runtime file {}", path.display()))?;
     let runtime: ParentStatefulRuntimeFile = serde_json::from_str(&contents)
         .with_context(|| format!("failed to parse Stateful runtime file {}", path.display()))?;
+    if runtime.protocol_version != "stateful.v2" {
+        bail!(
+            "unsupported Stateful runtime protocol {}; expected stateful.v2",
+            runtime.protocol_version
+        );
+    }
     let source_env = BTreeMap::from([
         ("STATEFUL_SERVER_URL".to_string(), runtime.base_url),
         ("STATEFUL_SERVER_TOKEN".to_string(), runtime.token),
@@ -1882,7 +1889,7 @@ mod tests {
     }
 
     #[test]
-    fn inherit_parent_stateful_runtime_env_reads_runtime_file() {
+    fn inherit_parent_stateful_runtime_env_reads_v2_runtime_file() {
         let root = env::temp_dir().join(format!(
             "stateful-bench-runtime-env-{}",
             SystemTime::now()
@@ -1899,7 +1906,7 @@ mod tests {
                 "token": "file-token",
                 "pid": 123,
                 "workspace_id": "workspace",
-                "protocol_version": "stateful.v1",
+                "protocol_version": "stateful.v2",
                 "started_at": "2026-06-29T00:00:00Z"
             }"#,
         )
@@ -1918,5 +1925,28 @@ mod tests {
             Some("file-token")
         );
         fs::remove_dir_all(root).ok();
+    }
+    #[test]
+    fn inherit_parent_stateful_runtime_env_rejects_non_v2_runtime_file() {
+        let path = env::temp_dir().join(format!(
+            "stateful-bench-runtime-v1-{}.json",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock should be after epoch")
+                .as_nanos()
+        ));
+        fs::write(
+            &path,
+            r#"{"base_url":"http://127.0.0.1:43873","token":"file-token","protocol_version":"legacy"}"#,
+        )
+        .expect("runtime file should be written");
+        let mut target = BTreeMap::new();
+
+        let error = inherit_parent_stateful_runtime_env_from_file(&mut target, &path)
+            .expect_err("non-v2 runtime must be rejected");
+
+        assert!(error.to_string().contains("stateful.v2"));
+        assert!(target.is_empty());
+        fs::remove_file(path).ok();
     }
 }

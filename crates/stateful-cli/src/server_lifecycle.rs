@@ -163,8 +163,9 @@ pub fn runtime_is_healthy(runtime: &ServerRuntime) -> bool {
 
 fn runtime_is_reusable(runtime: &ServerRuntime) -> bool {
     runtime_is_basic_healthy(runtime)
-        && runtime_identity_matches_pid(runtime).unwrap_or(false)
-        && pid_matches_current_exe(runtime.pid).unwrap_or(false)
+        && (runtime.pid == 0
+            || (runtime_identity_matches_pid(runtime).unwrap_or(false)
+                && pid_matches_current_exe(runtime.pid).unwrap_or(false)))
 }
 
 fn runtime_is_basic_healthy(runtime: &ServerRuntime) -> bool {

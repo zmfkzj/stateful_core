@@ -2250,8 +2250,14 @@ fn stateful_server_args(mode: RunMode, port: u16, workspace_id: &str) -> Vec<Str
         "--workspace-id".to_string(),
         workspace_id.to_string(),
     ];
-    if mode == RunMode::Awareness {
-        args.extend(["--coordination-mode".to_string(), "awareness".to_string()]);
+    match mode {
+        RunMode::Awareness => {
+            args.extend(["--coordination-mode".to_string(), "awareness".to_string()]);
+        }
+        RunMode::Stateful => {
+            args.extend(["--coordination-mode".to_string(), "enforcement".to_string()]);
+        }
+        RunMode::NoState => {}
     }
     args
 }
@@ -4508,7 +4514,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn awareness_mode_uses_awareness_server_flag() {
+    fn coordinated_modes_use_explicit_server_flags() {
         assert_eq!(RunMode::Awareness.as_str(), "awareness");
         assert_eq!(
             stateful_server_args(RunMode::Awareness, 3456, "workspace-1"),
@@ -4526,6 +4532,20 @@ mod tests {
         );
         assert_eq!(
             stateful_server_args(RunMode::Stateful, 3456, "workspace-1"),
+            vec![
+                "server".to_string(),
+                "--host".to_string(),
+                "127.0.0.1".to_string(),
+                "--port".to_string(),
+                "3456".to_string(),
+                "--workspace-id".to_string(),
+                "workspace-1".to_string(),
+                "--coordination-mode".to_string(),
+                "enforcement".to_string(),
+            ]
+        );
+        assert_eq!(
+            stateful_server_args(RunMode::NoState, 3456, "workspace-1"),
             vec![
                 "server".to_string(),
                 "--host".to_string(),

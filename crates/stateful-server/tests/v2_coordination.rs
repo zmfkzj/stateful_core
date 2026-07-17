@@ -286,7 +286,7 @@ async fn awareness_treats_expired_partial_and_structural_reads_as_missing_eviden
 }
 
 #[tokio::test]
-async fn awareness_treats_invalidated_peer_reads_as_missing_evidence() {
+async fn awareness_denies_invalidated_peer_reads_as_stale() {
     let app = app();
     let first_reservation = successful_post(
         &app,
@@ -444,10 +444,10 @@ async fn awareness_treats_invalidated_peer_reads_as_missing_evidence() {
         ))
         .await
         .expect("invalidated peer read responds");
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert_eq!(
-        response_json(response).await["decision"]["reason_code"],
-        "missing_read_provenance",
+        response_json(response).await["reason_code"],
+        "stale_observation"
     );
 }
 

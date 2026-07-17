@@ -755,6 +755,9 @@ fn thin_safety_state(
         Some(record) if record.status == ReadObservationStatus::Expired => {
             ObservationFreshness::Expired
         }
+        Some(record) if record.status == ReadObservationStatus::Invalidated => {
+            ObservationFreshness::Changed
+        }
         Some(record) if !record.is_stable() || !target.before.is_complete_exact() => {
             ObservationFreshness::Missing
         }

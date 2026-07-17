@@ -59,12 +59,103 @@ def test_overlap_harness_scores_documents_and_exports_warning_metrics(tmp_path):
     assert [row["status"] for row in collided["task_results"]] == ["failed", "passed"]
     assert collided["metrics"]["missing_expected_line_count"] == 1
 
+    def v2_event(event_type, family, kind, aggregate_id, data, created_at, agent_id="agent-a"):
+        return {
+            "event_id": f"event-{aggregate_id}-{kind}",
+            "event_type": event_type,
+            "agent_id": agent_id,
+            "workspace_id": "workspace-a",
+            "payload": {
+                "family": family,
+                "event": {
+                    "kind": kind,
+                    "data": {"aggregate_id": aggregate_id, "repeated": False, "data": data},
+                },
+            },
+            "created_at": created_at,
+        }
+
     (pair_dir / "coordination-events.jsonl").write_text(
         "\n".join(
-            [
-                json.dumps({"event_type": "AuthorizationWarned", "agent_id": "agent-a", "path": "doc.txt"}),
-                json.dumps({"event_type": "WriteCompleted", "agent_id": "agent-a", "path": "doc.txt"}),
-                json.dumps({"event_type": "WaitStarted", "reason": "active_claim_conflict", "wait_ms": 13}),
+            json.dumps(event)
+            for event in [
+                v2_event(
+                    "wait.became_claimable",
+                    "wait",
+                    "became_claimable",
+                    "wait-zero",
+                    {"wait": {"wait_id": "wait-zero", "agent_id": "waiter-zero", "relative_path": "zero.txt"}},
+                    "2026-07-17T12:00:00.020Z",
+                ),
+                v2_event(
+                    "wait.requested",
+                    "wait",
+                    "requested",
+                    "wait-zero",
+                    {"wait": {"wait_id": "wait-zero", "agent_id": "waiter-zero", "relative_path": "zero.txt"}},
+                    "2026-07-17T12:00:00.020Z",
+                ),
+                v2_event(
+                    "wait.became_claimable",
+                    "wait",
+                    "became_claimable",
+                    "wait-a",
+                    {"wait": {"wait_id": "wait-a", "agent_id": "waiter-a", "relative_path": "doc.txt"}},
+                    "2026-07-17T12:00:00.013Z",
+                    agent_id="blocker-a",
+                ),
+                v2_event(
+                    "wait.became_claimable",
+                    "wait",
+                    "became_claimable",
+                    "wait-unrelated",
+                    {"wait": {"wait_id": "wait-unrelated", "agent_id": "waiter-unrelated", "relative_path": "other.txt"}},
+                    "2026-07-17T12:00:00.010Z",
+                ),
+                v2_event(
+                    "write_intent.committed",
+                    "write_intent",
+                    "committed",
+                    "intent-a",
+                    {"write_intent": {"operation_id": "operation-a", "targets": [{"path": "doc.txt"}]}},
+                    "2026-07-17T12:00:00.009Z",
+                ),
+                v2_event(
+                    "write_intent.committed",
+                    "write_intent",
+                    "committed",
+                    "intent-unrelated",
+                    {"write_intent": {"operation_id": "operation-a", "targets": [{"path": "other.txt"}]}},
+                    "2026-07-17T12:00:00.008Z",
+                    agent_id="agent-b",
+                ),
+                {"event_type": "AuthorizationWarned", "agent_id": "agent-a", "path": "legacy.txt"},
+                {"event_type": "authorization.warned", "payload": {"event": {"data": {"data": {}}}}},
+                {"event_type": [], "payload": {}},
+                v2_event(
+                    "wait.requested",
+                    "wait",
+                    "requested",
+                    "wait-a",
+                    {"wait": {"wait_id": "wait-a", "agent_id": "waiter-a", "relative_path": "doc.txt"}},
+                    "2026-07-17T12:00:00Z",
+                ),
+                v2_event(
+                    "authorization.warned",
+                    "authorization",
+                    "warned",
+                    "reservation-warning",
+                    {"targets": [{"path": "reservation.txt"}]},
+                    "2026-07-17T11:59:59.998Z",
+                ),
+                v2_event(
+                    "authorization.warned",
+                    "authorization",
+                    "warned",
+                    "operation-a",
+                    {"operation_id": "operation-a", "targets": [{"path": "doc.txt"}]},
+                    "2026-07-17T11:59:59.999Z",
+                ),
             ]
         )
         + "\n",
@@ -75,10 +166,34 @@ def test_overlap_harness_scores_documents_and_exports_warning_metrics(tmp_path):
         encoding="utf-8",
     )
     warned = mod.evaluate_pair(workspace, pair_json, pair_dir)
-    observer_events = (pair_dir / "observer-events.jsonl").read_text(encoding="utf-8")
-    assert '"event_type":"authorization_warning"' in observer_events
-    assert '"event_type":"warning_ignored_write"' in observer_events
-    assert '"event_type":"wait_event"' in observer_events
+    observer_events = [
+        json.loads(line)
+        for line in (pair_dir / "observer-events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [event["event_type"] for event in observer_events] == [
+        "authorization_warning",
+        "authorization_warning",
+        "warning_ignored_write",
+        "wait_event",
+        "wait_event",
+    ]
+    assert observer_events[0]["path"] == "reservation.txt"
+    assert "operation_id" not in observer_events[0]
+    assert observer_events[2]["operation_id"] == "operation-a"
+    assert observer_events[2]["agent_id"] == "agent-a"
+    assert not any(
+        event["event_type"] == "warning_ignored_write" and event["agent_id"] == "agent-b"
+        for event in observer_events
+    )
+    assert observer_events[3]["wait_id"] == "wait-a"
+    assert observer_events[3]["agent_id"] == "waiter-a"
+    assert observer_events[4] == {
+        "event_type": "wait_event",
+        "agent_id": "waiter-zero",
+        "wait_id": "wait-zero",
+        "path": "zero.txt",
+        "wait_ms": 0,
+    }
     assert warned["metrics"]["wait_time_ms"] == 13
     assert warned["metrics"]["total_tokens"] == 21
 

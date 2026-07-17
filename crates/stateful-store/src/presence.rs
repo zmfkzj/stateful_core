@@ -96,14 +96,14 @@ impl Store {
             let existing =
                 reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?;
             if let Some(presence) = &existing {
-                crate::handoff::ensure_presence_owner(request, presence)?;
+                crate::handoff::ensure_presence_owner(request, reader, presence)?;
             }
             if existing.is_none()
                 && let Some(handoff) =
                     reader.handoff(&request.workspace.workspace_id, &request.agent.agent_id)?
                 && handoff.expires_at > now
             {
-                crate::handoff::ensure_handoff_owner(request, &handoff)?;
+                crate::handoff::ensure_handoff_owner(request, reader, &handoff)?;
             }
             let mut events = crate::handoff::lazy_current_state_events(request, reader, now)?;
             let repeated = existing.is_some();
@@ -506,7 +506,7 @@ pub(crate) fn lifecycle_presence_for_resource_update<T>(
     if let Some(presence) =
         reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?
     {
-        crate::handoff::ensure_presence_owner(request, &presence)?;
+        crate::handoff::ensure_presence_owner(request, reader, &presence)?;
         if presence.expires_at <= now
             && presence
                 .busy_until
@@ -520,7 +520,7 @@ pub(crate) fn lifecycle_presence_for_resource_update<T>(
         reader.handoff(&request.workspace.workspace_id, &request.agent.agent_id)?
         && handoff.expires_at > now
     {
-        crate::handoff::ensure_handoff_owner(request, &handoff)?;
+        crate::handoff::ensure_handoff_owner(request, reader, &handoff)?;
     }
     Ok((events, register_record(request, None, None, now)))
 }

@@ -370,7 +370,7 @@ def arm_stateful_server(arm_dir: Path, cfg: RunConfig):
         "--workspace-id",
         workspace_id,
         "--coordination-mode",
-        "enforcement",
+        "awareness",
     ]
     with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
         process = subprocess.Popen(command, env=env, stdout=stdout, stderr=stderr, start_new_session=True)

@@ -10,7 +10,7 @@ use crate::{
 use rusqlite::{OptionalExtension, params};
 use serde_json::json;
 use stateful_core::{
-    ClaimEvent, EXPLICIT_HANDOFF_RELEVANCE, EventData, EventPayload, ExplicitHandoff,
+    ActorType, ClaimEvent, EXPLICIT_HANDOFF_RELEVANCE, EventData, EventPayload, ExplicitHandoff,
     FALLBACK_HANDOFF_RELEVANCE, HandoffEvent, HandoffRecord, HandoffStatus, NewEvent,
     PresenceEvent, PresenceRecord, PresenceResourceRelation, RequestEnvelope, ReservationEvent,
     WaitEvent, WriteFenceEvent,
@@ -117,13 +117,13 @@ impl Store {
             let presence =
                 reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?;
             if let Some(presence) = &presence {
-                ensure_presence_owner(request, presence)?;
+                ensure_presence_owner(request, reader, presence)?;
             }
             if presence.is_none()
                 && let Some(existing) =
                     reader.handoff(&request.workspace.workspace_id, &request.agent.agent_id)?
             {
-                ensure_handoff_owner(request, &existing)?;
+                ensure_handoff_owner(request, reader, &existing)?;
                 if existing.explicit {
                     return Ok(CommandPlan {
                         events: vec![],
@@ -533,14 +533,14 @@ fn fallback_plan_with_promotions(
 ) -> StoreResult<CommandPlan<Option<HandoffRecord>>> {
     let presence = reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?;
     if let Some(presence) = &presence {
-        ensure_presence_owner(request, presence)?;
+        ensure_presence_owner(request, reader, presence)?;
     }
     if presence.is_none()
         && let Some(existing) =
             reader.handoff(&request.workspace.workspace_id, &request.agent.agent_id)?
         && existing.expires_at > now
     {
-        ensure_handoff_owner(request, &existing)?;
+        ensure_handoff_owner(request, reader, &existing)?;
         return Ok(CommandPlan {
             events: Vec::new(),
             response: Some(existing),
@@ -700,6 +700,9 @@ pub(crate) fn presence_finalization_events<T>(
     promote_waiters: bool,
 ) -> StoreResult<Vec<NewEvent>> {
     let workspace_id = &request.workspace.workspace_id;
+    let migrated_unknown_presence = reader
+        .presence(workspace_id, agent_id)?
+        .is_some_and(|presence| is_migrated_unknown_presence(&presence));
     let mut presence_data = EventData::new(agent_id);
     presence_data.data = json!({"agent_id": agent_id});
     let mut events = vec![NewEvent::new(
@@ -758,9 +761,11 @@ pub(crate) fn presence_finalization_events<T>(
             )?);
         }
     }
+    let mut has_unattributed_agent_fence = false;
     for mut fence in
         typed_records::<WriteFenceRecord>(reader, CurrentAggregate::WriteFence, workspace_id)?
     {
+        has_unattributed_agent_fence |= fence.agent_id == agent_id && !fence.initiating_actor_known;
         if fence.status == "active" && fence.is_owned_by(&request.agent) {
             fence.status = "released".into();
             fence.released_at = Some(crate::reservations::timestamp(now)?);
@@ -773,7 +778,7 @@ pub(crate) fn presence_finalization_events<T>(
             )?);
         }
     }
-    if events.len() == 1 {
+    if events.len() == 1 || migrated_unknown_presence || has_unattributed_agent_fence {
         let mut cleanup_data = EventData::new(agent_id);
         cleanup_data.data = json!({"agent_id": agent_id, "cleanup": true, "actor": request.agent});
         for payload in [
@@ -838,10 +843,29 @@ fn append_waiter_promotions<T>(
     Ok(())
 }
 
+fn is_migrated_unknown_presence(presence: &PresenceRecord) -> bool {
+    presence.actor_id == "unknown"
+        && presence.actor_type == ActorType::Unknown
+        && presence.owner_id.is_none()
+        && presence.parent_agent_id.is_none()
+        && presence.parent_actor_id.is_none()
+}
+
 pub(crate) fn ensure_presence_owner<T>(
     request: &RequestEnvelope<T>,
+    reader: &dyn ProjectionReader,
     presence: &PresenceRecord,
 ) -> StoreResult<()> {
+    if presence.agent_id == request.agent.agent_id
+        && is_migrated_unknown_presence(presence)
+        && reader.is_migration_seed_event(
+            &presence.workspace_id,
+            presence.origin_event_seq,
+            "migration.presence_snapshot_seeded",
+        )?
+    {
+        return Ok(());
+    }
     if presence.agent_id != request.agent.agent_id
         || presence.actor_id != request.agent.actor_id
         || presence.actor_type != request.agent.actor_type
@@ -856,8 +880,23 @@ pub(crate) fn ensure_presence_owner<T>(
 
 pub(crate) fn ensure_handoff_owner<T>(
     request: &RequestEnvelope<T>,
+    reader: &dyn ProjectionReader,
     handoff: &HandoffRecord,
 ) -> StoreResult<()> {
+    if handoff.agent_id == request.agent.agent_id
+        && handoff.actor_id == "unknown"
+        && handoff.actor_type == ActorType::Unknown
+        && handoff.owner_id.is_none()
+        && handoff.parent_agent_id.is_none()
+        && handoff.parent_actor_id.is_none()
+        && reader.is_migration_seed_event(
+            &handoff.workspace_id,
+            handoff.origin_event_seq,
+            "migration.legacy_handoff_snapshot_seeded",
+        )?
+    {
+        return Ok(());
+    }
     if handoff.agent_id != request.agent.agent_id
         || handoff.actor_id != request.agent.actor_id
         || handoff.actor_type != request.agent.actor_type

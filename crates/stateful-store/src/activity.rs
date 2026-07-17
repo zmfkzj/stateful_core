@@ -29,12 +29,12 @@ impl Store {
             let existing =
                 reader.presence(&request.workspace.workspace_id, &request.agent.agent_id)?;
             if let Some(presence) = &existing {
-                crate::handoff::ensure_presence_owner(request, presence)?;
+                crate::handoff::ensure_presence_owner(request, reader, presence)?;
             } else if let Some(handoff) =
                 reader.handoff(&request.workspace.workspace_id, &request.agent.agent_id)?
                 && handoff.expires_at > now
             {
-                crate::handoff::ensure_handoff_owner(request, &handoff)?;
+                crate::handoff::ensure_handoff_owner(request, reader, &handoff)?;
             }
             let mut activity = register_record(request, existing, None, now);
             activity.phase = Some(phase);

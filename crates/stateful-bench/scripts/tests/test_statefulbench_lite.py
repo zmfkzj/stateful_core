@@ -479,7 +479,8 @@ class StatefulBenchLiteTests(unittest.TestCase):
         )
         timed_out = next(record for record in result["agents"] if record["agent_id"] == "task-slug")
         self.assertTrue(timed_out["timed_out"])
-    def test_arm_server_tolerates_signal_denial_from_outer_sandbox(self):
+
+    def test_arm_server_starts_awareness_and_tolerates_signal_denial_from_outer_sandbox(self):
         process = Mock(pid=42)
         process.poll.return_value = None
         response = Mock(status=200)
@@ -490,7 +491,7 @@ class StatefulBenchLiteTests(unittest.TestCase):
             with (
                 patch.object(self.mod, "_available_port", return_value=45678),
                 patch.object(self.mod.secrets, "token_urlsafe", return_value="token"),
-                patch.object(self.mod.subprocess, "Popen", return_value=process),
+                patch.object(self.mod.subprocess, "Popen", return_value=process) as popen,
                 patch.object(self.mod.urllib.request, "urlopen", return_value=response),
                 patch.object(self.mod.os, "killpg", side_effect=PermissionError),
             ):
@@ -500,6 +501,10 @@ class StatefulBenchLiteTests(unittest.TestCase):
                 ) as env:
                     self.assertEqual(env["STATEFUL_SERVER_URL"], "http://127.0.0.1:45678")
                     self.assertEqual(env["STATEFUL_SERVER_TOKEN"], "token")
+                    self.assertEqual(
+                        popen.call_args.args[0][-2:],
+                        ["--coordination-mode", "awareness"],
+                    )
 
         process.terminate.assert_called_once_with()
         process.wait.assert_called_once_with(timeout=5)

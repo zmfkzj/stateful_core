@@ -107,14 +107,14 @@ fn request<T: serde::Serialize>(agent_id: &str, payload: T) -> RequestEnvelope<T
     .expect("request should be valid")
 }
 
-fn owned_projection_rows(path: &Path, table: &str, agent_id: &str) -> i64 {
+fn payload_owned_projection_rows(path: &Path, table: &str, agent_id: &str) -> i64 {
     Connection::open(path)
         .expect("migrated database should open")
         .query_row(
             &format!(
-                "SELECT COUNT(*) FROM {table} projection
-                 JOIN journal_events event ON event.event_seq = projection.origin_event_seq
-                 WHERE projection.workspace_id = 'workspace-main' AND event.agent_id = ?1"
+                "SELECT COUNT(*) FROM {table}
+                 WHERE workspace_id = 'workspace-main'
+                   AND json_extract(payload_json, '$.agent_id') = ?1"
             ),
             [agent_id],
             |row| row.get(0),
@@ -746,7 +746,36 @@ fn migrated_presence_and_handoff_project_to_typed_records_before_commands() {
 }
 
 #[test]
-fn finalization_cleans_migrated_coordination_rows_by_journal_owner() {
+fn migrated_handoff_accepts_a_v2_owner_after_presence_is_absent() {
+    let temp = TempDir::new().expect("temporary directory should exist");
+    let path = legacy_database(&temp, "handoff-adoption.sqlite");
+    let mut store = open_legacy(&path).expect("legacy database should migrate");
+    Connection::open(&path)
+        .expect("migrated database should open")
+        .execute(
+            "DELETE FROM presence_current WHERE workspace_id = ?1 AND agent_id = ?2",
+            ["workspace-main", "agent-alpha"],
+        )
+        .expect("migrated presence should be absent");
+
+    let handoff = store
+        .finalize_handoff(&request(
+            "agent-alpha",
+            ExplicitHandoff {
+                status: HandoffStatus::Done,
+                summary: "finished".into(),
+                files_changed: vec![],
+                tests_run: vec![],
+                remaining_work: vec![],
+                next_plan: None,
+            },
+        ))
+        .expect("migrated handoff should accept its V2 owner");
+    assert!(handoff.response.explicit);
+}
+
+#[test]
+fn resumed_migrated_presence_finalization_cleans_coordination_rows_by_payload_owner() {
     let temp = TempDir::new().expect("temporary directory should exist");
     let path = legacy_database(&temp, "owned-cleanup.sqlite");
     Connection::open(&path)
@@ -772,14 +801,21 @@ fn finalization_cleans_migrated_coordination_rows_by_journal_owner() {
         "write_fence_current",
     ] {
         assert!(
-            owned_projection_rows(&path, table, "agent-alpha") > 0,
+            payload_owned_projection_rows(&path, table, "agent-alpha") > 0,
             "alpha must own a {table} row"
         );
         assert!(
-            owned_projection_rows(&path, table, "agent-beta") > 0,
+            payload_owned_projection_rows(&path, table, "agent-beta") > 0,
             "beta must own a {table} row"
         );
     }
+
+    store
+        .resume_presence(&request(
+            "agent-alpha",
+            PresenceRegistration { first_prompt: None },
+        ))
+        .expect("migrated presence should resume before finalization");
 
     store
         .finalize_handoff(&request(
@@ -802,13 +838,16 @@ fn finalization_cleans_migrated_coordination_rows_by_journal_owner() {
         "write_fence_current",
     ] {
         assert_eq!(
-            owned_projection_rows(&path, table, "agent-alpha"),
+            payload_owned_projection_rows(&path, table, "agent-alpha"),
             0,
             "alpha {table} rows must be cleaned"
         );
         assert!(
-            owned_projection_rows(&path, table, "agent-beta") > 0,
+            payload_owned_projection_rows(&path, table, "agent-beta") > 0,
             "beta {table} rows must remain"
         );
     }
+    store
+        .rebuild_projections()
+        .expect("resumed migration cleanup should replay");
 }

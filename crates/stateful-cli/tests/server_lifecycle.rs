@@ -351,7 +351,16 @@ fn stop_server_refuses_identity_from_different_pid_without_signaling_process() {
     if process_is_alive {
         stateful_cli::write_global_runtime_file(&paths, &actual)
             .expect("actual runtime should be restored for cleanup");
-        stop_server(&paths).expect("matching child should stop during cleanup");
+        let cleanup = Command::new(env!("CARGO_BIN_EXE_stateful"))
+            .args(["server", "stop"])
+            .env("STATEFUL_HOME", home.path())
+            .output()
+            .expect("stateful cleanup command should run");
+        assert!(
+            cleanup.status.success(),
+            "matching child should stop during cleanup: {}",
+            String::from_utf8_lossy(&cleanup.stderr)
+        );
     }
 
     assert!(
@@ -442,7 +451,7 @@ fn ensure_server_with_options_rejects_healthy_runtime_on_different_port() {
         200,
         r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":1,"capabilities":["presence"]}"#,
     )]);
-    let runtime = ServerRuntime::new(fake.base_url(), "token", "w1", 123);
+    let runtime = ServerRuntime::new(fake.base_url(), "token", "w1", 0);
     stateful_cli::write_global_runtime_file(&paths, &runtime).expect("runtime should write");
 
     let error = ensure_server_with_options(

@@ -39,6 +39,12 @@ pub trait ProjectionReader {
     fn live_presences(&self, workspace_id: &str) -> StoreResult<Vec<PresenceRecord>>;
     fn handoff(&self, workspace_id: &str, agent_id: &str) -> StoreResult<Option<HandoffRecord>>;
     fn handoffs(&self, workspace_id: &str) -> StoreResult<Vec<HandoffRecord>>;
+    fn is_migration_seed_event(
+        &self,
+        workspace_id: &str,
+        origin_event_seq: u64,
+        event_type: &str,
+    ) -> StoreResult<bool>;
     fn active_claims_for_path(
         &self,
         workspace_id: &str,
@@ -325,6 +331,28 @@ impl ProjectionReader for SqlProjectionReader<'_> {
         statement
             .query_map([workspace_id], handoff_from_row)?
             .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    fn is_migration_seed_event(
+        &self,
+        workspace_id: &str,
+        origin_event_seq: u64,
+        event_type: &str,
+    ) -> StoreResult<bool> {
+        self.transaction
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1
+                    FROM journal_events
+                    WHERE workspace_id = ?1
+                      AND event_seq = ?2
+                      AND aggregate_kind = 'migration'
+                      AND event_type = ?3
+                )",
+                params![workspace_id, origin_event_seq, event_type],
+                |row| row.get::<_, i64>(0).map(|exists| exists != 0),
+            )
             .map_err(StoreError::from)
     }
 

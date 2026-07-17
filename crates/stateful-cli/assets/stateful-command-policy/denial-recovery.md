@@ -35,12 +35,14 @@ Exact file claims cover file writes, deletes, renames, and moves. Directory clai
 
 ## Claim Conflict Or Wait Queue
 
-If `state_claim_acquire` reports `coordination_conflict`, do not retry acquisition or steal the claim.
+In awareness, `coordination_conflict` is a warning: inspect rendered context and narrow the plan. It does not create a wait queue or lazy replay operation.
+
+In explicit enforcement, if `state_claim_acquire` reports `coordination_conflict`, do not retry acquisition or steal the claim.
 
 - To wait for a path, call active `state_reservation_request` with a stable `request_id`, denied `action`, `path`, and `purpose`.
 - Use the next-turn notification or active `state_notifications_poll` to learn when the reservation is claimable; use active `state_resume_next` as durable recovery for still-active claimable reservations.
 - When reserved, reread the target.
-- Native edits and write-target sandbox writes can lazy-claim the reservation at the next write boundary. Queued OMP lazy operations resume with `lazy_edit_resume` or `lazy_write_resume`; otherwise use the active `state_reservation_claim` tool when it is exposed.
+- Queued OMP lazy operations resume with `lazy_edit_resume` or `lazy_write_resume` only after the matching `reservation_granted` notification marks them claimable. The helper reauthorizes the original write with stale-target guards; it does not claim the reservation itself.
 
 If a response already includes `wait_id`, `queue_position`, or reservation guidance, follow that wait queue protocol.
 

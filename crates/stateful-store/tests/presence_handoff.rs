@@ -7,7 +7,7 @@ use stateful_core::{
 use stateful_store::{
     ActivityFinalization, ActivityStart, Clock, FixedClock, PresenceRegistration,
     PresenceResourceUpdate, PresenceToolResult, PresenceToolStart, ReservationDeclaration, Store,
-    WaitRequest, WriteFenceAcquire,
+    StoreError, WaitRequest, WriteFenceAcquire,
 };
 use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
@@ -71,6 +71,19 @@ fn request<T: serde::Serialize>(
         payload,
     )
     .expect("test request should be valid")
+}
+
+fn unknown_request<T: serde::Serialize>(
+    request_id: Uuid,
+    agent_id: &str,
+    actor_id: &str,
+    payload: T,
+) -> RequestEnvelope<T> {
+    let mut request = request(request_id, agent_id, actor_id, ActorType::Unknown, payload);
+    request.agent.owner_id = None;
+    request.agent.parent_agent_id = None;
+    request.agent.parent_actor_id = None;
+    request
 }
 
 fn register_request(
@@ -205,6 +218,76 @@ fn registration_preserves_root_subagent_human_system_and_unknown_attribution() {
         assert_eq!(presence.parent_agent_id.as_deref(), Some("parent-agent"));
         assert_eq!(presence.parent_actor_id.as_deref(), Some("parent-actor"));
     }
+}
+
+#[test]
+fn normal_unknown_presence_rejects_a_different_same_agent_identity() {
+    let mut store = store();
+    let owner = unknown_request(
+        Uuid::new_v4(),
+        "agent-unknown",
+        "unknown",
+        PresenceRegistration { first_prompt: None },
+    );
+    store
+        .register_presence(&owner)
+        .expect("unknown owner should register");
+    store
+        .resume_presence(&unknown_request(
+            Uuid::new_v4(),
+            "agent-unknown",
+            "unknown",
+            PresenceRegistration { first_prompt: None },
+        ))
+        .expect("exact unknown owner should resume");
+
+    assert!(matches!(
+        store.resume_presence(&unknown_request(
+            Uuid::new_v4(),
+            "agent-unknown",
+            "different-actor",
+            PresenceRegistration { first_prompt: None },
+        )),
+        Err(StoreError::ReservationOwnerMismatch)
+    ));
+}
+
+#[test]
+fn normal_unknown_handoff_rejects_a_different_same_agent_identity() {
+    let mut store = store();
+    store
+        .register_presence(&unknown_request(
+            Uuid::new_v4(),
+            "agent-unknown",
+            "unknown",
+            PresenceRegistration { first_prompt: None },
+        ))
+        .expect("unknown owner should register");
+    store
+        .stop_presence(&unknown_request(
+            Uuid::new_v4(),
+            "agent-unknown",
+            "unknown",
+            (),
+        ))
+        .expect("exact unknown owner should stop");
+
+    assert!(matches!(
+        store.finalize_handoff(&unknown_request(
+            Uuid::new_v4(),
+            "agent-unknown",
+            "different-actor",
+            ExplicitHandoff {
+                status: HandoffStatus::Done,
+                summary: "done".into(),
+                files_changed: vec![],
+                tests_run: vec![],
+                remaining_work: vec![],
+                next_plan: None,
+            },
+        )),
+        Err(StoreError::ReservationOwnerMismatch)
+    ));
 }
 
 #[test]

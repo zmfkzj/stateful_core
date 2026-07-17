@@ -497,12 +497,15 @@ impl<'a> Projector<'a> {
                             "DELETE FROM {table}
                              WHERE workspace_id = ?1
                                AND json_extract(payload_json, '$.agent_id') = ?2
-                               AND json_extract(payload_json, '$.actor_id') = ?3
-                               AND json_extract(payload_json, '$.actor_type') = ?4
-                               AND json_extract(payload_json, '$.owner_id') IS ?5
-                               AND json_extract(payload_json, '$.parent_agent_id') IS ?6
-                               AND json_extract(payload_json, '$.parent_actor_id') IS ?7
-                               AND json_extract(payload_json, '$.initiating_actor_known') = 1"
+                               AND (
+                                 (json_extract(payload_json, '$.initiating_actor_known') = 1
+                                  AND json_extract(payload_json, '$.actor_id') = ?3
+                                  AND json_extract(payload_json, '$.actor_type') = ?4
+                                  AND json_extract(payload_json, '$.owner_id') IS ?5
+                                  AND json_extract(payload_json, '$.parent_agent_id') IS ?6
+                                  AND json_extract(payload_json, '$.parent_actor_id') IS ?7)
+                                 OR COALESCE(json_extract(payload_json, '$.initiating_actor_known'), 0) = 0
+                               )"
                         ),
                         params![
                             event.workspace_id,

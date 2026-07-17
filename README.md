@@ -22,9 +22,9 @@ stateful server start --coordination-mode enforcement
 ```
 
 The product center is presence, freshness, and handoff—not locking. In both
-modes, the deliberately thin hard stops reject stale exact-read evidence,
-unreconciled high-confidence human writes, an active write fence, and a prior
-write whose outcome is unknown. Explicit enforcement additionally can deny
+modes, the deliberately thin hard stops reject invalid targets, stale exact-read
+evidence, unreconciled high-confidence human writes, an active write fence, and
+a prior write whose outcome is unknown. Explicit enforcement additionally can deny
 overlapping supported writes; awareness keeps reservations and claims advisory.
 
 ## Why
@@ -98,8 +98,9 @@ indefinite; events are not deleted solely because of their age.
 
 The enabled Codex and OMP integrations register sessions, maintain presence, and
 render context for the active actor. Rendered context has a delivery ID,
-sequence, and workspace version; the client acknowledges the delivered context
-so a later session can receive context it has not acknowledged.
+sequence, and workspace version; the client acknowledges the delivered context,
+so an unacknowledged delivery is retried for that agent on a later turn or
+resumed session.
 
 Before a supported write, inspect current context, declare the known scope, then
 complete an exact read of each target. Freshness is evidence from that completed

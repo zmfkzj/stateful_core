@@ -26,7 +26,9 @@ inside a separate agent container instead of on the host. The image must include
 The Docker container is the sandbox boundary, so the adapter sets
 `STATEFUL_OMP_SANDBOX=off` for the in-container `docker exec` by default. When
 Stateful is enabled, the agent container inherits the parent Stateful runtime
-environment so it uses the same server/token. The adapter copies the target
+environment so it uses the same server/token. A discovered parent runtime file
+supplies those credentials only when its `protocol_version` is exactly
+`stateful.v2`; no legacy runtime file is inherited. The adapter copies the target
 workspace into `/workspace`, runs Stateful install/enable and OMP, copies
 `/workspace` back to the host airlock, then uses the existing target container
 smoke compile and archive flow. Copy-back failures are reported as

@@ -390,7 +390,9 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
     assert!(extension.contains(
         "import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from \"node:fs\""
     ));
-    assert!(extension.contains("import { delimiter, dirname, resolve } from \"node:path\""));
+    assert!(
+        extension.contains("import { delimiter, dirname, relative, resolve } from \"node:path\"")
+    );
     assert!(extension.contains("import { fileURLToPath } from \"node:url\""));
     assert!(
         extension
@@ -736,7 +738,7 @@ fn install_codex_yes_creates_global_command_policy_skill() {
     assert!(command_policy_skill.contains("Support Files"));
     assert!(command_policy_skill.contains("state_reservation_declare"));
     assert!(command_policy_skill.contains("state_claim_acquire"));
-    assert!(command_policy_skill.contains("copy the exact active name"));
+    assert!(command_policy_skill.contains("Call only names shown in the active tool list"));
     for (name, marker) in [
         ("omp-tools.md", "Use OMP-Native Stateful Tools"),
         (

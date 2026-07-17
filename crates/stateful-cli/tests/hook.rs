@@ -581,17 +581,23 @@ fn omp_truncated_raw_read_completes_without_baseline() {
     .to_string();
 
     let pre = run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "pre-tool-use"], &input);
-    assert!(pre.status.success(), "{}", String::from_utf8_lossy(&pre.stderr));
+    assert!(
+        pre.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pre.stderr)
+    );
     for _ in 0..2 {
-        assert!(rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("read-start identity should arrive")
-            .starts_with("GET /v2/runtime/identity?"));
+        assert!(
+            rx.recv_timeout(Duration::from_secs(2))
+                .expect("read-start identity should arrive")
+                .starts_with("GET /v2/runtime/identity?")
+        );
     }
-    assert!(rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("read start should arrive")
-        .starts_with("POST /v2/read/start "));
+    assert!(
+        rx.recv_timeout(Duration::from_secs(2))
+            .expect("read start should arrive")
+            .starts_with("POST /v2/read/start ")
+    );
 
     let post = run_hook_subprocess(
         &repo_root,
@@ -599,9 +605,16 @@ fn omp_truncated_raw_read_completes_without_baseline() {
         &["hook", "omp", "post-tool-use"],
         &input,
     );
-    assert!(post.status.success(), "{}", String::from_utf8_lossy(&post.stderr));
+    assert!(
+        post.status.success(),
+        "{}",
+        String::from_utf8_lossy(&post.stderr)
+    );
     let requests = (0..5)
-        .map(|_| rx.recv_timeout(Duration::from_secs(2)).expect("post-read request should arrive"))
+        .map(|_| {
+            rx.recv_timeout(Duration::from_secs(2))
+                .expect("post-read request should arrive")
+        })
         .collect::<Vec<_>>();
     let complete = requests
         .iter()
@@ -5817,7 +5830,10 @@ fn hook_pre_tool_use_discovers_global_runtime_file() {
     );
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v2/authorize HTTP/1.1"));
-    assert_eq!(request_json_body(&request)["workspace"]["workspace_id"], "w1");
+    assert_eq!(
+        request_json_body(&request)["workspace"]["workspace_id"],
+        "w1"
+    );
 }
 
 #[test]
