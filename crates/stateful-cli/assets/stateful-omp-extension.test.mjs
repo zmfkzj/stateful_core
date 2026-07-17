@@ -391,10 +391,10 @@ test("lazy edit resume preserves the original tool-call identity through both ho
   const resumedHooks = recorded.filter(({ event, payload }) => event === "pre-tool-use" && payload.yolo)
     .concat(recorded.filter(({ event, payload }) => event === "post-tool-use" && payload.tool_call_id === "original-edit-call"));
   assert.equal(resumedHooks.length, 2);
-  for (const { payload } of resumedHooks) {
+  for (const { event, payload } of resumedHooks) {
     assert.equal(payload.tool_call_id, "original-edit-call");
-    assert.equal(payload.wait_id, "wait-edit");
-    assert.equal(payload.reservation_id, "reservation-edit");
+    assert.equal(payload.wait_id, undefined);
+    assert.equal(payload.reservation_id, event === "pre-tool-use" ? "reservation-edit" : undefined);
     assert.deepEqual(payload.tool_input, input);
   }
   assert.equal(resumedHooks[1].payload.is_error, false);
@@ -446,10 +446,10 @@ test("lazy write resume preserves the original tool-call identity through both h
   const resumedHooks = recorded.filter(({ event, payload }) => event === "pre-tool-use" && payload.yolo)
     .concat(recorded.filter(({ event, payload }) => event === "post-tool-use" && payload.tool_call_id === "original-write-call"));
   assert.equal(resumedHooks.length, 2);
-  for (const { payload } of resumedHooks) {
+  for (const { event, payload } of resumedHooks) {
     assert.equal(payload.tool_call_id, "original-write-call");
-    assert.equal(payload.wait_id, "wait-write");
-    assert.equal(payload.reservation_id, "reservation-write");
+    assert.equal(payload.wait_id, undefined);
+    assert.equal(payload.reservation_id, event === "pre-tool-use" ? "reservation-write" : undefined);
     assert.deepEqual(payload.tool_input, input);
   }
   assert.equal(resumedHooks[1].payload.is_error, false);

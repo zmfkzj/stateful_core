@@ -1425,7 +1425,6 @@ function state_reservation_claim(operation, _ctx) {
       if (!claim.ok) return lazyToolResult("failed", claim.message, { operation_id: operationId, targets: operation.targets });
       const authorization = runStatefulHook("pre-tool-use", {
         tool_call_id: operation.tool_call_id,
-        wait_id: operation.wait_id || undefined,
         agent_id: operation.agent_id,
         reservation_id: operation.reservation_id || undefined,
         cwd: operation.cwd || ctx.cwd,
@@ -1446,8 +1445,6 @@ function state_reservation_claim(operation, _ctx) {
       runStatefulHook("post-tool-use", {
         agent_id: operation.agent_id,
         tool_call_id: operation.tool_call_id,
-        reservation_id: operation.reservation_id || undefined,
-        wait_id: operation.wait_id || undefined,
         cwd: operation.cwd || ctx.cwd,
         tool_name: operation.tool_name,
         tool_input: operation.tool_input,
@@ -1490,7 +1487,6 @@ function state_reservation_claim(operation, _ctx) {
         cwd: operation.cwd || ctx.cwd,
         yolo: true,
         tool_call_id: operation.tool_call_id,
-        wait_id: operation.wait_id || undefined,
         tool_name: operation.tool_name,
         tool_input: operation.tool_input,
       });
@@ -1507,8 +1503,6 @@ function state_reservation_claim(operation, _ctx) {
       runStatefulHook("post-tool-use", {
         agent_id: operation.agent_id,
         tool_call_id: operation.tool_call_id,
-        reservation_id: operation.reservation_id || undefined,
-        wait_id: operation.wait_id || undefined,
         cwd: operation.cwd || ctx.cwd,
         tool_name: operation.tool_name,
         tool_input: operation.tool_input,

@@ -7,7 +7,7 @@ Implemented and verified at base `f86ae6d`.
 
 - RED — `node --test crates/stateful-cli/assets/stateful-omp-extension.test.mjs`: lazy resumes attempted wait-only/redundant claims before a grant; grant-path, original-ID, and completion-identity regressions were added first.
 - RED — `node --test integrations/vscode/test/core.test.js`: enabled-repository identity initially emitted global unknown metadata; disabled/mismatched folders posted, multi-root presence coalesced, symlink document paths were dropped, and an outer root won over a nested enabled root.
-- RED — focused regressions also caught raw subdirectory claim paths, quoted YAML booleans, explicit-workspace actor collisions, missing grant binding, and grant-path mismatch acceptance.
+- RED — focused regressions also caught raw subdirectory claim paths, quoted YAML booleans, explicit-workspace actor collisions, missing grant binding, grant-path mismatch acceptance, and unsupported raw hook identity fields.
 - GREEN — `node --test crates/stateful-cli/assets/stateful-omp-extension.test.mjs`: 15 passing, 0 failing.
 - GREEN — `node --test integrations/vscode/test/core.test.js`: 19 passing, 0 failing.
 
@@ -22,8 +22,8 @@ Implemented and verified at base `f86ae6d`.
 
 ## OMP and Task 7 closure
 
-- Lazy edit/write stores the original OMP `toolCallId`, wait identity, and normalized repository-relative target. A `reservation_granted` notification binds its exact `wait_id` to the payload's actual `reservation_id`; a payload path, when present, must equal the stored target. Unmatched or ungranted waits fail closed.
-- A granted wait is not claimed again. Resumed PreToolUse uses the bound real reservation ID and original tool-call ID; PostToolUse uses that original ID and records wait/reservation IDs only as result diagnostics. No wait-only compatibility claim exists.
+- The reservation record owns `wait_id`. A `reservation_granted` notification binds its exact wait to the actual reservation ID; resumed PreToolUse sends only its supported real `reservation_id` and original tool-call ID, so Rust can claim the reservation before the original operation completes. Unmatched or ungranted waits fail closed.
+- PostToolUse sends the original operation ID and completion outcome; wait/reservation IDs remain only in `result_metadata` diagnostics, not unsupported top-level fields. A granted wait is never claimed again and no wait-only compatibility claim exists.
 
 ## Files
 
