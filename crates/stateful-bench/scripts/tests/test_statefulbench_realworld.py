@@ -3408,20 +3408,29 @@ class RealWorldRunnerTests(unittest.TestCase):
             log.write_text("", encoding="utf-8")
             return self.mod.AgentHandle(Process(agent_id), agent_id, 0.0)
 
-        result = self.mod.run_repo_arm(
-            self.repo,
-            self.corpus,
-            self.dataset,
-            self.root / "cache",
-            self.root / "out",
-            "parallel-off",
-            self.mod.RunConfig(tasks=10, stateful_binary="/tmp/stateful"),
-            launch=launch,
-            workspace_factory=self.workspace,
-            archive_loader=lambda *_: self.root / "archive.tar.gz",
-            setup=lambda *_: True,
-            evaluator=lambda *_: True,
-            suite=lambda *_: True,
+        with mock.patch.object(self.mod.os, "killpg") as killpg:
+            result = self.mod.run_repo_arm(
+                self.repo,
+                self.corpus,
+                self.dataset,
+                self.root / "cache",
+                self.root / "out",
+                "parallel-off",
+                self.mod.RunConfig(tasks=10, stateful_binary="/tmp/stateful"),
+                launch=launch,
+                workspace_factory=self.workspace,
+                archive_loader=lambda *_: self.root / "archive.tar.gz",
+                setup=lambda *_: True,
+                evaluator=lambda *_: True,
+                suite=lambda *_: True,
+            )
+        self.assertEqual(
+            killpg.call_args_list,
+            [
+                mock.call(1, self.mod.signal.SIGTERM),
+                mock.call(1, self.mod.signal.SIGKILL),
+            ]
+            * 3,
         )
 
         self.assertEqual(result["error"], "launch failed")
