@@ -39,7 +39,8 @@ Implemented and verified at base `f86ae6d`.
 - Implementation: `da1770b` — `fix: preserve integration repository identities`
 - Review fixes: `3a6689c` — `fix: scope resumed claims and IDE actors`
 - Independent review closure: `9dcb3d8` — `fix: bind granted lazy reservations`
-- Pushed `0bd6496..9dcb3d8` to `origin/presence-first-event-journal-v2`.
+- Supported-hook-field closure: `4aba6b3` — `fix: use supported lazy hook fields`
+- Pushed `0bf21fa..4aba6b3` to `origin/presence-first-event-journal-v2`.
 
 ## Concerns
 
