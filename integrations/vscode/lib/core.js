@@ -45,6 +45,12 @@ function sha256Hex(bytes) {
   return crypto.createHash('sha256').update(bytes).digest('hex');
 }
 
+function yamlBare(value) {
+  const text = value.trim();
+  const comment = text.search(/\s#/);
+  return (comment < 0 ? text : text.slice(0, comment)).trim();
+}
+
 function yamlScalar(value) {
   const text = value.trim();
   if (!text) return null;
@@ -56,7 +62,12 @@ function yamlScalar(value) {
     }
   }
   if (text.startsWith("'") && text.endsWith("'")) return text.slice(1, -1).replace(/''/g, "'");
-  return text;
+  return yamlBare(text);
+}
+
+function yamlBoolean(value) {
+  const text = yamlBare(value);
+  return text === 'true' || text === 'false' ? text : null;
 }
 
 function readRepoRegistry(filePath) {
@@ -82,7 +93,7 @@ function readRepoRegistry(filePath) {
       if (entry) entries.push(entry);
       entry = {};
       if (required.includes(item[1])) {
-        const value = yamlScalar(item[2]);
+        const value = item[1] === 'enabled' ? yamlBoolean(item[2]) : yamlScalar(item[2]);
         if (value === null) return null;
         entry[item[1]] = value;
       }
@@ -95,7 +106,7 @@ function readRepoRegistry(filePath) {
     if (!field) return null;
     if (!required.includes(field[1])) continue;
     if (Object.hasOwn(entry, field[1])) return null;
-    const value = yamlScalar(field[2]);
+    const value = field[1] === 'enabled' ? yamlBoolean(field[2]) : yamlScalar(field[2]);
     if (value === null) return null;
     entry[field[1]] = value;
   }

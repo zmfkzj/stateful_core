@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -33,6 +33,7 @@ function fakePi() {
 
 async function loadExtension(t, { decision = { decision: "allow" }, fetchImpl, claimRequiresPath = false } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "stateful-omp-extension-"));
+  await mkdir(join(directory, ".git"));
   const extensionContext = context(directory);
   const hookLog = join(directory, "hooks.jsonl");
   const statefulPath = join(directory, "stateful");
@@ -318,8 +319,8 @@ test("awareness warnings are queued for the next turn without a lazy write", asy
 });
 
 test("enforcement denials retain lazy write replay", async (t) => {
-  const { pi } = await loadExtension(t, { decision: { decision: "block", reason: "reservation pending", wait: { wait_id: "wait-8" } } });
-  const result = await pi.handlers.get("tool_call")({ toolCallId: "call-block", toolName: "write", input: { path: "src/lib.rs", content: "x" } }, context());
+  const { pi, context: extensionContext } = await loadExtension(t, { decision: { decision: "block", reason: "reservation pending", wait: { wait_id: "wait-8" } } });
+  const result = await pi.handlers.get("tool_call")({ toolCallId: "call-block", toolName: "write", input: { path: "src/lib.rs", content: "x" } }, extensionContext);
   assert.equal(result.block, true);
   assert.match(result.reason, /Queued lazy write operation_id: wait-8/);
 });
@@ -454,4 +455,38 @@ test("lazy write resume preserves the original tool-call identity through both h
     message: "lazy write applied",
     targets: ["resume-write.js"],
   });
+});
+
+test("lazy write claim uses the repository-relative granted path", async (t) => {
+  const { pi, hookLog, context: extensionContext, directory } = await loadExtension(t, {
+    decision: {
+      decision: "block",
+      reason: "reservation pending",
+      wait: { wait_id: "wait-subdir", reservation_id: "reservation-subdir" },
+    },
+    claimRequiresPath: true,
+  });
+  const cwd = join(directory, "packages", "client");
+  await mkdir(join(cwd, "src"), { recursive: true });
+  await writeFile(join(cwd, "src", "resume.js"), "before\n");
+  const nestedContext = { ...extensionContext, cwd };
+  const input = { path: "src/resume.js", content: "after\n" };
+
+  await pi.handlers.get("tool_call")({
+    toolCallId: "original-subdir-call",
+    toolName: "write",
+    reservationId: "reservation-subdir",
+    input,
+  }, nestedContext);
+  const resumed = await pi.tools.get("lazy_write_resume").execute(
+    "resume-subdir-tool-call",
+    { operation_id: "wait-subdir" },
+    undefined,
+    undefined,
+    nestedContext,
+  );
+  assert.equal(resumed.isError, false);
+
+  const claim = (await hooks(hookLog)).find(({ args }) => args?.[0] === "reservation" && args[1] === "claim");
+  assert.equal(claim.args[claim.args.indexOf("--path") + 1], "packages/client/src/resume.js");
 });

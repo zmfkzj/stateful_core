@@ -165,6 +165,20 @@ test('effectiveWorkspaceId matches Rust local runtime derivation', () => {
   assert.equal(core().effectiveWorkspaceId('remote-workspace', identity), 'remote-workspace');
 });
 
+test('enabledRepoIdentity accepts YAML boolean comments but rejects quoted booleans', () => {
+  const home = tempDir();
+  const root = fs.realpathSync(tempDir());
+  writeGitRepo(root);
+  writeEnabledRepos(home, [{ repoId: 'repo-bool', root }]);
+  const configPath = path.join(home, 'config.yml');
+
+  fs.writeFileSync(configPath, fs.readFileSync(configPath, 'utf8').replace('enabled: true', 'enabled: "true"'));
+  assert.equal(core().enabledRepoIdentity(root, { STATEFUL_HOME: home }), null);
+
+  fs.writeFileSync(configPath, fs.readFileSync(configPath, 'utf8').replace('enabled: "true"', 'enabled: true # enabled'));
+  assert.equal(core().enabledRepoIdentity(root, { STATEFUL_HOME: home }).repoId, 'repo-bool');
+});
+
 
 test('contentHash matches server fnv1a64 format for observed file bytes', () => {
   assert.equal(core().contentHash(Buffer.from('hello\n')), 'fnv1a64:a9bc80cca21f28b3');
@@ -253,8 +267,8 @@ test('VS Code sends a complete V2 query envelope to the runtime identity route',
   process.env.STATEFUL_HOME = home;
   const required = {
     protocol_version: 'stateful.v2',
-    agent_id: 'ide-workspace-1',
-    actor_id: 'ide-workspace-1',
+    agent_id: 'ide-workspace-1-repo-query',
+    actor_id: 'ide-workspace-1-repo-query',
     actor_type: 'human',
     root,
     workspace_id: 'workspace-1',
@@ -342,7 +356,7 @@ test('VS Code uses the V2 runtime handshake and human request envelopes', async 
     assert.deepStrictEqual(calls[0].options.headers, { authorization: 'Bearer secret-token' });
 
     const identity = {
-      agent: { agent_id: 'ide-workspace-1', actor_id: 'ide-workspace-1', actor_type: 'human' },
+      agent: { agent_id: 'ide-workspace-1-repo-envelope', actor_id: 'ide-workspace-1-repo-envelope', actor_type: 'human' },
       workspace: {
         root,
         workspace_id: 'workspace-1',
@@ -543,7 +557,7 @@ test('VS Code preserves an explicit non-local runtime workspace ID', async () =>
     if (new URL(call.url).pathname === '/v2/runtime/identity') {
       const query = Object.fromEntries(new URL(call.url).searchParams);
       return query.workspace_id === 'remote-workspace'
-        && query.agent_id === 'ide-remote-workspace'
+        && query.agent_id === 'ide-remote-workspace-repo-explicit'
         && query.repo_id === 'repo-explicit'
         && query.worktree_id === 'repo-explicit'
         ? jsonResponse({ protocol_version: 'stateful.v2', journal_schema_version: 2, capabilities: ['presence'] })
@@ -559,7 +573,7 @@ test('VS Code preserves an explicit non-local runtime workspace ID', async () =>
     const probe = calls.find((call) => new URL(call.url).pathname === '/v2/human/save-check');
     const envelope = JSON.parse(probe.options.body);
     assert.equal(envelope.workspace.workspace_id, 'remote-workspace');
-    assert.equal(envelope.agent.agent_id, 'ide-remote-workspace');
+    assert.equal(envelope.agent.agent_id, 'ide-remote-workspace-repo-explicit');
   } finally {
     global.fetch = originalFetch;
     if (originalHome === undefined) delete process.env.STATEFUL_HOME;
@@ -617,7 +631,7 @@ test('VS Code keeps multi-root repository envelopes and low-confidence actors di
   const calls = [];
   writeGitRepo(firstRoot, 'first');
   writeGitRepo(secondRoot, 'second');
-  writeRuntime(home, 'local');
+  writeRuntime(home, 'remote-workspace');
   writeEnabledRepos(home, [
     { repoId: 'repo-first', root: firstRoot },
     { repoId: 'repo-second', root: secondRoot },
@@ -657,14 +671,14 @@ test('VS Code keeps multi-root repository envelopes and low-confidence actors di
       .sort((left, right) => left.repoId.localeCompare(right.repoId));
     assert.deepStrictEqual(identities, [
       {
-        agentId: 'ide-workspace-first',
-        workspaceId: 'workspace-first',
+        agentId: 'ide-remote-workspace-repo-first',
+        workspaceId: 'remote-workspace',
         repoId: 'repo-first',
         root: firstRoot,
       },
       {
-        agentId: 'ide-workspace-second',
-        workspaceId: 'workspace-second',
+        agentId: 'ide-remote-workspace-repo-second',
+        workspaceId: 'remote-workspace',
         repoId: 'repo-second',
         root: secondRoot,
       },

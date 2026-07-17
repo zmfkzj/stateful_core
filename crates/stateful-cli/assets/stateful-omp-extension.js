@@ -4,7 +4,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { delimiter, dirname, resolve } from "node:path";
+import { delimiter, dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const STATEFUL = __STATEFUL_BINARY_JSON__;
@@ -668,6 +668,19 @@ function safeLazyOperationTarget(target) {
     && !target.split("/").some((part) => part === "" || part === "." || part === "..");
 }
 
+function repoRelativeLazyTarget(cwd, target) {
+  if (!safeLazyOperationTarget(target)) return "";
+  const base = resolve(cwd || process.cwd());
+  let root = base;
+  while (!existsSync(resolve(root, ".git"))) {
+    const parent = dirname(root);
+    if (parent === root) return "";
+    root = parent;
+  }
+  const normalized = relative(root, resolve(base, target)).replace(/\\/g, "/");
+  return safeLazyOperationTarget(normalized) ? normalized : "";
+}
+
 function readOperationBase(path) {
   if (!existsSync(path)) return { ok: true, value: null };
   try {
@@ -696,13 +709,17 @@ function rememberLazyEditOperation(event, ctx, decision) {
   if (!bases) return "";
   const toolCallId = String(event?.toolCallId || "").trim();
   if (!toolCallId) return "";
-  const operationId = structuredLazyEditOperationId(decision) || nextLazyEditOperationId();
+  const waitId = structuredLazyWaitId(decision);
+  const claimPath = targets.length === 1 ? repoRelativeLazyTarget(ctx.cwd, targets[0]) : "";
+  if (waitId && !claimPath) return "";
+  const operationId = waitId || nextLazyEditOperationId();
   lazyEditOperations.set(operationId, {
     tool_call_id: toolCallId,
     agent_id: agentId(event, ctx),
     workspace_id: detectWorkspaceId(event, ctx),
-    wait_id: structuredLazyWaitId(decision),
+    wait_id: waitId,
     reservation_id: structuredLazyReservationId(event, decision),
+    claim_path: claimPath,
     cwd: ctx.cwd,
     tool_name: event.toolName,
     tool_input: event.input || {},
@@ -727,13 +744,17 @@ function rememberLazyWriteOperation(event, ctx, decision) {
   if (!bases) return "";
   const toolCallId = String(event?.toolCallId || "").trim();
   if (!toolCallId) return "";
-  const operationId = structuredLazyWriteOperationId(decision) || nextLazyWriteOperationId();
+  const waitId = structuredLazyWaitId(decision);
+  const claimPath = repoRelativeLazyTarget(ctx.cwd, target);
+  if (waitId && !claimPath) return "";
+  const operationId = waitId || nextLazyWriteOperationId();
   lazyWriteOperations.set(operationId, {
     tool_call_id: toolCallId,
     agent_id: agentId(event, ctx),
     workspace_id: detectWorkspaceId(event, ctx),
-    wait_id: structuredLazyWaitId(decision),
+    wait_id: waitId,
     reservation_id: structuredLazyReservationId(event, decision),
+    claim_path: claimPath,
     cwd: ctx.cwd,
     tool_name: event.toolName,
     tool_input: event.input || {},
@@ -1356,7 +1377,7 @@ export default function statefulOmpExtension(pi) {
 function state_reservation_claim(operation, ctx) {
   const waitId = String(operation?.wait_id || "").trim();
   if (!waitId) return { ok: true };
-  const relativePath = String(operation?.targets?.[0] || "").trim();
+  const relativePath = String(operation?.claim_path || "").trim();
   if (!safeLazyOperationTarget(relativePath)) {
     return { ok: false, message: "state_reservation_claim missing normalized path" };
   }

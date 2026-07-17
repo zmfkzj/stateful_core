@@ -22,9 +22,11 @@ async function activate(context) {
   for (const folder of vscode.workspace.workspaceFolders || []) {
     const identity = core.enabledRepoIdentity(folder.uri.fsPath);
     if (!identity) continue;
+    const workspaceId = core.effectiveWorkspaceId(runtime.workspaceId, identity);
     const workspace = {
       root: identity.root,
-      workspaceId: core.effectiveWorkspaceId(runtime.workspaceId, identity),
+      workspaceId,
+      actorId: `ide-${workspaceId}${workspaceId === runtime.workspaceId ? `-${identity.worktreeId}` : ''}`,
       repoId: identity.repoId,
       worktreeId: identity.worktreeId,
       branch: identity.branch,
@@ -56,7 +58,7 @@ async function activate(context) {
   const observeLow = (document, kind) => {
     const target = documentTarget(workspaces, document);
     if (!target) return;
-    const key = `${target.workspace.workspaceId}:${kind}:${target.relativePath}`;
+    const key = `${target.workspace.actorId}:${kind}:${target.relativePath}`;
     const now = Date.now();
     if ((lastLowConfidencePost.get(key) || 0) + THROTTLE_MS > now) return;
     lastLowConfidencePost.set(key, now);
@@ -171,7 +173,7 @@ async function runtimeIdentity(runtime, workspace) {
 }
 
 function v2Query(workspace, event) {
-  const agentId = `ide-${workspace.workspaceId}`;
+  const agentId = workspace.actorId;
   return new URLSearchParams({
     protocol_version: 'stateful.v2',
     request_id: crypto.randomUUID(),
@@ -191,7 +193,7 @@ function v2Query(workspace, event) {
 }
 
 function v2Envelope(workspace, payload, event) {
-  const agentId = `ide-${workspace.workspaceId}`;
+  const agentId = workspace.actorId;
   return {
     protocol_version: 'stateful.v2',
     request_id: crypto.randomUUID(),
