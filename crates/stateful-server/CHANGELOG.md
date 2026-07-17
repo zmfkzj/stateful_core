@@ -1,5 +1,54 @@
 # Changelog
 
+## [1.0.0](https://github.com/zmfkzj/stateful_core/compare/stateful-server-v0.1.1...stateful-server-v1.0.0) (2026-07-17)
+
+
+### Features
+
+* add exact-read freshness and thin safety ([6a67680](https://github.com/zmfkzj/stateful_core/commit/6a676808b6114089e60479adf730931942e27cfe))
+* add OMP sandbox tooling, external command policy, and DeNovo coverage ([4e1869e](https://github.com/zmfkzj/stateful_core/commit/4e1869ef4ea0fc33d7f3dc1f930232476dc83cb7))
+* authorize writes by reservation id ([5a83bda](https://github.com/zmfkzj/stateful_core/commit/5a83bda2cd143f24dd0a20e92a525700438a5cb2))
+* complete presence-first v2 cutover ([329f9d5](https://github.com/zmfkzj/stateful_core/commit/329f9d54e698ce270e62a37b7206077015df445a))
+* cut server protocol to stateful v2 ([bfc27a1](https://github.com/zmfkzj/stateful_core/commit/bfc27a106f2f31eb39a05f4369b544a474e1ede0))
+* define stateful v2 domain contracts ([ffbd994](https://github.com/zmfkzj/stateful_core/commit/ffbd9940bab7f30a85982f531ba91f67ac522e19))
+* finalize reservation id authorization ([ba976de](https://github.com/zmfkzj/stateful_core/commit/ba976de86e1129d28a604075a9fda8f9cd2dc789))
+* finalize reservation id authorization ([b8af2e1](https://github.com/zmfkzj/stateful_core/commit/b8af2e1edf5ac997000c33eebb547c05ad2a150e))
+* improve OMP sandbox and DeNovo Docker workflows ([9f507f7](https://github.com/zmfkzj/stateful_core/commit/9f507f72fdde34781c8dff796ccede94840026e4))
+* make OMP bash tools background by default ([618d641](https://github.com/zmfkzj/stateful_core/commit/618d641725e3cc578eafeeb6bceaa3687a734fff))
+* **mcp:** batch claim acquisition ([2abbba7](https://github.com/zmfkzj/stateful_core/commit/2abbba7a066dff24594ddfd00cf1ca7ad2c8d833))
+* **omp:** improve sandbox tool UX and reservation recovery ([a10dfa7](https://github.com/zmfkzj/stateful_core/commit/a10dfa70b2e4f6c2db4a18ec9ab045e4179e23ac))
+
+
+### Bug Fixes
+
+* address final v2 verification findings ([8f39d2f](https://github.com/zmfkzj/stateful_core/commit/8f39d2ff083dad751bef72610f97cb0516459ffd))
+* allow-directory-lease-observations ([c23ea85](https://github.com/zmfkzj/stateful_core/commit/c23ea85fcc0eb13dc7c894dd39237fc747d0b22a))
+* atomically project write lifecycle presence ([8ecdf01](https://github.com/zmfkzj/stateful_core/commit/8ecdf01d3187fe9b0eabc9c36aa0dda6dc8ee186))
+* audit whitespace authorization denials ([1c150c6](https://github.com/zmfkzj/stateful_core/commit/1c150c674edc809f1b1dd25ed1d8310d2148c565))
+* bind authorize receipts to requests ([3146ca6](https://github.com/zmfkzj/stateful_core/commit/3146ca6131e37958d302bbcd7f9b74ee2232f0ec))
+* bind lifecycle resources to journal state ([24e2837](https://github.com/zmfkzj/stateful_core/commit/24e2837b3a487e2fa1b46320405cc409ade148d8))
+* bind runtime endpoint to process pid ([cb0adce](https://github.com/zmfkzj/stateful_core/commit/cb0adce20b935dd4b0f47d0a70af8d6857cf2b2b))
+* close v2 delivery and recovery gaps ([7a18baf](https://github.com/zmfkzj/stateful_core/commit/7a18baf47f5560b26bde080148d1176b17a9c8c0))
+* close v2 server lifecycle gaps ([2fa8af6](https://github.com/zmfkzj/stateful_core/commit/2fa8af67fc742db2fcc46091397b5d4f7813f909))
+* enforce v2 domain invariants ([68265b5](https://github.com/zmfkzj/stateful_core/commit/68265b51b4b281251d16b43ad3fafd8105dde30b))
+* enforce v2 server contracts ([d674841](https://github.com/zmfkzj/stateful_core/commit/d674841bb8e93f02ee8aefcd6fc88ebd2806a7c5))
+* freeze server authorization denials ([d8d9ede](https://github.com/zmfkzj/stateful_core/commit/d8d9ede6fa128bd6c7e60cb6c8edf42cd520044a))
+* make notification poll receipted ([ee05a10](https://github.com/zmfkzj/stateful_core/commit/ee05a10063694338ac81fc837dd4c2bb9b96b500))
+* preserve expiry and observation causality ([b7079e6](https://github.com/zmfkzj/stateful_core/commit/b7079e6a6a3b60caba542634ee8f19f4c6903d42))
+* preserve mixed reservation operation authority ([61b9854](https://github.com/zmfkzj/stateful_core/commit/61b9854191292b890fadabc56ecc2642ea644eee))
+* preserve task reservation authority ([cd7f603](https://github.com/zmfkzj/stateful_core/commit/cd7f60341ba7f43419ad39bab2cc6d81d5b0b019))
+* preserve v2 freshness and heartbeat safety ([ac13ef3](https://github.com/zmfkzj/stateful_core/commit/ac13ef360f97187a488d981123ed9570452a4e94))
+* preserve write freshness ownership ([0b2f937](https://github.com/zmfkzj/stateful_core/commit/0b2f9379900ea46d98d772b37267845907b08535))
+* replace hardcoded home paths ([ff2db8b](https://github.com/zmfkzj/stateful_core/commit/ff2db8b5b5adfa53a328c36d0f9b83c4261bc804))
+* return authorize warning decisions ([4e53198](https://github.com/zmfkzj/stateful_core/commit/4e53198f4b2f3040a8bdc1b69438bb6adb71367a))
+* tighten reservation scoped claims ([3a9953a](https://github.com/zmfkzj/stateful_core/commit/3a9953ade6b8040c7ff3965522df7143b0892949))
+* update ProgramBench OMP lifecycle ([cdb4d97](https://github.com/zmfkzj/stateful_core/commit/cdb4d9726dc8271e3cfa4c2e761a253b529ca021))
+
+
+### Miscellaneous Chores
+
+* release 1.0.0 ([97745c7](https://github.com/zmfkzj/stateful_core/commit/97745c77ffe77543b94a372fdb7861df2b854ea7))
+
 ## [0.1.1](https://github.com/zmfkzj/stateful_core/compare/stateful-server-v0.1.0...stateful-server-v0.1.1) (2026-06-23)
 
 

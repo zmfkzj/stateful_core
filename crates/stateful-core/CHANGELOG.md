@@ -1,5 +1,42 @@
 # Changelog
 
+## [1.0.0](https://github.com/zmfkzj/stateful_core/compare/stateful-core-v0.1.1...stateful-core-v1.0.0) (2026-07-17)
+
+
+### Features
+
+* add exact-read freshness and thin safety ([6a67680](https://github.com/zmfkzj/stateful_core/commit/6a676808b6114089e60479adf730931942e27cfe))
+* add OMP sandbox tooling, external command policy, and DeNovo coverage ([4e1869e](https://github.com/zmfkzj/stateful_core/commit/4e1869ef4ea0fc33d7f3dc1f930232476dc83cb7))
+* define stateful v2 domain contracts ([ffbd994](https://github.com/zmfkzj/stateful_core/commit/ffbd9940bab7f30a85982f531ba91f67ac522e19))
+* deliver versioned coordination context ([8657b1f](https://github.com/zmfkzj/stateful_core/commit/8657b1f0b591ab02ef917d5bc021cfa3b19ba553))
+* finalize reservation id authorization ([ba976de](https://github.com/zmfkzj/stateful_core/commit/ba976de86e1129d28a604075a9fda8f9cd2dc789))
+* improve OMP sandbox and DeNovo Docker workflows ([9f507f7](https://github.com/zmfkzj/stateful_core/commit/9f507f72fdde34781c8dff796ccede94840026e4))
+* migrate legacy state into journal seeds ([308a66f](https://github.com/zmfkzj/stateful_core/commit/308a66fc9f42b6905e702ad643a269e3a559335f))
+* persist presence and structured handoffs ([f7ec9f5](https://github.com/zmfkzj/stateful_core/commit/f7ec9f53ee9f1a5ea524144eb3c2b54b8f383ea5))
+
+
+### Bug Fixes
+
+* address final v2 verification findings ([8f39d2f](https://github.com/zmfkzj/stateful_core/commit/8f39d2ff083dad751bef72610f97cb0516459ffd))
+* atomically project write lifecycle presence ([8ecdf01](https://github.com/zmfkzj/stateful_core/commit/8ecdf01d3187fe9b0eabc9c36aa0dda6dc8ee186))
+* close aggregate lifecycle gaps ([940f664](https://github.com/zmfkzj/stateful_core/commit/940f66413ee0f157311a544c5ab4f206983dd87e))
+* complete event-sourced aggregate cutover ([9a80cd9](https://github.com/zmfkzj/stateful_core/commit/9a80cd908ffcefa8ead3789df2366786ecba8700))
+* enforce v2 domain invariants ([68265b5](https://github.com/zmfkzj/stateful_core/commit/68265b51b4b281251d16b43ad3fafd8105dde30b))
+* harden legacy migration cutover ([31088ad](https://github.com/zmfkzj/stateful_core/commit/31088ad56fad207d6c5db29812d62b3ad2f7244e))
+* harden unknown write reconciliation ([2756c82](https://github.com/zmfkzj/stateful_core/commit/2756c8255190ec204ab2a416531ff034b25321c0))
+* harden versioned context delivery ([8a0b81e](https://github.com/zmfkzj/stateful_core/commit/8a0b81e71be6265592fd9079cb03b996bc69a488))
+* preserve expiry and observation causality ([b7079e6](https://github.com/zmfkzj/stateful_core/commit/b7079e6a6a3b60caba542634ee8f19f4c6903d42))
+* preserve v2 freshness and heartbeat safety ([ac13ef3](https://github.com/zmfkzj/stateful_core/commit/ac13ef360f97187a488d981123ed9570452a4e94))
+* preserve write freshness ownership ([0b2f937](https://github.com/zmfkzj/stateful_core/commit/0b2f9379900ea46d98d772b37267845907b08535))
+* prioritize actionable context delivery ([80094ca](https://github.com/zmfkzj/stateful_core/commit/80094ca9170825bf37e123003a8e803fe8d61f22))
+* restore exact read freshness contract ([7c66c06](https://github.com/zmfkzj/stateful_core/commit/7c66c06f84eb4874914184c21b5ddadd297fb52c))
+* update ProgramBench OMP lifecycle ([cdb4d97](https://github.com/zmfkzj/stateful_core/commit/cdb4d9726dc8271e3cfa4c2e761a253b529ca021))
+
+
+### Miscellaneous Chores
+
+* release 1.0.0 ([97745c7](https://github.com/zmfkzj/stateful_core/commit/97745c77ffe77543b94a372fdb7861df2b854ea7))
+
 ## [0.1.1](https://github.com/zmfkzj/stateful_core/compare/stateful-core-v0.1.0...stateful-core-v0.1.1) (2026-06-23)
 
 

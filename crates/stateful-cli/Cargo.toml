@@ -1,6 +1,6 @@
 [package]
 name = "stateful-cli"
-version = "0.1.1"
+version = "1.0.0"
 description = "Command-line and hook integration entry points for stateful_core."
 edition.workspace = true
 license.workspace = true
