@@ -10,7 +10,10 @@ use time::OffsetDateTime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SyncStatus { Pending, Synced }
+pub enum SyncStatus {
+    Pending,
+    Synced,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutboxEntry {
@@ -49,11 +52,15 @@ impl Store {
         let now = self.clock.now();
         let entry = request.payload.clone();
         self.execute_command(request, "outbox.enqueue", |reader| {
-            if let Some(current) = reader.aggregate_records(CurrentAggregate::Delivery, &request.workspace.workspace_id)?
+            if let Some(current) = reader
+                .aggregate_records(CurrentAggregate::Delivery, &request.workspace.workspace_id)?
                 .into_iter()
                 .find(|record| record.aggregate_id == outbox_delivery_id(&entry.outbox_id))
             {
-                let existing = current.payload.get("outbox").cloned()
+                let existing = current
+                    .payload
+                    .get("outbox")
+                    .cloned()
                     .ok_or(crate::StoreError::ReservationRequestNotFound)?;
                 return Ok(CommandPlan {
                     events: Vec::new(),
@@ -83,7 +90,14 @@ impl Store {
                 origin_event_seq: 0,
             };
             Ok(CommandPlan {
-                events: vec![outbox_event(request, 0, now, RecoveryEvent::Queued, &delivery, &record)?],
+                events: vec![outbox_event(
+                    request,
+                    0,
+                    now,
+                    RecoveryEvent::Queued,
+                    &delivery,
+                    &record,
+                )?],
                 response: record,
                 http_status: 200,
             })
@@ -97,16 +111,24 @@ impl Store {
         let now = self.clock.now();
         let input = request.payload.clone();
         self.execute_command(request, "outbox.delivery", |reader| {
-            let current = reader.aggregate_records(CurrentAggregate::Delivery, &request.workspace.workspace_id)?
+            let current = reader
+                .aggregate_records(CurrentAggregate::Delivery, &request.workspace.workspace_id)?
                 .into_iter()
                 .find(|record| record.aggregate_id == outbox_delivery_id(&input.outbox_id))
                 .ok_or(crate::StoreError::ReservationRequestNotFound)?;
-            let outbox = current.payload.get("outbox").cloned()
+            let outbox = current
+                .payload
+                .get("outbox")
+                .cloned()
                 .ok_or(crate::StoreError::ReservationRequestNotFound)?;
             let mut record: OutboxRecord = serde_json::from_value(outbox)?;
             let mut delivery: DeliveryRecord = serde_json::from_value(current.payload.clone())?;
             if delivery.status == "delivered" {
-                return Ok(CommandPlan { events: Vec::new(), response: record, http_status: 200 });
+                return Ok(CommandPlan {
+                    events: Vec::new(),
+                    response: record,
+                    http_status: 200,
+                });
             }
             let (variant, status): (fn(EventData) -> RecoveryEvent, &str) = match input.outcome {
                 DeliveryAttempt::Attempted => (RecoveryEvent::Attempted, "attempted"),
@@ -114,7 +136,11 @@ impl Store {
                 DeliveryAttempt::Failed => (RecoveryEvent::Failed, "failed"),
             };
             if delivery.status == status && delivery.last_error == input.error {
-                return Ok(CommandPlan { events: Vec::new(), response: record, http_status: 200 });
+                return Ok(CommandPlan {
+                    events: Vec::new(),
+                    response: record,
+                    http_status: 200,
+                });
             }
             delivery.status = status.into();
             delivery.attempts += 1;
@@ -134,12 +160,17 @@ impl Store {
     }
 
     pub fn outbox(&self, workspace_id: &str, outbox_id: &str) -> StoreResult<Option<OutboxRecord>> {
-        let Some(record) = self.current_records(CurrentAggregate::Delivery, workspace_id)?
+        let Some(record) = self
+            .current_records(CurrentAggregate::Delivery, workspace_id)?
             .into_iter()
-            .find(|record| record.aggregate_id == outbox_delivery_id(outbox_id)) else {
+            .find(|record| record.aggregate_id == outbox_delivery_id(outbox_id))
+        else {
             return Ok(None);
         };
-        record.payload.get("outbox").cloned()
+        record
+            .payload
+            .get("outbox")
+            .cloned()
             .map(serde_json::from_value)
             .transpose()
             .map_err(crate::StoreError::from)
@@ -159,7 +190,13 @@ fn outbox_event<T>(
         "workspace_id": delivery.workspace_id, "status": delivery.status, "attempts": delivery.attempts,
         "last_error": delivery.last_error, "retry_at": delivery.retry_at, "delivered_at": delivery.delivered_at,
         "origin_event_seq": delivery.origin_event_seq, "outbox": outbox}});
-    NewEvent::new(request.request_id, ordinal, now, EventPayload::Recovery(variant(data))).map_err(crate::StoreError::from)
+    NewEvent::new(
+        request.request_id,
+        ordinal,
+        now,
+        EventPayload::Recovery(variant(data)),
+    )
+    .map_err(crate::StoreError::from)
 }
 
 fn outbox_delivery_id(outbox_id: &str) -> String {

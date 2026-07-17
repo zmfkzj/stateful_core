@@ -1,8 +1,12 @@
 use crate::{
     CommandOutcome, CommandPlan, CurrentAggregate, Store, StoreError, StoreResult,
     observations::read_event,
-    presence::{lifecycle_presence_for_resource_update, resource_update_event, tool_completed_event},
-    reservations::{expired, normalized_scope, record_from_current, scopes_conflict, timestamp, typed_records},
+    presence::{
+        lifecycle_presence_for_resource_update, resource_update_event, tool_completed_event,
+    },
+    reservations::{
+        expired, normalized_scope, record_from_current, scopes_conflict, timestamp, typed_records,
+    },
     write_fences::{WriteFenceRecord, fence_event},
 };
 use serde_json::json;
@@ -170,7 +174,9 @@ impl Store {
         .any(|intent| {
             intent.status.blocks_writes()
                 && intent.targets.iter().any(|existing| {
-                    targets.iter().any(|target| scopes_conflict(&existing.path, &target.path))
+                    targets
+                        .iter()
+                        .any(|target| scopes_conflict(&existing.path, &target.path))
                 })
         }) {
             return Err(StoreError::InvalidWriteIntent);
@@ -179,24 +185,26 @@ impl Store {
         let intent_id = Uuid::new_v4().to_string();
         let fences = targets
             .iter()
-            .map(|target| Ok(WriteFenceRecord {
-                fence_id: Uuid::new_v4().to_string(),
-                agent_id: request.agent.agent_id.clone(),
-                actor_id: request.agent.actor_id.clone(),
-                actor_type: request.agent.actor_type.clone(),
-                owner_id: request.agent.owner_id.clone(),
-                parent_agent_id: request.agent.parent_agent_id.clone(),
-                parent_actor_id: request.agent.parent_actor_id.clone(),
-                initiating_actor_known: true,
-                workspace_id: request.workspace.workspace_id.clone(),
-                relative_path: target.path.clone(),
-                action: payload.action.clone(),
-                status: "active".into(),
-                acquired_at: timestamp(now)?,
-                expires_at: timestamp(now + WRITE_FENCE_TTL)?,
-                released_at: None,
-                origin_event_seq: 0,
-            }))
+            .map(|target| {
+                Ok(WriteFenceRecord {
+                    fence_id: Uuid::new_v4().to_string(),
+                    agent_id: request.agent.agent_id.clone(),
+                    actor_id: request.agent.actor_id.clone(),
+                    actor_type: request.agent.actor_type.clone(),
+                    owner_id: request.agent.owner_id.clone(),
+                    parent_agent_id: request.agent.parent_agent_id.clone(),
+                    parent_actor_id: request.agent.parent_actor_id.clone(),
+                    initiating_actor_known: true,
+                    workspace_id: request.workspace.workspace_id.clone(),
+                    relative_path: target.path.clone(),
+                    action: payload.action.clone(),
+                    status: "active".into(),
+                    acquired_at: timestamp(now)?,
+                    expires_at: timestamp(now + WRITE_FENCE_TTL)?,
+                    released_at: None,
+                    origin_event_seq: 0,
+                })
+            })
             .collect::<StoreResult<Vec<_>>>()?;
         let intent = WriteIntentRecord {
             intent_id: intent_id.clone(),
@@ -220,7 +228,10 @@ impl Store {
         };
         let (mut events, mut presence) =
             lifecycle_presence_for_resource_update(reader, request, now)?;
-        if decision.as_ref().is_some_and(|decision| decision.decision == DecisionKind::Warn) {
+        if decision
+            .as_ref()
+            .is_some_and(|decision| decision.decision == DecisionKind::Warn)
+        {
             events.push(authorization_warned_event(
                 request,
                 events.len() as u32,
@@ -340,7 +351,11 @@ impl Store {
                 }
             }
             append_fence_releases(request, reader, now, &intent, &mut events)?;
-            Ok(CommandPlan { events, response: completed, http_status: 200 })
+            Ok(CommandPlan {
+                events,
+                response: completed,
+                http_status: 200,
+            })
         })
     }
 
@@ -358,7 +373,10 @@ impl Store {
             let actual = post_fingerprints(&intent.targets, actual)?;
             let mut recovered = intent.clone();
             recovered.completed_at = Some(now);
-            let unchanged = intent.targets.iter().all(|target| actual[&target.path] == target.before);
+            let unchanged = intent
+                .targets
+                .iter()
+                .all(|target| actual[&target.path] == target.before);
             let mut events = Vec::new();
             if unchanged {
                 recovered.status = WriteIntentStatus::Reconciled;
@@ -382,7 +400,11 @@ impl Store {
                     &[],
                 )?);
             }
-            Ok(CommandPlan { events, response: recovered, http_status: 200 })
+            Ok(CommandPlan {
+                events,
+                response: recovered,
+                http_status: 200,
+            })
         })
     }
 
@@ -493,10 +515,13 @@ impl Store {
                 )?);
             }
             append_fence_releases(request, reader, now, &intent, &mut events)?;
-            Ok(CommandPlan { events, response: reconciled, http_status: 200 })
+            Ok(CommandPlan {
+                events,
+                response: reconciled,
+                http_status: 200,
+            })
         })
     }
-
 
     pub fn active_write_intent(
         &self,
@@ -511,7 +536,10 @@ impl Store {
             .into_iter()
             .find(|intent| {
                 intent.status.blocks_writes()
-                    && intent.targets.iter().any(|target| scopes_conflict(&target.path, &path))
+                    && intent
+                        .targets
+                        .iter()
+                        .any(|target| scopes_conflict(&target.path, &path))
             })
             .map(Ok)
             .transpose()
@@ -530,7 +558,8 @@ impl Store {
             .collect::<StoreResult<Vec<_>>>()?
             .into_iter()
             .find(|fence| {
-                fence.status == "active" && !expired(&fence.expires_at, now)
+                fence.status == "active"
+                    && !expired(&fence.expires_at, now)
                     && scopes_conflict(&fence.relative_path, &path)
             })
             .map(Ok)
@@ -603,7 +632,10 @@ fn post_fingerprints(
             return Err(StoreError::InvalidWriteIntent);
         }
     }
-    if targets.iter().any(|target| !values.contains_key(&target.path)) {
+    if targets
+        .iter()
+        .any(|target| !values.contains_key(&target.path))
+    {
         return Err(StoreError::InvalidWriteIntent);
     }
     Ok(values)
@@ -620,15 +652,22 @@ fn next_resource_versions<T>(
         CurrentAggregate::ResourceWrite,
         &request.workspace.workspace_id,
     )?;
-    Ok(intent.targets.iter().map(|target| ResourceVersion {
-        workspace_id: request.workspace.workspace_id.clone(),
-        path: target.path.clone(),
-        version: current.iter().find(|version| version.path == target.path).map_or(1, |version| version.version + 1),
-        fingerprint: posts[&target.path].clone(),
-        writer_agent_id: request.agent.agent_id.clone(),
-        intent_id: intent.intent_id.clone(),
-        origin_event_seq: 0,
-    }).collect())
+    Ok(intent
+        .targets
+        .iter()
+        .map(|target| ResourceVersion {
+            workspace_id: request.workspace.workspace_id.clone(),
+            path: target.path.clone(),
+            version: current
+                .iter()
+                .find(|version| version.path == target.path)
+                .map_or(1, |version| version.version + 1),
+            fingerprint: posts[&target.path].clone(),
+            writer_agent_id: request.agent.agent_id.clone(),
+            intent_id: intent.intent_id.clone(),
+            origin_event_seq: 0,
+        })
+        .collect())
 }
 
 fn append_peer_observation_invalidations<T>(
@@ -684,8 +723,11 @@ fn append_fence_releases<T>(
         }) {
             continue;
         }
-        let mut fence = fences.iter().find(|fence| fence.fence_id == *fence_id)
-            .cloned().ok_or(StoreError::WriteIntentNotFound)?;
+        let mut fence = fences
+            .iter()
+            .find(|fence| fence.fence_id == *fence_id)
+            .cloned()
+            .ok_or(StoreError::WriteIntentNotFound)?;
         if fence.status == "active" {
             fence.status = "released".into();
             fence.released_at = Some(timestamp(now)?);
@@ -714,10 +756,19 @@ fn intent_event<T>(
         "write_intent": intent,
         "resource_versions": resource_versions,
     });
-    NewEvent::new(request.request_id, ordinal, now, EventPayload::WriteIntent(variant(data)))
-        .map_err(StoreError::from)
+    NewEvent::new(
+        request.request_id,
+        ordinal,
+        now,
+        EventPayload::WriteIntent(variant(data)),
+    )
+    .map_err(StoreError::from)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "authorization audit events retain the complete decision context"
+)]
 fn authorization_decision_event<T>(
     request: &RequestEnvelope<T>,
     ordinal: u32,

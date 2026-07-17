@@ -1,49 +1,48 @@
-# Denial Recovery
+# Recovery From Warnings And Denials
 
-Denials are the API. Read the denial, change the authorization path, and do not retry small command variants.
+Denials are the API; awareness warnings use the same response contract. Read the response, change the coordination path, and do not retry small command variants.
 
-## Missing Scope Or Claim
+## Advisory Scope Or Claim Warning
 
-If the denial says `missing_reservation`, `missing_claim`, `Target is outside active reservation scope`, or asks for exact scope:
+In awareness mode, missing reservation, missing claim, scope, and claim-conflict results are coordination warnings. Treat them as active-work evidence: inspect rendered context and narrow the plan before writing. In explicit enforcement they can deny.
 
-1. For OMP native `edit`/`write` without an explicit `reservation_id`, allow the extension to auto-declare the exact tool-visible file scope, acquire same-reservation claims, and retry authorization when this is the only denial.
-2. Otherwise re-read the target if it exists.
-3. If the active tool list exposes them, add the missing exact file or directory scopes to the task reservation with `state_reservation_declare(purpose=<task purpose>, files_planned=[...])`, then acquire exact same-reservation claims with `state_claim_acquire(reservation_id=<reservation_id>, paths=[...])`.
-4. If those tools are absent, do not invent them. Use OMP native `edit`/`write` auto-declare, lazy resume, or an already-authorized `reservation_id` write boundary; otherwise report that the command-shaped write cannot be authorized in this tool context.
+1. For OMP native `edit`/`write` without an explicit `reservation_id`, allow the extension to auto-declare the exact tool-visible file scope, acquire same-reservation claims, and retry authorization when this is the only issue.
+2. Otherwise reread the target if it exists.
+3. If the active tool list exposes them, add exact file or directory scopes with `state_reservation_declare(purpose=<task purpose>, files_planned=[...])`, then acquire exact same-reservation claims with `state_claim_acquire(reservation_id=<reservation_id>, paths=[...])`.
+4. If those tools are absent, use OMP native `edit`/`write` auto-declare, lazy resume, or an already-authorized `reservation_id` write boundary. Do not invent tools or repair the session through a shell.
 5. Use native edit tools for repo edits, or `sandbox run --fs write-targets` / OMP built-in Bash with a strict trusted `stateful sandbox run --fs write-targets ...` command and matching targets for command-shaped writes.
 
-Use file claims for file writes, deletes, renames, and moves. Directory claims only authorize directory writes.
+Exact file claims cover file writes, deletes, renames, and moves. Directory claims cover only directory writes.
 
-## Freshness Denials
+## Freshness Hard Stops
 
-If the denial says `missing_base_observation`, `stale_target_observation`, or `stale_claim_observation`, do not retry the same write.
+`unknown_write_outcome`, `stale_observation`, and `write_fence_conflict` deny in both modes. A missing or expired read is a warning in awareness and a denial in explicit enforcement.
 
-1. Reread every affected file path, including both source and destination for moves or renames.
-2. Reconcile or regenerate the edit against the current file contents.
-3. Retry once through the same native edit/write or authorized sandbox write boundary so the hook can send fresh `base_observations`.
-4. If freshness denial repeats, stop and report the stale path and denial reason instead of forcing the write.
+1. For `unknown_write_outcome`, complete a matching exact reread and reconcile that write intent before another write.
+2. For `stale_observation`, reread every affected exact path, including both source and destination for moves or renames, then regenerate the edit from the current contents.
+3. For `write_fence_conflict`, wait for the in-flight write to complete, then reread before retrying.
+4. If a freshness issue repeats, stop and report the path and response instead of forcing the write.
 
 ## Unreconciled Human Write
 
-Human save tooling is explicit: `stateful human observe <path> ...` records a human save, and `stateful human save-check <path>...` checks whether pending human saves block agent writes.
-
-If a hook or save-check says `unreconciled_human_write`, do not overwrite the file.
+`unreconciled_human_write` is a hard stop in both modes: it records a high-confidence human change, not advisory activity.
 
 1. Reread every denied file path.
 2. Summarize the human change and decide whether to `adopt`, `reapply`, `ask_user`, or `abandon`.
-3. If the active tool list exposes `state_reconcile_ack`, `state.reconcile.ack`, `state.reconcile_ack`, `stateful_reconcile_ack`, or an MCP-prefixed equivalent, call the exact shown tool with `resource`/`resources`, `reservation_id`, `files_reread`, `summary` or `human_change_summary`, and `decision`.
-4. Otherwise use `stateful reconcile ack --reservation-id <reservation_id> --resource <path> --files-reread <path> --summary <text> --decision <adopt|reapply|ask_user|abandon>`.
+3. If the active tool list exposes `state_reconcile_ack`, `state.reconcile.ack`, or an MCP-prefixed equivalent, call the exact shown tool with `resource`/`resources`, `reservation_id`, `files_reread`, `summary` or `human_change_summary`, and `decision`.
+4. If no reconcile-ack tool is exposed, report the missing native path and do not overwrite.
 5. Retry the original write only after an `adopt` or `reapply` acknowledgement succeeds.
+
 ## Claim Conflict Or Wait Queue
 
-If `state_claim_acquire` reports `claim_conflict`, do not retry acquisition or steal the claim.
+If `state_claim_acquire` reports `coordination_conflict`, do not retry acquisition or steal the claim.
 
-- To wait for a path, call `state_reservation_request` with a stable `request_id`, denied `action`, `path`, and `purpose` when that tool is exposed.
-- Use the next-turn notification or exposed `state_notifications_poll` to learn when the reservation is claimable; polling marks returned notifications delivered. Use exposed `state_resume_next` as durable recovery for still-active claimable reservations if a notice was missed or already delivered.
+- To wait for a path, call active `state_reservation_request` with a stable `request_id`, denied `action`, `path`, and `purpose`.
+- Use the next-turn notification or active `state_notifications_poll` to learn when the reservation is claimable; use active `state_resume_next` as durable recovery for still-active claimable reservations.
 - When reserved, reread the target.
-- Native edits and write-target sandbox writes can lazy-claim the reservation at the next write boundary. Queued OMP lazy operations should resume with `lazy_edit_resume` or `lazy_write_resume`; manual native-tool/CLI flows should first call exposed `state_reservation_claim(reservation_id=<reservation_id>, wait_id=<wait_id>)` or an explicitly permitted `stateful reservation claim --reservation-id <reservation_id> --wait-id <wait_id>`.
+- Native edits and write-target sandbox writes can lazy-claim the reservation at the next write boundary. Queued OMP lazy operations resume with `lazy_edit_resume` or `lazy_write_resume`; otherwise use the active `state_reservation_claim` tool when it is exposed.
 
-If a denial already includes `wait_id`, `queue_position`, or reservation guidance, follow that wait queue protocol.
+If a response already includes `wait_id`, `queue_position`, or reservation guidance, follow that wait queue protocol.
 
 For disposable repo `tmp/` directory claim conflicts, prefer a different session-unique scratch child over waiting when the artifact is truly disposable. Build/test commands should use the build profile's external `/tmp/stateful` scratch instead of repo `tmp/`.
 
@@ -52,8 +51,8 @@ For disposable repo `tmp/` directory claim conflicts, prefer a different session
 If raw Bash or eval-tool execution is blocked:
 
 - Use native Stateful coordination tools and native inspection first.
-- Use OMP native `edit`/`write` auto-declare/claim for the default simple-write path; use reservation and claims for other repo edits.
-- Codex fallback command paths: read-only sandbox for read-only shell inspection, `stateful sandbox process find` for process checks, write-targets sandbox for command-shaped writes, and git profile for git.
+- Use OMP native `edit`/`write` auto-declare/claim for the simple-write path; for other repo edits, use active reservation and claim tools or report the missing path.
+- Codex fallback command paths: read-only sandbox for shell inspection, `stateful sandbox process find` for process checks, write-targets sandbox for command-shaped writes, and git profile for git.
 - OMP fallback command paths: built-in Bash with strict trusted `stateful sandbox run ...` or `stateful sandbox process find ...` commands. Bare `stateful` is trusted only after session-start or per-tool preflight hash-verifies the first PATH `stateful` binary against the installed Stateful binary; commands using the installed absolute binary path remain trusted.
 
 Do not wrap `stateful sandbox run` in arbitrary Bash/eval in OMP; only the built-in Bash strict trusted Stateful command path is allowed.

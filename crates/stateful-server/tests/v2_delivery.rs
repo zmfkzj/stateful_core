@@ -1,6 +1,9 @@
 mod support;
 
-use axum::{body::Body, http::{Request, StatusCode}};
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 use serde_json::json;
 use std::time::Duration;
 use tokio_stream::StreamExt;
@@ -16,7 +19,7 @@ fn stream_get(last_event_id: Option<u64>) -> Request<Body> {
     if let Some(last_event_id) = last_event_id {
         builder = builder.header("last-event-id", last_event_id);
     }
-    builder.body(Body::empty()).unwrap()
+    builder.body(Body::empty()).expect("stream request builds")
 }
 
 #[tokio::test]
@@ -26,7 +29,7 @@ async fn sse_reconnect_acknowledges_live_sequence_without_replay() {
         .clone()
         .oneshot(stream_get(None))
         .await
-        .unwrap();
+        .expect("initial SSE connection receives a response");
     assert_eq!(response.status(), StatusCode::OK);
     let mut stream = response.into_body().into_data_stream();
 
@@ -41,7 +44,7 @@ async fn sse_reconnect_acknowledges_live_sequence_without_replay() {
                 ),
             ))
             .await
-            .unwrap(),
+            .expect("reservation request receives a response"),
     )
     .await;
     assert!(wait["wait_id"].is_string());
@@ -56,7 +59,7 @@ async fn sse_reconnect_acknowledges_live_sequence_without_replay() {
             ),
         ))
         .await
-        .unwrap();
+        .expect("reservation claim receives a response");
     assert_eq!(grant.status(), StatusCode::OK);
 
     let bytes = tokio::time::timeout(Duration::from_secs(1), stream.next())
@@ -71,7 +74,7 @@ async fn sse_reconnect_acknowledges_live_sequence_without_replay() {
         .clone()
         .oneshot(stream_get(Some(1)))
         .await
-        .unwrap();
+        .expect("reconnected SSE connection receives a response");
     assert_eq!(response.status(), StatusCode::OK);
     let mut reconnected = response.into_body().into_data_stream();
     assert!(
@@ -81,7 +84,10 @@ async fn sse_reconnect_acknowledges_live_sequence_without_replay() {
         "acknowledged notifications must not replay",
     );
 
-    let response = app.oneshot(stream_get(None)).await.unwrap();
+    let response = app
+        .oneshot(stream_get(None))
+        .await
+        .expect("fresh SSE connection receives a response");
     assert_eq!(response.status(), StatusCode::OK);
     let mut fresh_connection = response.into_body().into_data_stream();
     assert!(
@@ -98,37 +104,56 @@ async fn context_acknowledgement_requires_the_delivery_sequence() {
     successful_post(
         &app,
         "/v2/session/register",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d201", json!({"first_prompt": "work"})),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d201",
+            json!({"first_prompt": "work"}),
+        ),
     )
     .await;
     let delivery = successful_post(
         &app,
         "/v2/context/render",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d202", json!({"mode": "brief"})),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d202",
+            json!({"mode": "brief"}),
+        ),
     )
     .await;
     let invalid = app
         .clone()
         .oneshot(post(
             "/v2/context/ack",
-            envelope_for("agent-1", "00000000-0000-4000-8000-00000000d203", json!({
-                "delivery_id": delivery["delivery_id"],
-                "sequence": delivery["sequence"].as_u64().expect("sequence") + 1,
-                "workspace_version": delivery["workspace_version"]
-            })),
+            envelope_for(
+                "agent-1",
+                "00000000-0000-4000-8000-00000000d203",
+                json!({
+                    "delivery_id": delivery["delivery_id"],
+                    "sequence": delivery["sequence"].as_u64().expect("sequence") + 1,
+                    "workspace_version": delivery["workspace_version"]
+                }),
+            ),
         ))
         .await
-        .unwrap();
+        .expect("invalid context acknowledgement receives a response");
     assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(response_json(invalid).await["error"]["code"], "invalid_context_delivery");
+    assert_eq!(
+        response_json(invalid).await["error"]["code"],
+        "invalid_context_delivery"
+    );
     successful_post(
         &app,
         "/v2/context/ack",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d204", json!({
-            "delivery_id": delivery["delivery_id"],
-            "sequence": delivery["sequence"],
-            "workspace_version": delivery["workspace_version"]
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d204",
+            json!({
+                "delivery_id": delivery["delivery_id"],
+                "sequence": delivery["sequence"],
+                "workspace_version": delivery["workspace_version"]
+            }),
+        ),
     )
     .await;
 }
@@ -139,7 +164,11 @@ async fn event_reads_are_scoped_to_the_requested_workspace() {
     successful_post(
         &app,
         "/v2/session/register",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d205", json!({"first_prompt": "workspace one"})),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d205",
+            json!({"first_prompt": "workspace one"}),
+        ),
     )
     .await;
     let mut other_workspace = envelope_for(
@@ -152,9 +181,14 @@ async fn event_reads_are_scoped_to_the_requested_workspace() {
     successful_post(&app, "/v2/session/register", other_workspace).await;
 
     let response = app
-        .oneshot(query_get("/v2/events", "agent-1", "00000000-0000-4000-8000-00000000d207", "workspace-1"))
+        .oneshot(query_get(
+            "/v2/events",
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d207",
+            "workspace-1",
+        ))
         .await
-        .unwrap();
+        .expect("scoped events query receives a response");
     assert_eq!(response.status(), StatusCode::OK);
     assert!(
         response_json(response).await["events"]
@@ -171,17 +205,25 @@ async fn lost_poll_response_redelivers_until_sequence_acknowledgement() {
     let wait = successful_post(
         &app,
         "/v2/reservation/request",
-        envelope_for("agent-2", "00000000-0000-4000-8000-00000000d314", json!({
-            "relative_path": "src/lib.rs", "action": "write_file", "purpose": "Need the file."
-        })),
+        envelope_for(
+            "agent-2",
+            "00000000-0000-4000-8000-00000000d314",
+            json!({
+                "relative_path": "src/lib.rs", "action": "write_file", "purpose": "Need the file."
+            }),
+        ),
     )
     .await;
     successful_post(
         &app,
         "/v2/reservation/claim",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d315", json!({
-            "relative_path": "src/lib.rs"
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d315",
+            json!({
+                "relative_path": "src/lib.rs"
+            }),
+        ),
     )
     .await;
     let first = successful_post(
@@ -200,7 +242,11 @@ async fn lost_poll_response_redelivers_until_sequence_acknowledgement() {
     assert_eq!(second, first, "a lost poll response must remain pending");
     assert_eq!(first[0]["notification_id"], wait["wait_id"]);
 
-    let response = app.clone().oneshot(stream_get(None)).await.expect("stream response");
+    let response = app
+        .clone()
+        .oneshot(stream_get(None))
+        .await
+        .expect("stream response");
     assert_eq!(response.status(), StatusCode::OK);
     let mut stream = response.into_body().into_data_stream();
     let bytes = tokio::time::timeout(Duration::from_secs(1), stream.next())
@@ -214,7 +260,11 @@ async fn lost_poll_response_redelivers_until_sequence_acknowledgement() {
     let acknowledged = successful_post(
         &app,
         "/v2/notifications/poll",
-        envelope_for("agent-2", "00000000-0000-4000-8000-00000000d318", json!({"sequence": 1})),
+        envelope_for(
+            "agent-2",
+            "00000000-0000-4000-8000-00000000d318",
+            json!({"sequence": 1}),
+        ),
     )
     .await;
     assert_eq!(acknowledged, json!([wait["wait_id"]]));
@@ -225,11 +275,16 @@ async fn lost_poll_response_redelivers_until_sequence_acknowledgement() {
     )
     .await;
     assert_eq!(after_ack, json!([]));
-    let response = app.oneshot(stream_get(None)).await.expect("stream response");
+    let response = app
+        .oneshot(stream_get(None))
+        .await
+        .expect("stream response");
     assert_eq!(response.status(), StatusCode::OK);
     let mut stream = response.into_body().into_data_stream();
     assert!(
-        tokio::time::timeout(Duration::from_millis(250), stream.next()).await.is_err(),
+        tokio::time::timeout(Duration::from_millis(250), stream.next())
+            .await
+            .is_err(),
         "acknowledged notification must not replay to SSE",
     );
 }
@@ -247,17 +302,25 @@ async fn forged_last_event_id_does_not_hide_a_new_notification() {
     successful_post(
         &app,
         "/v2/reservation/request",
-        envelope_for("agent-2", "00000000-0000-4000-8000-00000000d311", json!({
-            "relative_path": "src/lib.rs", "action": "write_file", "purpose": "Need the file."
-        })),
+        envelope_for(
+            "agent-2",
+            "00000000-0000-4000-8000-00000000d311",
+            json!({
+                "relative_path": "src/lib.rs", "action": "write_file", "purpose": "Need the file."
+            }),
+        ),
     )
     .await;
     successful_post(
         &app,
         "/v2/reservation/claim",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d312", json!({
-            "relative_path": "src/lib.rs"
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d312",
+            json!({
+                "relative_path": "src/lib.rs"
+            }),
+        ),
     )
     .await;
     let event = tokio::time::timeout(Duration::from_secs(1), stream.next())
@@ -265,5 +328,9 @@ async fn forged_last_event_id_does_not_hide_a_new_notification() {
         .expect("notification must arrive after forged cursor")
         .expect("stream remains open")
         .expect("SSE data is valid");
-    assert!(String::from_utf8(event.to_vec()).expect("SSE is UTF-8").contains("id: 1"));
+    assert!(
+        String::from_utf8(event.to_vec())
+            .expect("SSE is UTF-8")
+            .contains("id: 1")
+    );
 }

@@ -4717,6 +4717,20 @@ class V2RunnerMetricContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "coordination"):
             self.mod._build_coordination_metrics("parallel-on", incomplete, [])
 
+    def test_normalizer_accepts_coordination_conflict_warning_and_rejects_unknown_warning(self) -> None:
+        metrics = self.metrics(bytes_at=10)
+        metrics["authorization"]["warned_by_reason"] = {"coordination_conflict": 1}
+
+        normalized = self.mod._normalized_coordination_metrics(metrics)
+
+        self.assertEqual(
+            normalized["authorization"]["warned_by_reason"],
+            {"coordination_conflict": 1},
+        )
+        metrics["authorization"]["warned_by_reason"] = {"unknown_reason": 1}
+        with self.assertRaisesRegex(ValueError, "coordination warned reasons"):
+            self.mod._normalized_coordination_metrics(metrics)
+
     def test_aggregate_nulls_uncleared_rows_and_weights_wait_means(self) -> None:
         first = self.metrics(bytes_at=10, wait_count=2, wait_total=3.0)
         second = self.metrics(bytes_at=20, wait_count=3, wait_total=12.0)

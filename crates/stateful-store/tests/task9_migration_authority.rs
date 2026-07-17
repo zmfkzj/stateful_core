@@ -1,7 +1,8 @@
 use rusqlite::Connection;
 use serde::Serialize;
 use stateful_core::{
-    ActorType, AgentIdentity, RequestEnvelope, ReservationScope, SourceKind, SourceRef, WorkspaceIdentity,
+    ActorType, AgentIdentity, RequestEnvelope, ReservationScope, SourceKind, SourceRef,
+    WorkspaceIdentity,
 };
 use stateful_store::{FixedClock, ReservationRelease, Store};
 use tempfile::TempDir;
@@ -100,11 +101,8 @@ fn migration_preserves_all_reservation_and_claim_scopes_with_null_expiries() {
         .expect("legacy rows insert");
     drop(connection);
 
-    let mut store = Store::open_with_clock(
-        &path,
-        FixedClock::new(datetime!(2026-07-15 11:30 UTC)),
-    )
-    .expect("legacy database migrates");
+    let mut store = Store::open_with_clock(&path, FixedClock::new(datetime!(2026-07-15 11:30 UTC)))
+        .expect("legacy database migrates");
 
     let reservation = store
         .reservation("workspace-main", "reservation-no-deadline")
@@ -130,7 +128,9 @@ fn migration_preserves_all_reservation_and_claim_scopes_with_null_expiries() {
     assert_eq!(claim.status, "active");
     assert_eq!(claim.expires_at, None);
 
-    store.rebuild_projections().expect("migration replay succeeds");
+    store
+        .rebuild_projections()
+        .expect("migration replay succeeds");
     assert_eq!(
         store
             .reservation("workspace-main", "reservation-no-deadline")
@@ -173,11 +173,8 @@ fn migration_excludes_terminal_claim_scopes_and_preserves_active_claim_scopes() 
         .expect("legacy rows insert");
     drop(connection);
 
-    let mut store = Store::open_with_clock(
-        &path,
-        FixedClock::new(datetime!(2026-07-15 11:30 UTC)),
-    )
-    .expect("legacy database migrates");
+    let mut store = Store::open_with_clock(&path, FixedClock::new(datetime!(2026-07-15 11:30 UTC)))
+        .expect("legacy database migrates");
 
     let reservation = store
         .reservation("workspace-main", "reservation-claim-lifecycle")
@@ -192,7 +189,9 @@ fn migration_excludes_terminal_claim_scopes_and_preserves_active_claim_scopes() 
         ],
     );
 
-    store.rebuild_projections().expect("migration replay succeeds");
+    store
+        .rebuild_projections()
+        .expect("migration replay succeeds");
     assert_eq!(
         store
             .reservation("workspace-main", "reservation-claim-lifecycle")
@@ -271,7 +270,9 @@ fn migration_promotes_slashless_directory_wait_as_directory_after_blocker_releas
     let released = store
         .release_reservation(&request(
             "agent-alpha",
-            ReservationRelease { reservation_id: "reservation-directory-blocker".into() },
+            ReservationRelease {
+                reservation_id: "reservation-directory-blocker".into(),
+            },
         ))
         .expect("blocker releases")
         .response;
@@ -285,7 +286,10 @@ fn migration_promotes_slashless_directory_wait_as_directory_after_blocker_releas
     assert_eq!(promoted.status, "claimable");
     assert_eq!(queued.relative_path, "src/");
     assert_eq!(promoted.relative_path, "src/");
-    assert_eq!(promoted.reservation_id.as_deref(), Some("wait-slashless-directory"));
+    assert_eq!(
+        promoted.reservation_id.as_deref(),
+        Some("wait-slashless-directory")
+    );
     assert_eq!(
         store
             .reservation("workspace-main", "wait-slashless-directory")

@@ -600,7 +600,10 @@ fn authorize_omp_targets(
     if targets.is_empty() {
         return Ok(OmpHookOutcome::Allow);
     }
-    if targets.iter().any(|target| target.action != targets[0].action) {
+    if targets
+        .iter()
+        .any(|target| target.action != targets[0].action)
+    {
         return Ok(OmpHookOutcome::Block {
             reason: format!(
                 "{} mixes write actions; split the operation into one action per patch",
@@ -1702,9 +1705,16 @@ fn read_classification(
         return stateful_core::ReadClassification::Partial;
     }
     if !selector.as_ref().is_some_and(|selector| selector.raw)
-        || ["offset", "limit", "start_line", "end_line", "line_start", "line_end"]
-            .iter()
-            .any(|key| tool_input.get(*key).is_some_and(|value| !value.is_null()))
+        || [
+            "offset",
+            "limit",
+            "start_line",
+            "end_line",
+            "line_start",
+            "line_end",
+        ]
+        .iter()
+        .any(|key| tool_input.get(*key).is_some_and(|value| !value.is_null()))
     {
         stateful_core::ReadClassification::StructuralSummary
     } else {
@@ -1951,7 +1961,10 @@ fn post_omp_testing_start(
     post_testing_presence(
         runtime,
         &input.agent_id,
-        &input.workspace_id.clone().unwrap_or_else(|| effective_workspace_id(runtime, identity)),
+        &input
+            .workspace_id
+            .clone()
+            .unwrap_or_else(|| effective_workspace_id(runtime, identity)),
         identity,
         tool_name,
         None,
@@ -1967,7 +1980,10 @@ fn post_omp_testing_result(
     post_testing_presence(
         runtime,
         &input.agent_id,
-        &input.workspace_id.clone().unwrap_or_else(|| effective_workspace_id(runtime, identity)),
+        &input
+            .workspace_id
+            .clone()
+            .unwrap_or_else(|| effective_workspace_id(runtime, identity)),
         identity,
         tool_name,
         Some(!input.metadata.failed()),
@@ -2071,8 +2087,10 @@ fn handle_pre_tool_use_with_runtime(
             })
         }
     }?;
-    if matches!(outcome, HookOutcome::Allow | HookOutcome::AllowWithContext { .. })
-        && let (Some(command), Some(runtime)) = (command, runtime)
+    if matches!(
+        outcome,
+        HookOutcome::Allow | HookOutcome::AllowWithContext { .. }
+    ) && let (Some(command), Some(runtime)) = (command, runtime)
     {
         post_codex_testing_start(&input, runtime, identity.as_ref(), command)?;
     }
@@ -3700,7 +3718,9 @@ mod tests {
     #[test]
     fn testing_command_accepts_only_executed_supported_test_grammar() {
         assert_eq!(
-            testing_command(&json!({ "command": "stateful sandbox run --fs build --network enabled --write-dir target --command 'cargo nextest run'" })),
+            testing_command(
+                &json!({ "command": "stateful sandbox run --fs build --network enabled --write-dir target --command 'cargo nextest run'" })
+            ),
             Some("cargo nextest".to_string())
         );
         assert_eq!(
@@ -3708,7 +3728,9 @@ mod tests {
             None
         );
         assert_eq!(
-            testing_command(&json!({ "command": "stateful sandbox run --fs build --network enabled --write-dir target --command 'npm test -- --runInBand'" })),
+            testing_command(
+                &json!({ "command": "stateful sandbox run --fs build --network enabled --write-dir target --command 'npm test -- --runInBand'" })
+            ),
             Some("npm test".to_string())
         );
         assert_eq!(

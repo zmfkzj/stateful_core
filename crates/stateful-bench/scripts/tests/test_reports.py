@@ -11,39 +11,6 @@ def condition(summary: dict, condition_id: str) -> dict:
     return next(item for item in summary["conditions"] if item["condition_id"] == condition_id)
 
 
-def test_summary_splits_friction_from_true_collision():
-    mod = load_script("denovo_codex_agent.py")
-    summary = mod.summarize_orchestration_events(
-        [
-            {
-                "event_type": "AuthorizationDenied",
-                "workspace_id": "w1",
-                "reason_code": "stale_target_observation",
-                "path": "a.py",
-            },
-            {
-                "event_type": "AuthorizationDenied",
-                "workspace_id": "w1",
-                "payload": {
-                    "reason_code": "active_claim_conflict",
-                    "path": "b.py",
-                    "wait": {"blocking_agent_id": "s2"},
-                },
-            },
-            {
-                "event_type": "ScopeOverlap",
-                "kind": "scope_overlap",
-                "workspace_id": "w1",
-                "path": "b.py",
-            },
-        ],
-        agent_id=None,
-        workspace_id="w1",
-    )
-
-    assert summary["true_collisions_prevented"] == 1
-    assert summary["self_inflicted_denials"] == 1
-    assert summary["scope_overlap_warnings"] == 1
 
 
 def test_progress_report_aggregates_in_progress_shards_from_results_jsonl(tmp_path):

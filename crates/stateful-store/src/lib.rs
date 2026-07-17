@@ -7,8 +7,8 @@ mod human;
 mod journal;
 mod migration;
 mod notifications;
-mod outbox;
 mod observations;
+mod outbox;
 mod presence;
 mod projector;
 mod reservations;
@@ -16,15 +16,17 @@ mod schema;
 mod write_fences;
 mod write_intents;
 pub use activity::{ActivityFinalization, ActivityStart};
-pub use claims::{ClaimAcquire, ClaimAcquireResponse, ClaimBatchAcquireResult, ClaimObservation, ClaimPath, ClaimRelease, ClaimRecord};
+pub use claims::{
+    ClaimAcquire, ClaimAcquireResponse, ClaimBatchAcquireResult, ClaimObservation, ClaimPath,
+    ClaimRecord, ClaimRelease,
+};
 pub use clock::{Clock, FixedClock, MutableClock, SystemClock};
 pub use context_delivery::{
     ContextAcknowledgement, ContextAcknowledgementResult, ContextDeliveryRecord, ContextRender,
 };
 pub use human::{
     HumanObservationConfidence, HumanObservationInput, HumanObservationKind,
-    HumanObservationRecord, ReconciliationAckInput,
-    HumanReconciliationAcknowledgementRecord,
+    HumanObservationRecord, HumanReconciliationAcknowledgementRecord, ReconciliationAckInput,
 };
 pub use journal::{
     CommandOutcome, CommandPlan, CurrentAggregate, CurrentRecord, JournalDiagnostics,
@@ -39,8 +41,8 @@ pub use presence::{
     PresenceRegistration, PresenceResourceUpdate, PresenceToolResult, PresenceToolStart,
 };
 pub use reservations::{
-    ReservationDeclaration, ReservationDeclarationResponse, ReservationHeartbeat, ReservationRecord,
-    ReservationRelease, WaitCancellation, WaitGrant, WaitRecord, WaitRequest,
+    ReservationDeclaration, ReservationDeclarationResponse, ReservationHeartbeat,
+    ReservationRecord, ReservationRelease, WaitCancellation, WaitGrant, WaitRecord, WaitRequest,
 };
 pub use stateful_core::PresenceRecord;
 pub use stateful_core::{ReadObservationRecord, ResourceVersion, WriteIntentRecord};
@@ -100,10 +102,15 @@ pub enum StoreError {
     #[error("matching active reservation is required")]
     MissingReservation,
     #[error("write fence conflict on `{path}` held by `{owner_agent_id}`")]
-    WriteFenceConflict { path: String, owner_agent_id: String },
+    WriteFenceConflict {
+        path: String,
+        owner_agent_id: String,
+    },
     #[error("authorization snapshot is stale")]
     StaleAuthorization,
-    #[error("invalid claim path `{0}`: direct tmp claims are not allowed; claim a file or subdirectory under tmp instead")]
+    #[error(
+        "invalid claim path `{0}`: direct tmp claims are not allowed; claim a file or subdirectory under tmp instead"
+    )]
     InvalidClaimPath(String),
     #[error("purpose is required")]
     MissingPurpose,
@@ -153,7 +160,10 @@ impl Store {
         Self::open_with_clock(path, SystemClock)
     }
 
-    pub fn open_with_clock(path: impl AsRef<Path>, clock: impl Clock + 'static) -> StoreResult<Self> {
+    pub fn open_with_clock(
+        path: impl AsRef<Path>,
+        clock: impl Clock + 'static,
+    ) -> StoreResult<Self> {
         let path = path.as_ref();
         prepare_database_path(path)?;
         let _migration_guard = migration::MigrationGuard::acquire(path)?;
@@ -209,7 +219,9 @@ impl Store {
             CurrentAggregate::WriteIntent => ("write_intent_current", "aggregate_id"),
             CurrentAggregate::ResourceWrite => ("resource_write_current", "path"),
             CurrentAggregate::HumanObservation => ("human_observation_current", "aggregate_id"),
-            CurrentAggregate::HumanAcknowledgement => ("human_acknowledgement_current", "aggregate_id"),
+            CurrentAggregate::HumanAcknowledgement => {
+                ("human_acknowledgement_current", "aggregate_id")
+            }
             CurrentAggregate::Notification => ("notification_current", "aggregate_id"),
             CurrentAggregate::Delivery => ("delivery_current", "aggregate_id"),
             CurrentAggregate::ContextDelivery => ("context_delivery_current", "aggregate_id"),
@@ -275,7 +287,11 @@ impl Store {
                     root: row.get(6)?,
                     branch: row.get(7)?,
                     payload: serde_json::from_str(&payload).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(error))
+                        rusqlite::Error::FromSqlConversionFailure(
+                            8,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
                     })?,
                     created_at: row.get(9)?,
                 })
@@ -284,7 +300,11 @@ impl Store {
             .map_err(StoreError::from)
     }
 
-    pub fn recent_workspace_events(&self, workspace_id: &str, limit: u64) -> StoreResult<Vec<EventRecord>> {
+    pub fn recent_workspace_events(
+        &self,
+        workspace_id: &str,
+        limit: u64,
+    ) -> StoreResult<Vec<EventRecord>> {
         let mut statement = self.conn.prepare(
             "SELECT event_id, event_type, agent_id, workspace_id, repo_id, worktree_id, root, branch,
                     payload_json, occurred_at
@@ -303,7 +323,11 @@ impl Store {
                     root: row.get(6)?,
                     branch: row.get(7)?,
                     payload: serde_json::from_str(&payload).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(error))
+                        rusqlite::Error::FromSqlConversionFailure(
+                            8,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
                     })?,
                     created_at: row.get(9)?,
                 })

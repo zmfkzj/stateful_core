@@ -1,6 +1,9 @@
 mod support;
 
-use axum::{body::Body, http::{Request, StatusCode}};
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 use serde_json::json;
 use stateful_core::{RequestEnvelope, WriteIntentStart, fingerprint_reader};
 use stateful_store::Store;
@@ -10,21 +13,37 @@ use support::{app, app_with_store, envelope, envelope_for, get, post, response_j
 
 #[tokio::test]
 async fn v1_routes_are_absent() {
-    assert_eq!(app().oneshot(get("/v1/current")).await.unwrap().status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        app()
+            .oneshot(get("/v1/current"))
+            .await
+            .expect("V1 route request receives a response")
+            .status(),
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]
 async fn v2_body_with_v1_protocol_returns_unsupported_protocol() {
     let mut body = envelope(json!({"first_prompt": "work"}));
     body["protocol_version"] = json!("stateful.v1");
-    let response = app().oneshot(post("/v2/session/register", body)).await.unwrap();
+    let response = app()
+        .oneshot(post("/v2/session/register", body))
+        .await
+        .expect("V1 body request receives a response");
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(response_json(response).await["error"]["code"], "unsupported_protocol");
+    assert_eq!(
+        response_json(response).await["error"]["code"],
+        "unsupported_protocol"
+    );
 }
 
 #[tokio::test]
 async fn get_queries_reject_missing_identity() {
-    let response = app().oneshot(get("/v2/current?protocol_version=stateful.v2")).await.unwrap();
+    let response = app()
+        .oneshot(get("/v2/current?protocol_version=stateful.v2"))
+        .await
+        .expect("missing identity query receives a response");
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
@@ -33,14 +52,23 @@ async fn v1_query_envelopes_are_unsupported_on_every_v2_get_route() {
     for (path, request_id) in [
         ("/v2/current", "00000000-0000-4000-8000-00000000c101"),
         ("/v2/events", "00000000-0000-4000-8000-00000000c102"),
-        ("/v2/notifications/stream", "00000000-0000-4000-8000-00000000c103"),
-        ("/v2/runtime/identity", "00000000-0000-4000-8000-00000000c104"),
+        (
+            "/v2/notifications/stream",
+            "00000000-0000-4000-8000-00000000c103",
+        ),
+        (
+            "/v2/runtime/identity",
+            "00000000-0000-4000-8000-00000000c104",
+        ),
     ] {
         let mut request = support::query_get(path, "agent-1", request_id, "workspace-1");
         *request.uri_mut() = request
             .uri()
             .to_string()
-            .replace("protocol_version=stateful.v2", "protocol_version=stateful.v1")
+            .replace(
+                "protocol_version=stateful.v2",
+                "protocol_version=stateful.v1",
+            )
             .parse()
             .expect("valid V1 query URI");
         let response = app().oneshot(request).await.expect("query responds");
@@ -57,25 +85,56 @@ async fn v1_query_envelopes_are_unsupported_on_every_v2_get_route() {
 async fn duplicate_mutation_returns_identical_frozen_response() {
     let request = envelope(json!({"first_prompt": "work"}));
     let app = app();
-    let first = app.clone().oneshot(post("/v2/session/register", request.clone())).await.unwrap();
+    let first = app
+        .clone()
+        .oneshot(post("/v2/session/register", request.clone()))
+        .await
+        .expect("first registration receives a response");
     assert_eq!(first.status(), StatusCode::OK);
     let first = response_json(first).await;
-    let second = app.oneshot(post("/v2/session/register", request)).await.unwrap();
+    let second = app
+        .oneshot(post("/v2/session/register", request))
+        .await
+        .expect("duplicate registration receives a response");
     assert_eq!(second.status(), StatusCode::OK);
     assert_eq!(response_json(second).await, first);
 }
 
-
 #[tokio::test]
 async fn v2_post_surface_is_registered() {
     for path in [
-        "/v2/session/register", "/v2/presence/update", "/v2/read/start", "/v2/read/complete",
-        "/v2/write/complete", "/v2/write/recover", "/v2/activity/finalize", "/v2/reservation/declare",
-        "/v2/reservation/request", "/v2/reservation/claim", "/v2/reservation/cancel", "/v2/claim/acquire",
-        "/v2/claim/release", "/v2/authorize", "/v2/human/observe", "/v2/human/save-check", "/v2/reconcile/ack",
-        "/v2/context/render", "/v2/context/ack", "/v2/notifications/poll", "/v2/resume/next", "/v2/outbox/sync",
+        "/v2/session/register",
+        "/v2/presence/update",
+        "/v2/read/start",
+        "/v2/read/complete",
+        "/v2/write/complete",
+        "/v2/write/recover",
+        "/v2/activity/finalize",
+        "/v2/reservation/declare",
+        "/v2/reservation/request",
+        "/v2/reservation/claim",
+        "/v2/reservation/cancel",
+        "/v2/claim/acquire",
+        "/v2/claim/release",
+        "/v2/authorize",
+        "/v2/human/observe",
+        "/v2/human/save-check",
+        "/v2/reconcile/ack",
+        "/v2/context/render",
+        "/v2/context/ack",
+        "/v2/notifications/poll",
+        "/v2/resume/next",
+        "/v2/outbox/sync",
     ] {
-        assert_ne!(app().oneshot(post(path, envelope(json!({})))).await.unwrap().status(), StatusCode::NOT_FOUND, "{path}");
+        assert_ne!(
+            app()
+                .oneshot(post(path, envelope(json!({}))))
+                .await
+                .expect("registered POST route receives a response")
+                .status(),
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
     }
 }
 
@@ -114,12 +173,17 @@ async fn empty_activity_finalize_uses_the_idempotent_fallback_handoff_path() {
 #[tokio::test]
 async fn typed_write_recovery_replays_an_outcome_unknown_result() {
     let before = fingerprint_reader(std::io::Cursor::new(b"before")).expect("before fingerprint");
-    let changed = fingerprint_reader(std::io::Cursor::new(b"changed")).expect("changed fingerprint");
-    let start_request = serde_json::from_value::<RequestEnvelope<WriteIntentStart>>(envelope_for("agent-1", "00000000-0000-4000-8000-00000000f002", json!({
-        "operation_id": "write-1",
-        "action": "write_file",
-        "targets": [{"path": "src/lib.rs", "before": before}],
-    })))
+    let changed =
+        fingerprint_reader(std::io::Cursor::new(b"changed")).expect("changed fingerprint");
+    let start_request = serde_json::from_value::<RequestEnvelope<WriteIntentStart>>(envelope_for(
+        "agent-1",
+        "00000000-0000-4000-8000-00000000f002",
+        json!({
+            "operation_id": "write-1",
+            "action": "write_file",
+            "targets": [{"path": "src/lib.rs", "before": before}],
+        }),
+    ))
     .expect("write start request");
     let store = Store::open_in_memory().expect("store opens");
     let intent = store
@@ -127,10 +191,14 @@ async fn typed_write_recovery_replays_an_outcome_unknown_result() {
         .expect("write intent starts")
         .response;
     let app = app_with_store(store);
-    let recovery = envelope_for("agent-1", "00000000-0000-4000-8000-00000000f003", json!({
-        "intent_id": intent.intent_id,
-        "actual_fingerprints": [{"path": "src/lib.rs", "fingerprint": changed}],
-    }));
+    let recovery = envelope_for(
+        "agent-1",
+        "00000000-0000-4000-8000-00000000f003",
+        json!({
+            "intent_id": intent.intent_id,
+            "actual_fingerprints": [{"path": "src/lib.rs", "fingerprint": changed}],
+        }),
+    );
 
     let first = app
         .clone()
@@ -151,8 +219,21 @@ async fn typed_write_recovery_replays_an_outcome_unknown_result() {
 
 #[tokio::test]
 async fn v2_get_surface_is_registered() {
-    for path in ["/v2/current", "/v2/events", "/v2/notifications/stream", "/v2/runtime/identity"] {
-        assert_ne!(app().oneshot(get(path)).await.unwrap().status(), StatusCode::NOT_FOUND, "{path}");
+    for path in [
+        "/v2/current",
+        "/v2/events",
+        "/v2/notifications/stream",
+        "/v2/runtime/identity",
+    ] {
+        assert_ne!(
+            app()
+                .oneshot(get(path))
+                .await
+                .expect("registered GET route receives a response")
+                .status(),
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
     }
 }
 
@@ -164,7 +245,7 @@ async fn payload_cannot_override_request_actor() {
             envelope(json!({"first_prompt": "work", "actor_id": "forged-actor"})),
         ))
         .await
-        .unwrap();
+        .expect("actor override request receives a response");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response_json(response).await["actor_id"], "actor-1");
 }
@@ -173,7 +254,10 @@ async fn payload_cannot_override_request_actor() {
 async fn nil_request_id_is_rejected_without_server_replacement() {
     let mut body = envelope(json!({"first_prompt": "work"}));
     body["request_id"] = json!("00000000-0000-0000-0000-000000000000");
-    let response = app().oneshot(post("/v2/session/register", body)).await.unwrap();
+    let response = app()
+        .oneshot(post("/v2/session/register", body))
+        .await
+        .expect("nil request ID request receives a response");
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = response_json(response).await;
     assert_eq!(body["request_id"], "00000000-0000-0000-0000-000000000000");
@@ -186,9 +270,15 @@ macro_rules! mutation_rejects_non_v2 {
         async fn $name() {
             let mut body = envelope(json!({}));
             body["protocol_version"] = json!("stateful.v1");
-            let response = app().oneshot(post($path, body)).await.unwrap();
+            let response = app()
+                .oneshot(post($path, body))
+                .await
+                .expect("non-V2 mutation receives a response");
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-            assert_eq!(response_json(response).await["error"]["code"], "unsupported_protocol");
+            assert_eq!(
+                response_json(response).await["error"]["code"],
+                "unsupported_protocol"
+            );
         }
     };
 }
@@ -215,7 +305,6 @@ mutation_rejects_non_v2!(notifications_poll_requires_v2, "/v2/notifications/poll
 mutation_rejects_non_v2!(resume_next_requires_v2, "/v2/resume/next");
 mutation_rejects_non_v2!(outbox_sync_requires_v2, "/v2/outbox/sync");
 
-
 #[tokio::test]
 async fn malformed_post_and_invalid_flattened_query_return_v2_errors() {
     let post_response = app()
@@ -226,16 +315,25 @@ async fn malformed_post_and_invalid_flattened_query_return_v2_errors() {
                 .header("authorization", "Bearer test-token")
                 .header("content-type", "application/json")
                 .body(Body::from("{"))
-                .unwrap(),
+                .expect("malformed POST request builds"),
         )
         .await
-        .unwrap();
+        .expect("malformed POST receives a response");
     assert_eq!(post_response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(response_json(post_response).await["protocol_version"], "stateful.v2");
+    assert_eq!(
+        response_json(post_response).await["protocol_version"],
+        "stateful.v2"
+    );
 
-    let get_response = app().oneshot(get("/v2/current?protocol_version=stateful.v1")).await.unwrap();
+    let get_response = app()
+        .oneshot(get("/v2/current?protocol_version=stateful.v1"))
+        .await
+        .expect("invalid query receives a response");
     assert_eq!(get_response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(response_json(get_response).await["protocol_version"], "stateful.v2");
+    assert_eq!(
+        response_json(get_response).await["protocol_version"],
+        "stateful.v2"
+    );
 }
 
 #[tokio::test]
@@ -249,7 +347,7 @@ async fn request_id_reused_across_mutation_routes_is_rejected() {
                 envelope_for("agent-1", request_id, json!({"first_prompt": "work"})),
             ))
             .await
-            .unwrap()
+            .expect("initial mutation receives a response")
             .status(),
         StatusCode::OK,
     );
@@ -260,11 +358,13 @@ async fn request_id_reused_across_mutation_routes_is_rejected() {
             envelope_for("agent-1", request_id, json!({"kind": "heartbeat"})),
         ))
         .await
-        .unwrap();
+        .expect("cross-route reuse request receives a response");
     assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(response_json(response).await["error"]["code"], "idempotency_key_reused");
+    assert_eq!(
+        response_json(response).await["error"]["code"],
+        "idempotency_key_reused"
+    );
 }
-
 
 #[tokio::test]
 async fn store_failures_return_sanitized_v2_internal_errors() {
@@ -280,11 +380,14 @@ async fn store_failures_return_sanitized_v2_internal_errors() {
             ),
         ))
         .await
-        .unwrap();
+        .expect("store failure request receives a response");
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let body = response_json(response).await;
     assert_eq!(body["error"]["code"], "internal_error");
-    assert_eq!(body["error"]["message"], "The server could not complete the request.");
+    assert_eq!(
+        body["error"]["message"],
+        "The server could not complete the request."
+    );
 }
 
 #[tokio::test]
@@ -305,19 +408,30 @@ async fn request_id_reused_between_register_routes_is_rejected() {
     let response = app
         .oneshot(post(
             "/v2/presence/update",
-            envelope_for("agent-1", request_id, json!({"kind": "register", "first_prompt": "work"})),
+            envelope_for(
+                "agent-1",
+                request_id,
+                json!({"kind": "register", "first_prompt": "work"}),
+            ),
         ))
         .await
         .expect("duplicate route response");
     assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(response_json(response).await["error"]["code"], "idempotency_key_reused");
+    assert_eq!(
+        response_json(response).await["error"]["code"],
+        "idempotency_key_reused"
+    );
 }
-
 
 #[tokio::test]
 async fn bearer_failures_use_the_v2_error_envelope_with_an_action() {
     let response = app()
-        .oneshot(Request::builder().uri("/v2/current").body(Body::empty()).expect("request"))
+        .oneshot(
+            Request::builder()
+                .uri("/v2/current")
+                .body(Body::empty())
+                .expect("request"),
+        )
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);

@@ -1,5 +1,6 @@
 use crate::{
-    CommandOutcome, CommandPlan, CurrentAggregate, ReservationRecord, Store, StoreError, StoreResult,
+    CommandOutcome, CommandPlan, CurrentAggregate, ReservationRecord, Store, StoreError,
+    StoreResult,
     reservations::{expired, normalized_scope, record_from_current, timestamp, typed_records},
     write_fences::active_fence_owner,
 };
@@ -27,16 +28,23 @@ pub enum HumanObservationKind {
 }
 
 impl HumanObservationKind {
-    fn is_write(self) -> bool { matches!(self, Self::Save | Self::Change | Self::Delete) }
-    fn is_ephemeral(self) -> bool { matches!(self, Self::Presence | Self::Dirty) }
+    fn is_write(self) -> bool {
+        matches!(self, Self::Save | Self::Change | Self::Delete)
+    }
+    fn is_ephemeral(self) -> bool {
+        matches!(self, Self::Presence | Self::Dirty)
+    }
 }
 
 impl FromStr for HumanObservationKind {
     type Err = String;
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "save" => Ok(Self::Save), "change" => Ok(Self::Change), "delete" => Ok(Self::Delete),
-            "presence" => Ok(Self::Presence), "dirty" => Ok(Self::Dirty),
+            "save" => Ok(Self::Save),
+            "change" => Ok(Self::Change),
+            "delete" => Ok(Self::Delete),
+            "presence" => Ok(Self::Presence),
+            "dirty" => Ok(Self::Dirty),
             _ => Err(format!("unknown human observation kind: {value}")),
         }
     }
@@ -44,12 +52,19 @@ impl FromStr for HumanObservationKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum HumanObservationConfidence { High, Low }
+pub enum HumanObservationConfidence {
+    High,
+    Low,
+}
 
 impl FromStr for HumanObservationConfidence {
     type Err = String;
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value { "high" => Ok(Self::High), "low" => Ok(Self::Low), _ => Err(format!("unknown human observation confidence: {value}")) }
+        match value {
+            "high" => Ok(Self::High),
+            "low" => Ok(Self::Low),
+            _ => Err(format!("unknown human observation confidence: {value}")),
+        }
     }
 }
 
@@ -60,7 +75,11 @@ pub struct HumanObservationInput {
     pub confidence: HumanObservationConfidence,
     pub source: String,
     pub summary: String,
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "time::serde::rfc3339::option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
     pub observed_at: Option<OffsetDateTime>,
 }
 
@@ -121,8 +140,16 @@ impl Store {
         self.execute_command(request, "human.observe", |reader| {
             let relative_path = normalized_scope(&payload.relative_path)?;
             let observed_at = payload.observed_at.unwrap_or(now);
-            let attributed_owner = (payload.kind.is_write() && payload.confidence == HumanObservationConfidence::High)
-                .then(|| active_fence_owner(reader, &request.workspace.workspace_id, &relative_path, observed_at))
+            let attributed_owner = (payload.kind.is_write()
+                && payload.confidence == HumanObservationConfidence::High)
+                .then(|| {
+                    active_fence_owner(
+                        reader,
+                        &request.workspace.workspace_id,
+                        &relative_path,
+                        observed_at,
+                    )
+                })
                 .transpose()?
                 .flatten();
             let attributed = attributed_owner.is_some();
@@ -135,19 +162,32 @@ impl Store {
                 source: payload.source,
                 observed_at: timestamp(observed_at)?,
                 summary: payload.summary,
-                status: if attributed { "reconciled".into() } else { "pending".into() },
-                expires_at: Some(timestamp(observed_at + if payload.kind.is_ephemeral() {
-                    EPHEMERAL_OBSERVATION_TTL
+                status: if attributed {
+                    "reconciled".into()
                 } else {
-                    HUMAN_WRITE_OBSERVATION_TTL
-                })?),
+                    "pending".into()
+                },
+                expires_at: Some(timestamp(
+                    observed_at
+                        + if payload.kind.is_ephemeral() {
+                            EPHEMERAL_OBSERVATION_TTL
+                        } else {
+                            HUMAN_WRITE_OBSERVATION_TTL
+                        },
+                )?),
                 reconciled_at: attributed.then(|| timestamp(observed_at)).transpose()?,
                 decision: None,
                 reconciled_by_agent_id: attributed_owner,
                 origin_event_seq: 0,
             };
             Ok(CommandPlan {
-                events: vec![observation_event(request, 0, now, HumanObservationEvent::Observed, &observation)?],
+                events: vec![observation_event(
+                    request,
+                    0,
+                    now,
+                    HumanObservationEvent::Observed,
+                    &observation,
+                )?],
                 response: observation,
                 http_status: 200,
             })
@@ -266,7 +306,7 @@ impl Store {
                     &request.workspace.workspace_id,
                 )? {
                     if observation.status != "pending"
-                        || !paths.iter().any(|path| *path == observation.relative_path)
+                        || !paths.contains(&observation.relative_path)
                     {
                         continue;
                     }
@@ -290,7 +330,7 @@ impl Store {
                     &request.workspace.workspace_id,
                 )? {
                     if observation.status != "pending"
-                        || !paths.iter().any(|path| *path == observation.relative_path)
+                        || !paths.contains(&observation.relative_path)
                     {
                         continue;
                     }
@@ -316,14 +356,33 @@ impl Store {
         self.execute_command(request, "human.expire", |reader| {
             let mut events = Vec::new();
             let mut expired_ids = Vec::new();
-            for mut observation in typed_records::<HumanObservationRecord>(reader, CurrentAggregate::HumanObservation, &request.workspace.workspace_id)? {
-                if observation.status == "pending" && observation.expires_at.as_deref().is_some_and(|value| expired(value, now)) {
+            for mut observation in typed_records::<HumanObservationRecord>(
+                reader,
+                CurrentAggregate::HumanObservation,
+                &request.workspace.workspace_id,
+            )? {
+                if observation.status == "pending"
+                    && observation
+                        .expires_at
+                        .as_deref()
+                        .is_some_and(|value| expired(value, now))
+                {
                     observation.status = "expired".into();
                     expired_ids.push(observation.observation_id.clone());
-                    events.push(observation_event(request, events.len() as u32, now, HumanObservationEvent::Expired, &observation)?);
+                    events.push(observation_event(
+                        request,
+                        events.len() as u32,
+                        now,
+                        HumanObservationEvent::Expired,
+                        &observation,
+                    )?);
                 }
             }
-            Ok(CommandPlan { events, response: expired_ids, http_status: 200 })
+            Ok(CommandPlan {
+                events,
+                response: expired_ids,
+                http_status: 200,
+            })
         })
     }
 
@@ -332,12 +391,22 @@ impl Store {
         workspace_id: &str,
         paths: &[String],
     ) -> StoreResult<Vec<HumanObservationRecord>> {
-        let paths = paths.iter().map(|path| normalized_scope(path)).collect::<StoreResult<Vec<_>>>()?;
-        Ok(self.current_records(CurrentAggregate::HumanObservation, workspace_id)?.into_iter()
+        let paths = paths
+            .iter()
+            .map(|path| normalized_scope(path))
+            .collect::<StoreResult<Vec<_>>>()?;
+        Ok(self
+            .current_records(CurrentAggregate::HumanObservation, workspace_id)?
+            .into_iter()
             .map(record_from_current::<HumanObservationRecord>)
             .collect::<StoreResult<Vec<_>>>()?
             .into_iter()
-            .filter(|observation| observation.status == "pending" && observation.kind.is_write() && observation.confidence == HumanObservationConfidence::High && paths.contains(&observation.relative_path))
+            .filter(|observation| {
+                observation.status == "pending"
+                    && observation.kind.is_write()
+                    && observation.confidence == HumanObservationConfidence::High
+                    && paths.contains(&observation.relative_path)
+            })
             .collect())
     }
 
@@ -352,7 +421,11 @@ impl Store {
     }
 }
 
-fn reconciliation_error(code: &'static str, message: &'static str, next_action: &'static str) -> StoreError {
+fn reconciliation_error(
+    code: &'static str,
+    message: &'static str,
+    next_action: &'static str,
+) -> StoreError {
     V2Error::new(code, message)
         .with_required_next_action(next_action)
         .into()
@@ -367,7 +440,13 @@ fn observation_event<T>(
 ) -> StoreResult<stateful_core::NewEvent> {
     let mut data = EventData::new(&observation.observation_id);
     data.data = json!({"observation": observation});
-    stateful_core::NewEvent::new(request.request_id, ordinal, now, EventPayload::HumanObservation(variant(data))).map_err(StoreError::from)
+    stateful_core::NewEvent::new(
+        request.request_id,
+        ordinal,
+        now,
+        EventPayload::HumanObservation(variant(data)),
+    )
+    .map_err(StoreError::from)
 }
 fn acknowledgement_event<T>(
     request: &RequestEnvelope<T>,
@@ -385,4 +464,3 @@ fn acknowledgement_event<T>(
     )
     .map_err(StoreError::from)
 }
-

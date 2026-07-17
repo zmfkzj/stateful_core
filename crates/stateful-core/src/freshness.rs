@@ -74,7 +74,8 @@ pub struct ReadObservationRecord {
 
 impl ReadObservationRecord {
     pub fn is_stable(&self) -> bool {
-        self.status == ReadObservationStatus::Stabilized && self.classification == ReadClassification::Exact
+        self.status == ReadObservationStatus::Stabilized
+            && self.classification == ReadClassification::Exact
     }
 
     pub fn is_fresh_at(&self, now: OffsetDateTime) -> bool {
@@ -127,7 +128,10 @@ pub struct WriteIntentCompletion {
 }
 
 impl WriteIntentCompletion {
-    pub fn committed(intent_id: String, post_fingerprints: Vec<(String, ContentFingerprint)>) -> Self {
+    pub fn committed(
+        intent_id: String,
+        post_fingerprints: Vec<(String, ContentFingerprint)>,
+    ) -> Self {
         Self {
             intent_id,
             outcome: WriteIntentOutcome::Committed,
@@ -271,7 +275,10 @@ pub fn evaluate_thin_safety(state: ThinSafetyState, mode: FreshnessMode) -> Deci
             "Complete a matching exact reread and reconcile the specific write intent before writing.",
         );
     }
-    if matches!(state.observation, ObservationFreshness::Changed | ObservationFreshness::Unstable) {
+    if matches!(
+        state.observation,
+        ObservationFreshness::Changed | ObservationFreshness::Unstable
+    ) {
         return Decision::deny(
             "stale_observation",
             "The supplied read observation is not stable for the current resource version.",

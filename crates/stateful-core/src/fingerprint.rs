@@ -34,9 +34,7 @@ impl ContentFingerprint {
                 exists: true,
                 sha256: Some(hash),
                 ..
-            } => {
-                hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-            }
+            } => hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()),
             _ => false,
         }
     }

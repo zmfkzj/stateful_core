@@ -1562,6 +1562,7 @@ class V2DiagnosticContractTests(unittest.TestCase):
             ),
             ("wait-private", "wait.claimed", payload({})),
             ("audit-one", "authorization.warned", payload({"reason_code": "missing_claim", "message": "private warning"})),
+            ("audit-conflict", "authorization.warned", payload({"reason_code": "coordination_conflict"})),
             ("audit-two", "authorization.denied", payload({"reason_code": "active_claim_conflict", "path": "private/path.txt"})),
             ("fence-one", "write_fence.conflict_observed", payload({"operation_id": "operation-private"})),
             ("intent-one", "write_intent.outcome_unknown", payload({})),
@@ -1625,7 +1626,10 @@ class V2DiagnosticContractTests(unittest.TestCase):
         self.assertEqual(metrics["context"]["deliveries"], 1)
         self.assertEqual(metrics["context"]["acks"], 1)
         self.assertEqual(metrics["context"]["redeliveries"], 1)
-        self.assertEqual(metrics["authorization"], {"warned_by_reason": {"missing_claim": 1}, "denied_by_reason": {}})
+        self.assertEqual(
+            metrics["authorization"],
+            {"warned_by_reason": {"coordination_conflict": 1, "missing_claim": 1}, "denied_by_reason": {}},
+        )
         self.assertEqual(metrics["write_safety"]["fence_conflicts"], 1)
         self.assertEqual(metrics["write_safety"]["unknown_outcomes"], 1)
         self.assertEqual(metrics["notifications"]["by_kind"], {"reservation_granted": 1, "scope_overlap": 1})

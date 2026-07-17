@@ -1,11 +1,11 @@
 use crate::{StoreError, StoreResult, journal::JournalEvent, schema};
 use rusqlite::{Connection, params};
 use stateful_core::{
-    ActorType, AgentIdentity, AuthorizationEvent, ClaimEvent, ContextEvent, EventData, EventPayload, HandoffEvent,
-    HandoffRecord, HandoffStatus, HumanAcknowledgementEvent, HumanObservationEvent, MigrationEvent,
-    NotificationEvent, PresenceEvent, PresenceRecord, PresenceResource, ReadObservationEvent,
-    ReadObservationRecord, RecoveryEvent, ReservationEvent, ResourceVersion, WaitEvent,
-    WriteFenceEvent, WriteIntentEvent, FALLBACK_HANDOFF_RELEVANCE,
+    ActorType, AgentIdentity, AuthorizationEvent, ClaimEvent, ContextEvent, EventData,
+    EventPayload, FALLBACK_HANDOFF_RELEVANCE, HandoffEvent, HandoffRecord, HandoffStatus,
+    HumanAcknowledgementEvent, HumanObservationEvent, MigrationEvent, NotificationEvent,
+    PresenceEvent, PresenceRecord, PresenceResource, ReadObservationEvent, ReadObservationRecord,
+    RecoveryEvent, ReservationEvent, ResourceVersion, WaitEvent, WriteFenceEvent, WriteIntentEvent,
 };
 
 pub(crate) struct Projector<'a> {
@@ -70,21 +70,23 @@ impl<'a> Projector<'a> {
             return Ok(());
         }
 
-        let table = migration_seed_projection_table(event).or_else(|| match event.stored.aggregate_kind() {
-            "presence" => Some("presence_current"),
-            "reservation" => Some("reservation_current"),
-            "claim" => Some("claim_current"),
-            "wait" => Some("wait_current"),
-            "write_fence" => Some("write_fence_current"),
-            "read_observation" => Some("read_observation_current"),
-            "write_intent" => Some("write_intent_current"),
-            "human_observation" => Some("human_observation_current"),
-            "human_acknowledgement" => Some("human_acknowledgement_current"),
-            "handoff" => Some("handoff_current"),
-            "notification" => Some("notification_current"),
-            "recovery" => Some("delivery_current"),
-            "migration" => Some("migration_current"),
-            _ => None,
+        let table = migration_seed_projection_table(event).or_else(|| {
+            match event.stored.aggregate_kind() {
+                "presence" => Some("presence_current"),
+                "reservation" => Some("reservation_current"),
+                "claim" => Some("claim_current"),
+                "wait" => Some("wait_current"),
+                "write_fence" => Some("write_fence_current"),
+                "read_observation" => Some("read_observation_current"),
+                "write_intent" => Some("write_intent_current"),
+                "human_observation" => Some("human_observation_current"),
+                "human_acknowledgement" => Some("human_acknowledgement_current"),
+                "handoff" => Some("handoff_current"),
+                "notification" => Some("notification_current"),
+                "recovery" => Some("delivery_current"),
+                "migration" => Some("migration_current"),
+                _ => None,
+            }
         });
         if let Some(table) = table {
             self.apply_aggregate(table, event)?;
@@ -96,8 +98,7 @@ impl<'a> Projector<'a> {
     }
 
     fn apply_context_delivery(&self, event: &JournalEvent) -> StoreResult<bool> {
-        let Some(delivery) = event_data(event)
-            .and_then(|data| data.get("context_delivery")) else {
+        let Some(delivery) = event_data(event).and_then(|data| data.get("context_delivery")) else {
             return Ok(false);
         };
         let target_agent_id = delivery
@@ -129,7 +130,10 @@ impl<'a> Projector<'a> {
                 event.stored.event_seq(),
             ],
         )?;
-        if matches!(event.stored.payload(), EventPayload::Context(ContextEvent::DeliveryAcknowledged(_))) {
+        if matches!(
+            event.stored.payload(),
+            EventPayload::Context(ContextEvent::DeliveryAcknowledged(_))
+        ) {
             let cursor = format!("{}agent_context_cursor", self.prefix);
             self.connection.execute(
                 &format!(
@@ -146,12 +150,24 @@ impl<'a> Projector<'a> {
         match event.stored.payload() {
             EventPayload::Migration(MigrationEvent::PresenceSnapshotSeeded(data)) => {
                 let now = event.stored.observed_at();
-                let phase = data.data.get("phase")
+                let phase = data
+                    .data
+                    .get("phase")
                     .and_then(serde_json::Value::as_str)
-                    .and_then(|phase| serde_json::from_value(serde_json::Value::String(phase.into())).ok());
-                let expires_at = data.data.get("expires_at")
+                    .and_then(|phase| {
+                        serde_json::from_value(serde_json::Value::String(phase.into())).ok()
+                    });
+                let expires_at = data
+                    .data
+                    .get("expires_at")
                     .and_then(serde_json::Value::as_str)
-                    .and_then(|value| time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339).ok())
+                    .and_then(|value| {
+                        time::OffsetDateTime::parse(
+                            value,
+                            &time::format_description::well_known::Rfc3339,
+                        )
+                        .ok()
+                    })
                     .unwrap_or(now);
                 let presence = PresenceRecord {
                     workspace_id: event.workspace_id.clone(),
@@ -201,7 +217,8 @@ impl<'a> Projector<'a> {
                     parent_agent_id: None,
                     parent_actor_id: None,
                     status: HandoffStatus::Unknown,
-                    summary: "Migrated legacy session ended with no explicit handoff supplied.".into(),
+                    summary: "Migrated legacy session ended with no explicit handoff supplied."
+                        .into(),
                     files_changed: Vec::new(),
                     tests_run: Vec::new(),
                     remaining_work: Vec::new(),
@@ -282,7 +299,9 @@ impl<'a> Projector<'a> {
                 WriteIntentEvent::Committed(data) | WriteIntentEvent::Reconciled(data),
             ) => {
                 self.apply_aggregate("write_intent_current", event)?;
-                let versions = data.data.get("resource_versions")
+                let versions = data
+                    .data
+                    .get("resource_versions")
                     .cloned()
                     .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
                 for value in versions.as_array().into_iter().flatten() {
@@ -333,7 +352,9 @@ impl<'a> Projector<'a> {
                 let observations = format!("{}read_observation_current", self.prefix);
                 let operations = format!("{}read_operation_current", self.prefix);
                 self.connection.execute(
-                    &format!("DELETE FROM {observations} WHERE workspace_id = ?1 AND agent_id = ?2"),
+                    &format!(
+                        "DELETE FROM {observations} WHERE workspace_id = ?1 AND agent_id = ?2"
+                    ),
                     params![event.workspace_id, event.stored.aggregate_id()],
                 )?;
                 self.connection.execute(
@@ -382,7 +403,7 @@ impl<'a> Projector<'a> {
                             aggregate_id,
                             &resource.agent_id,
                             &resource.relative_path,
-                            serde_json::to_value(&resource.relation)?.as_str().unwrap_or(""),
+                            serde_json::to_value(resource.relation)?.as_str().unwrap_or(""),
                             resource.observed_at.format(&time::format_description::well_known::Rfc3339)
                                 .map_err(|error| StoreError::InvalidTimestamp(error.to_string()))?,
                             serde_json::to_string(&resource)?,
@@ -428,14 +449,18 @@ impl<'a> Projector<'a> {
                 Ok(true)
             }
             EventPayload::Handoff(HandoffEvent::Expired(data)) => {
-                let agent_id = data.data.get("handoff")
+                let agent_id = data
+                    .data
+                    .get("handoff")
                     .and_then(|value| value.get("agent_id"))
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or(event.stored.aggregate_id());
                 let handoffs = format!("{}handoff_current", self.prefix);
                 let resources = format!("{}handoff_resource_current", self.prefix);
                 self.connection.execute(
-                    &format!("DELETE FROM {handoffs} WHERE workspace_id = ?1 AND aggregate_id = ?2"),
+                    &format!(
+                        "DELETE FROM {handoffs} WHERE workspace_id = ?1 AND aggregate_id = ?2"
+                    ),
                     params![event.workspace_id, agent_id],
                 )?;
                 self.connection.execute(
@@ -539,8 +564,12 @@ impl<'a> Projector<'a> {
                 )?;
             }
             "claim_current" | "write_fence_current" => {
-                let path = data.and_then(|data| data.get("relative_path")).and_then(serde_json::Value::as_str);
-                let expires_at = data.and_then(|data| data.get("expires_at")).and_then(serde_json::Value::as_str);
+                let path = data
+                    .and_then(|data| data.get("relative_path"))
+                    .and_then(serde_json::Value::as_str);
+                let expires_at = data
+                    .and_then(|data| data.get("expires_at"))
+                    .and_then(serde_json::Value::as_str);
                 self.connection.execute(
                     &format!(
                         "INSERT INTO {table} (workspace_id, aggregate_id, path, expires_at, payload_json, origin_event_seq)
@@ -552,7 +581,13 @@ impl<'a> Projector<'a> {
             }
             "wait_current" | "write_intent_current" => {
                 let operation_id = data
-                    .and_then(|data| data.get(if aggregate_table == "wait_current" { "request_id" } else { "operation_id" }))
+                    .and_then(|data| {
+                        data.get(if aggregate_table == "wait_current" {
+                            "request_id"
+                        } else {
+                            "operation_id"
+                        })
+                    })
                     .and_then(serde_json::Value::as_str);
                 self.connection.execute(
                     &format!(
@@ -564,8 +599,13 @@ impl<'a> Projector<'a> {
                 )?;
             }
             "notification_current" => {
-                let target_agent_id = data.and_then(|data| data.get("target_agent_id")).and_then(serde_json::Value::as_str);
-                let version = data.and_then(|data| data.get("sequence")).and_then(serde_json::Value::as_i64).unwrap_or(0);
+                let target_agent_id = data
+                    .and_then(|data| data.get("target_agent_id"))
+                    .and_then(serde_json::Value::as_str);
+                let version = data
+                    .and_then(|data| data.get("sequence"))
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(0);
                 self.connection.execute(
                     &format!(
                         "INSERT INTO {table} (workspace_id, aggregate_id, target_agent_id, version, payload_json, origin_event_seq)
@@ -783,7 +823,10 @@ fn presence_resource_key(resource: &PresenceResource) -> String {
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
         .unwrap_or_default();
-    format!("{}\u{1}{}\u{1}{relation}", resource.agent_id, resource.relative_path)
+    format!(
+        "{}\u{1}{}\u{1}{relation}",
+        resource.agent_id, resource.relative_path
+    )
 }
 
 fn handoff_resource_key(agent_id: &str, relative_path: &str) -> String {
@@ -814,13 +857,23 @@ fn cleanup_identity(event: &JournalEvent) -> Option<(String, Option<AgentIdentit
 
 fn migration_seed_projection_table(event: &JournalEvent) -> Option<&'static str> {
     match event.stored.payload() {
-        EventPayload::Migration(MigrationEvent::PresenceSnapshotSeeded(_)) => Some("presence_current"),
-        EventPayload::Migration(MigrationEvent::ReservationSnapshotSeeded(_)) => Some("reservation_current"),
+        EventPayload::Migration(MigrationEvent::PresenceSnapshotSeeded(_)) => {
+            Some("presence_current")
+        }
+        EventPayload::Migration(MigrationEvent::ReservationSnapshotSeeded(_)) => {
+            Some("reservation_current")
+        }
         EventPayload::Migration(MigrationEvent::ClaimSnapshotSeeded(_)) => Some("claim_current"),
         EventPayload::Migration(MigrationEvent::WaitSnapshotSeeded(_)) => Some("wait_current"),
-        EventPayload::Migration(MigrationEvent::WriteFenceSnapshotSeeded(_)) => Some("write_fence_current"),
-        EventPayload::Migration(MigrationEvent::HumanObservationSnapshotSeeded(_)) => Some("human_observation_current"),
-        EventPayload::Migration(MigrationEvent::LegacyHandoffSnapshotSeeded(_)) => Some("handoff_current"),
+        EventPayload::Migration(MigrationEvent::WriteFenceSnapshotSeeded(_)) => {
+            Some("write_fence_current")
+        }
+        EventPayload::Migration(MigrationEvent::HumanObservationSnapshotSeeded(_)) => {
+            Some("human_observation_current")
+        }
+        EventPayload::Migration(MigrationEvent::LegacyHandoffSnapshotSeeded(_)) => {
+            Some("handoff_current")
+        }
         EventPayload::Migration(MigrationEvent::DeliverySnapshotSeeded(data)) => match data
             .data
             .get("delivery_kind")
@@ -832,4 +885,3 @@ fn migration_seed_projection_table(event: &JournalEvent) -> Option<&'static str>
         _ => None,
     }
 }
-

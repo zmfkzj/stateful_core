@@ -1,12 +1,20 @@
 use crate::{CoordinationMode, RUNTIME_CAPABILITIES, ServerConfig, SharedStore, protocol};
-use axum::{Json, extract::{RawQuery, State}, http::{HeaderMap, StatusCode}, response::{IntoResponse, Response, sse::{Event as SseEvent, KeepAlive, Sse}}};
+use axum::{
+    Json,
+    extract::{RawQuery, State},
+    http::{HeaderMap, StatusCode},
+    response::{
+        IntoResponse, Response,
+        sse::{Event as SseEvent, KeepAlive, Sse},
+    },
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use stateful_core::{
-    AuthorizationInput, ContentFingerprint, Decision, DecisionKind, FreshnessMode, ObservationFreshness,
-    PolicyState, QueryEnvelope, ReadObservationStatus, RequestEnvelope, ThinSafetyState,
-    V2Error, WriteIntentStart, WriteTarget, authorize_action, evaluate_thin_safety,
-    normalize_relative_path,
+    AuthorizationInput, ContentFingerprint, Decision, DecisionKind, FreshnessMode,
+    ObservationFreshness, PolicyState, QueryEnvelope, ReadObservationStatus, RequestEnvelope,
+    ThinSafetyState, V2Error, WriteIntentStart, WriteTarget, authorize_action,
+    evaluate_thin_safety, normalize_relative_path,
 };
 use stateful_store::{NotificationAcknowledgement, PresenceRegistration, Store, StoreError};
 use std::{convert::Infallible, time::Duration};
@@ -67,7 +75,10 @@ pub(crate) async fn session_register(
         Err(response) => return response,
     };
     let request_id = request.request_id.to_string();
-    protocol::command_response(&request_id, lock_store(&config.store).and_then(|mut store| store.register_presence(&request)))
+    protocol::command_response(
+        &request_id,
+        lock_store(&config.store).and_then(|mut store| store.register_presence(&request)),
+    )
 }
 
 pub(crate) async fn presence_update(
@@ -84,37 +95,72 @@ pub(crate) async fn presence_update(
         payload.remove("kind");
     }
     match kind.as_str() {
-        "resume" => command(config, body, |store, request| store.resume_presence(request)),
+        "resume" => command(config, body, |store, request| {
+            store.resume_presence(request)
+        }),
         "heartbeat" => {
             body["payload"] = Value::Null;
-            command(config, body, |store, request| store.heartbeat_presence(request))
+            command(config, body, |store, request| {
+                store.heartbeat_presence(request)
+            })
         }
-        "resource" => command(config, body, |store, request| store.update_presence_resource(request)),
-        "tool_start" => command(config, body, |store, request| store.start_presence_tool(request)),
-        "tool_result" => command(config, body, |store, request| store.complete_presence_tool(request)),
-        "register" => command(config, body, |store, request| store.register_presence_via_update(request)),
-        "update" => command(config, body, |store, request| store.update_presence(request)),
+        "resource" => command(config, body, |store, request| {
+            store.update_presence_resource(request)
+        }),
+        "tool_start" => command(config, body, |store, request| {
+            store.start_presence_tool(request)
+        }),
+        "tool_result" => command(config, body, |store, request| {
+            store.complete_presence_tool(request)
+        }),
+        "register" => command(config, body, |store, request| {
+            store.register_presence_via_update(request)
+        }),
+        "update" => command(config, body, |store, request| {
+            store.update_presence(request)
+        }),
         _ => protocol::error_response(
             StatusCode::BAD_REQUEST,
             body.get("request_id").and_then(Value::as_str),
-            V2Error::new("invalid_presence_update", "kind must be register, resume, heartbeat, update, resource, tool_start, or tool_result."),
+            V2Error::new(
+                "invalid_presence_update",
+                "kind must be register, resume, heartbeat, update, resource, tool_start, or tool_result.",
+            ),
         ),
     }
 }
 
-pub(crate) async fn read_start(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
-    command(config, body, |store, request| store.start_read_observation(request))
+pub(crate) async fn read_start(
+    State(config): State<ServerConfig>,
+    protocol::V2Json(body): protocol::V2Json,
+) -> Response {
+    command(config, body, |store, request| {
+        store.start_read_observation(request)
+    })
 }
 
-pub(crate) async fn read_complete(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
-    command(config, body, |store, request| store.complete_read_observation(request))
+pub(crate) async fn read_complete(
+    State(config): State<ServerConfig>,
+    protocol::V2Json(body): protocol::V2Json,
+) -> Response {
+    command(config, body, |store, request| {
+        store.complete_read_observation(request)
+    })
 }
 
-pub(crate) async fn write_complete(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
-    command(config, body, |store, request| store.complete_write_intent(request))
+pub(crate) async fn write_complete(
+    State(config): State<ServerConfig>,
+    protocol::V2Json(body): protocol::V2Json,
+) -> Response {
+    command(config, body, |store, request| {
+        store.complete_write_intent(request)
+    })
 }
 
-pub(crate) async fn write_recover(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
+pub(crate) async fn write_recover(
+    State(config): State<ServerConfig>,
+    protocol::V2Json(body): protocol::V2Json,
+) -> Response {
     let request = match protocol::parse_request::<WriteRecoveryPayload>(body) {
         Ok(request) => request,
         Err(response) => return response,
@@ -125,10 +171,17 @@ pub(crate) async fn write_recover(State(config): State<ServerConfig>, protocol::
         &request,
         (
             payload.intent_id.clone(),
-            payload.actual_fingerprints.iter().map(|item| (item.path.clone(), item.fingerprint.clone())).collect(),
+            payload
+                .actual_fingerprints
+                .iter()
+                .map(|item| (item.path.clone(), item.fingerprint.clone()))
+                .collect(),
         ),
     );
-    protocol::command_response(&request_id, lock_store(&config.store).and_then(|store| store.recover_write_intent(&request)))
+    protocol::command_response(
+        &request_id,
+        lock_store(&config.store).and_then(|store| store.recover_write_intent(&request)),
+    )
 }
 
 pub(crate) async fn activity_finalize(
@@ -136,7 +189,9 @@ pub(crate) async fn activity_finalize(
     protocol::V2Json(body): protocol::V2Json,
 ) -> Response {
     if body.pointer("/payload/status").is_some() {
-        command(config, body, |store, request| store.finalize_handoff(request))
+        command(config, body, |store, request| {
+            store.finalize_handoff(request)
+        })
     } else {
         let mut body = body;
         body["payload"] = Value::Null;
@@ -144,33 +199,60 @@ pub(crate) async fn activity_finalize(
     }
 }
 
-pub(crate) async fn reservation_declare(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
+pub(crate) async fn reservation_declare(
+    State(config): State<ServerConfig>,
+    protocol::V2Json(body): protocol::V2Json,
+) -> Response {
     let awareness = config.coordination_mode == CoordinationMode::Awareness;
-    command(config, body, move |store, request| store.declare_reservation_with_mode(request, awareness))
+    command(config, body, move |store, request| {
+        store.declare_reservation_with_mode(request, awareness)
+    })
 }
 
-pub(crate) async fn reservation_request(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
+pub(crate) async fn reservation_request(
+    State(config): State<ServerConfig>,
+    protocol::V2Json(body): protocol::V2Json,
+) -> Response {
     command(config, body, |store, request| store.request_wait(request))
 }
 
-pub(crate) async fn reservation_claim(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
-    command(config, body, |store, request| store.grant_next_wait(request))
+pub(crate) async fn reservation_claim(
+    State(config): State<ServerConfig>,
+    protocol::V2Json(body): protocol::V2Json,
+) -> Response {
+    command(config, body, |store, request| {
+        store.grant_next_wait(request)
+    })
 }
 
-pub(crate) async fn reservation_cancel(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
+pub(crate) async fn reservation_cancel(
+    State(config): State<ServerConfig>,
+    protocol::V2Json(body): protocol::V2Json,
+) -> Response {
     command(config, body, |store, request| store.cancel_wait(request))
 }
 
-pub(crate) async fn claim_acquire(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
+pub(crate) async fn claim_acquire(
+    State(config): State<ServerConfig>,
+    protocol::V2Json(body): protocol::V2Json,
+) -> Response {
     let awareness = config.coordination_mode == CoordinationMode::Awareness;
-    command(config, body, move |store, request| store.acquire_claim_with_mode(request, awareness))
+    command(config, body, move |store, request| {
+        store.acquire_claim_with_mode(request, awareness)
+    })
 }
 
-pub(crate) async fn claim_release(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
+pub(crate) async fn claim_release(
+    State(config): State<ServerConfig>,
+    protocol::V2Json(body): protocol::V2Json,
+) -> Response {
     command(config, body, |store, request| store.release_claim(request))
 }
 
-pub(crate) async fn authorize(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
+pub(crate) async fn authorize(
+    State(config): State<ServerConfig>,
+    protocol::V2Json(body): protocol::V2Json,
+) -> Response {
     let request = match protocol::parse_request::<AuthorizePayload>(body) {
         Ok(request) => request,
         Err(response) => return response,
@@ -183,10 +265,11 @@ pub(crate) async fn authorize(State(config): State<ServerConfig>, protocol::V2Js
     if let Err(error) = store.run_maintenance() {
         return protocol::store_error_response(&request_id, error);
     }
-    let authorization_journal_sequence = match store.workspace_journal_sequence(&request.workspace.workspace_id) {
-        Ok(sequence) => sequence,
-        Err(error) => return protocol::store_error_response(&request_id, error),
-    };
+    let authorization_journal_sequence =
+        match store.workspace_journal_sequence(&request.workspace.workspace_id) {
+            Ok(sequence) => sequence,
+            Err(error) => return protocol::store_error_response(&request_id, error),
+        };
     let decision = match authorize_request(&mut store, config.coordination_mode, &request) {
         Ok(decision) => decision,
         Err(error) => return protocol::store_error_response(&request_id, error),
@@ -207,8 +290,13 @@ pub(crate) async fn authorize(State(config): State<ServerConfig>, protocol::V2Js
     )
 }
 
-pub(crate) async fn human_observe(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
-    command(config, body, |store, request| store.record_human_observation(request))
+pub(crate) async fn human_observe(
+    State(config): State<ServerConfig>,
+    protocol::V2Json(body): protocol::V2Json,
+) -> Response {
+    command(config, body, |store, request| {
+        store.record_human_observation(request)
+    })
 }
 
 pub(crate) async fn human_save_check(
@@ -222,15 +310,24 @@ pub(crate) async fn human_save_check(
     let request_id = request.request_id.to_string();
     let response = lock_store(&config.store).and_then(|mut store| {
         store.run_maintenance()?;
-        store.unreconciled_human_observations(&request.workspace.workspace_id, &request.payload.paths)
+        store.unreconciled_human_observations(
+            &request.workspace.workspace_id,
+            &request.payload.paths,
+        )
     });
     match response {
-        Ok(observations) => Json(json!({"blocked": !observations.is_empty(), "observations": observations})).into_response(),
+        Ok(observations) => {
+            Json(json!({"blocked": !observations.is_empty(), "observations": observations}))
+                .into_response()
+        }
         Err(error) => protocol::store_error_response(&request_id, error),
     }
 }
 
-pub(crate) async fn reconcile_ack(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
+pub(crate) async fn reconcile_ack(
+    State(config): State<ServerConfig>,
+    protocol::V2Json(body): protocol::V2Json,
+) -> Response {
     if body.pointer("/payload/intent_id").is_some() {
         let request = match protocol::parse_request::<WriteReconcilePayload>(body) {
             Ok(request) => request,
@@ -238,26 +335,40 @@ pub(crate) async fn reconcile_ack(State(config): State<ServerConfig>, protocol::
         };
         let request_id = request.request_id.to_string();
         let request = retarget(&request, request.payload.intent_id.clone());
-        return protocol::command_response(&request_id, lock_store(&config.store).and_then(|store| store.reconcile_write_intent(&request)));
+        return protocol::command_response(
+            &request_id,
+            lock_store(&config.store).and_then(|store| store.reconcile_write_intent(&request)),
+        );
     }
-    command(config, body, |store, request| store.acknowledge_human_reconciliation(request))
+    command(config, body, |store, request| {
+        store.acknowledge_human_reconciliation(request)
+    })
 }
 
-pub(crate) async fn context_render(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
+pub(crate) async fn context_render(
+    State(config): State<ServerConfig>,
+    protocol::V2Json(body): protocol::V2Json,
+) -> Response {
     command(config, body, |store, request| {
         store.run_maintenance()?;
         store.render_context(request)
     })
 }
 
-pub(crate) async fn context_ack(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
+pub(crate) async fn context_ack(
+    State(config): State<ServerConfig>,
+    protocol::V2Json(body): protocol::V2Json,
+) -> Response {
     command(config, body, |store, request| {
         store.run_maintenance()?;
         store.acknowledge_context(request)
     })
 }
 
-pub(crate) async fn notifications_poll(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
+pub(crate) async fn notifications_poll(
+    State(config): State<ServerConfig>,
+    protocol::V2Json(body): protocol::V2Json,
+) -> Response {
     if body.pointer("/payload/notification_id").is_some() {
         return command(config, body, |store, request| {
             store.run_maintenance()?;
@@ -284,7 +395,10 @@ pub(crate) async fn notifications_poll(State(config): State<ServerConfig>, proto
     )
 }
 
-pub(crate) async fn resume_next(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
+pub(crate) async fn resume_next(
+    State(config): State<ServerConfig>,
+    protocol::V2Json(body): protocol::V2Json,
+) -> Response {
     let request = match protocol::parse_request::<Value>(body) {
         Ok(request) => request,
         Err(response) => return response,
@@ -295,20 +409,29 @@ pub(crate) async fn resume_next(State(config): State<ServerConfig>, protocol::V2
         store.run_maintenance()?;
         let presence = store.presence_for_request(&unit, &request.agent.agent_id)?;
         let handoff = store.handoff_for_request(&unit, &request.agent.agent_id)?;
-        let deliveries = store.pending_context_deliveries(&request.agent.agent_id, &request.workspace.workspace_id)?;
+        let deliveries = store
+            .pending_context_deliveries(&request.agent.agent_id, &request.workspace.workspace_id)?;
         Ok::<_, StoreError>((presence, handoff, deliveries))
     });
     match result {
-        Ok((presence, handoff, deliveries)) => Json(json!({"presence": presence, "handoff": handoff, "deliveries": deliveries})).into_response(),
+        Ok((presence, handoff, deliveries)) => {
+            Json(json!({"presence": presence, "handoff": handoff, "deliveries": deliveries}))
+                .into_response()
+        }
         Err(error) => protocol::store_error_response(&request_id, error),
     }
 }
 
-pub(crate) async fn outbox_sync(State(config): State<ServerConfig>, protocol::V2Json(body): protocol::V2Json) -> Response {
+pub(crate) async fn outbox_sync(
+    State(config): State<ServerConfig>,
+    protocol::V2Json(body): protocol::V2Json,
+) -> Response {
     if body.pointer("/payload/event_type").is_some() {
         command(config, body, |store, request| store.enqueue_outbox(request))
     } else {
-        command(config, body, |store, request| store.record_outbox_delivery(request))
+        command(config, body, |store, request| {
+            store.record_outbox_delivery(request)
+        })
     }
 }
 
@@ -328,12 +451,22 @@ pub(crate) async fn current(
         let handoff = store.handoff_for_request(&unit, &request.agent.agent_id)?;
         let resources = store.presence_resources_for_request(&unit, &request.agent.agent_id)?;
         let resources = match request.query.resource.as_deref() {
-            Some(resource) => resources.into_iter().filter(|item| item.relative_path == resource).collect::<Vec<_>>(),
+            Some(resource) => resources
+                .into_iter()
+                .filter(|item| item.relative_path == resource)
+                .collect::<Vec<_>>(),
             None => resources,
         };
         let workspace_version = store.workspace_version(&request.workspace.workspace_id)?;
-        let context_cursor = store.context_cursor(&request.workspace.workspace_id, &request.agent.agent_id)?;
-        Ok::<_, StoreError>((presence, handoff, resources, workspace_version, context_cursor))
+        let context_cursor =
+            store.context_cursor(&request.workspace.workspace_id, &request.agent.agent_id)?;
+        Ok::<_, StoreError>((
+            presence,
+            handoff,
+            resources,
+            workspace_version,
+            context_cursor,
+        ))
     });
     match result {
         Ok((presence, handoff, resources, workspace_version, context_cursor)) => Json(json!({
@@ -342,7 +475,8 @@ pub(crate) async fn current(
             "resources": resources,
             "workspace_version": workspace_version,
             "context_cursor": context_cursor,
-        })).into_response(),
+        }))
+        .into_response(),
         Err(error) => protocol::store_error_response(&request_id, error),
     }
 }
@@ -356,7 +490,9 @@ pub(crate) async fn events(
         Err(response) => return response,
     };
     let request_id = request.request_id.to_string();
-    match lock_store(&config.store).and_then(|store| store.recent_workspace_events(&request.workspace.workspace_id, request.query.limit)) {
+    match lock_store(&config.store).and_then(|store| {
+        store.recent_workspace_events(&request.workspace.workspace_id, request.query.limit)
+    }) {
         Ok(events) => Json(json!({"events": events})).into_response(),
         Err(error) => protocol::store_error_response(&request_id, error),
     }
@@ -371,7 +507,9 @@ pub(crate) async fn runtime_identity(
         Err(response) => return response,
     };
     let request_id = request.request_id.to_string();
-    match lock_store(&config.store).and_then(|store| store.workspace_version(&request.workspace.workspace_id)) {
+    match lock_store(&config.store)
+        .and_then(|store| store.workspace_version(&request.workspace.workspace_id))
+    {
         Ok(workspace_version) => Json(json!({
             "protocol_version": "stateful.v2",
             "journal_schema_version": 2,
@@ -380,7 +518,8 @@ pub(crate) async fn runtime_identity(
             "workspace_version": workspace_version,
             "capabilities": RUNTIME_CAPABILITIES,
             "pid": std::process::id(),
-        })).into_response(),
+        }))
+        .into_response(),
         Err(error) => protocol::store_error_response(&request_id, error),
     }
 }
@@ -423,31 +562,33 @@ pub(crate) async fn notifications_stream(
     let store = config.store.clone();
     let agent_id = request.agent.agent_id;
     let workspace_id = request.workspace.workspace_id;
-    let stream = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(Duration::from_millis(100)))
-        .filter_map(move |_| {
-            let notification = lock_store(&store)
-                .and_then(|mut store| {
-                    store.run_maintenance()?;
-                    store.pending_notifications(&agent_id, &workspace_id)
-                })
-                .ok()
-                .and_then(|notifications| {
-                    notifications
-                        .into_iter()
-                        .filter(|notification| notification.sequence > cursor)
-                        .min_by_key(|notification| notification.sequence)
-                });
-            notification.map(|notification| {
-                cursor = notification.sequence;
-                Ok::<_, Infallible>(
-                    SseEvent::default()
-                        .id(notification.sequence.to_string())
-                        .event("notification")
-                        .json_data(notification)
-                        .expect("notification JSON is serializable"),
-                )
+    let stream = tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(
+        Duration::from_millis(100),
+    ))
+    .filter_map(move |_| {
+        let notification = lock_store(&store)
+            .and_then(|mut store| {
+                store.run_maintenance()?;
+                store.pending_notifications(&agent_id, &workspace_id)
             })
-        });
+            .ok()
+            .and_then(|notifications| {
+                notifications
+                    .into_iter()
+                    .filter(|notification| notification.sequence > cursor)
+                    .min_by_key(|notification| notification.sequence)
+            });
+        notification.map(|notification| {
+            cursor = notification.sequence;
+            Ok::<_, Infallible>(
+                SseEvent::default()
+                    .id(notification.sequence.to_string())
+                    .event("notification")
+                    .json_data(notification)
+                    .expect("notification JSON is serializable"),
+            )
+        })
+    });
     Sse::new(stream)
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
         .into_response()
@@ -456,7 +597,10 @@ pub(crate) async fn notifications_stream(
 fn command<T, R>(
     config: ServerConfig,
     body: Value,
-    run: impl FnOnce(&mut Store, &RequestEnvelope<T>) -> Result<stateful_store::CommandOutcome<R>, StoreError>,
+    run: impl FnOnce(
+        &mut Store,
+        &RequestEnvelope<T>,
+    ) -> Result<stateful_store::CommandOutcome<R>, StoreError>,
 ) -> Response
 where
     T: serde::de::DeserializeOwned,
@@ -467,11 +611,16 @@ where
         Err(response) => return response,
     };
     let request_id = request.request_id.to_string();
-    protocol::command_response(&request_id, lock_store(&config.store).and_then(|mut store| run(&mut store, &request)))
+    protocol::command_response(
+        &request_id,
+        lock_store(&config.store).and_then(|mut store| run(&mut store, &request)),
+    )
 }
 
 fn lock_store(store: &SharedStore) -> Result<std::sync::MutexGuard<'_, Store>, StoreError> {
-    store.lock().map_err(|_| StoreError::MigrationValidation("store lock poisoned".into()))
+    store
+        .lock()
+        .map_err(|_| StoreError::MigrationValidation("store lock poisoned".into()))
 }
 
 fn retarget<T, U>(request: &RequestEnvelope<T>, payload: U) -> RequestEnvelope<U> {
@@ -516,7 +665,8 @@ fn authorize_request(
     };
     let mut result = Decision::allow("authorized", "Action is authorized.");
     for target in &request.payload.targets {
-        let decision = evaluate_thin_safety(thin_safety_state(store, request, target)?, freshness_mode);
+        let decision =
+            evaluate_thin_safety(thin_safety_state(store, request, target)?, freshness_mode);
         if decision.decision == DecisionKind::Deny {
             return Ok(decision);
         }
@@ -569,7 +719,8 @@ fn thin_safety_state(
     request: &RequestEnvelope<AuthorizePayload>,
     target: &WriteTarget,
 ) -> Result<ThinSafetyState, StoreError> {
-    let invalid_target = target.path.is_empty() || normalize_relative_path(&target.path) != target.path;
+    let invalid_target =
+        target.path.is_empty() || normalize_relative_path(&target.path) != target.path;
     if invalid_target {
         return Ok(ThinSafetyState {
             invalid_target: true,
@@ -581,13 +732,19 @@ fn thin_safety_state(
     }
     let active_intent = store.active_write_intent(&request.workspace.workspace_id, &target.path)?;
     let duplicate_intent = active_intent.as_ref().is_some_and(|intent| {
-        intent.agent_id == request.agent.agent_id && intent.operation_id == request.payload.operation_id
+        intent.agent_id == request.agent.agent_id
+            && intent.operation_id == request.payload.operation_id
     });
     let unknown_write_outcome = active_intent.is_some() && !duplicate_intent;
-    let active_fence = store.active_write_fence(&request.workspace.workspace_id, &target.path)?.is_some()
+    let active_fence = store
+        .active_write_fence(&request.workspace.workspace_id, &target.path)?
+        .is_some()
         && !duplicate_intent;
     let unreconciled_human_write = !store
-        .unreconciled_human_observations(&request.workspace.workspace_id, std::slice::from_ref(&target.path))?
+        .unreconciled_human_observations(
+            &request.workspace.workspace_id,
+            std::slice::from_ref(&target.path),
+        )?
         .is_empty();
     let observation = match store.read_observation(
         &request.workspace.workspace_id,
@@ -595,14 +752,24 @@ fn thin_safety_state(
         &target.path,
     )? {
         None => ObservationFreshness::Missing,
-        Some(record) if record.status == ReadObservationStatus::Expired => ObservationFreshness::Expired,
-        Some(record) if !record.is_stable() || !target.before.is_complete_exact() => ObservationFreshness::Missing,
+        Some(record) if record.status == ReadObservationStatus::Expired => {
+            ObservationFreshness::Expired
+        }
+        Some(record) if !record.is_stable() || !target.before.is_complete_exact() => {
+            ObservationFreshness::Missing
+        }
         Some(record) if !record.is_fresh_at(store.now()) => ObservationFreshness::Expired,
-        Some(record) if record.after.as_ref() != Some(&target.before) => ObservationFreshness::Changed,
-        Some(record) => match store.resource_version(&request.workspace.workspace_id, &target.path)? {
-            Some(version) if version.version != record.resource_version => ObservationFreshness::Changed,
-            _ => ObservationFreshness::Stable,
-        },
+        Some(record) if record.after.as_ref() != Some(&target.before) => {
+            ObservationFreshness::Changed
+        }
+        Some(record) => {
+            match store.resource_version(&request.workspace.workspace_id, &target.path)? {
+                Some(version) if version.version != record.resource_version => {
+                    ObservationFreshness::Changed
+                }
+                _ => ObservationFreshness::Stable,
+            }
+        }
     };
     Ok(ThinSafetyState {
         invalid_target: false,
@@ -613,7 +780,10 @@ fn thin_safety_state(
     })
 }
 
-fn authorization_decision(store: &mut Store, request: &RequestEnvelope<AuthorizePayload>) -> Result<Decision, StoreError> {
+fn authorization_decision(
+    store: &mut Store,
+    request: &RequestEnvelope<AuthorizePayload>,
+) -> Result<Decision, StoreError> {
     if let Some(decision) = invalid_write_action(&request.payload) {
         return Ok(decision);
     }
@@ -634,14 +804,17 @@ fn authorization_decision(store: &mut Store, request: &RequestEnvelope<Authorize
             "Declare an active reservation before writing.",
         ));
     };
-    let mut state = PolicyState::default().with_active_reservation_scopes(reservation.scopes.clone());
-    if let Some(presence) = store.presence_for_request(&retarget(request, ()), &request.agent.agent_id)?
+    let mut state =
+        PolicyState::default().with_active_reservation_scopes(reservation.scopes.clone());
+    if let Some(presence) =
+        store.presence_for_request(&retarget(request, ()), &request.agent.agent_id)?
         && let Some(phase) = presence.phase
     {
         state = state.with_presence_phase(phase);
     }
     for target in &request.payload.targets {
-        let claimed = store.active_claims_for_path(&request.workspace.workspace_id, &target.path)?
+        let claimed = store
+            .active_claims_for_path(&request.workspace.workspace_id, &target.path)?
             .into_iter()
             .any(|claim| {
                 claim.reservation_id == reservation.reservation_id
@@ -656,22 +829,39 @@ fn authorization_decision(store: &mut Store, request: &RequestEnvelope<Authorize
         }
     }
     let decisions = match request.payload.action.as_str() {
-        "write_file" => request.payload.targets.iter()
+        "write_file" => request
+            .payload
+            .targets
+            .iter()
             .map(|target| authorize_action(&state, AuthorizationInput::write_file(&target.path)))
             .collect::<Vec<_>>(),
-        "write_directory" => request.payload.targets.iter()
-            .map(|target| authorize_action(&state, AuthorizationInput::write_directory(&target.path)))
+        "write_directory" => request
+            .payload
+            .targets
+            .iter()
+            .map(|target| {
+                authorize_action(&state, AuthorizationInput::write_directory(&target.path))
+            })
             .collect::<Vec<_>>(),
-        "delete_file" => request.payload.targets.iter()
+        "delete_file" => request
+            .payload
+            .targets
+            .iter()
             .map(|target| authorize_action(&state, AuthorizationInput::delete_file(&target.path)))
             .collect::<Vec<_>>(),
         "rename_file" if request.payload.targets.len() == 2 => vec![authorize_action(
             &state,
-            AuthorizationInput::rename_file(&request.payload.targets[0].path, &request.payload.targets[1].path),
+            AuthorizationInput::rename_file(
+                &request.payload.targets[0].path,
+                &request.payload.targets[1].path,
+            ),
         )],
         "move_file" if request.payload.targets.len() == 2 => vec![authorize_action(
             &state,
-            AuthorizationInput::move_file(&request.payload.targets[0].path, &request.payload.targets[1].path),
+            AuthorizationInput::move_file(
+                &request.payload.targets[0].path,
+                &request.payload.targets[1].path,
+            ),
         )],
         _ => vec![Decision::deny(
             "invalid_write_action",
@@ -679,6 +869,8 @@ fn authorization_decision(store: &mut Store, request: &RequestEnvelope<Authorize
             "Provide a supported action with its required target paths.",
         )],
     };
-    Ok(decisions.into_iter().find(|decision| decision.decision == DecisionKind::Deny)
+    Ok(decisions
+        .into_iter()
+        .find(|decision| decision.decision == DecisionKind::Deny)
         .unwrap_or_else(|| Decision::allow("authorized", "Action is authorized.")))
 }

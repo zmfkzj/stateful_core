@@ -75,7 +75,9 @@ impl Store {
             let current_version = reader.workspace_version(workspace_id)?;
             let cursor = reader.context_cursor(workspace_id, agent_id)?;
             if cursor > current_version {
-                return Err(invalid_context("context cursor is ahead of workspace version."));
+                return Err(invalid_context(
+                    "context cursor is ahead of workspace version.",
+                ));
             }
 
             let deliveries = context_deliveries(reader, workspace_id, agent_id)?;
@@ -104,12 +106,20 @@ impl Store {
                 cursor,
                 input.resource.as_deref(),
             )?;
-            let outstanding = deliveries.iter().filter(|delivery| is_unacknowledged(delivery)).count();
+            let outstanding = deliveries
+                .iter()
+                .filter(|delivery| is_unacknowledged(delivery))
+                .count();
             let dead_letter = outstanding >= CONTEXT_DELIVERY_DEAD_LETTER_THRESHOLD;
             if outstanding >= CONTEXT_DELIVERY_SUMMARY_THRESHOLD {
                 items.clear();
             }
-            let sequence = deliveries.iter().map(|delivery| delivery.sequence).max().unwrap_or(0) + 1;
+            let sequence = deliveries
+                .iter()
+                .map(|delivery| delivery.sequence)
+                .max()
+                .unwrap_or(0)
+                + 1;
             let mut delivery = ContextDeliveryRecord {
                 delivery_id: Uuid::new_v4().to_string(),
                 target_agent_id: agent_id.clone(),
@@ -134,7 +144,10 @@ impl Store {
                 );
             }
 
-            for previous in deliveries.iter().filter(|delivery| is_unacknowledged(delivery)) {
+            for previous in deliveries
+                .iter()
+                .filter(|delivery| is_unacknowledged(delivery))
+            {
                 let mut previous = previous.clone();
                 previous.status = DELIVERY_SUPERSEDED.into();
                 events.push(context_delivery_event(
@@ -162,12 +175,8 @@ impl Store {
                     &delivery,
                 )?);
             } else {
-                let (notification, variant) = context_notification(
-                    reader,
-                    request,
-                    now,
-                    &delivery,
-                )?;
+                let (notification, variant) =
+                    context_notification(reader, request, now, &delivery)?;
                 events.push(notification_event(
                     request,
                     events.len() as u32,
@@ -198,9 +207,15 @@ impl Store {
             let target = deliveries
                 .iter()
                 .find(|delivery| delivery.delivery_id == input.delivery_id)
-                .ok_or_else(|| invalid_context("context delivery does not belong to this agent and workspace."))?;
-            if target.sequence != input.sequence || target.workspace_version != input.workspace_version {
-                return Err(invalid_context("context acknowledgement does not match its delivery sequence and version."));
+                .ok_or_else(|| {
+                    invalid_context("context delivery does not belong to this agent and workspace.")
+                })?;
+            if target.sequence != input.sequence
+                || target.workspace_version != input.workspace_version
+            {
+                return Err(invalid_context(
+                    "context acknowledgement does not match its delivery sequence and version.",
+                ));
             }
             let acknowledged_version = target.workspace_version;
             let cursor = reader.context_cursor(workspace_id, agent_id)?;
@@ -293,12 +308,15 @@ impl Store {
         target_agent_id: &str,
         workspace_id: &str,
     ) -> StoreResult<Vec<ContextDeliveryRecord>> {
-        let mut deliveries = self.current_records(CurrentAggregate::ContextDelivery, workspace_id)?
+        let mut deliveries = self
+            .current_records(CurrentAggregate::ContextDelivery, workspace_id)?
             .into_iter()
             .map(record_from_current::<ContextDeliveryRecord>)
             .collect::<StoreResult<Vec<_>>>()?
             .into_iter()
-            .filter(|delivery| delivery.target_agent_id == target_agent_id && is_unacknowledged(delivery))
+            .filter(|delivery| {
+                delivery.target_agent_id == target_agent_id && is_unacknowledged(delivery)
+            })
             .collect::<Vec<_>>();
         deliveries.sort_by_key(|delivery| (delivery.workspace_version, delivery.sequence));
         Ok(deliveries)
@@ -322,10 +340,14 @@ fn context_deliveries(
     workspace_id: &str,
     agent_id: &str,
 ) -> StoreResult<Vec<ContextDeliveryRecord>> {
-    Ok(typed_records::<ContextDeliveryRecord>(reader, CurrentAggregate::ContextDelivery, workspace_id)?
-        .into_iter()
-        .filter(|delivery| delivery.target_agent_id == agent_id)
-        .collect())
+    Ok(typed_records::<ContextDeliveryRecord>(
+        reader,
+        CurrentAggregate::ContextDelivery,
+        workspace_id,
+    )?
+    .into_iter()
+    .filter(|delivery| delivery.target_agent_id == agent_id)
+    .collect())
 }
 
 fn delta_from_delivery(delivery: &ContextDeliveryRecord) -> ContextDelta {
@@ -342,7 +364,10 @@ fn delta_from_delivery(delivery: &ContextDeliveryRecord) -> ContextDelta {
 }
 
 fn is_unacknowledged(delivery: &ContextDeliveryRecord) -> bool {
-    matches!(delivery.status.as_str(), DELIVERY_PENDING | DELIVERY_SUPERSEDED)
+    matches!(
+        delivery.status.as_str(),
+        DELIVERY_PENDING | DELIVERY_SUPERSEDED
+    )
 }
 
 fn invalid_context(message: &str) -> StoreError {
@@ -402,12 +427,14 @@ fn context_delivery_recovery_event<T>(
     .map_err(StoreError::from)
 }
 
+type ContextNotification = (NotificationRecord, fn(EventData) -> NotificationEvent);
+
 fn context_notification<T>(
     reader: &dyn ProjectionReader,
     request: &RequestEnvelope<T>,
     now: OffsetDateTime,
     delivery: &ContextDeliveryRecord,
-) -> StoreResult<(NotificationRecord, fn(EventData) -> NotificationEvent)> {
+) -> StoreResult<ContextNotification> {
     let notifications = typed_records::<NotificationRecord>(
         reader,
         CurrentAggregate::Notification,
@@ -418,10 +445,9 @@ fn context_notification<T>(
         .filter(|notification| notification.target_agent_id == request.agent.agent_id)
         .map(|notification| notification.sequence)
         .max()
-        .unwrap_or(0) + 1;
-    let mut queued = notifications
-    .into_iter()
-    .find(|notification| {
+        .unwrap_or(0)
+        + 1;
+    let mut queued = notifications.into_iter().find(|notification| {
         notification.status == "queued"
             && notification.target_agent_id == request.agent.agent_id
             && notification.kind == CONTEXT_INVALIDATED_KIND
@@ -451,7 +477,10 @@ fn context_notification<T>(
             status: "queued".into(),
             created_at: timestamp(now)?,
             expires_at: Some(timestamp(now + CONTEXT_DELIVERY_TTL)?),
-            coalesce_key: Some(format!("{CONTEXT_INVALIDATED_KIND}:{}", request.agent.agent_id)),
+            coalesce_key: Some(format!(
+                "{CONTEXT_INVALIDATED_KIND}:{}",
+                request.agent.agent_id
+            )),
             origin_event_seq: 0,
         });
         NotificationEvent::Created
@@ -508,7 +537,13 @@ fn changed_current_items(
                 .live_presences(workspace_id)?
                 .into_iter()
                 .find(|presence| presence.agent_id == aggregate_id)
-                && let Some(item) = presence_item(reader, presence, workspace_id, target_agent_id, resource_filter)?
+                && let Some(item) = presence_item(
+                    reader,
+                    presence,
+                    workspace_id,
+                    target_agent_id,
+                    resource_filter,
+                )?
             {
                 items.push((item.0, item.1));
             }
@@ -560,7 +595,13 @@ fn append_migrated_current_items(
     for presence in reader.live_presences(workspace_id)? {
         if presence.agent_id == aggregate_id
             && presence.origin_event_seq > after_version
-            && let Some(item) = presence_item(reader, presence, workspace_id, target_agent_id, resource_filter)?
+            && let Some(item) = presence_item(
+                reader,
+                presence,
+                workspace_id,
+                target_agent_id,
+                resource_filter,
+            )?
         {
             items.push(item);
         }
@@ -611,7 +652,8 @@ fn presence_item(
     }
     let resources = reader.presence_resources(workspace_id, &presence.agent_id)?;
     let resource = resources.iter().find_map(|resource| {
-        resource_relevant(resource_filter, &resource.relative_path).then(|| resource.relative_path.clone())
+        resource_relevant(resource_filter, &resource.relative_path)
+            .then(|| resource.relative_path.clone())
     });
     if resource_filter.is_some() && resource.is_none() {
         return Ok(None);
@@ -641,20 +683,25 @@ fn handoff_item(
     workspace_id: &str,
     resource_filter: Option<&str>,
 ) -> Option<(u64, CurrentItem)> {
-    let resource = handoff.files_changed.iter().find(|path| resource_relevant(resource_filter, path));
-    (resource_filter.is_none() || resource.is_some()).then(|| (
-        handoff.origin_event_seq,
-        CurrentItem::new(
-            CurrentItemKind::Finalization,
-            CurrentSeverity::Info,
-            CurrentFreshness::Finalized,
-            resource.cloned().unwrap_or_else(|| "handoff".into()),
-            "Preserve handoff context from previous work.",
-            handoff.summary,
+    let resource = handoff
+        .files_changed
+        .iter()
+        .find(|path| resource_relevant(resource_filter, path));
+    (resource_filter.is_none() || resource.is_some()).then(|| {
+        (
+            handoff.origin_event_seq,
+            CurrentItem::new(
+                CurrentItemKind::Finalization,
+                CurrentSeverity::Info,
+                CurrentFreshness::Finalized,
+                resource.cloned().unwrap_or_else(|| "handoff".into()),
+                "Preserve handoff context from previous work.",
+                handoff.summary,
+            )
+            .with_agent(handoff.agent_id)
+            .with_workspace(workspace_id),
         )
-        .with_agent(handoff.agent_id)
-        .with_workspace(workspace_id),
-    ))
+    })
 }
 
 fn append_record_items(
@@ -715,7 +762,10 @@ fn item_from_current(
     resource_override: Option<&str>,
 ) -> Option<CurrentItem> {
     let value = record.payload;
-    let status = value.get("status").and_then(Value::as_str).unwrap_or_default();
+    let status = value
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let resource = resource_override.unwrap_or_else(|| {
         value
             .get("relative_path")
@@ -728,46 +778,73 @@ fn item_from_current(
     }
 
     let agent_id = value.get("agent_id").and_then(Value::as_str);
-    let purpose = value.get("purpose").and_then(Value::as_str).unwrap_or("Coordinate with related work.");
+    let purpose = value
+        .get("purpose")
+        .and_then(Value::as_str)
+        .unwrap_or("Coordinate with related work.");
     let (item_kind, severity, summary, next_action) = match kind {
         "reservation" if status == "active" => (
             CurrentItemKind::Reservation,
             CurrentSeverity::Warn,
-            format!("Agent {} reserved {resource}.", agent_id.unwrap_or("another agent")),
+            format!(
+                "Agent {} reserved {resource}.",
+                agent_id.unwrap_or("another agent")
+            ),
             Some("Coordinate with the reservation owner before editing this resource."),
         ),
         "claim" if status == "active" => (
             CurrentItemKind::Claim,
             CurrentSeverity::Warn,
-            format!("Agent {} holds an active claim on {resource}.", agent_id.unwrap_or("another agent")),
+            format!(
+                "Agent {} holds an active claim on {resource}.",
+                agent_id.unwrap_or("another agent")
+            ),
             Some("Coordinate with the claim owner before editing this resource."),
         ),
         "wait" if matches!(status, "queued" | "waiting") => (
             CurrentItemKind::WaitQueue,
             CurrentSeverity::Warn,
-            format!("Agent {} is queued for {resource}.", agent_id.unwrap_or("another agent")),
+            format!(
+                "Agent {} is queued for {resource}.",
+                agent_id.unwrap_or("another agent")
+            ),
             Some("Wait for the reservation to become claimable."),
         ),
         "wait" if status == "claimable" => (
             CurrentItemKind::ClaimableReservation,
             CurrentSeverity::Warn,
-            format!("Agent {} has a claimable reservation for {resource}.", agent_id.unwrap_or("another agent")),
+            format!(
+                "Agent {} has a claimable reservation for {resource}.",
+                agent_id.unwrap_or("another agent")
+            ),
             Some("Claim the granted reservation before it expires."),
         ),
         "write_fence" if status == "active" => (
             CurrentItemKind::Claim,
             CurrentSeverity::Block,
-            format!("Agent {} has a write fence on {resource}.", agent_id.unwrap_or("another agent")),
+            format!(
+                "Agent {} has a write fence on {resource}.",
+                agent_id.unwrap_or("another agent")
+            ),
             Some("Wait for the write fence to release or coordinate with its owner."),
         ),
-        "human_observation" if status == "pending"
-            && value.get("confidence").and_then(Value::as_str) == Some("high")
-            && matches!(value.get("kind").and_then(Value::as_str), Some("save" | "change" | "delete")) => (
-            CurrentItemKind::Claim,
-            CurrentSeverity::Block,
-            format!("{resource} has an unreconciled human write."),
-            Some("Reread the resource, summarize the human change, then acknowledge reconciliation."),
-        ),
+        "human_observation"
+            if status == "pending"
+                && value.get("confidence").and_then(Value::as_str) == Some("high")
+                && matches!(
+                    value.get("kind").and_then(Value::as_str),
+                    Some("save" | "change" | "delete")
+                ) =>
+        {
+            (
+                CurrentItemKind::Claim,
+                CurrentSeverity::Block,
+                format!("{resource} has an unreconciled human write."),
+                Some(
+                    "Reread the resource, summarize the human change, then acknowledge reconciliation.",
+                ),
+            )
+        }
         "human_observation" if status == "pending" => (
             CurrentItemKind::Claim,
             CurrentSeverity::Warn,
@@ -800,7 +877,8 @@ fn item_from_current(
             && matches!(kind, "reservation" | "claim" | "wait" | "write_fence")
         {
             item.severity = CurrentSeverity::Info;
-            item.source_refs.push(stateful_core::AGENT_CONTEXT_SCOPE_SOURCE_REF.into());
+            item.source_refs
+                .push(stateful_core::AGENT_CONTEXT_SCOPE_SOURCE_REF.into());
         }
     }
     Some(item)
@@ -813,11 +891,13 @@ fn reservation_scope_paths(value: &Value) -> Vec<String> {
         .flatten()
         .filter_map(|scope| {
             let path = scope.get("path")?.as_str()?;
-            Some(if scope.get("kind").and_then(Value::as_str) == Some("directory") {
-                format!("{path}/")
-            } else {
-                path.into()
-            })
+            Some(
+                if scope.get("kind").and_then(Value::as_str) == Some("directory") {
+                    format!("{path}/")
+                } else {
+                    path.into()
+                },
+            )
         })
         .collect()
 }
@@ -828,18 +908,26 @@ fn write_intent_target_paths(value: &Value) -> Vec<String> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|target| target.get("path").and_then(Value::as_str).map(str::to_owned))
+        .filter_map(|target| {
+            target
+                .get("path")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
 }
-
 
 fn resource_relevant(resource_filter: Option<&str>, resource: &str) -> bool {
     let Some(filter) = resource_filter.filter(|filter| !filter.is_empty()) else {
         return true;
     };
     resource == filter
-        || resource.strip_suffix('/').is_some_and(|prefix| filter.starts_with(prefix))
-        || filter.strip_suffix('/').is_some_and(|prefix| resource.starts_with(prefix))
+        || resource
+            .strip_suffix('/')
+            .is_some_and(|prefix| filter.starts_with(prefix))
+        || filter
+            .strip_suffix('/')
+            .is_some_and(|prefix| resource.starts_with(prefix))
 }

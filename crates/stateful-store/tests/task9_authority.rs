@@ -153,22 +153,33 @@ fn two_scope_reservation_replays_and_authorizes_each_declared_file() {
             ClaimAcquire {
                 reservation_id: reservation.reservation_id.clone(),
                 paths: vec![
-                    ClaimPath { relative_path: "src/a.rs".into(), observation: None },
-                    ClaimPath { relative_path: "src/b.rs".into(), observation: None },
+                    ClaimPath {
+                        relative_path: "src/a.rs".into(),
+                        observation: None,
+                    },
+                    ClaimPath {
+                        relative_path: "src/b.rs".into(),
+                        observation: None,
+                    },
                 ],
             },
         ))
         .expect("both declared files authorize claims");
     assert_eq!(claims.response.acquired, 2);
 
-    store.rebuild_projections().expect("reservation replay succeeds");
+    store
+        .rebuild_projections()
+        .expect("reservation replay succeeds");
     assert_eq!(
         store
             .reservation("workspace-1", &reservation.reservation_id)
             .expect("reservation reads")
             .expect("reservation exists")
             .scopes,
-        vec![ReservationScope::file("src/a.rs"), ReservationScope::file("src/b.rs")],
+        vec![
+            ReservationScope::file("src/a.rs"),
+            ReservationScope::file("src/b.rs")
+        ],
     );
 }
 
@@ -205,7 +216,9 @@ fn promoted_wait_uses_its_own_bound_reservation_id_after_another_declaration() {
     store
         .release_reservation(&request(
             "agent-1",
-            ReservationRelease { reservation_id: blocker.reservation_id },
+            ReservationRelease {
+                reservation_id: blocker.reservation_id,
+            },
         ))
         .expect("release promotes wait");
 
@@ -213,7 +226,9 @@ fn promoted_wait_uses_its_own_bound_reservation_id_after_another_declaration() {
         .wait("workspace-1", &wait.wait_id)
         .expect("wait reads")
         .expect("wait exists");
-    let bound_id = promoted.reservation_id.expect("wait has a bound reservation");
+    let bound_id = promoted
+        .reservation_id
+        .expect("wait has a bound reservation");
     assert_ne!(bound_id, unrelated.reservation_id);
     assert_eq!(
         store
@@ -250,7 +265,9 @@ fn promoted_directory_wait_retains_its_directory_scope() {
     store
         .release_reservation(&request(
             "agent-1",
-            ReservationRelease { reservation_id: blocker.reservation_id },
+            ReservationRelease {
+                reservation_id: blocker.reservation_id,
+            },
         ))
         .expect("release promotes directory wait");
 
@@ -262,7 +279,10 @@ fn promoted_directory_wait_retains_its_directory_scope() {
         store
             .reservation(
                 "workspace-1",
-                promoted.reservation_id.as_deref().expect("bound reservation"),
+                promoted
+                    .reservation_id
+                    .as_deref()
+                    .expect("bound reservation"),
             )
             .expect("reservation reads")
             .expect("reservation exists")
@@ -312,16 +332,26 @@ fn multi_scope_release_does_not_promote_conflicting_waits_across_scopes() {
     store
         .release_reservation(&request(
             "agent-1",
-            ReservationRelease { reservation_id: blocker.reservation_id },
+            ReservationRelease {
+                reservation_id: blocker.reservation_id,
+            },
         ))
         .expect("release succeeds");
 
     assert_eq!(
-        store.wait("workspace-1", &file_wait.wait_id).expect("file wait reads").expect("file wait exists").status,
+        store
+            .wait("workspace-1", &file_wait.wait_id)
+            .expect("file wait reads")
+            .expect("file wait exists")
+            .status,
         "claimable",
     );
     assert_eq!(
-        store.wait("workspace-1", &directory_wait.wait_id).expect("directory wait reads").expect("directory wait exists").status,
+        store
+            .wait("workspace-1", &directory_wait.wait_id)
+            .expect("directory wait reads")
+            .expect("directory wait exists")
+            .status,
         "queued",
     );
 }
@@ -352,7 +382,9 @@ fn releasing_a_multi_scope_reservation_grants_an_overlapping_wait_once() {
         .expect("overlapping wait queues");
     let release = request(
         "agent-1",
-        ReservationRelease { reservation_id: reservation.reservation_id },
+        ReservationRelease {
+            reservation_id: reservation.reservation_id,
+        },
     );
     store
         .release_reservation(&release)
@@ -378,7 +410,10 @@ fn reconciliation_clears_only_with_owner_exact_scope_and_fresh_exact_reread() {
         "agent-1",
         reconcile(None, ReconciliationDecision::Adopt, vec!["src/a.rs"]),
     ));
-    assert_eq!(missing.expect_err("missing authority rejects").code(), "missing_reservation");
+    assert_eq!(
+        missing.expect_err("missing authority rejects").code(),
+        "missing_reservation"
+    );
 
     let wrong_owner = store
         .declare_reservation(&request(
@@ -395,11 +430,16 @@ fn reconciliation_clears_only_with_owner_exact_scope_and_fresh_exact_reread() {
             vec!["src/a.rs"],
         ),
     ));
-    assert_eq!(wrong_owner_result.expect_err("wrong owner rejects").code(), "reservation_owner_mismatch");
+    assert_eq!(
+        wrong_owner_result.expect_err("wrong owner rejects").code(),
+        "reservation_owner_mismatch"
+    );
     store
         .release_reservation(&request(
             "agent-2",
-            ReservationRelease { reservation_id: wrong_owner.reservation_id },
+            ReservationRelease {
+                reservation_id: wrong_owner.reservation_id,
+            },
         ))
         .expect("other owner releases");
 
@@ -418,7 +458,12 @@ fn reconciliation_clears_only_with_owner_exact_scope_and_fresh_exact_reread() {
             vec!["src/a.rs"],
         ),
     ));
-    assert_eq!(non_covering_result.expect_err("non-covering scope rejects").code(), "scope_mismatch");
+    assert_eq!(
+        non_covering_result
+            .expect_err("non-covering scope rejects")
+            .code(),
+        "scope_mismatch"
+    );
 
     let exact = store
         .declare_reservation(&request(
@@ -435,7 +480,10 @@ fn reconciliation_clears_only_with_owner_exact_scope_and_fresh_exact_reread() {
             vec!["src/a.rs"],
         ),
     ));
-    assert_eq!(stale_result.expect_err("missing reread rejects").code(), "missing_read_provenance");
+    assert_eq!(
+        stale_result.expect_err("missing reread rejects").code(),
+        "missing_read_provenance"
+    );
 
     let content = fingerprint(b"current file");
     store
@@ -468,7 +516,12 @@ fn reconciliation_clears_only_with_owner_exact_scope_and_fresh_exact_reread() {
             vec!["src/a.rs"],
         ),
     ));
-    assert_eq!(non_exact_result.expect_err("non-exact reread rejects").code(), "stale_observation");
+    assert_eq!(
+        non_exact_result
+            .expect_err("non-exact reread rejects")
+            .code(),
+        "stale_observation"
+    );
 
     exact_reread(&store, "agent-1");
     let acknowledged = store
@@ -482,13 +535,25 @@ fn reconciliation_clears_only_with_owner_exact_scope_and_fresh_exact_reread() {
         ))
         .expect("fresh exact authority clears");
     assert_eq!(acknowledged.response, 1);
-    assert!(store
-        .unreconciled_human_observations("workspace-1", &["src/a.rs".into()])
-        .expect("observations read")
-        .is_empty());
+    assert!(
+        store
+            .unreconciled_human_observations("workspace-1", &["src/a.rs".into()])
+            .expect("observations read")
+            .is_empty()
+    );
 
-    store.rebuild_projections().expect("authority transitions replay");
-    assert_eq!(NOW + Duration::minutes(60), store.read_observation("workspace-1", "agent-1", "src/a.rs").expect("read observation").expect("reread exists").expires_at.expect("reread expires"));
+    store
+        .rebuild_projections()
+        .expect("authority transitions replay");
+    assert_eq!(
+        NOW + Duration::minutes(60),
+        store
+            .read_observation("workspace-1", "agent-1", "src/a.rs")
+            .expect("read observation")
+            .expect("reread exists")
+            .expires_at
+            .expect("reread expires")
+    );
 }
 
 #[test]
@@ -520,7 +585,10 @@ fn stale_exact_reread_cannot_clear_a_human_write_block() {
             vec!["src/a.rs"],
         ),
     ));
-    assert_eq!(stale.expect_err("stale reread rejects").code(), "stale_observation");
+    assert_eq!(
+        stale.expect_err("stale reread rejects").code(),
+        "stale_observation"
+    );
     assert_eq!(
         store
             .unreconciled_human_observations("workspace-1", &["src/a.rs".into()])
@@ -573,7 +641,10 @@ fn ask_user_and_abandon_remain_audit_only_without_reservation_authority() {
     let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
     record_human_write(&store);
 
-    for decision in [ReconciliationDecision::AskUser, ReconciliationDecision::Abandon] {
+    for decision in [
+        ReconciliationDecision::AskUser,
+        ReconciliationDecision::Abandon,
+    ] {
         store
             .acknowledge_human_reconciliation(&request(
                 "agent-1",

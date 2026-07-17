@@ -143,7 +143,10 @@ fn cli_current_and_events_serialize_enabled_repo_identity() {
             .arg(command)
             .current_dir(temp_root)
             .env_clear()
-            .env("PATH", std::env::var_os("PATH").expect("PATH should be set"))
+            .env(
+                "PATH",
+                std::env::var_os("PATH").expect("PATH should be set"),
+            )
             .env("STATEFUL_HOME", &paths.home)
             .output()
             .expect("stateful query should run");
@@ -505,12 +508,16 @@ fn declare_reservation_via_http_posts_one_task_envelope_and_returns_its_identity
 
     thread::spawn(move || {
         for reservation_id in ["reservation-123", "reservation-456"] {
-            let (mut stream, _) = listener.accept().expect("handshake connection should arrive");
+            let (mut stream, _) = listener
+                .accept()
+                .expect("handshake connection should arrive");
             let handshake = read_http_request_without_body(&mut stream);
             assert!(handshake.contains("GET /v2/runtime/identity?"));
             write_v2_runtime_identity(&mut stream);
 
-            let (mut stream, _) = listener.accept().expect("declaration connection should arrive");
+            let (mut stream, _) = listener
+                .accept()
+                .expect("declaration connection should arrive");
             tx.send(read_http_request(&mut stream))
                 .expect("request should send to test");
             write_http_response(
@@ -574,7 +581,9 @@ fn claim_reservation_via_http_posts_granted_path_and_validates_wait_identity() {
     let (tx, rx) = mpsc::channel();
 
     thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("handshake connection should arrive");
+        let (mut stream, _) = listener
+            .accept()
+            .expect("handshake connection should arrive");
         let handshake = read_http_request_without_body(&mut stream);
         assert!(handshake.contains("GET /v2/runtime/identity?"));
         write_v2_runtime_identity(&mut stream);
@@ -629,7 +638,9 @@ fn request_reservation_via_http_posts_expected_payload() {
     let (tx, rx) = mpsc::channel();
 
     thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("handshake connection should arrive");
+        let (mut stream, _) = listener
+            .accept()
+            .expect("handshake connection should arrive");
         let handshake = read_http_request_without_body(&mut stream);
         assert!(handshake.contains("GET /v2/runtime/identity?"));
         write_v2_runtime_identity(&mut stream);
@@ -687,7 +698,9 @@ fn cancel_reservation_via_http_posts_expected_payload() {
     let (tx, rx) = mpsc::channel();
 
     thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("handshake connection should arrive");
+        let (mut stream, _) = listener
+            .accept()
+            .expect("handshake connection should arrive");
         let handshake = read_http_request_without_body(&mut stream);
         assert!(handshake.contains("GET /v2/runtime/identity?"));
         write_v2_runtime_identity(&mut stream);
@@ -736,7 +749,9 @@ fn runtime_post_wraps_typed_payload_in_v2_envelope() {
     let addr = listener.local_addr().expect("listener address should load");
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("handshake connection should arrive");
+        let (mut stream, _) = listener
+            .accept()
+            .expect("handshake connection should arrive");
         let handshake = read_http_request_without_body(&mut stream);
         assert!(handshake.contains("GET /v2/runtime/identity?"));
         write_v2_runtime_identity(&mut stream);

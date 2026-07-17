@@ -1,6 +1,10 @@
 #![allow(dead_code)]
 
-use axum::{Router, body::Body, http::{Request, StatusCode}};
+use axum::{
+    Router,
+    body::Body,
+    http::{Request, StatusCode},
+};
 use serde_json::{Value, json};
 use stateful_server::{ServerConfig, build_router};
 use stateful_store::Store;
@@ -75,7 +79,7 @@ pub fn post(path: &str, body: Value) -> Request<Body> {
         .header("authorization", "Bearer test-token")
         .header("content-type", "application/json")
         .body(Body::from(body.to_string()))
-        .unwrap()
+        .expect("test POST request builds")
 }
 
 pub fn get(path: &str) -> Request<Body> {
@@ -83,22 +87,33 @@ pub fn get(path: &str) -> Request<Body> {
         .uri(path)
         .header("authorization", "Bearer test-token")
         .body(Body::empty())
-        .unwrap()
+        .expect("test GET request builds")
 }
 
 pub async fn response_json(response: axum::response::Response) -> Value {
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    serde_json::from_slice(&bytes).unwrap()
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body reads");
+    serde_json::from_slice(&bytes).expect("response body is valid JSON")
 }
 
-pub fn query_get(path: &str, agent_id: &str, request_id: &str, workspace_id: &str) -> Request<Body> {
+pub fn query_get(
+    path: &str,
+    agent_id: &str,
+    request_id: &str,
+    workspace_id: &str,
+) -> Request<Body> {
     get(&format!(
         "{path}?protocol_version=stateful.v2&request_id={request_id}&observed_at=2026-07-16T00%3A00%3A00Z&agent_id={agent_id}&actor_id={agent_id}-actor&actor_type=agent&root=%2Fworkspace&workspace_id={workspace_id}&repo_id=repo-1&worktree_id=worktree-1&branch=main&kind=hook&event=test&source_ref=query-{request_id}",
     ))
 }
 
 pub async fn successful_post(app: &Router, path: &str, body: Value) -> Value {
-    let response = app.clone().oneshot(post(path, body)).await.unwrap();
+    let response = app
+        .clone()
+        .oneshot(post(path, body))
+        .await
+        .expect("test request receives a response");
     assert_eq!(response.status(), StatusCode::OK, "{path}");
     response_json(response).await
 }

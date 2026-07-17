@@ -456,7 +456,11 @@ fn sync_outbox_requeues_only_unsent_records_after_failure() {
     let error = sync_outbox_with_runtime(&paths, &runtime)
         .expect_err("outbox sync should fail on server error");
 
-    assert!(error.to_string().contains("outbox sync failed with HTTP 500"));
+    assert!(
+        error
+            .to_string()
+            .contains("outbox sync failed with HTTP 500")
+    );
     let remaining = fs::read_to_string(&outbox_file).expect("failed record should remain pending");
     assert!(!remaining.contains("\"outbox_id\":\"outbox-1\""));
     assert!(remaining.contains("\"outbox_id\":\"outbox-2\""));
@@ -535,20 +539,37 @@ fn sync_outbox_discards_a_structured_404_heartbeat_and_sends_the_next_record() {
                 "HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             );
-            stream.write_all(response.as_bytes()).expect("response should write");
+            stream
+                .write_all(response.as_bytes())
+                .expect("response should write");
         }
     });
     let runtime = ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42);
     let outbox_file = paths.outbox_dir.join("s1.jsonl");
     write_pending_records(
         &outbox_file,
-        &[("outbox-heartbeat", "s1", "w1", 1), ("outbox-next", "s1", "w1", 2)],
+        &[
+            ("outbox-heartbeat", "s1", "w1", 1),
+            ("outbox-next", "s1", "w1", 2),
+        ],
     );
 
-    assert_eq!(sync_outbox_with_runtime(&paths, &runtime).expect("next record should sync"), 1);
-    assert!(rx.recv_timeout(Duration::from_secs(2)).is_ok(), "heartbeat should arrive");
-    assert!(rx.recv_timeout(Duration::from_secs(2)).is_ok(), "next record should arrive");
-    assert!(!outbox_file.exists(), "404 heartbeat must not retain the outbox file");
+    assert_eq!(
+        sync_outbox_with_runtime(&paths, &runtime).expect("next record should sync"),
+        1
+    );
+    assert!(
+        rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+        "heartbeat should arrive"
+    );
+    assert!(
+        rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+        "next record should arrive"
+    );
+    assert!(
+        !outbox_file.exists(),
+        "404 heartbeat must not retain the outbox file"
+    );
 }
 
 #[test]

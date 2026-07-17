@@ -11,13 +11,13 @@ fn sha256_fingerprint_distinguishes_missing_empty_and_nonempty_files() {
     let _ = fs::remove_file(&path);
 
     let missing = fingerprint_path(&path).expect("missing files should have a fingerprint");
-    assert_eq!(missing.exists, false);
+    assert!(!missing.exists);
     assert_eq!(missing.byte_len, 0);
     assert_eq!(missing.sha256, None);
 
     fs::write(&path, []).expect("empty file should be written");
     let empty = fingerprint_path(&path).expect("empty file should fingerprint");
-    assert_eq!(empty.exists, true);
+    assert!(empty.exists);
     assert_eq!(empty.byte_len, 0);
     assert_eq!(
         empty.sha256.as_deref(),
@@ -26,7 +26,7 @@ fn sha256_fingerprint_distinguishes_missing_empty_and_nonempty_files() {
 
     fs::write(&path, b"stateful").expect("nonempty file should be written");
     let nonempty = fingerprint_path(&path).expect("nonempty file should fingerprint");
-    assert_eq!(nonempty.exists, true);
+    assert!(nonempty.exists);
     assert_eq!(nonempty.byte_len, 8);
     assert_eq!(
         nonempty.sha256.as_deref(),

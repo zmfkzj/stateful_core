@@ -124,20 +124,21 @@ fn query_envelope_requires_explicit_agent_and_workspace_identity() {
 
 #[test]
 fn v1_protocol_value_is_rejected() {
-    let error = RequestEnvelope::<PresenceUpdate>::from_json(
-        r#"{"protocol_version":"stateful.v1"}"#,
-    )
-    .expect_err("v1 must be rejected");
+    let error =
+        RequestEnvelope::<PresenceUpdate>::from_json(r#"{"protocol_version":"stateful.v1"}"#)
+            .expect_err("v1 must be rejected");
 
     assert_eq!(error.code, "unsupported_protocol");
     let response = serde_json::to_value(
-        error.envelope(
-            Uuid::parse_str("8d5ddf45-9ce3-44ac-953e-3b776cd1783d").expect("valid UUID"),
-        ),
+        error
+            .envelope(Uuid::parse_str("8d5ddf45-9ce3-44ac-953e-3b776cd1783d").expect("valid UUID")),
     )
     .expect("error envelope should serialize");
     assert_eq!(response["protocol_version"], "stateful.v2");
-    assert_eq!(response["request_id"], "8d5ddf45-9ce3-44ac-953e-3b776cd1783d");
+    assert_eq!(
+        response["request_id"],
+        "8d5ddf45-9ce3-44ac-953e-3b776cd1783d"
+    );
     assert_eq!(response["error"]["code"], "unsupported_protocol");
 }
 

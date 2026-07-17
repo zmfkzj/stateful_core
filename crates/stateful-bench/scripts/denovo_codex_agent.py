@@ -22,8 +22,9 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import uuid
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
@@ -51,6 +52,7 @@ OFFICIAL_BENCHMARK_PROTOCOL = "denovo_swe_single_rollout"
 RESUME_POLICY_CONTEXT_OR_TOKEN_ONLY = "context_or_token_failure_only"
 DEFAULT_SUBAGENT_MIN_COUNT = 3
 DEFAULT_OMP_REASONING_EFFORT = "high"
+ORCHESTRATION_TRACE_EVENT_LIMIT = 10_000
 CODEX_EMPTY_STOP_EXIT_CODE = 2
 
 
@@ -2093,12 +2095,15 @@ def stateful_http_json(
     path: str,
     payload: dict[str, Any] | None = None,
     timeout: float = 5.0,
+    query: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     base_url = env.get("STATEFUL_SERVER_URL")
     token = env.get("STATEFUL_SERVER_TOKEN")
     if not base_url or not token:
         raise RuntimeError("STATEFUL_SERVER_URL and STATEFUL_SERVER_TOKEN are required")
     url = urllib.parse.urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
+    if query is not None:
+        url = f"{url}?{urllib.parse.urlencode(query, quote_via=urllib.parse.quote)}"
     data = None
     method = "GET"
     headers = {
@@ -2114,14 +2119,87 @@ def stateful_http_json(
         return json.loads(response.read().decode("utf-8"))
 
 
+def stateful_v2_trace_identity(
+    stateful_agent_id: str | None,
+    workspace_id: str | None,
+    instance_id: str,
+) -> dict[str, dict[str, Any]]:
+    agent_id = stateful_agent_id or "denovo-trace"
+    return {
+        "agent": {
+            "agent_id": agent_id,
+            "actor_id": agent_id,
+            "actor_type": "agent",
+        },
+        "workspace": {
+            "root": "unknown",
+            "workspace_id": workspace_id or "unknown",
+            "repo_id": "unknown",
+            "worktree_id": "unknown",
+            "branch": "unknown",
+        },
+        "source": {
+            "kind": "cli",
+            "event": "orchestration_trace",
+            "tool_name": "denovo_codex_agent",
+            "source_ref": instance_id,
+        },
+    }
+
+
+def stateful_v2_trace_query(
+    identity: dict[str, dict[str, Any]],
+    query: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "protocol_version": "stateful.v2",
+        "request_id": str(uuid.uuid4()),
+        "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        **identity["agent"],
+        **identity["workspace"],
+        **identity["source"],
+        **(query or {}),
+    }
+
+
+def stateful_v2_trace_request(
+    identity: dict[str, dict[str, Any]],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "protocol_version": "stateful.v2",
+        "request_id": str(uuid.uuid4()),
+        "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        **identity,
+        "payload": payload,
+    }
+
+
 def event_payload(event: dict[str, Any]) -> dict[str, Any]:
     payload = event.get("payload")
-    return payload if isinstance(payload, dict) else {}
+    if not isinstance(payload, dict):
+        return {}
+    for field in ("event", "data", "data"):
+        nested = payload.get(field)
+        if not isinstance(nested, dict):
+            break
+        payload = nested
+    return payload
 
 
-def event_field(event: dict[str, Any], key: str) -> Any:
-    payload = event_payload(event)
-    return payload.get(key, event.get(key))
+
+
+def authorization_target_paths(event: dict[str, Any]) -> list[str]:
+    targets = event_payload(event).get("targets")
+    if not isinstance(targets, list):
+        return []
+    return [
+        path
+        for target in targets
+        if isinstance(target, dict)
+        for path in [target.get("path")]
+        if isinstance(path, str) and path
+    ]
 
 
 def parse_event_time(event: dict[str, Any]) -> datetime | None:
@@ -2154,8 +2232,11 @@ def heartbeat_summary(events: list[dict[str, Any]]) -> dict[str, int | None]:
     previous_key: tuple[Any, ...] | None = None
     previous_time: datetime | None = None
     in_window = False
-    for event in events:
-        if event.get("event_type") != "AgentHeartbeat":
+    for event in sorted(
+        events,
+        key=lambda event: str(event.get("created_at") or event.get("timestamp") or ""),
+    ):
+        if event.get("event_type") != "presence.heartbeat":
             in_window = False
             continue
         count += 1
@@ -2195,12 +2276,12 @@ def summarize_orchestration_events(
     denial_paths: Counter[str] = Counter()
     denial_messages: Counter[str] = Counter()
     for event in matching:
-        if event.get("event_type") != "AuthorizationDenied":
+        if event.get("event_type") != "authorization.denied":
             continue
-        path = event_field(event, "path") or event_field(event, "resource") or event_field(event, "requested_path")
-        message = event_field(event, "message") or event_field(event, "denial_reason")
-        if path:
-            denial_paths[str(path)] += 1
+        for path in authorization_target_paths(event):
+            denial_paths[path] += 1
+        payload = event_payload(event)
+        message = payload.get("message") or payload.get("denial_reason")
         if message:
             denial_messages[str(message)] += 1
     heartbeat = heartbeat_summary(matching)
@@ -2208,17 +2289,21 @@ def summarize_orchestration_events(
         "event_count": len(matching),
         "event_types": dict(sorted(event_types.items())),
         "reservation_events": sum(
-            count for event_type, count in event_types.items() if event_type.startswith("Reservation")
+            count
+            for event_type, count in event_types.items()
+            if event_type.startswith("reservation.")
         ),
         "claim_events": sum(
-            count for event_type, count in event_types.items() if event_type.startswith("Claim")
+            count
+            for event_type, count in event_types.items()
+            if event_type.startswith("claim.")
         ),
         "conflict_events": sum(
             count
             for event_type, count in event_types.items()
-            if event_type == "AuthorizationDenied" or "Conflict" in event_type
+            if event_type == "authorization.denied" or "conflict" in event_type
         ),
-        "denial_events": event_types.get("AuthorizationDenied", 0),
+        "denial_events": event_types.get("authorization.denied", 0),
         "denial_paths": top_counts(denial_paths, 10),
         "denial_messages": top_counts(denial_messages, 5),
         **heartbeat,
@@ -2245,32 +2330,48 @@ def write_orchestration_trace(
     if patch_path is not None:
         trace["patch_path"] = patch_path.relative_to(instance_dir.parent).as_posix()
     try:
-        current = stateful_http_json(env, "/v1/current")
-        events_body = stateful_http_json(env, "/v1/events")
+        workspace_id = env.get("STATEFUL_WORKSPACE_ID")
+        identity = stateful_v2_trace_identity(
+            stateful_agent_id,
+            workspace_id,
+            instance_id,
+        )
+        current = stateful_http_json(
+            env,
+            "/v2/current",
+            query=stateful_v2_trace_query(identity),
+        )
+        events_body = stateful_http_json(
+            env,
+            "/v2/events",
+            query=stateful_v2_trace_query(
+                identity,
+                {"limit": ORCHESTRATION_TRACE_EVENT_LIMIT},
+            ),
+        )
         events = events_body.get("events", [])
         if not isinstance(events, list):
             events = []
-        workspace_id = env.get("STATEFUL_WORKSPACE_ID")
+        if len(events) >= ORCHESTRATION_TRACE_EVENT_LIMIT:
+            raise RuntimeError(
+                f"stateful event trace reached the {ORCHESTRATION_TRACE_EVENT_LIMIT}-event limit"
+            )
         if workspace_id:
             trace["workspace_id"] = workspace_id
         trace.update(summarize_orchestration_events(events, stateful_agent_id, workspace_id))
         trace["trace_captured"] = True
-        trace["current"] = current.get("current", current)
+        trace["current"] = current
         trace["events"] = events
         if workspace_id:
             trace["context"] = stateful_http_json(
                 env,
-                "/v1/context/render",
-                {
-                    "agent_id": stateful_agent_id,
-                    "workspace_id": workspace_id,
-                    "mode": "brief",
-                },
+                "/v2/context/render",
+                stateful_v2_trace_request(identity, {"mode": "brief"}),
             )
     except Exception as error:  # noqa: BLE001 - trace capture must not fail the run.
         trace["trace_error"] = repr(error)
     write_json(trace_path, trace)
-    return {
+    result = {
         "trace_path": relative_trace_path,
         "trace_captured": trace["trace_captured"],
         "reservation_events": trace.get("reservation_events", 0),
@@ -2285,6 +2386,9 @@ def write_orchestration_trace(
         "denial_paths": trace.get("denial_paths", {}),
         "denial_messages": trace.get("denial_messages", {}),
     }
+    if trace_error := trace.get("trace_error"):
+        result["trace_error"] = trace_error
+    return result
 
 
 def missing_runtime_image_name(error: BaseException) -> str | None:

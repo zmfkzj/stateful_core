@@ -9,7 +9,8 @@ use std::{
 };
 
 use stateful_cli::{
-    CommitRequest, GlobalPaths, ServerRuntime, run_structured_commit, write_global_runtime_file,
+    CommitRequest, GlobalPaths, ServerRuntime, enable_repo, run_structured_commit,
+    write_global_runtime_file,
 };
 
 #[cfg(unix)]
@@ -1074,11 +1075,9 @@ fn structured_commit_restores_unrelated_index_entries_added_by_failed_hook() {
     assert!(!root.path().join("generated.txt").exists());
 }
 
-
 const COMMIT_CHILD_REPO: &str = "STATEFUL_COMMIT_V2_CHILD_REPO";
 const COMMIT_CHILD_FAILS: &str = "STATEFUL_COMMIT_V2_CHILD_FAILS";
 const COMMIT_CHILD_REPLAY_FAILURE: &str = "STATEFUL_COMMIT_REPLAY_FAILURE";
-
 
 #[cfg(unix)]
 #[test]
@@ -1091,6 +1090,7 @@ fn structured_commit_v2_completion_follows_the_git_outcome() {
     fs::write(success.path().join("docs/plan.md"), "plan\n").expect("plan should write");
     let success_home = tempfile::tempdir().expect("stateful home should create");
     let success_paths = GlobalPaths::new(success_home.path());
+    enable_repo(&success_paths, success.path()).expect("success repo should enable");
     let (success_runtime, success_events) = spawn_commit_v2_server(success.path().to_path_buf());
     write_global_runtime_file(&success_paths, &success_runtime).expect("runtime should write");
 
@@ -1102,7 +1102,10 @@ fn structured_commit_v2_completion_follows_the_git_outcome() {
     );
     let success_completion = commit_v2_event(&success_events, "/v2/write/complete");
     let success_body = request_json_body(&success_completion.0);
-    assert_eq!(success_completion.1, 2, "completion must follow the Git commit");
+    assert_eq!(
+        success_completion.1, 2,
+        "completion must follow the Git commit"
+    );
     assert_eq!(success_body["payload"]["intent_id"], "commit-intent");
     assert_eq!(success_body["payload"]["outcome"], "committed");
 
@@ -1121,6 +1124,7 @@ fn structured_commit_v2_completion_follows_the_git_outcome() {
     fs::set_permissions(&hook_path, permissions).expect("pre-commit hook should be executable");
     let failure_home = tempfile::tempdir().expect("stateful home should create");
     let failure_paths = GlobalPaths::new(failure_home.path());
+    enable_repo(&failure_paths, failure.path()).expect("failure repo should enable");
     let (failure_runtime, failure_events) = spawn_commit_v2_server(failure.path().to_path_buf());
     write_global_runtime_file(&failure_paths, &failure_runtime).expect("runtime should write");
 
@@ -1143,6 +1147,7 @@ fn structured_commit_replay_failure_prevents_new_authorization() {
     fs::write(repo.path().join("docs/plan.md"), "plan\n").expect("plan should write");
     let home = tempfile::tempdir().expect("stateful home should create");
     let paths = GlobalPaths::new(home.path());
+    enable_repo(&paths, repo.path()).expect("replay repo should enable");
     let (runtime, events) = spawn_commit_v2_server(repo.path().to_path_buf());
     write_global_runtime_file(&paths, &runtime).expect("runtime should write");
     let pending = paths.runtime_dir.join("write-intents").join("agent");
@@ -1185,7 +1190,10 @@ fn structured_commit_v2_completion_child() {
         authorize: None,
     });
     if replay_failure {
-        assert!(result.is_err(), "replay failure should fail before authorization");
+        assert!(
+            result.is_err(),
+            "replay failure should fail before authorization"
+        );
     } else if fails {
         assert!(result.is_err(), "failing hook should fail commit");
     } else {
@@ -1205,7 +1213,9 @@ fn run_commit_v2_child(repo_root: &std::path::Path, paths: &GlobalPaths, fails: 
         .expect("commit child should run");
     assert!(
         output.status.success(),
-        "{}",
+        "child status: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 }
@@ -1214,13 +1224,19 @@ fn spawn_commit_v2_server(
     repo_root: std::path::PathBuf,
 ) -> (ServerRuntime, mpsc::Receiver<(String, usize)>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-    let address = listener.local_addr().expect("listener address should resolve");
+    let address = listener
+        .local_addr()
+        .expect("listener address should resolve");
     let (tx, rx) = mpsc::channel();
+    let pid = std::process::id();
     thread::spawn(move || {
+        let identity = format!(
+            r#"{{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":{pid},"workspace_id":"w1","workspace_version":1,"capabilities":["presence"]}}"#
+        );
         while let Ok((mut stream, _)) = listener.accept() {
             let request = read_http_request(&mut stream);
             let body = if request.starts_with("GET /v2/runtime/identity?") {
-                r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":42,"workspace_id":"w1","workspace_version":1,"capabilities":["presence"]}"#
+                identity.as_str()
             } else if request.starts_with("POST /v2/authorize ") {
                 tx.send((request, commit_count(&repo_root)))
                     .expect("authorization should send");
@@ -1234,15 +1250,12 @@ fn spawn_commit_v2_server(
         }
     });
     (
-        ServerRuntime::new(format!("http://{address}"), "token", "w1", 1),
+        ServerRuntime::new(format!("http://{address}"), "token", "w1", pid),
         rx,
     )
 }
 
-fn commit_v2_event(
-    events: &mpsc::Receiver<(String, usize)>,
-    endpoint: &str,
-) -> (String, usize) {
+fn commit_v2_event(events: &mpsc::Receiver<(String, usize)>, endpoint: &str) -> (String, usize) {
     loop {
         let event = events
             .recv_timeout(Duration::from_secs(2))
@@ -1273,7 +1286,11 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> String {
     let content_length = headers
         .lines()
         .find_map(|line| line.strip_prefix("Content-Length: "))
-        .map(|length| length.parse::<usize>().expect("content length should parse"))
+        .map(|length| {
+            length
+                .parse::<usize>()
+                .expect("content length should parse")
+        })
         .unwrap_or_default();
     let mut body = vec![0; content_length];
     stream

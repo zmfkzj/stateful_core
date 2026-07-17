@@ -2,10 +2,23 @@ mod commands;
 mod protocol;
 mod routes_v2;
 
-use axum::{Router, extract::{Request, State}, http::{HeaderMap, StatusCode}, middleware::{self, Next}, response::{IntoResponse, Response}, routing::get};
+use axum::{
+    Router,
+    extract::{Request, State},
+    http::{HeaderMap, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::get,
+};
 use stateful_core::V2Error;
 use stateful_store::Store;
-use std::{future::Future, net::SocketAddr, str::FromStr, sync::{Arc, Mutex}, time::Duration};
+use std::{
+    future::Future,
+    net::SocketAddr,
+    str::FromStr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 pub const CRATE_NAME: &str = "stateful-server";
 pub(crate) const RUNTIME_CAPABILITIES: &[&str] = &[
@@ -94,8 +107,10 @@ impl ServerConfig {
 pub(crate) type SharedStore = Arc<Mutex<Store>>;
 
 pub fn build_router(config: ServerConfig) -> Router {
-    let protected = routes_v2::router()
-        .route_layer(middleware::from_fn_with_state(config.clone(), require_bearer));
+    let protected = routes_v2::router().route_layer(middleware::from_fn_with_state(
+        config.clone(),
+        require_bearer,
+    ));
     Router::new()
         .route("/health", get(health))
         .merge(protected)

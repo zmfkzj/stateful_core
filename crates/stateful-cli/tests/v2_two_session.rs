@@ -44,7 +44,10 @@ async fn two_sessions_coordinate_over_real_tcp_and_replay_persistent_journal() {
         .await
         .expect("real TCP listener should bind");
     let runtime = ServerRuntime::new(
-        format!("http://{}", listener.local_addr().expect("listener address should load")),
+        format!(
+            "http://{}",
+            listener.local_addr().expect("listener address should load")
+        ),
         "two-session-token",
         WORKSPACE_ID,
         0,
@@ -65,7 +68,14 @@ async fn two_sessions_coordinate_over_real_tcp_and_replay_persistent_journal() {
         json!({"first_prompt": "Coordinate the shared file."}),
     );
     let initial = fingerprint(&workspace, SHARED_PATH);
-    read_exact(&runtime, &identity, AGENT_A, "a-initial-read", SHARED_PATH, initial.clone());
+    read_exact(
+        &runtime,
+        &identity,
+        AGENT_A,
+        "a-initial-read",
+        SHARED_PATH,
+        initial.clone(),
+    );
 
     post_success(
         &runtime,
@@ -84,7 +94,10 @@ async fn two_sessions_coordinate_over_real_tcp_and_replay_persistent_journal() {
         initial.clone(),
     );
     assert_eq!(b_write["decision"]["decision"], "warn");
-    assert_eq!(b_write["decision"]["reason_code"], "missing_read_provenance");
+    assert_eq!(
+        b_write["decision"]["reason_code"],
+        "missing_read_provenance"
+    );
     assert_eq!(
         queue_event_count(&events(&runtime, &identity, AGENT_B)),
         queued_before_b_warning,
@@ -97,9 +110,14 @@ async fn two_sessions_coordinate_over_real_tcp_and_replay_persistent_journal() {
         "/v2/notifications/poll",
         json!({}),
     );
-    assert_eq!(b_notifications, json!([]), "awareness warnings must not queue notifications");
+    assert_eq!(
+        b_notifications,
+        json!([]),
+        "awareness warnings must not queue notifications"
+    );
     std::fs::create_dir_all(workspace.join("src")).expect("source directory should create");
-    std::fs::write(workspace.join(SHARED_PATH), "B\n").expect("B write should reach the Git workspace");
+    std::fs::write(workspace.join(SHARED_PATH), "B\n")
+        .expect("B write should reach the Git workspace");
     let b_after = fingerprint(&workspace, SHARED_PATH);
     complete_write(
         &runtime,
@@ -183,11 +201,17 @@ async fn two_sessions_coordinate_over_real_tcp_and_replay_persistent_journal() {
         "/v2/notifications/poll",
         json!({}),
     );
-    assert_eq!(notifications, json!([]), "awareness warnings must not queue notifications");
+    assert_eq!(
+        notifications,
+        json!([]),
+        "awareness warnings must not queue notifications"
+    );
     let events_before_context = events(&runtime, &identity, AGENT_A);
     assert!(
         events_before_context.iter().all(|event| {
-            let event_type = event["event_type"].as_str().expect("event type should serialize");
+            let event_type = event["event_type"]
+                .as_str()
+                .expect("event type should serialize");
             !event_type.starts_with("wait.") && !event_type.starts_with("notification.")
         }),
         "awareness warnings must not enqueue waits or notifications"
@@ -202,7 +226,10 @@ async fn two_sessions_coordinate_over_real_tcp_and_replay_persistent_journal() {
     );
     assert_eq!(a_context["changed"], true);
     assert!(
-        a_context["workspace_version"].as_u64().expect("workspace version should be numeric") > 0,
+        a_context["workspace_version"]
+            .as_u64()
+            .expect("workspace version should be numeric")
+            > 0,
         "A must receive a versioned context delta after B commits"
     );
     let mut delivery_ids = vec![ack_delivery(&runtime, &identity, AGENT_A, &a_context)];
@@ -259,11 +286,11 @@ async fn two_sessions_coordinate_over_real_tcp_and_replay_persistent_journal() {
         json!({}),
     );
     assert_eq!(
-        a_notifications,
-        notifications_before_a_warning,
+        a_notifications, notifications_before_a_warning,
         "the reservation awareness warning must not create a notification"
     );
-    std::fs::write(workspace.join(SHARED_PATH), "A\n").expect("A write should reach the Git workspace");
+    std::fs::write(workspace.join(SHARED_PATH), "A\n")
+        .expect("A write should reach the Git workspace");
     let a_after = fingerprint(&workspace, SHARED_PATH);
     complete_write(
         &runtime,
@@ -300,9 +327,14 @@ async fn two_sessions_coordinate_over_real_tcp_and_replay_persistent_journal() {
         json!({"mode": "detailed", "resource": SHARED_PATH}),
     );
     assert!(
-        handoff_context["items"].as_array().expect("context items should be an array").iter().any(|item| {
-            item["agent_id"] == AGENT_B && item["summary"] == "B completed the shared-file update."
-        }),
+        handoff_context["items"]
+            .as_array()
+            .expect("context items should be an array")
+            .iter()
+            .any(|item| {
+                item["agent_id"] == AGENT_B
+                    && item["summary"] == "B completed the shared-file update."
+            }),
         "A must receive B's explicit handoff in a delivered context"
     );
     delivery_ids.push(ack_delivery(&runtime, &identity, AGENT_A, &handoff_context));
@@ -315,13 +347,23 @@ async fn two_sessions_coordinate_over_real_tcp_and_replay_persistent_journal() {
         "/v2/context/render",
         json!({"mode": "detailed", "resource": SHARED_PATH}),
     );
-    assert_eq!(fallback_context["changed"], true, "expiry must produce a context version");
-    delivery_ids.push(ack_delivery(&runtime, &identity, AGENT_A, &fallback_context));
-    let current_a = current(&runtime, &identity, AGENT_A);
-    assert_eq!(current_a["handoff"]["explicit"], false, "A must expire into fallback without Stop");
     assert_eq!(
-        current_a["handoff"]["summary"],
-        "Session ended with no explicit handoff supplied.",
+        fallback_context["changed"], true,
+        "expiry must produce a context version"
+    );
+    delivery_ids.push(ack_delivery(
+        &runtime,
+        &identity,
+        AGENT_A,
+        &fallback_context,
+    ));
+    let current_a = current(&runtime, &identity, AGENT_A);
+    assert_eq!(
+        current_a["handoff"]["explicit"], false,
+        "A must expire into fallback without Stop"
+    );
+    assert_eq!(
+        current_a["handoff"]["summary"], "Session ended with no explicit handoff supplied.",
         "fallback handoff must remain distinct from B's explicit handoff"
     );
     assert_ne!(current_a["handoff"]["summary"], explicit["summary"]);
@@ -332,7 +374,8 @@ async fn two_sessions_coordinate_over_real_tcp_and_replay_persistent_journal() {
         .expect("server task should join")
         .expect("server should stop gracefully");
 
-    let mut reopened = Store::open_with_clock(&database, clock).expect("persistent store should reopen");
+    let mut reopened =
+        Store::open_with_clock(&database, clock).expect("persistent store should reopen");
     assert!(
         reopened
             .pending_context_deliveries(AGENT_A, WORKSPACE_ID)
@@ -346,7 +389,10 @@ async fn two_sessions_coordinate_over_real_tcp_and_replay_persistent_journal() {
             .expect("context delivery should load")
             .expect("ACKed delivery should persist");
         assert_eq!(delivery.status, "acknowledged");
-        assert!(delivery.origin_event_seq > 0, "replay must preserve delivery origin event sequences");
+        assert!(
+            delivery.origin_event_seq > 0,
+            "replay must preserve delivery origin event sequences"
+        );
     }
     let all_events = reopened
         .recent_workspace_events(WORKSPACE_ID, 1_000)
@@ -359,10 +405,19 @@ async fn two_sessions_coordinate_over_real_tcp_and_replay_persistent_journal() {
         delivery_ids.len(),
         "each delivery must have exactly one ACK event"
     );
-    let before_replay = reopened.projection_snapshot().expect("complete projection snapshot should load");
-    reopened.rebuild_projections().expect("journal should replay into empty projections");
-    let after_replay = reopened.projection_snapshot().expect("replayed projection snapshot should load");
-    assert_eq!(before_replay, after_replay, "replay must preserve all projection bytes and origin sequences");
+    let before_replay = reopened
+        .projection_snapshot()
+        .expect("complete projection snapshot should load");
+    reopened
+        .rebuild_projections()
+        .expect("journal should replay into empty projections");
+    let after_replay = reopened
+        .projection_snapshot()
+        .expect("replayed projection snapshot should load");
+    assert_eq!(
+        before_replay, after_replay,
+        "replay must preserve all projection bytes and origin sequences"
+    );
 }
 
 async fn wait_for_stop(stopping: Arc<AtomicBool>) {
@@ -387,7 +442,11 @@ fn initialize_git_workspace(workspace: &Path) {
         .arg(workspace)
         .output()
         .expect("git should initialize the temporary workspace");
-    assert!(output.status.success(), "git init failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "git init failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn repo_identity(workspace: &Path) -> RepoIdentity {
@@ -400,8 +459,10 @@ fn repo_identity(workspace: &Path) -> RepoIdentity {
 }
 
 fn fingerprint(workspace: &Path, path: &str) -> Value {
-    serde_json::to_value(fingerprint_path(&workspace.join(path)).expect("workspace fingerprint should load"))
-        .expect("fingerprint should serialize")
+    serde_json::to_value(
+        fingerprint_path(&workspace.join(path)).expect("workspace fingerprint should load"),
+    )
+    .expect("fingerprint should serialize")
 }
 
 fn request(identity: &RepoIdentity, agent_id: &str, payload: Value) -> RequestEnvelope<Value> {
@@ -451,7 +512,11 @@ fn post_success(
 }
 
 fn response_json(response: HttpResponse, expected_status: u16) -> Value {
-    assert_eq!(response.status_code, expected_status, "unexpected response body: {}", response.body);
+    assert_eq!(
+        response.status_code, expected_status,
+        "unexpected response body: {}",
+        response.body
+    );
     serde_json::from_str(&response.body).expect("response body should be JSON")
 }
 
@@ -531,10 +596,22 @@ fn complete_write(
     assert_eq!(completed["status"], "committed");
 }
 
-fn ack_delivery(runtime: &ServerRuntime, identity: &RepoIdentity, agent_id: &str, context: &Value) -> String {
-    let delivery_id = context["delivery_id"].as_str().expect("context delivery id should be present").to_owned();
-    let sequence = context["sequence"].as_u64().expect("context sequence should be present");
-    let workspace_version = context["workspace_version"].as_u64().expect("context version should be present");
+fn ack_delivery(
+    runtime: &ServerRuntime,
+    identity: &RepoIdentity,
+    agent_id: &str,
+    context: &Value,
+) -> String {
+    let delivery_id = context["delivery_id"]
+        .as_str()
+        .expect("context delivery id should be present")
+        .to_owned();
+    let sequence = context["sequence"]
+        .as_u64()
+        .expect("context sequence should be present");
+    let workspace_version = context["workspace_version"]
+        .as_u64()
+        .expect("context version should be present");
     let acknowledgement = post_success(
         runtime,
         identity,
@@ -555,7 +632,9 @@ fn queue_event_count(events: &[Value]) -> usize {
     events
         .iter()
         .filter(|event| {
-            let event_type = event["event_type"].as_str().expect("event type should serialize");
+            let event_type = event["event_type"]
+                .as_str()
+                .expect("event type should serialize");
             event_type.starts_with("wait.") || event_type.starts_with("notification.")
         })
         .count()
@@ -575,7 +654,8 @@ fn events(runtime: &ServerRuntime, identity: &RepoIdentity, agent_id: &str) -> V
     )
     .expect("V2 events query should build");
     response_json(
-        get_v2(runtime, "/v2/events", &request).expect("authenticated V2 events query should complete"),
+        get_v2(runtime, "/v2/events", &request)
+            .expect("authenticated V2 events query should complete"),
         200,
     )["events"]
         .as_array()
@@ -597,7 +677,8 @@ fn current(runtime: &ServerRuntime, identity: &RepoIdentity, agent_id: &str) -> 
     )
     .expect("V2 current query should build");
     response_json(
-        get_v2(runtime, "/v2/current", &request).expect("authenticated V2 current query should complete"),
+        get_v2(runtime, "/v2/current", &request)
+            .expect("authenticated V2 current query should complete"),
         200,
     )
 }

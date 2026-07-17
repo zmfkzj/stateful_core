@@ -71,6 +71,7 @@ _V2_WARNED_REASON_CODES = frozenset(
     {
         "missing_read_provenance", "missing_reservation", "inactive_session_phase",
         "scope_mismatch", "invalid_write_action", "missing_claim",
+        "coordination_conflict",
     }
 )
 _V2_DENIED_REASON_CODES = frozenset(

@@ -252,7 +252,8 @@ fn runtime_health_requires_v2_identity_and_capabilities() {
     let runtime = ServerRuntime::new(health_not_ok.base_url(), "token", "w1", 1);
     assert!(!runtime_is_healthy(&runtime));
 
-    let identity_not_ok = FakeHttpServer::start(vec![fake_response(401, r#"{"error":"unauthorized"}"#)]);
+    let identity_not_ok =
+        FakeHttpServer::start(vec![fake_response(401, r#"{"error":"unauthorized"}"#)]);
     let runtime = ServerRuntime::new(identity_not_ok.base_url(), "token", "w1", 1);
     assert!(!runtime_is_healthy(&runtime));
 
@@ -330,7 +331,10 @@ fn stop_server_refuses_identity_from_different_pid_without_signaling_process() {
         &fs::read_to_string(&paths.server_json).expect("detached runtime should be readable"),
     )
     .expect("detached runtime should be valid JSON");
-    let mismatched_pid = actual.pid.checked_add(1).expect("child pid should not overflow");
+    let mismatched_pid = actual
+        .pid
+        .checked_add(1)
+        .expect("child pid should not overflow");
     let identity = format!(
         r#"{{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":{mismatched_pid},"capabilities":["presence"]}}"#
     );
@@ -350,8 +354,14 @@ fn stop_server_refuses_identity_from_different_pid_without_signaling_process() {
         stop_server(&paths).expect("matching child should stop during cleanup");
     }
 
-    assert!(process_is_alive, "mismatched identity must not signal the child");
-    assert!(runtime_file_remains, "mismatched identity must preserve runtime file");
+    assert!(
+        process_is_alive,
+        "mismatched identity must not signal the child"
+    );
+    assert!(
+        runtime_file_remains,
+        "mismatched identity must preserve runtime file"
+    );
     let error = result.expect_err("mismatched identity must refuse stop");
     assert!(
         error.to_string().contains("refusing to stop"),
@@ -423,7 +433,6 @@ fn restart_refuses_unsupported_runtime_schemes_before_pid_evaluation() {
     );
     assert!(paths.server_json.is_file());
 }
-
 
 #[test]
 fn ensure_server_with_options_rejects_healthy_runtime_on_different_port() {

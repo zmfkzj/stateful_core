@@ -83,13 +83,13 @@ After all ten task agents exit, the harness injects the evaluator tests. The fin
 
 ## Arm execution
 
-Every arm/trial starts from a fresh checkout created from the verified source archive.
+Every repository/arm/trial owns a fresh checkout and fresh Stateful home created from the verified source archive. The runner rejects an existing `--out` directory or any scheduled `repo/arm/trial` directory before it reads the receipt or starts a container; never reuse output or row databases.
 
 - `sequential`: ten independent task agents run in specification order.
 - `parallel-off`: ten task agents run concurrently in one checkout without Stateful coordination.
-- `parallel-on`: ten task agents run concurrently in one checkout and share one arm-local enforcement server.
+- `parallel-on`: ten task agents run concurrently in one checkout and share one arm-local Stateful server started in `awareness` mode. It provides presence, freshness, handoff, rendered context, and advisory intent; enforcement is not the default benchmark arm.
 
-The final agent runs only after all task-agent processes have been reaped. No checkout or Stateful server is shared across repositories, arms, or trials.
+The final agent runs only after all task-agent processes have been reaped. No checkout, container, or Stateful home is shared across repositories, arms, or trials. `parallel-on` is opt-in: omitted `--arms` means only `sequential,parallel-off`; every model-backed three-arm gate must spell `--arms sequential,parallel-off,parallel-on`.
 
 ## Completion and metrics
 
@@ -113,31 +113,59 @@ The harness records:
 
 ### Coordination metrics
 
-Each detailed result row also contains `coordination_metrics`. It supplements the efficiency fields and does not redefine `cleared`.
+Each cleared `parallel-on` row contains one locked, value-free `coordination_metrics` object with `protocol_version: "stateful.v2"`. `sequential` and `parallel-off` rows set it to `null`. An incomplete, malformed, non-monotonic, or post-admission diagnostic makes the on-arm row uncleared and its metrics `null`; an aggregate is present only when every scheduled on-arm trial is complete, never as a partial total.
 
-- `sequential` and `parallel-off` rows set `coordination_metrics` to `null`.
-- A `parallel-on` row contains an object only when all coordination diagnostics are complete. If the private coordination SQLite snapshot is unavailable, locked, malformed, or lacks the expected schema; server-log markers cannot be captured consistently; marker phase counts decrease; or the result assembler cannot construct the object, the field is `null` and the existing diagnostic failure path leaves the row uncleared.
-- Each populated object contains:
-  - `notifications.by_kind`, a status-count map for protocol notification kinds. It always includes `scope_overlap` and `reservation_granted`, each with `created`, `delivered`, `pending`, and `expired` counts; other protocol kinds may appear as sorted keys. `created` is the sum of retained status counts. A `scope_overlap` count is a deduplicated advisory-notification count, not a raw edit-collision count, and `delivered` records poll/SSE delivery.
-  - `waits.by_final_status`; `waits.grant_wait_time_s` with `count`, `total`, `mean`, and `max`; and `waits.unmeasured_grants`. A measurable grant duration runs from the matched reservation wait request to grant availability. Missing links or timestamps, malformed timestamps, and negative durations increment `unmeasured_grants` rather than becoming zero; `mean` and `max` are `null` when `count` is zero.
-  - `authorization.denied_by_reason` and `authorization.warned_by_reason`, which count protocol reason codes without decision messages.
-  - `context_renders.server` and `context_renders.explicit_tool_calls`, each with `tasks`, `final`, and `total`. Server `tasks` is the `after-tasks - before-tasks` successful-marker delta, `final` is `after-final - after-tasks`, and `total` is their sum. Explicit `tasks` sums task-agent OMP-log executions and `final` comes from the final-agent log. The benchmark does not derive an automatic-render count.
+The fixed object reports only:
 
-`results.json` and `summary.json.results` retain complete row objects. A repository/arm aggregate has coordination metrics only when every scheduled `parallel-on` row is present and complete; otherwise its field is `null`, never a partial total. Aggregate notification, wait-status, authorization, render, measured-grant, and unmeasured-grant counts and wait totals are summed. The aggregate wait `mean` is the weighted `total / count`, rather than an average of row means; `max` is the maximum row value, or `null` for zero measured grants.
+- `journal`: `events`, `bytes_start`, `bytes_end`, `bytes_growth`, and allowlisted `by_event_type`;
+- `presence`: `registered`, `expired`, `finalized`, and `peak_active`;
+- `handoffs`: `explicit`, `fallback_stop`, `fallback_ttl`, and allowlisted `by_status`;
+- `read_observations`: `started`, `stable`, `unstable`, `aborted`, and `invalidated`;
+- `context`: `versions`, `renders`, `deliveries`, `acks`, `redeliveries`, `coalesced`, `prompt_utf8_bytes`, `prompt_unicode_scalars`, and `prompt_items`;
+- `authorization`: allowlisted `warned_by_reason` and `denied_by_reason`;
+- `write_safety`: `fence_conflicts`, `unknown_outcomes`, `same_path_overlaps`, and `cross_agent_overwrites`;
+- `notifications`: allowlisted `by_kind`; and
+- `waits`: allowlisted `by_final_status`, `grant_wait_time_s` (`count`, `total`, `mean`, `max`), and `unmeasured_grants`.
 
-The published object is value-free: it contains aggregate protocol categories, counts, and derived aggregate wait durations only. It must not expose notification payloads, wait/reservation/agent IDs, paths, resources, timestamps, free-form messages, raw database rows, or raw server-log lines. These diagnostics are observational evidence, not proof that Stateful caused an outcome. A fresh authorized smoke must emit the new fields before they are used for an on/off conclusion.
+The object contains no payloads, identifiers, paths, resources, timestamps, free-form messages, raw database rows, raw server-log lines, or per-agent data. `mean` is `total / count` (or `null` at zero); summary means are weighted from totals and counts, and unmeasured grants are not zero-duration waits. `results.json` preserves the row's sanitized evidence and qualification identity; `summary.json` contains only sanitized report rows and locked aggregates.
 
-The reporting contract remains efficiency-only. A single trial is descriptive. Results must not be presented as behavioral-quality, causal, safety, or statistical-superiority evidence.
+These are observational coordination diagnostics, not causal proof. The credit-free Docker E2E and one model-backed trial are descriptive smoke/scoped evidence only. Do not make behavioral-quality, causal, safety, statistical, or superiority claims without an appropriately qualified multi-trial study.
 
 ## Qualification and launch gates
 
-Run the following gates in order:
+The Docker real-world runner is distinct from ProgramBench and DeNovoSWE. Its qualification receipt authorizes only this corpus/image identity.
 
-1. Verify every pinned source, setup procedure, and upstream suite.
-2. Demonstrate task-level RED on base and GREEN on the reference patch.
-3. Demonstrate repository-level GREEN for the integrated ten-task reference patch.
-4. Validate zero isolated nodes in every overlap graph.
-5. Run the generated deterministic baseline smoke.
-6. Run one repository through all three live arms.
-7. Run all ten repositories through the full three-arm benchmark.
-8. Preserve and report result artifacts and the provenance manifest.
+1. Build and inspect a `linux/arm64` image; the inspected image itself must report `linux/arm64`. A non-arm Docker daemon is private provenance, not an admission substitute.
+2. Qualify the selected repository set against that exact image. A passing receipt at `CACHE/qualification/receipts/KEY.json` binds the manifest, corpus, archive, commit, staged graded inputs, image ID/platform/digests, and the six-tool map: Python, OMP, Stateful SHA, Git, Rustc, and Cargo. Rebuild, retag, or any bound-input change requires requalification.
+3. Run only selected repositories with matching receipts, a new output directory, and explicit arms. `parallel-on` starts awareness; it is never implicit.
+4. Preserve the fresh output directory and report only cleared rows. A full result is 10 repositories × 3 arms × 3 trials = 90 cleared rows; it has not yet been run.
+
+```sh
+IMAGE=statefulbench-realworld:local
+BENCH_ROOT="$HOME/.cache/statefulbench-realworld"
+CACHE="$BENCH_ROOT/cache"
+
+docker build --platform linux/arm64 --pull \
+  -f crates/stateful-bench/docker/statefulbench-realworld.Dockerfile \
+  -t "$IMAGE" .
+docker image inspect "$IMAGE" \
+  --format '{{.Id}} {{.Os}}/{{.Architecture}} {{join .RepoDigests ","}}'
+
+python3 crates/stateful-bench/scripts/statefulbench_realworld.py qualify \
+  --manifest datasets/statefulbench-realworld/manifest.json \
+  --cache "$CACHE" \
+  --docker-image "$IMAGE" \
+  --repo requests
+
+RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
+python3 crates/stateful-bench/scripts/statefulbench_realworld.py run \
+  --manifest datasets/statefulbench-realworld/manifest.json \
+  --cache "$CACHE" \
+  --out "$BENCH_ROOT/runs/requests-$RUN_ID" \
+  --docker-image "$IMAGE" \
+  --repos requests \
+  --arms sequential,parallel-off,parallel-on \
+  --trials 1 \
+  --model openai-codex/gpt-5.6-terra \
+  --thinking high
+```

@@ -2,224 +2,116 @@
 
 Presence-first coordination for coding agents and humans sharing one live repository checkout.
 
-Git coordinates committed history. `stateful_core` coordinates live presence
-before it becomes history. Before a supported write occurs, an actor should see:
-
-```text
-Who is nearby, what is fresh, what was handed off, and should this write proceed?
-```
-
-The project is intentionally about current state, not long-term memory. Memory
-recalls what happened before; current state captures active, scoped, expiring
-operational truth that can be checked before writes, test execution, handoff, and
-other coordination-sensitive actions.
-
-The product center is one live-checkout presence layer: agents and humans see
-nearby work, freshness, and handoff before writing. Blocking exists only as a
-thin safety rail at data-loss edges. See
-[ADR 0002](docs/adr/0002-presence-first-not-lock-first.md) for this direction
-and its evidence.
+Git coordinates committed history. `stateful_core` coordinates the live work that
+precedes it: who is present, what is fresh, what was handed off, and what context
+the next actor needs before changing a shared checkout.
 
 ## Status
 
-This repository is an early Rust implementation and local-first, macOS-first
-prototype. The current implementation is Codex-first with OMP support. It
-includes a CLI, global user-level installation, repo allowlist gating, a local
-HTTP state server, native Stateful coordination tools, Codex and OMP hook
-adapters, SQLite-backed state store, sandboxed command profiles, outbox sync,
-human observation/reconciliation commands, a VS Code advisory save gate, and
-benchmark tooling.
+This is a local-first, macOS-first Rust implementation with a CLI, local HTTP
+server, SQLite-backed state, native Stateful tools, Codex and OMP integration,
+human observation/reconciliation, and benchmark tooling. The shipped protocol is
+`stateful.v2` with a schema-2 event journal.
 
-These docs describe the shipped local v1 coordination mechanism. Checked-in
-benchmark evidence now includes three-arm forced-overlap plumbing/smoke results;
-ProgramBench quality scoring remains blocked on this macOS arm64 host and needs
-a Linux amd64-compatible eval rerun before quality comparisons.
+The runtime starts in **awareness**: reservations and claims describe advisory
+intent, and actors receive current-state context and warnings. Select
+**enforcement** explicitly when supported writes must be authorized:
 
-Human coordination is explicit and advisory: `stateful watch`, `human observe`,
-`human save-check`, `reconcile ack`, and the VS Code save gate surface conflicts.
+```bash
+stateful server start --coordination-mode enforcement
+```
 
-APIs, configuration files, and command behavior may change while the project is
-pre-release. The current security and support scope is documented in
-[SECURITY.md](SECURITY.md).
+The product center is presence, freshness, and handoff—not locking. In both
+modes, the deliberately thin hard stops reject stale exact-read evidence,
+unreconciled high-confidence human writes, an active write fence, and a prior
+write whose outcome is unknown. Explicit enforcement additionally can deny
+overlapping supported writes; awareness keeps reservations and claims advisory.
 
 ## Why
 
-Coding agents usually know their own session, but they do not reliably know what
-another agent, another session, or a human is doing in the same repository right
-now. That creates avoidable failures:
+Separate agents, sessions, and humans can all change the same checkout before
+Git sees a commit. Without live coordination, they can miss nearby work, treat
+stale observations as current, or leave the next actor without a useful handoff.
 
-- two agents edit the same file without seeing each other
-- a file changes in a shared checkout while an agent still holds a claim on it
-- an interrupted session leaves no structured handoff state
-- stale memory is treated as active truth
-- a tool writes before the session has declared its intended scope
-- test execution or reconciliation happens outside the coordination loop
+`stateful_core` records scoped presence and activity, renders current context,
+tracks exact-read freshness, and carries explicit handoffs. It is not a task
+scheduler, filesystem lock manager, access-control system, durable secret store,
+or long-term memory product. Git remains responsible for integration.
 
-`stateful_core` provides a small protocol for recording session activity,
-reading current-state summaries, rendering scoped write-time coordination
-context (`context_render`), declaring intent as reservation, and tracking active
-claim freshness. `context_render` is a briefing, not a task scheduler: task
-allocation belongs to an orchestrator or human, and integration belongs to Git.
-As a safety rail, v1 still queues blocked writers and blocks supported writes
-that lack matching active reservation/claim authority or fresh base observations.
+Use it for a shared workspace whose useful question is “should this write happen
+here now?” Prefer branches, worktrees, containers, or task-level orchestration
+when isolation is practical.
 
-## When To Use It
-
-`stateful_core` does not replace Git, branches, worktrees, editors, or agent
-runners.
-
-Use shared-workspace coordination when separate worktrees or containers would
-hide information the actors need right now. Typical cases:
-
-- the development environment is expensive or fragile to duplicate per agent:
-  warm build caches, local dev servers, database state, device state, or
-  credentials already bound to the canonical checkout
-- tightly coupled tasks need each other's uncommitted edits immediately, before a
-  commit, rebase, or merge is realistic
-- a human is working live in the canonical checkout alongside agents, and the
-  agents need to avoid supported writes that collide with fresh shared-state
-  claims
-
-This does not mean automatic filesystem or IDE observation of human edits is
-shipped. Current protection depends on explicit/shared-state signals and
-supported write paths.
-
-When those conditions do not apply, prefer isolation first: separate branches,
-worktrees, containers, or task-level orchestration usually give a simpler failure
-model. `stateful_core` is for the remaining shared-workspace moments where the
-useful question is not "how do we merge later?" but "should this write happen
-here right now?"
-
-## What It Provides
-
-- A `stateful` CLI for installation, repo enablement, status/current-state
-  inspection, reservation declaration, hooks, sandboxed command profiles, outbox
-  sync, and server lifecycle management.
-- A local HTTP state server with token-protected non-health endpoints.
-- A SQLite event store and materialized current-state summary.
-- Codex and OMP lifecycle hook integration for observing and gating important
-  actions.
-- Native Stateful coordination tools exposed by the active agent harness.
-- Human coordination commands for `human observe`, `human save-check`, and
-  `reconcile ack`, plus an advisory VS Code save gate.
-- Sandboxed profiles for build/test output, command-shaped repo writes, git
-  operations, GitHub PR commands, and repo-external shell work.
-- Benchmark tooling for SWE-bench pair runs, reports, comparisons, awareness
-  mode, synthetic coordination experiments, forced-overlap harness scripts, and
-  DeNovoSWE/ProgramBench adapters.
-
-`stateful_core` is not a sandbox, access-control system, file lock manager,
-distributed lock service, durable secret store, or long-term memory product. It
-stores shared operational state that trusted local tools can consult before
-coordination-sensitive actions. See the
-[security model](SECURITY.md#local-trust-model) for details.
-
-## Install From Source
+## Install from source
 
 Prerequisites:
 
 - Rust 1.85 or newer
 - Git
-- Codex CLI, when using bundled Codex hooks or `stateful codex`
-- OMP, when using the generated OMP `stateful` profile
-- A supported OS sandbox backend for `stateful sandbox run`: macOS Seatbelt via
-  `/usr/bin/sandbox-exec` is the verified first-class backend. Linux bubblewrap
-  support is implemented but experimental and not yet release-verified.
-
-Build the workspace:
+- Codex CLI for Codex hooks or `stateful codex`
+- OMP for the OMP `stateful` profile
+- A supported sandbox backend for `stateful sandbox run`; macOS Seatbelt is the
+  verified backend, while Linux bubblewrap support is experimental
 
 ```bash
 cargo build --workspace
-```
-
-Install the CLI from this repository:
-
-```bash
 cargo install --path crates/stateful-cli
 ```
 
-If you do not install it, use `target/debug/stateful` in the commands below. The
-benchmark binary is built as `target/debug/stateful-bench`.
+Without installation, use `target/debug/stateful` below. The benchmark binary is
+`target/debug/stateful-bench`.
 
-## Quick Start
+## Quick start
 
-Install the user-level stateful files. Without `--yes`, this command prints a
-dry-run plan.
+Install user-level files; omit `--yes` to inspect the dry-run plan:
 
 ```bash
 stateful install --yes
 ```
 
-### Codex
-
-Install Codex integration when you want global Codex hooks,
-`skills/stateful-command-policy/` (`SKILL.md`, `omp-tools.md`,
-`sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`), and
-`skills/dispatching-parallel-agents/SKILL.md`:
+Install the integration you use, then enable the repository:
 
 ```bash
+# Codex
 stateful install --agent codex --yes
 stateful enable
 stateful codex
-```
 
-### OMP
-
-Install OMP integration when you want the isolated OMP `stateful` profile,
-stateful hooks, native Stateful tool injection, built-in Bash preflight, OMP
-edit/write auto-declare/claim for missing scope, lazy resume fallbacks, and
-`skills/stateful-command-policy/` (`SKILL.md`, `omp-tools.md`,
-`sandbox-tools.md`, `denial-recovery.md`, `subagent-write-recovery.md`):
-
-```bash
+# OMP
 stateful install --agent omp --yes
 stateful enable
 ```
 
-Check local setup health:
+Check the runtime and inspect shared state before making source changes:
 
 ```bash
 stateful status
 stateful doctor
-```
-
-For a no-source-change first use, inspect current state:
-
-```bash
 stateful current
 ```
 
-Then read the write-flow notes below and use either the active-session native
-tools path or the manual reservation/claim path before making writes.
+`stateful doctor` reports journal footprint and growth and warns when the
+configured footprint threshold is reached. The canonical event journal is
+indefinite; events are not deleted solely because of their age.
 
-## Day-To-Day Coordination
+## Day-to-day coordination
 
-In normal `stateful codex` or OMP `stateful` profile use, lifecycle hooks bind
-the active `agent_id` and `workspace_id` for state operations. OMP derives its
-Stateful `agent_id` only from `ctx.sessionManager`: `getSessionId()` supplies the
-required session UUID and `getLeafId()`, when present, supplies the active branch.
-Stateful uses `omp-${sessionId}-${leafId}` when a leaf id exists and
-`omp-${sessionId}` otherwise. If `getSessionId()` is unavailable or invalid, OMP
-Stateful actions fail closed instead of reading event/ctx identity fields or
-inventing process, environment, or current-session-file identity. Codex hooks map
-Codex's hook `session_id` parameter to Stateful `agent_id`. There is no
-environment-variable fallback path for agents to maintain. Hook messages tell
-the agent when an explicit
-coordination step is needed.
+The enabled Codex and OMP integrations register sessions, maintain presence, and
+render context for the active actor. Rendered context has a delivery ID,
+sequence, and workspace version; the client acknowledges the delivered context
+so a later session can receive context it has not acknowledged.
 
-Manual CLI use outside an active agent session can declare scope, keep the
-returned reservation id, and inspect the current state:
+Before a supported write, inspect current context, declare the known scope, then
+complete an exact read of each target. Freshness is evidence from that completed
+read, not an assertion made when intent is declared. In an active agent session,
+prefer the native Stateful tools; outside one, the CLI can declare scope:
 
 ```bash
-reservation_id=$(stateful reservation declare --purpose "Update README content requested by the user." README.md | jq -r '.reservation_id')
+reservation_id=$(stateful reservation declare --agent-id <agent-id> --purpose "Update README content requested by the user." README.md | jq -r '.reservation_id')
 stateful current
 ```
 
-Server coordination defaults to enforcement; use
-`stateful server start --coordination-mode awareness` for warn-only awareness
-mode.
-
-Human-side coordination is explicit:
+Humans participate explicitly and remain in control:
 
 ```bash
 stateful human observe <path> [--summary <text>]
@@ -227,126 +119,47 @@ stateful human save-check <paths...>
 stateful reconcile ack --reservation-id <reservation_id> --resource <path> --files-reread <path> --summary <text> --decision adopt|reapply|ask_user|abandon
 ```
 
-The VS Code extension is an advisory save gate: it warns on server-reported
-human save conflicts and lets the human decide.
+The VS Code save gate is advisory. A completed handoff records the work, tests,
+and remaining work explicitly; when a session ends without one, the rendered
+context carries a fallback handoff rather than treating cleanup as a handoff.
 
-Inside an active Codex or OMP session, use the active Stateful coordination tools
-directly instead of shelling out to `stateful reservation declare`. Simple OMP
-native `edit`/`write` calls can rely on auto-declare/claim when no explicit
-reservation id is supplied and the only denial is missing reservation/scope. The
-explicit multi-resource write flow remains:
+See the [usage reference](docs/usage-reference.md) for command, hook, sandbox,
+LAN-sharing, and recovery details.
 
-```text
-read current state -> declare task reservation with known file set -> keep reservation_id -> acquire exact same-reservation claims for reserved paths -> reread targets -> write with the same reservation_id
-```
+## Journal migration and recovery
 
-Reservation and claim are separate on purpose. A reservation groups the task's
-known file and directory scopes under one purpose and one `reservation_id`, and
-can be expanded when the task discovers another target. Claim acquisition uses
-`reservation_id` plus `paths: string[]` so callers can acquire a batch from that
-reservation in one request. Each resulting claim still owns one exact file or
-directory resource and expires when the agent stops being fresh.
+Opening a legacy persistent database performs a guarded migration. The runtime
+preflights the source, creates a sibling SQLite backup such as
+`<database>.v1.backup.sqlite`, migrates into the schema-2 journal and shadow
+projections, validates replay, then commits the cutover. A failed validation does
+not silently replace the source.
 
-For native OMP `edit` and `write`, this fallback is the default simple-write
-path: when no explicit reservation id is supplied and the only denial is missing
-reservation/scope, the extension declares the exact file scope, acquires
-same-reservation claims, and retries authorization. When another active claim
-blocks a write, the writer can queue for that resource. When the resource is
-released or expires, the server reserves it for the next eligible waiter and
-stores a resume notification with a monotonic sequence for that target agent in
-that workspace. Polling returns pending notifications and marks the returned
-rows delivered. The SSE stream sends `id: <sequence>` plus the same `sequence`
-in JSON data without marking the notification delivered immediately; on
-reconnect, `Last-Event-ID` / `last-event-id` acknowledges notifications through
-that sequence and the server streams later pending notifications. During
-queued-reservation compatibility, wait records expose the same id as both
-`wait_id` and `reservation_id`; use that id for the eventual claim and write. In
-OMP, queued/conflicting edits, writes whose target changed before replay,
-unavailable authorization runtime, unsupported targets, explicit bad reservation
-ids, other denials, and external Bash commands waiting on a scoped grant remain
-lazy-resume cases. Agents call
-`lazy_edit_resume` for strict line-based patch replay, `lazy_write_resume` for
-captured write replay, or `lazy_bash_resume` to rerun a blocked external Bash
-command after approving its grant. If a lazy edit/write operation captured a
-`wait_id`, OMP first claims that queued reservation, then re-authorizes and
-applies with stale-target guards. Generated no-wait operation ids still require
-resolving the missing scope or claim externally before resume.
+Durable requests use receipts and outbox replay where the runtime cannot confirm
+a completion. An uncertain write remains an outcome-unknown condition until it
+is reconciled; do not assume it completed merely because a client disconnected.
 
-Detailed queue states, claim expiry behavior, and promotion rules are documented
-in [State model](docs/state-model.md),
-[Current-state coordination rationale/index](docs/current-state-coordination.md), and
-[Concurrency control spec](docs/concurrency-control-spec.md).
-
-## Command Execution
-
-Use native read/search tools for ordinary inspection. Do not use raw shell tools
-inside enabled Codex or OMP sessions when a stateful-native path exists.
-
-| Need | Use |
-| --- | --- |
-| Simple OMP repo file edit | Native `edit`/`write`; auto-declare/claim handles missing reservation/scope when no explicit reservation id is supplied |
-| Other repo file edit | Native edit/write tools after task-level reservation and exact same-reservation file claim |
-| Build or test command | `stateful sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command <cmd>` |
-| Command-shaped repo write | `stateful sandbox run --fs write-targets --reservation-id <reservation_id> --write-target <file> --command <cmd>` |
-| Local git operation | `stateful sandbox run --fs git --network disabled --command 'git <args>'` |
-| Remote git operation | Git sandbox profile with `--network enabled` |
-| GitHub PR list/view/status/create | `stateful sandbox run --fs github-pr --network enabled --command 'gh pr <list|view|status|create> ...'` |
-| Repo-external shell operation | `stateful sandbox run --fs external --purpose <purpose> --command <cmd>` for reads; add exact `--write-target`, `--create-target`, or `--write-dir` scopes for writes |
-
-Use repeated `--sequence <cmd>` instead of outer Bash `&&`/`;` when a sandboxed operation needs multiple setup steps. Stateful compiles the sequence into one sandbox-internal script, so the outer Bash call remains a single trusted `stateful sandbox run ...` command. Add `--sequence-shell /bin/zsh` only when the script needs a shell other than `/bin/sh`. The `git` and `github-pr` profiles reject `--sequence` because they validate one direct `git` or `gh pr` command.
-
-By default, `stateful sandbox run` passes the wrapped command's `stdout`,
-`stderr`, and exit code through unchanged. Add `--json` when automation needs the
-structured result envelope with `status`, `exit_code`, captured streams, and
-authorization metadata.
-
-In OMP, built-in Bash may run only strict trusted `stateful sandbox run ...`
-and `stateful sandbox process find ...` commands. Bare `stateful` is trusted
-only after session-start or per-tool preflight hash-verifies the first PATH
-`stateful` binary against the installed Stateful binary; otherwise use the
-installed absolute binary path. External write/create/write-dir/socket/signal
-scope and repo-external OMP native `edit`/`write` file targets auto-approve the
-scoped Stateful-owned OMP grant prompt by default through
-`stateful.autoApprove: true`, while sandbox scope validation, hooks,
-reservation/claim checks, and grant limits still apply. Set
-`stateful.autoApprove: false` to require the prompt. Repo-internal native OMP
-`edit` and `write` use auto-declare/claim as the default simple-write path when
-no explicit reservation id is supplied and
-the only denial is missing reservation/scope. Use `lazy_edit_resume` for
-queued/conflicting line-based OMP `edit` patches and `lazy_write_resume` for
-captured full OMP `write` replay; captured wait ids are claimed before
-re-authorization, while generated no-wait ids still require the missing scope or
-claim to be resolved externally. Use `lazy_bash_resume` to rerun a queued
-external Bash command after the scoped grant is approved.
-
-See [Usage reference](docs/usage-reference.md) for detailed CLI, hook, sandbox,
-LAN sharing, generated-file, and release notes.
-
-## Architecture At A Glance
+## Architecture at a glance
 
 ```text
-observe session or tool activity
--> register session and declare reservation
--> acquire or refresh exact advisory claims for reserved paths
--> authorize, queue, warn, or block coordination-sensitive actions
--> record activity and heartbeat
--> finalize activity and release claims
--> reserve released resources for queued waiters
--> notify reserved sessions so they can resume
+session or tool activity
+-> presence and scoped intent
+-> rendered current context and exact-read freshness
+-> supported write authorization (warn in awareness; enforce only when selected)
+-> durable journal receipt, handoff, and next-actor delivery
 ```
 
-The state server owns policy, persistence, TTLs, and conflict checks. Codex/OMP
-hooks observe and gate important agent actions. Native Stateful tools give
-agents a structured way to read and update coordination state. See
-[Architecture](docs/architecture.md) and
-[Implementation contract](docs/implementation-contract.md) for the concrete API,
-hook, runtime, storage, and test contracts.
+The state server owns policy, persistence, and conflict checks. Hooks and native
+tools supply the actor lifecycle and delivery acknowledgements. The canonical
+contracts are the [core concept](docs/core-concept.md),
+[state model](docs/state-model.md), [architecture](docs/architecture.md),
+[implementation contract](docs/implementation-contract.md), and
+[current-state coordination guide](docs/current-state-coordination.md).
 
-## LAN Runtime Sharing
+## LAN runtime sharing
 
-Use LAN mode when one Mac should host the stateful HTTP runtime for another Mac.
-The remote machine should connect through an SSH tunnel so the bearer token is
-not sent to a non-loopback `http://` address.
+Use LAN mode when one Mac hosts the runtime for another. Connect the remote
+machine through an SSH tunnel so the bearer token is not sent to a non-loopback
+plain-HTTP address:
 
 ```bash
 # host Mac
@@ -356,85 +169,46 @@ stateful server start --host 0.0.0.0 --workspace-id shared
 stateful server join http://127.0.0.1:43873 --token <token> --enable-repo
 ```
 
-`stateful server join` rejects non-loopback plain `http://` URLs unless explicitly
-allowed. See [Usage reference](docs/usage-reference.md#lan-runtime-sharing) for
-the full flow.
+`stateful server join` rejects non-loopback plain-HTTP URLs unless explicitly
+allowed. See the [usage reference](docs/usage-reference.md#server-lifecycle)
+for the complete flow.
 
-## Generated Local Files
+## Benchmark tooling
 
-`stateful_core` generates local runtime and integration files. These paths may
-contain absolute paths, local configuration, runtime state, benchmark artifacts,
-or bearer tokens and are ignored by default:
+Benchmark runs distinguish sequential, parallel-off, and explicit parallel-on
+arms. `parallel-on` is never implicit: a required three-arm gate must name all
+three arms, for example:
+
+```text
+--arms sequential,parallel-off,parallel-on
+```
+
+A credit-free smoke or a single trial validates plumbing only. It does not prove
+causal, statistical, quality, or safety superiority. See the benchmark guidance
+in the [usage reference](docs/usage-reference.md).
+
+## Generated local files
+
+Local runtime and integration state can contain absolute paths, local
+configuration, benchmark artifacts, or bearer tokens. These generated paths are
+ignored by default:
 
 - `.codex/`
 - `.stateful/`
 - `.stateful_core/`
 - `.stateful_bench/`
 
-Global installation writes under `$STATEFUL_HOME`, or `$HOME/.stateful_core`
-when `STATEFUL_HOME` is unset. Commit reusable documentation and source code, not
-local generated state.
-
-## Project Layout
-
-- `crates/stateful-core`: domain types, resource scope matching, current-state
-  rendering, reconciliation, and pure policy primitives.
-- `crates/stateful-store`: SQLite event store and current-state persistence,
-  split by mutation domain for claims, reservations, notifications, and activity.
-- `crates/stateful-server`: local HTTP API and store-backed policy service.
-- `crates/stateful-cli`: CLI, hook adapter, runtime discovery, repo registry,
-  outbox sync, native-tool guidance assets, and sandbox wrappers.
-- `crates/stateful-bench`: benchmark tooling for paired-agent, synthetic,
-  DeNovoSWE, and ProgramBench experiments.
-- `docs/`: concept, state model, architecture, implementation contract,
-  coordination, hardening-scope, ADR, and benchmark guidance.
-
-## Benchmark Tooling
-
-`stateful-bench run --mode no-state|awareness|stateful` covers the three
-benchmark arms: no coordination, awareness as the warn-only middle arm, and
-stateful enforcement. `stateful-bench compare` accepts `--awareness-run-dir`
-alongside stateful/no-state runs. The benchmark crate also includes synthetic
-coordination experiments, forced-overlap scripts
-(`overlap_manifest_generator.py`, `overlap_omp_agent.py`,
-`overlap_harness.py`), DeNovoSWE adapters for official AweAgent, host Codex CLI,
-and OMP CLI workflows, and ProgramBench condition runs with official
-ProgramBench evaluation and efficiency reporting.
-
-Benchmark artifacts live under `.stateful_bench/` and are intentionally ignored.
-Checked-in benchmark summaries live under [docs/benchmarks](docs/benchmarks/):
-the forced-overlap result verifies three-arm runner/compare plumbing without a
-differentiated safety outcome, and the ProgramBench note records completed
-inference trials plus the official-eval blocker. Do not infer quality wins from
-either artifact.
-
-For DeNovoSWE and ProgramBench setup, interpretation rules, and reusable command
-lines, read [DeNovoSWE Benchmark Guide](docs/denovo-benchmark-guide.md),
-[DeNovoSWE Benchmark Commands](docs/denovo-benchmark-commands.md), and
-[ProgramBench Benchmark Guide](docs/programbench-benchmark-guide.md). Official
-ProgramBench setup currently needs Python >=3.10; install from the upstream
-`facebookresearch/ProgramBench` source when PyPI does not provide a usable
-package for your interpreter.
+Global installation writes under `$STATEFUL_HOME`, or `$HOME/.stateful_core` when
+`STATEFUL_HOME` is unset. Commit reusable source and documentation, not generated
+state.
 
 ## Development
 
-Run the Rust test suite:
-
 ```bash
 cargo test --workspace
 ```
 
-Run formatting, linting, and tests:
-
-```bash
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-```
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution expectations and
-[Usage reference](docs/usage-reference.md#versioning-and-reclaims) for the local
-release workflow notes.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution expectations.
 
 ## Documentation
 
@@ -443,24 +217,15 @@ release workflow notes.
 - [State model](docs/state-model.md)
 - [Architecture](docs/architecture.md)
 - [Implementation contract](docs/implementation-contract.md)
-- [Current-state coordination rationale/index](docs/current-state-coordination.md)
-- [Concurrency control spec](docs/concurrency-control-spec.md)
-- [V1 hardening scope decisions](docs/v1-hardening-scope-decisions.md)
-- [DeNovoSWE Benchmark Guide](docs/denovo-benchmark-guide.md)
-- [DeNovoSWE Benchmark Commands](docs/denovo-benchmark-commands.md)
-- [ProgramBench Benchmark Guide](docs/programbench-benchmark-guide.md)
+- [Current-state coordination guide](docs/current-state-coordination.md)
 - [ADR 0001: State-first, not memory-first](docs/adr/0001-state-first-not-memory-first.md)
+- [ADR 0002: Presence-first, not lock-first](docs/adr/0002-presence-first-not-lock-first.md)
+- [Historical V1 hardening scope decisions](docs/v1-hardening-scope-decisions.md)
 
-Some historical implementation plans and specs are tracked under
-`docs/superpowers/` for traceability. New local scratch plans under that tree are
-ignored by default.
+Historical implementation plans and specs under `.superpowers/` are retained for
+traceability; they are not current runtime instructions.
 
 ## License
 
 `stateful_core` is licensed under the GNU Affero General Public License version
 3.0 only. See [LICENSE](LICENSE).
-
-Why AGPL? `stateful_core` is intended to remain open even when it is used behind
-local or network services. The license is part of keeping improvements to the
-coordination layer available to the people who depend on it.
-

@@ -176,6 +176,26 @@ fn install_codex_yes_creates_global_files_and_merges_codex_config() {
     ));
     assert_eq!(count(&first_config, "[features]"), 1);
 
+    let installed_policy = fs::read_to_string(
+        fixture
+            .codex_config_parent()
+            .join("skills/stateful-command-policy/SKILL.md"),
+    )
+    .expect("installed command policy should read");
+    let source_policy = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/stateful-command-policy/SKILL.md"),
+    )
+    .expect("source command policy should read");
+    assert_eq!(installed_policy, source_policy);
+    assert!(
+        installed_policy.contains("Awareness is the default coordination mode."),
+        "installed policy must make awareness the default"
+    );
+    assert!(
+        !installed_policy.contains("enforcement mode by default"),
+        "installed policy must not instruct enforcement by default"
+    );
+
     apply_codex_install(fixture.codex_options(true)).expect("install should be idempotent");
 
     let second_config =

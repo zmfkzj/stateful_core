@@ -96,10 +96,12 @@ impl<T> RequestEnvelope<T> {
 
 impl<T: DeserializeOwned> RequestEnvelope<T> {
     pub fn from_json(input: impl AsRef<str>) -> Result<Self, V2Error> {
-        let value: serde_json::Value = serde_json::from_str(input.as_ref()).map_err(|error| {
-            V2Error::new("invalid_request_envelope", error.to_string())
-        })?;
-        match value.get("protocol_version").and_then(serde_json::Value::as_str) {
+        let value: serde_json::Value = serde_json::from_str(input.as_ref())
+            .map_err(|error| V2Error::new("invalid_request_envelope", error.to_string()))?;
+        match value
+            .get("protocol_version")
+            .and_then(serde_json::Value::as_str)
+        {
             Some("stateful.v2") => {}
             Some(_) => {
                 return Err(V2Error::new(

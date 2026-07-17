@@ -2,9 +2,11 @@
 
 Native Codex or OMP subagents must recover write authorization in their own active native tool context. They must not repair identity through shell commands, environment overrides, or hook-state archaeology.
 
+Awareness is the default coordination mode: missing scope or claim can be advisory, but stale exact evidence, unknown write outcomes, active write fences, and unreconciled high-confidence human writes remain hard stops in every subagent context.
+
 ## Recovery Flow
 
-When a subagent hits `apply_patch writes require ... same-reservation file claim`, `Target is outside active reservation scope`, `missing_reservation`, `missing_claim`, `claim_conflict`, or `state_reservation_declare cannot resolve active agent identity`:
+When a subagent hits `apply_patch writes require ... same-reservation file claim`, `Target is outside active reservation scope`, `missing_reservation`, `missing_claim`, `coordination_conflict`, or `state_reservation_declare cannot resolve active agent identity`:
 
 1. Stop retrying command variants; denials are the API.
 2. Re-read the exact target if it exists.

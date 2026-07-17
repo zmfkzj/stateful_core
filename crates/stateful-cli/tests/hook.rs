@@ -5,7 +5,11 @@ use std::{
     net::TcpListener,
     path::Path,
     process::{Command, Stdio},
-    sync::mpsc,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+        mpsc,
+    },
     thread,
     time::Duration,
 };
@@ -305,7 +309,10 @@ fn normal_read_posts_structural_completion_with_one_operation_id() {
     assert!(complete.contains("POST /v2/read/complete HTTP/1.1"));
     let complete_body = request_json_body(&complete);
     assert_eq!(complete_body["payload"]["operation_id"], "read-call-1");
-    assert_eq!(complete_body["payload"]["classification"], "structural_summary");
+    assert_eq!(
+        complete_body["payload"]["classification"],
+        "structural_summary"
+    );
     assert!(complete_body["payload"].get("after").is_none());
     let result_identity = rx
         .recv_timeout(Duration::from_secs(2))
@@ -390,27 +397,27 @@ fn partial_or_truncated_read_completes_without_baseline() {
         let request = rx.recv().expect("post-read identity request should arrive");
         assert!(request.contains("GET /v2/runtime/identity?"));
     }
-        let complete = rx
-            .recv_timeout(Duration::from_millis(200))
-            .expect("partial read completion should arrive");
-        assert!(
-            complete.contains("POST /v2/read/complete HTTP/1.1"),
-            "{complete}"
-        );
-        let body = request_json_body(&complete);
-        assert_eq!(body["payload"]["operation_id"], "partial-read-1");
-        assert_eq!(body["payload"]["classification"], "partial");
-        assert!(body["payload"].get("after").is_none());
-        let update = rx
-            .recv()
-            .expect("partial read presence update should arrive");
-        assert!(
-            update.contains("POST /v2/presence/update HTTP/1.1"),
-            "{update}"
-        );
-        let body = request_json_body(&update);
-        assert_eq!(body["payload"]["kind"], "tool_result");
-        assert_eq!(body["payload"]["outcome"], "partial");
+    let complete = rx
+        .recv_timeout(Duration::from_millis(200))
+        .expect("partial read completion should arrive");
+    assert!(
+        complete.contains("POST /v2/read/complete HTTP/1.1"),
+        "{complete}"
+    );
+    let body = request_json_body(&complete);
+    assert_eq!(body["payload"]["operation_id"], "partial-read-1");
+    assert_eq!(body["payload"]["classification"], "partial");
+    assert!(body["payload"].get("after").is_none());
+    let update = rx
+        .recv()
+        .expect("partial read presence update should arrive");
+    assert!(
+        update.contains("POST /v2/presence/update HTTP/1.1"),
+        "{update}"
+    );
+    let body = request_json_body(&update);
+    assert_eq!(body["payload"]["kind"], "tool_result");
+    assert_eq!(body["payload"]["outcome"], "partial");
 }
 
 #[test]
@@ -458,7 +465,6 @@ fn failed_optional_read_presence_update_does_not_skip_prior_completion() {
     );
 }
 
-
 #[test]
 fn omp_raw_reads_use_the_underlying_file_for_lifecycle_fingerprints() {
     let temp = tempfile::tempdir().expect("temp dir should create");
@@ -491,7 +497,11 @@ fn omp_raw_reads_use_the_underlying_file_for_lifecycle_fingerprints() {
     .to_string();
 
     let pre = run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "pre-tool-use"], &input);
-    assert!(pre.status.success(), "{}", String::from_utf8_lossy(&pre.stderr));
+    assert!(
+        pre.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pre.stderr)
+    );
     for _ in 0..2 {
         let identity = rx
             .recv_timeout(Duration::from_secs(2))
@@ -504,8 +514,17 @@ fn omp_raw_reads_use_the_underlying_file_for_lifecycle_fingerprints() {
     );
     assert_eq!(start["payload"]["path"], "src/read.txt");
 
-    let post = run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "post-tool-use"], &input);
-    assert!(post.status.success(), "{}", String::from_utf8_lossy(&post.stderr));
+    let post = run_hook_subprocess(
+        &repo_root,
+        &paths,
+        &["hook", "omp", "post-tool-use"],
+        &input,
+    );
+    assert!(
+        post.status.success(),
+        "{}",
+        String::from_utf8_lossy(&post.stderr)
+    );
     let mut post_requests = Vec::new();
     while let Ok(request) = rx.recv_timeout(Duration::from_millis(200)) {
         post_requests.push(request);
@@ -540,8 +559,7 @@ fn omp_namespaced_nested_raw_read_selectors_use_file_target_and_are_partial() {
         let paths = GlobalPaths::new(temp.path().join("home"));
         let repo_root = temp.path().join("repo");
         fs::create_dir_all(repo_root.join("src")).expect("repo source should create");
-        fs::write(repo_root.join("src/read.txt"), "contents\n")
-            .expect("read fixture should write");
+        fs::write(repo_root.join("src/read.txt"), "contents\n").expect("read fixture should write");
         enable_test_repo(&paths, &repo_root);
         let (runtime, rx) = spawn_v2_started_deny_server();
         write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
@@ -555,8 +573,7 @@ fn omp_namespaced_nested_raw_read_selectors_use_file_target_and_are_partial() {
         })
         .to_string();
 
-        let pre =
-            run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "pre-tool-use"], &input);
+        let pre = run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "pre-tool-use"], &input);
         assert!(
             String::from_utf8_lossy(&pre.stdout).contains(r#""decision":"allow""#),
             "nested selector should be allowed: {}",
@@ -568,9 +585,17 @@ fn omp_namespaced_nested_raw_read_selectors_use_file_target_and_are_partial() {
         );
         assert_eq!(start["payload"]["path"], "src/read.txt");
 
-        let post =
-            run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "post-tool-use"], &input);
-        assert!(post.status.success(), "{}", String::from_utf8_lossy(&post.stderr));
+        let post = run_hook_subprocess(
+            &repo_root,
+            &paths,
+            &["hook", "omp", "post-tool-use"],
+            &input,
+        );
+        assert!(
+            post.status.success(),
+            "{}",
+            String::from_utf8_lossy(&post.stderr)
+        );
         let mut requests = Vec::new();
         while let Ok(request) = rx.recv_timeout(Duration::from_millis(250)) {
             requests.push(request);
@@ -596,9 +621,11 @@ fn omp_namespaced_nested_raw_read_selectors_use_file_target_and_are_partial() {
             let body = request_json_body(request);
             body["payload"]["kind"] == "tool_result" && body["payload"]["outcome"] == "partial"
         }));
-        assert!(requests.iter().any(|request| {
-            request_json_body(request)["payload"]["kind"] == "heartbeat"
-        }));
+        assert!(
+            requests
+                .iter()
+                .any(|request| { request_json_body(request)["payload"]["kind"] == "heartbeat" })
+        );
     }
 }
 
@@ -623,7 +650,11 @@ fn denied_recognized_test_commands_do_not_emit_testing_starts() {
         &["hook", "codex", "pre-tool-use"],
         &codex,
     );
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
         rx.recv_timeout(Duration::from_millis(250)).is_err(),
         "denied Codex command must not enter Testing"
@@ -637,9 +668,12 @@ fn denied_recognized_test_commands_do_not_emit_testing_starts() {
         "tool_input": { "command": "cargo test" }
     })
     .to_string();
-    let output =
-        run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "pre-tool-use"], &omp);
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "pre-tool-use"], &omp);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
         rx.recv_timeout(Duration::from_millis(250)).is_err(),
         "denied OMP command must not enter Testing"
@@ -666,13 +700,13 @@ fn codex_permitted_tests_emit_typed_results_and_heartbeats() {
             "tool_input": { "command": command }
         })
         .to_string();
-        let output = run_hook_subprocess(
-            &repo_root,
-            &paths,
-            &["hook", "codex", "pre-tool-use"],
-            &pre,
+        let output =
+            run_hook_subprocess(&repo_root, &paths, &["hook", "codex", "pre-tool-use"], &pre);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
         );
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         let start_request = rx.recv_timeout(Duration::from_secs(2)).unwrap_or_else(|_| {
             panic!(
                 "testing start should arrive; stdout: {}; stderr: {}",
@@ -698,7 +732,11 @@ fn codex_permitted_tests_emit_typed_results_and_heartbeats() {
             &["hook", "codex", "post-tool-use"],
             &post,
         );
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let requests = (0..2)
             .map(|_| {
                 request_json_body(
@@ -710,8 +748,7 @@ fn codex_permitted_tests_emit_typed_results_and_heartbeats() {
         assert!(requests.iter().any(|body| {
             body["payload"]["kind"] == "tool_result"
                 && body["payload"]["tool_name"] == "pytest"
-                && body["payload"]["outcome"]
-                    == if success { "succeeded" } else { "failed" }
+                && body["payload"]["outcome"] == if success { "succeeded" } else { "failed" }
         }));
         assert!(
             requests
@@ -744,7 +781,11 @@ fn omp_permitted_tests_emit_typed_results_and_heartbeats() {
         .to_string();
         let output =
             run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "pre-tool-use"], &pre);
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let start = request_json_body(
             &rx.recv_timeout(Duration::from_secs(2))
                 .expect("testing start should arrive"),
@@ -763,7 +804,11 @@ fn omp_permitted_tests_emit_typed_results_and_heartbeats() {
         .to_string();
         let output =
             run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "post-tool-use"], &post);
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let requests = (0..2)
             .map(|_| {
                 request_json_body(
@@ -775,8 +820,7 @@ fn omp_permitted_tests_emit_typed_results_and_heartbeats() {
         assert!(requests.iter().any(|body| {
             body["payload"]["kind"] == "tool_result"
                 && body["payload"]["tool_name"] == "pytest"
-                && body["payload"]["outcome"]
-                    == if success { "succeeded" } else { "failed" }
+                && body["payload"]["outcome"] == if success { "succeeded" } else { "failed" }
         }));
         assert!(
             requests
@@ -811,7 +855,11 @@ fn lost_read_start_response_queues_failed_completion_and_replays_frozen_envelope
         &["hook", "codex", "pre-tool-use"],
         &input,
     );
-    assert!(pre.status.success(), "{}", String::from_utf8_lossy(&pre.stderr));
+    assert!(
+        pre.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pre.stderr)
+    );
     let accepted = dropped
         .recv_timeout(Duration::from_secs(2))
         .expect("read start should reach the server before its response is lost");
@@ -821,9 +869,15 @@ fn lost_read_start_response_queues_failed_completion_and_replays_frozen_envelope
     let pending = fs::read_to_string(&outbox_file)
         .expect("lost read start should remain durable")
         .lines()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("outbox line should parse"))
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).expect("outbox line should parse")
+        })
         .collect::<Vec<_>>();
-    assert_eq!(pending.len(), 2, "failed start must have a terminal completion");
+    assert_eq!(
+        pending.len(),
+        2,
+        "failed start must have a terminal completion"
+    );
     assert_eq!(pending[0]["route"], "/v2/read/start");
     assert_eq!(pending[1]["route"], "/v2/read/complete");
     assert_eq!(
@@ -853,10 +907,8 @@ fn lost_read_start_response_queues_failed_completion_and_replays_frozen_envelope
         "failed"
     );
 
-    let (replay_runtime, replayed) = spawn_fake_stateful_server_sequence(vec![
-        r#"{"status":"ok"}"#,
-        r#"{"status":"ok"}"#,
-    ]);
+    let (replay_runtime, replayed) =
+        spawn_fake_stateful_server_sequence(vec![r#"{"status":"ok"}"#, r#"{"status":"ok"}"#]);
     assert_eq!(
         sync_outbox_with_runtime(&paths, &replay_runtime).expect("restart should replay both"),
         2
@@ -906,7 +958,11 @@ fn lost_read_complete_response_replays_the_frozen_completion_after_restart() {
         &["hook", "codex", "pre-tool-use"],
         &input,
     );
-    assert!(pre.status.success(), "{}", String::from_utf8_lossy(&pre.stderr));
+    assert!(
+        pre.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pre.stderr)
+    );
     assert!(
         received
             .recv_timeout(Duration::from_secs(2))
@@ -920,7 +976,11 @@ fn lost_read_complete_response_replays_the_frozen_completion_after_restart() {
         &["hook", "codex", "post-tool-use"],
         &input,
     );
-    assert!(post.status.success(), "{}", String::from_utf8_lossy(&post.stderr));
+    assert!(
+        post.status.success(),
+        "{}",
+        String::from_utf8_lossy(&post.stderr)
+    );
     let accepted = received
         .recv_timeout(Duration::from_secs(2))
         .expect("read completion should reach the server before its response is lost");
@@ -930,13 +990,14 @@ fn lost_read_complete_response_replays_the_frozen_completion_after_restart() {
     let pending = fs::read_to_string(&outbox_file)
         .expect("lost completion should remain durable")
         .lines()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("outbox line should parse"))
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).expect("outbox line should parse")
+        })
         .collect::<Vec<_>>();
     let frozen = pending
         .iter()
         .find(|record| record["route"] == "/v2/read/complete")
-        .expect("read completion should be queued")
-        ["request_envelope"]
+        .expect("read completion should be queued")["request_envelope"]
         .as_str()
         .expect("completion should be frozen")
         .to_string();
@@ -967,7 +1028,10 @@ fn lost_read_complete_response_replays_the_frozen_completion_after_restart() {
             .split_once("\r\n\r\n")
             .is_some_and(|(_, body)| body == frozen)
     }));
-    assert!(!outbox_file.exists(), "replayed completion should be acknowledged");
+    assert!(
+        !outbox_file.exists(),
+        "replayed completion should be acknowledged"
+    );
 }
 
 #[test]
@@ -981,7 +1045,11 @@ fn lost_stop_response_replays_the_frozen_finalize_after_restart() {
     let input = r#"{"agent_id":"codex-agent-1","hook_event_name":"Stop"}"#;
 
     let output = run_hook_subprocess(&repo_root, &paths, &["hook", "codex", "stop"], input);
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let accepted = received
         .recv_timeout(Duration::from_secs(2))
         .expect("finalize should reach the server before its response is lost");
@@ -991,7 +1059,9 @@ fn lost_stop_response_replays_the_frozen_finalize_after_restart() {
     let pending = fs::read_to_string(&outbox_file)
         .expect("lost finalize should remain durable")
         .lines()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("outbox line should parse"))
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).expect("outbox line should parse")
+        })
         .collect::<Vec<_>>();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0]["route"], "/v2/activity/finalize");
@@ -1006,7 +1076,8 @@ fn lost_stop_response_replays_the_frozen_finalize_after_restart() {
         frozen
     );
 
-    let (replay_runtime, replayed) = spawn_fake_stateful_server_sequence(vec![r#"{"status":"ok"}"#]);
+    let (replay_runtime, replayed) =
+        spawn_fake_stateful_server_sequence(vec![r#"{"status":"ok"}"#]);
     assert_eq!(
         sync_outbox_with_runtime(&paths, &replay_runtime).expect("restart should replay finalize"),
         1
@@ -1021,7 +1092,10 @@ fn lost_stop_response_replays_the_frozen_finalize_after_restart() {
             .1,
         frozen
     );
-    assert!(!outbox_file.exists(), "replayed finalize should be acknowledged");
+    assert!(
+        !outbox_file.exists(),
+        "replayed finalize should be acknowledged"
+    );
 }
 
 #[test]
@@ -1107,7 +1181,6 @@ fn pre_write_returns_intent_and_post_success_commits_it() {
     assert_eq!(body["payload"]["outcome"], "committed");
     assert!(body["payload"]["post_fingerprints"][0][1]["sha256"].is_string());
 }
-
 
 #[test]
 fn denied_v2_write_intent_completes_the_exact_started_intent_as_failed() {
@@ -3650,13 +3723,12 @@ fn omp_write_authorize_records_runtime_lineage_without_commit_policy_input() {
     })
     .to_string();
 
-    let output = run_hook_subprocess(
-        &repo_root,
-        &paths,
-        &["hook", "omp", "pre-tool-use"],
-        &input,
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "pre-tool-use"], &input);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     for _ in 0..2 {
         let identity_request = rx.recv().expect("identity request should arrive");
         assert!(identity_request.starts_with("GET /v2/runtime/identity?"));
@@ -4199,13 +4271,12 @@ fn omp_edit_extracts_hashline_file_targets() {
     })
     .to_string();
 
-    let output = run_hook_subprocess(
-        &repo_root,
-        &paths,
-        &["hook", "omp", "pre-tool-use"],
-        &input,
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "pre-tool-use"], &input);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     for _ in 0..2 {
         let identity_request = rx.recv().expect("identity request should arrive");
         assert!(identity_request.starts_with("GET /v2/runtime/identity?"));
@@ -4296,19 +4367,21 @@ fn omp_write_uses_tool_input_reservation_when_top_level_reservation_is_blank() {
     })
     .to_string();
 
-    let output = run_hook_subprocess(
-        &repo_root,
-        &paths,
-        &["hook", "omp", "pre-tool-use"],
-        &input,
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "pre-tool-use"], &input);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     for _ in 0..2 {
         let identity_request = rx.recv().expect("identity request should arrive");
         assert!(identity_request.starts_with("GET /v2/runtime/identity?"));
     }
     let authorize = request_json_body(&rx.recv().expect("authorize should arrive"));
-    assert_eq!(authorize["payload"]["reservation_id"], "explicit-reservation");
+    assert_eq!(
+        authorize["payload"]["reservation_id"],
+        "explicit-reservation"
+    );
 }
 
 #[test]
@@ -4341,13 +4414,12 @@ fn omp_write_releases_auto_claim_when_retry_authorization_blocks() {
     })
     .to_string();
 
-    let output = run_hook_subprocess(
-        &repo_root,
-        &paths,
-        &["hook", "omp", "pre-tool-use"],
-        &input,
+    let output = run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "pre-tool-use"], &input);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     for _ in 0..2 {
         let identity_request = rx.recv().expect("identity request should arrive");
         assert!(identity_request.starts_with("GET /v2/runtime/identity?"));
@@ -4395,9 +4467,17 @@ fn omp_raw_bash_authorizes_trusted_write_target_sandbox_run() {
     })
     .to_string();
     let output = run_hook_subprocess(&repo_root, &paths, &["hook", "omp", "pre-tool-use"], &input);
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     for _ in 0..2 {
-        assert!(rx.recv().expect("identity request should arrive").starts_with("GET /v2/runtime/identity?"));
+        assert!(
+            rx.recv()
+                .expect("identity request should arrive")
+                .starts_with("GET /v2/runtime/identity?")
+        );
     }
     let body = request_json_body(&rx.recv().expect("authorize request should arrive"));
     assert_eq!(body["payload"]["action"], "write_file");
@@ -5223,7 +5303,10 @@ fn pre_tool_use_apply_patch_posts_authorize_and_allows_when_server_allows() {
     let body = request_json_body(&request);
     assert_eq!(body["protocol_version"], "stateful.v2");
     assert_eq!(body["agent"]["agent_id"], "s1");
-    assert_eq!(body["workspace"]["workspace_id"], "w1");
+    assert_eq!(
+        body["workspace"]["workspace_id"],
+        workspace_id_for_enabled_repo(&paths, &repo_root).expect("repo workspace id should load")
+    );
     assert!(
         body["workspace"]["repo_id"]
             .as_str()
@@ -5617,10 +5700,11 @@ fn hook_pre_tool_use_discovers_global_runtime_file() {
     fs::create_dir_all(&repo_root).expect("repo root should be creatable");
     let paths = GlobalPaths::new(temp_root.join("home"));
     enable_test_repo(&paths, &repo_root);
-    let (runtime, rx) = spawn_fake_stateful_server(
+    let runtime_pid = Arc::new(AtomicU32::new(0));
+    let (mut runtime, rx) = spawn_fake_stateful_server_with_runtime_pid(
         r#"{"decision":"allow","reason_code":"authorized","message":"ok","required_next_action":null}"#,
+        Arc::clone(&runtime_pid),
     );
-    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
 
     let input = r#"{
       "agent_id": "s-global",
@@ -5643,6 +5727,9 @@ fn hook_pre_tool_use_discovers_global_runtime_file() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("stateful hook should spawn");
+    runtime.pid = child.id();
+    runtime_pid.store(runtime.pid, Ordering::Release);
+    write_global_runtime_file(&paths, &runtime).expect("global runtime file should write");
     let mut stdin = child.stdin.take().expect("stdin should be piped");
     stdin
         .write_all(input.as_bytes())
@@ -5659,7 +5746,7 @@ fn hook_pre_tool_use_discovers_global_runtime_file() {
     );
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v2/authorize HTTP/1.1"));
-    assert!(request.contains("\"workspace_id\":\"w1\""));
+    assert_eq!(request_json_body(&request)["workspace"]["workspace_id"], "w1");
 }
 
 #[test]
@@ -5844,7 +5931,10 @@ fn session_start_posts_session_register() {
     let request = rx.recv().expect("captured request should arrive");
     assert!(request.contains("POST /v2/session/register HTTP/1.1"));
     assert!(request.contains("\"agent_id\":\"s1\""));
-    assert!(request.contains("\"workspace_id\":\"w1\""));
+    assert_eq!(
+        request_json_body(&request)["workspace"]["workspace_id"],
+        workspace_id_for_enabled_repo(&paths, &repo_root).expect("repo workspace id should load")
+    );
 }
 
 #[test]
@@ -5893,8 +5983,14 @@ fn stop_posts_activity_finalize() {
     assert!(request.contains("POST /v2/activity/finalize HTTP/1.1"));
     let body = request_json_body(&request);
     assert_eq!(body["agent"]["agent_id"], "s1");
-    assert_eq!(body["workspace"]["workspace_id"], "w1");
-    assert!(body["payload"].is_null(), "unspecified Stop must use automatic fallback");
+    assert_eq!(
+        body["workspace"]["workspace_id"],
+        workspace_id_for_enabled_repo(&paths, &repo_root).expect("repo workspace id should load")
+    );
+    assert!(
+        body["payload"].is_null(),
+        "unspecified Stop must use automatic fallback"
+    );
 
     let explicit = r#"{
       "agent_id": "s1",
@@ -6084,6 +6180,7 @@ fn spawn_fake_stateful_server_sequence_with_current(
 fn spawn_v2_started_deny_server() -> (ServerRuntime, mpsc::Receiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener.local_addr().expect("listener addr should load");
+
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         while let Ok((mut stream, _)) = listener.accept() {
@@ -6092,7 +6189,8 @@ fn spawn_v2_started_deny_server() -> (ServerRuntime, mpsc::Receiver<String>) {
                 write_json_response(&mut stream, fake_v2_runtime_identity());
                 continue;
             }
-            tx.send(request.clone()).expect("request should send to test");
+            tx.send(request.clone())
+                .expect("request should send to test");
             let body = if request.starts_with("POST /v2/authorize ") {
                 r#"{"intent_id":"intent-denied-1","decision":{"decision":"deny","reason_code":"denied","message":"blocked"}}"#
             } else {
@@ -6103,6 +6201,48 @@ fn spawn_v2_started_deny_server() -> (ServerRuntime, mpsc::Receiver<String>) {
     });
     (
         ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 42),
+        rx,
+    )
+}
+
+fn spawn_fake_stateful_server_with_runtime_pid(
+    actual_response: &'static str,
+    runtime_pid: Arc<AtomicU32>,
+) -> (ServerRuntime, mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener.local_addr().expect("listener addr should load");
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        while let Ok((mut stream, _)) = listener.accept() {
+            let request = read_http_request_maybe_body(&mut stream);
+            if request.starts_with("GET /v2/runtime/identity?") {
+                let response = serde_json::json!({
+                    "protocol_version": "stateful.v2",
+                    "journal_schema_version": 2,
+                    "coordination_mode": "awareness",
+                    "pid": runtime_pid.load(Ordering::Acquire),
+                    "workspace_id": "w1",
+                    "workspace_version": 1,
+                    "capabilities": ["presence"],
+                })
+                .to_string();
+                write_json_response(&mut stream, &response);
+                continue;
+            }
+            if request.contains("GET /health HTTP/1.1") {
+                write_json_response(&mut stream, r#"{"status":"ok"}"#);
+                continue;
+            }
+            tx.send(request.clone())
+                .expect("request should send to test");
+            let response = migrate_fake_authorize_response(&request, actual_response);
+            write_json_response(&mut stream, &response);
+            break;
+        }
+    });
+
+    (
+        ServerRuntime::new(format!("http://{addr}"), "secret-token", "w1", 0),
         rx,
     )
 }
@@ -6118,7 +6258,8 @@ fn spawn_server_dropping_presence_update() -> (ServerRuntime, mpsc::Receiver<Str
                 write_json_response(&mut stream, fake_v2_runtime_identity());
                 continue;
             }
-            tx.send(request.clone()).expect("request should send to test");
+            tx.send(request.clone())
+                .expect("request should send to test");
             if request.starts_with("POST /v2/presence/update ") {
                 break;
             }
@@ -6175,7 +6316,8 @@ fn spawn_server_dropping_route(route: &'static str) -> (ServerRuntime, mpsc::Rec
                 write_json_response(&mut stream, fake_v2_runtime_identity());
                 continue;
             }
-            tx.send(request.clone()).expect("request should send to test");
+            tx.send(request.clone())
+                .expect("request should send to test");
             if request.starts_with(route) {
                 drop(stream);
                 break;
@@ -6246,9 +6388,9 @@ fn run_hook_subprocess_from_with_extra_env(
     let fixture_runtime = fs::read_to_string(&paths.server_json)
         .ok()
         .and_then(|contents| serde_json::from_str::<ServerRuntime>(&contents).ok());
-    let has_runtime_override = extra_env.iter().any(|(key, _)| {
-        *key == "STATEFUL_SERVER_URL" || *key == "STATEFUL_SERVER_TOKEN"
-    });
+    let has_runtime_override = extra_env
+        .iter()
+        .any(|(key, _)| *key == "STATEFUL_SERVER_URL" || *key == "STATEFUL_SERVER_TOKEN");
     let mut command = Command::new(env!("CARGO_BIN_EXE_stateful"));
     command
         .args(args)

@@ -40,7 +40,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
@@ -2256,19 +2256,152 @@ fn stateful_server_args(mode: RunMode, port: u16, workspace_id: &str) -> Vec<Str
     args
 }
 
+#[derive(Deserialize)]
+struct StatefulRuntime {
+    base_url: String,
+    token: String,
+    workspace_id: String,
+}
+
+#[derive(Serialize)]
+struct StatefulV2QueryEnvelope<'a, Q> {
+    protocol_version: &'static str,
+    request_id: String,
+    observed_at: String,
+    agent_id: &'static str,
+    actor_id: &'static str,
+    actor_type: &'static str,
+    root: &'static str,
+    workspace_id: &'a str,
+    repo_id: &'static str,
+    worktree_id: &'static str,
+    branch: &'static str,
+    kind: &'static str,
+    event: &'static str,
+    tool_name: &'static str,
+    source_ref: &'static str,
+    #[serde(flatten)]
+    query: Q,
+}
+
+#[derive(Serialize)]
+struct CurrentQuery {}
+
+#[derive(Serialize)]
+struct EventsQuery {
+    limit: u64,
+}
+
+fn stateful_v2_query_url<Q: Serialize>(
+    runtime: &StatefulRuntime,
+    path: &str,
+    query: Q,
+) -> Result<String> {
+    let envelope = StatefulV2QueryEnvelope {
+        protocol_version: "stateful.v2",
+        request_id: uuid::Uuid::new_v4().to_string(),
+        observed_at: stateful_v2_observed_at(),
+        agent_id: "stateful-bench",
+        actor_id: "stateful-bench",
+        actor_type: "agent",
+        root: "unknown",
+        workspace_id: &runtime.workspace_id,
+        repo_id: "unknown",
+        worktree_id: "unknown",
+        branch: "unknown",
+        kind: "cli",
+        event: "benchmark_telemetry",
+        tool_name: "stateful-bench",
+        source_ref: "stateful-bench",
+        query,
+    };
+    let Value::Object(fields) = serde_json::to_value(envelope)? else {
+        anyhow::bail!("stateful V2 query envelope did not serialize as an object");
+    };
+    let mut pairs = fields
+        .into_iter()
+        .filter_map(|(key, value)| match value {
+            Value::Null => None,
+            Value::String(value) => Some(Ok((key, value))),
+            Value::Bool(value) => Some(Ok((key, value.to_string()))),
+            Value::Number(value) => Some(Ok((key, value.to_string()))),
+            _ => Some(Err(anyhow::anyhow!(
+                "stateful V2 query envelope field {key} must be scalar"
+            ))),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    pairs.sort_by(|left, right| left.0.cmp(&right.0));
+    let query = pairs
+        .into_iter()
+        .map(|(key, value)| {
+            format!(
+                "{}={}",
+                stateful_v2_query_component(&key),
+                stateful_v2_query_component(&value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    Ok(format!(
+        "{}{path}?{query}",
+        runtime.base_url.trim_end_matches('/')
+    ))
+}
+
+fn stateful_v2_query_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            byte => {
+                encoded.push('%');
+                encoded.push(HEX[(byte >> 4) as usize] as char);
+                encoded.push(HEX[(byte & 0x0f) as usize] as char);
+            }
+        }
+    }
+    encoded
+}
+
+fn stateful_v2_observed_at() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let days = seconds.div_euclid(86_400);
+    let seconds_of_day = seconds.rem_euclid(86_400);
+    let (year, month, day) = stateful_v2_civil_date(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        seconds_of_day / 3_600,
+        (seconds_of_day % 3_600) / 60,
+        seconds_of_day % 60,
+    )
+}
+
+fn stateful_v2_civil_date(days: i64) -> (i64, i64, i64) {
+    let days = days + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    (year, month, day)
+}
+
 fn export_coordination_events(stateful_home: &Path, pair_dir: &Path) -> Result<()> {
-    let runtime: Value = read_json_file(stateful_home.join("runtime/server.json"))?;
-    let base_url = runtime
-        .get("base_url")
-        .and_then(Value::as_str)
-        .context("stateful runtime missing base_url")?;
-    let token = runtime
-        .get("token")
-        .and_then(Value::as_str)
-        .context("stateful runtime missing token")?;
-    let url = format!("{}/v1/events", base_url.trim_end_matches('/'));
+    let runtime: StatefulRuntime = read_json_file(stateful_home.join("runtime/server.json"))?;
+    let url = stateful_v2_query_url(&runtime, "/v2/events", EventsQuery { limit: 100 })?;
     let body = ureq::get(&url)
-        .set("Authorization", &format!("Bearer {token}"))
+        .set("Authorization", &format!("Bearer {}", runtime.token))
         .call()
         .context("failed to export stateful coordination events")?
         .into_string()
@@ -2303,18 +2436,14 @@ fn wait_for_stateful_ready(
 
 fn stateful_current_is_ready(stateful_home: &Path) -> bool {
     let runtime_path = stateful_home.join("runtime/server.json");
-    let Ok(runtime) = read_json_file::<Value>(&runtime_path) else {
+    let Ok(runtime) = read_json_file::<StatefulRuntime>(&runtime_path) else {
         return false;
     };
-    let Some(base_url) = runtime.get("base_url").and_then(Value::as_str) else {
+    let Ok(url) = stateful_v2_query_url(&runtime, "/v2/current", CurrentQuery {}) else {
         return false;
     };
-    let Some(token) = runtime.get("token").and_then(Value::as_str) else {
-        return false;
-    };
-    let url = format!("{}/v1/current", base_url.trim_end_matches('/'));
     ureq::get(&url)
-        .set("Authorization", &format!("Bearer {token}"))
+        .set("Authorization", &format!("Bearer {}", runtime.token))
         .call()
         .is_ok_and(|response| (200..300).contains(&response.status()))
 }
@@ -4407,5 +4536,90 @@ mod tests {
                 "workspace-1".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn benchmark_runtime_uses_v2_query_envelopes_for_readiness_and_event_export() {
+        let root = std::env::temp_dir().join(format!("stateful-bench-v2-{}", uuid::Uuid::new_v4()));
+        let stateful_home = root.join("stateful-home");
+        let pair_dir = root.join("pair");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test server should bind");
+        let base_url = format!("http://{}", listener.local_addr().expect("server address"));
+        let (requests_sent, requests_received) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().expect("request should connect");
+                let mut request = String::new();
+                BufReader::new(stream.try_clone().expect("stream should clone"))
+                    .read_line(&mut request)
+                    .expect("request line should read");
+                let body = if request.starts_with("GET /v2/current?") {
+                    r#"{"presence":null,"handoff":null,"resources":[],"workspace_version":1,"context_cursor":0}"#
+                } else {
+                    r#"{"events":[{"event_type":"ReservationDeclared","workspace_id":"workspace-1"}]}"#
+                };
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .expect("response should write");
+                requests.push(request);
+            }
+            requests_sent.send(requests).expect("requests should send");
+        });
+
+        write_json_file(
+            stateful_home.join("runtime/server.json"),
+            &serde_json::json!({
+                "base_url": base_url,
+                "token": "test-token",
+                "workspace_id": "workspace-1",
+            }),
+        )
+        .expect("runtime metadata should write");
+
+        assert!(stateful_current_is_ready(&stateful_home));
+        export_coordination_events(&stateful_home, &pair_dir)
+            .expect("V2 event export should succeed");
+        server.join().expect("test server should exit");
+        let requests = requests_received
+            .recv()
+            .expect("test server should capture both requests");
+
+        assert!(requests[0].starts_with("GET /v2/current?"));
+        assert!(requests[1].starts_with("GET /v2/events?"));
+        for request in &requests {
+            for required in [
+                "protocol_version=stateful.v2",
+                "request_id=",
+                "observed_at=",
+                "agent_id=stateful-bench",
+                "actor_id=stateful-bench",
+                "actor_type=agent",
+                "workspace_id=workspace-1",
+                "kind=cli",
+                "event=benchmark_telemetry",
+                "tool_name=stateful-bench",
+                "source_ref=stateful-bench",
+            ] {
+                assert!(
+                    request.contains(required),
+                    "missing {required} in {request}"
+                );
+            }
+        }
+        assert!(requests[1].contains("limit=100"));
+        assert_eq!(
+            fs::read_to_string(pair_dir.join("coordination-events.jsonl"))
+                .expect("exported events should read"),
+            "{\"event_type\":\"ReservationDeclared\",\"workspace_id\":\"workspace-1\"}\n"
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 }

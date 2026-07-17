@@ -1,11 +1,16 @@
 use crate::{
-    CommandOutcome, CommandPlan, CurrentAggregate, ProjectionReader, Store, StoreError, StoreResult,
-    reservations::{expired, normalized_scope, record_from_current, scopes_conflict, timestamp, typed_records},
+    CommandOutcome, CommandPlan, CurrentAggregate, ProjectionReader, Store, StoreError,
+    StoreResult,
+    reservations::{
+        expired, normalized_scope, record_from_current, scopes_conflict, timestamp, typed_records,
+    },
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use serde_json::json;
-use stateful_core::{ActorType, AgentIdentity, EventData, EventPayload, NewEvent, RequestEnvelope, WriteFenceEvent};
+use stateful_core::{
+    ActorType, AgentIdentity, EventData, EventPayload, NewEvent, RequestEnvelope, WriteFenceEvent,
+};
+use std::collections::HashSet;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -92,39 +97,67 @@ impl Store {
         let now = self.clock.now();
         let payload = request.payload.clone();
         self.execute_command(request, "write_fence.acquire", |reader| {
-            if payload.paths.is_empty() { return Err(StoreError::MissingScope); }
-            let mut paths = payload.paths.iter().map(|path| normalized_scope(path)).collect::<StoreResult<Vec<_>>>()?;
+            if payload.paths.is_empty() {
+                return Err(StoreError::MissingScope);
+            }
+            let mut paths = payload
+                .paths
+                .iter()
+                .map(|path| normalized_scope(path))
+                .collect::<StoreResult<Vec<_>>>()?;
             paths.sort();
             paths.dedup();
-            let existing = typed_records::<WriteFenceRecord>(reader, CurrentAggregate::WriteFence, &request.workspace.workspace_id)?;
+            let existing = typed_records::<WriteFenceRecord>(
+                reader,
+                CurrentAggregate::WriteFence,
+                &request.workspace.workspace_id,
+            )?;
             if let Some(conflict) = existing.iter().find(|fence| {
                 fence.status == "active"
                     && !expired(&fence.expires_at, now)
                     && !fence.is_owned_by(&request.agent)
-                    && paths.iter().any(|path| scopes_conflict(&fence.relative_path, path))
+                    && paths
+                        .iter()
+                        .any(|path| scopes_conflict(&fence.relative_path, path))
             }) {
-                let conflict = WriteFenceConflict { path: conflict.relative_path.clone(), owner_agent_id: conflict.agent_id.clone() };
+                let conflict = WriteFenceConflict {
+                    path: conflict.relative_path.clone(),
+                    owner_agent_id: conflict.agent_id.clone(),
+                };
                 return Ok(CommandPlan {
                     events: Vec::new(),
-                    response: WriteFenceAcquireResult { fences: Vec::new(), conflict: Some(conflict) },
+                    response: WriteFenceAcquireResult {
+                        fences: Vec::new(),
+                        conflict: Some(conflict),
+                    },
                     http_status: 409,
                 });
             }
             let mut events = Vec::new();
             let mut fences = Vec::new();
             for path in paths {
-                if let Some(mut fence) = existing.iter().find(|fence| {
-                    fence.status == "active"
-                        && !expired(&fence.expires_at, now)
-                        && fence.agent_id == request.agent.agent_id
-                        && fence.relative_path == path
-                }).cloned() {
+                if let Some(mut fence) = existing
+                    .iter()
+                    .find(|fence| {
+                        fence.status == "active"
+                            && !expired(&fence.expires_at, now)
+                            && fence.agent_id == request.agent.agent_id
+                            && fence.relative_path == path
+                    })
+                    .cloned()
+                {
                     if !fence.is_owned_by(&request.agent) {
                         return Err(StoreError::ClaimOwnerMismatch);
                     }
                     fence.action = payload.action.clone();
                     fence.expires_at = timestamp(now + WRITE_FENCE_TTL)?;
-                    events.push(fence_event(request, events.len() as u32, now, WriteFenceEvent::Acquired, &fence)?);
+                    events.push(fence_event(
+                        request,
+                        events.len() as u32,
+                        now,
+                        WriteFenceEvent::Acquired,
+                        &fence,
+                    )?);
                     fences.push(fence);
                     continue;
                 }
@@ -146,10 +179,23 @@ impl Store {
                     released_at: None,
                     origin_event_seq: 0,
                 };
-                events.push(fence_event(request, events.len() as u32, now, WriteFenceEvent::Acquired, &fence)?);
+                events.push(fence_event(
+                    request,
+                    events.len() as u32,
+                    now,
+                    WriteFenceEvent::Acquired,
+                    &fence,
+                )?);
                 fences.push(fence);
             }
-            Ok(CommandPlan { events, response: WriteFenceAcquireResult { fences, conflict: None }, http_status: 200 })
+            Ok(CommandPlan {
+                events,
+                response: WriteFenceAcquireResult {
+                    fences,
+                    conflict: None,
+                },
+                http_status: 200,
+            })
         })
     }
 
@@ -160,7 +206,11 @@ impl Store {
         let now = self.clock.now();
         let fence_ids = request.payload.fence_ids.clone();
         self.execute_command(request, "write_fence.release", |reader| {
-            let existing = typed_records::<WriteFenceRecord>(reader, CurrentAggregate::WriteFence, &request.workspace.workspace_id)?;
+            let existing = typed_records::<WriteFenceRecord>(
+                reader,
+                CurrentAggregate::WriteFence,
+                &request.workspace.workspace_id,
+            )?;
             let mut released = Vec::new();
             let mut events = Vec::new();
             let mut processed = HashSet::with_capacity(fence_ids.len());
@@ -168,19 +218,32 @@ impl Store {
                 if !processed.insert(fence_id) {
                     continue;
                 }
-                let mut fence = existing.iter().find(|fence| fence.fence_id == *fence_id)
-                    .cloned().ok_or(StoreError::ClaimNotFound)?;
+                let mut fence = existing
+                    .iter()
+                    .find(|fence| fence.fence_id == *fence_id)
+                    .cloned()
+                    .ok_or(StoreError::ClaimNotFound)?;
                 if !fence.is_owned_by(&request.agent) {
                     return Err(StoreError::ClaimOwnerMismatch);
                 }
                 if fence.status == "active" {
                     fence.status = "released".into();
                     fence.released_at = Some(timestamp(now)?);
-                    events.push(fence_event(request, events.len() as u32, now, WriteFenceEvent::Released, &fence)?);
+                    events.push(fence_event(
+                        request,
+                        events.len() as u32,
+                        now,
+                        WriteFenceEvent::Released,
+                        &fence,
+                    )?);
                 }
                 released.push(fence);
             }
-            Ok(CommandPlan { events, response: released, http_status: 200 })
+            Ok(CommandPlan {
+                events,
+                response: released,
+                http_status: 200,
+            })
         })
     }
 
@@ -192,20 +255,39 @@ impl Store {
         self.execute_command(request, "write_fence.expire", |reader| {
             let mut events = Vec::new();
             let mut expired_fences = Vec::new();
-            for mut fence in typed_records::<WriteFenceRecord>(reader, CurrentAggregate::WriteFence, &request.workspace.workspace_id)? {
+            for mut fence in typed_records::<WriteFenceRecord>(
+                reader,
+                CurrentAggregate::WriteFence,
+                &request.workspace.workspace_id,
+            )? {
                 if fence.status == "active" && expired(&fence.expires_at, now) {
                     fence.status = "expired".into();
                     fence.released_at = Some(timestamp(now)?);
                     expired_fences.push(fence.fence_id.clone());
-                    events.push(fence_event(request, events.len() as u32, now, WriteFenceEvent::Expired, &fence)?);
+                    events.push(fence_event(
+                        request,
+                        events.len() as u32,
+                        now,
+                        WriteFenceEvent::Expired,
+                        &fence,
+                    )?);
                 }
             }
-            Ok(CommandPlan { events, response: expired_fences, http_status: 200 })
+            Ok(CommandPlan {
+                events,
+                response: expired_fences,
+                http_status: 200,
+            })
         })
     }
 
-    pub fn write_fence(&self, workspace_id: &str, fence_id: &str) -> StoreResult<Option<WriteFenceRecord>> {
-        self.current_records(CurrentAggregate::WriteFence, workspace_id)?.into_iter()
+    pub fn write_fence(
+        &self,
+        workspace_id: &str,
+        fence_id: &str,
+    ) -> StoreResult<Option<WriteFenceRecord>> {
+        self.current_records(CurrentAggregate::WriteFence, workspace_id)?
+            .into_iter()
             .map(record_from_current::<WriteFenceRecord>)
             .collect::<StoreResult<Vec<_>>>()?
             .into_iter()
@@ -221,18 +303,26 @@ pub(crate) fn active_fence_owner(
     path: &str,
     observed_at: OffsetDateTime,
 ) -> StoreResult<Option<String>> {
-    Ok(typed_records::<WriteFenceRecord>(reader, CurrentAggregate::WriteFence, workspace_id)?
-        .into_iter()
-        .find(|fence| {
-            (fence.status == "active"
-                && parse_before_or_at(&fence.acquired_at, observed_at)
-                && parse_after_or_at(&fence.expires_at, observed_at)
-                || fence.status == "released"
-                    && fence.released_at.as_deref().and_then(|released| crate::reservations::parse_time(released).ok())
-                        .is_some_and(|released| observed_at >= released && observed_at <= released + FENCE_ATTRIBUTION_GRACE))
-                && scopes_conflict(&fence.relative_path, path)
-        })
-        .map(|fence| fence.agent_id))
+    Ok(
+        typed_records::<WriteFenceRecord>(reader, CurrentAggregate::WriteFence, workspace_id)?
+            .into_iter()
+            .find(|fence| {
+                (fence.status == "active"
+                    && parse_before_or_at(&fence.acquired_at, observed_at)
+                    && parse_after_or_at(&fence.expires_at, observed_at)
+                    || fence.status == "released"
+                        && fence
+                            .released_at
+                            .as_deref()
+                            .and_then(|released| crate::reservations::parse_time(released).ok())
+                            .is_some_and(|released| {
+                                observed_at >= released
+                                    && observed_at <= released + FENCE_ATTRIBUTION_GRACE
+                            }))
+                    && scopes_conflict(&fence.relative_path, path)
+            })
+            .map(|fence| fence.agent_id),
+    )
 }
 
 fn parse_before_or_at(value: &str, observed_at: OffsetDateTime) -> bool {
@@ -252,5 +342,11 @@ pub(crate) fn fence_event<T>(
 ) -> StoreResult<NewEvent> {
     let mut data = EventData::new(&fence.fence_id);
     data.data = json!({"write_fence": fence});
-    NewEvent::new(request.request_id, ordinal, now, EventPayload::WriteFence(variant(data))).map_err(StoreError::from)
+    NewEvent::new(
+        request.request_id,
+        ordinal,
+        now,
+        EventPayload::WriteFence(variant(data)),
+    )
+    .map_err(StoreError::from)
 }

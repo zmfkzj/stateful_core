@@ -12,7 +12,7 @@ pub const LAST_RESULT_MAX_SCALARS: usize = 240;
 pub const HANDOFF_SUMMARY_MAX_SCALARS: usize = 2_000;
 pub const HANDOFF_LIST_MAX_ENTRIES: usize = 100;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PresenceUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal_excerpt: Option<String>,
@@ -22,20 +22,12 @@ pub struct PresenceUpdate {
     pub next_plan: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_result: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "time::serde::rfc3339::option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
     pub busy_until: Option<OffsetDateTime>,
-}
-
-impl Default for PresenceUpdate {
-    fn default() -> Self {
-        Self {
-            goal_excerpt: None,
-            phase: None,
-            next_plan: None,
-            last_result: None,
-            busy_until: None,
-        }
-    }
 }
 
 impl PresenceUpdate {
@@ -94,7 +86,11 @@ pub struct PresenceRecord {
     pub updated_at: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339")]
     pub expires_at: OffsetDateTime,
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "time::serde::rfc3339::option")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
     pub busy_until: Option<OffsetDateTime>,
     pub origin_event_seq: u64,
 }
@@ -192,7 +188,11 @@ impl Default for ExplicitHandoff {
 impl ExplicitHandoff {
     pub fn validate(&self) -> Result<(), V2Error> {
         validate_required("summary", &self.summary)?;
-        validate_scalar_limit("handoff_summary", &self.summary, HANDOFF_SUMMARY_MAX_SCALARS)?;
+        validate_scalar_limit(
+            "handoff_summary",
+            &self.summary,
+            HANDOFF_SUMMARY_MAX_SCALARS,
+        )?;
         for (field, entries) in [
             ("files_changed", &self.files_changed),
             ("tests_run", &self.tests_run),

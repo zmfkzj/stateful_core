@@ -1,20 +1,23 @@
 use rusqlite::Connection;
 use serde_json::Value;
+use stateful_core::migration_seed_event_id;
 use stateful_core::{
     ActorType, AgentIdentity, ExplicitHandoff, HandoffStatus, RequestEnvelope, SourceKind,
     SourceRef, WorkspaceIdentity,
 };
-use stateful_core::migration_seed_event_id;
 use stateful_store::{
     ClaimAcquire, ClaimPath, ClaimRelease, FixedClock, PresenceRegistration,
     ReservationDeclaration, Store, WriteFenceAcquire,
 };
-use std::{fs, path::{Path, PathBuf}};
-use time::macros::datetime;
-use uuid::Uuid;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 use tempfile::TempDir;
+use time::macros::datetime;
+use uuid::Uuid;
 
 const FIXTURE: &str = include_str!("fixtures/v1_persistent_state.sql");
 const CHECKPOINT: &str = "stateful.v2.event-journal";
@@ -22,7 +25,9 @@ const CHECKPOINT: &str = "stateful.v2.event-journal";
 fn legacy_database(temp: &TempDir, name: &str) -> PathBuf {
     let path = temp.path().join(name);
     let connection = Connection::open(&path).expect("fixture database should open");
-    connection.execute_batch(FIXTURE).expect("fixture SQL should apply");
+    connection
+        .execute_batch(FIXTURE)
+        .expect("fixture SQL should apply");
     path
 }
 
@@ -63,10 +68,13 @@ fn journal_payloads(path: &Path, event_type: &str) -> Vec<Value> {
     statement
         .query_map([event_type], |row| row.get::<_, String>(0))
         .expect("journal query should run")
-        .map(|row| serde_json::from_str::<Value>(&row.expect("payload should load")).expect("payload should be JSON")["event"].clone())
+        .map(|row| {
+            serde_json::from_str::<Value>(&row.expect("payload should load"))
+                .expect("payload should be JSON")["event"]
+                .clone()
+        })
         .collect()
 }
-
 
 fn request<T: serde::Serialize>(agent_id: &str, payload: T) -> RequestEnvelope<T> {
     RequestEnvelope::new(
@@ -95,7 +103,8 @@ fn request<T: serde::Serialize>(agent_id: &str, payload: T) -> RequestEnvelope<T
             source_ref: "migration-v2-test".into(),
         },
         payload,
-    ).expect("request should be valid")
+    )
+    .expect("request should be valid")
 }
 
 fn owned_projection_rows(path: &Path, table: &str, agent_id: &str) -> i64 {
@@ -120,9 +129,18 @@ fn persistent_v1_db_is_backed_up_seeded_replayed_and_cut_over() {
 
     let mut store = open_legacy(&path).expect("persistent v1 database should migrate");
     let backup = backup_path(&path);
-    assert!(backup.exists(), "migration must retain a versioned SQLite backup");
-    assert!(table_exists(&backup, "agents"), "backup must open as shipped v1");
-    assert!(!table_exists(&backup, "journal_events"), "backup must not be a raw post-cutover copy");
+    assert!(
+        backup.exists(),
+        "migration must retain a versioned SQLite backup"
+    );
+    assert!(
+        table_exists(&backup, "agents"),
+        "backup must open as shipped v1"
+    );
+    assert!(
+        !table_exists(&backup, "journal_events"),
+        "backup must not be a raw post-cutover copy"
+    );
     #[cfg(unix)]
     assert_eq!(
         fs::metadata(&path)
@@ -147,11 +165,25 @@ fn persistent_v1_db_is_backed_up_seeded_replayed_and_cut_over() {
             .readonly(),
         "backup must preserve the portable readonly permission setting",
     );
-    assert!(!store.has_table("agents").expect("schema lookup should work"), "legacy authority must be removed only after validation");
+    assert!(
+        !store
+            .has_table("agents")
+            .expect("schema lookup should work"),
+        "legacy authority must be removed only after validation"
+    );
     assert!(store.journal_event_count().expect("journal should load") > 0);
-    let before_replay = store.projection_snapshot().expect("projection snapshot should load");
-    store.rebuild_projections().expect("migrated journal should replay identically");
-    assert_eq!(store.projection_snapshot().expect("projection snapshot should load"), before_replay);
+    let before_replay = store
+        .projection_snapshot()
+        .expect("projection snapshot should load");
+    store
+        .rebuild_projections()
+        .expect("migrated journal should replay identically");
+    assert_eq!(
+        store
+            .projection_snapshot()
+            .expect("projection snapshot should load"),
+        before_replay
+    );
 
     let audit_ids = Connection::open(&path)
         .expect("migrated database should open")
@@ -201,8 +233,14 @@ fn tied_activities_choose_latest_expiry_then_activity_id() {
         .iter()
         .find(|payload| payload["data"]["aggregate_id"] == "agent-alpha")
         .expect("agent alpha seed should exist");
-    assert_eq!(alpha["data"]["data"]["selected_activity_id"], "activity-alpha-02");
-    assert_eq!(alpha["data"]["data"]["source_activity_ids"], serde_json::json!(["activity-alpha-01", "activity-alpha-02"]));
+    assert_eq!(
+        alpha["data"]["data"]["selected_activity_id"],
+        "activity-alpha-02"
+    );
+    assert_eq!(
+        alpha["data"]["data"]["source_activity_ids"],
+        serde_json::json!(["activity-alpha-01", "activity-alpha-02"])
+    );
     let event_id: String = Connection::open(&path)
         .expect("migrated database should open")
         .query_row(
@@ -264,7 +302,10 @@ fn legacy_claim_hash_is_not_read_provenance() {
         .iter()
         .find(|payload| payload["data"]["aggregate_id"] == "claim-active")
         .expect("active claim seed should exist");
-    assert_eq!(active["data"]["data"]["legacy_base_observation"]["content_hash"], "legacy-claim-sha");
+    assert_eq!(
+        active["data"]["data"]["legacy_base_observation"]["content_hash"],
+        "legacy-claim-sha"
+    );
     assert!(active["data"]["data"].get("read_provenance").is_none());
 }
 
@@ -289,10 +330,16 @@ fn migration_keeps_human_fingerprints_and_terminal_coordination_records() {
         human["data"]["data"]["legacy_observation"],
         serde_json::json!({"exists": true, "content_hash": "human-sha"})
     );
-    let before_rebuild = store.projection_snapshot().expect("projection snapshot loads");
-    store.rebuild_projections().expect("migration replay succeeds");
+    let before_rebuild = store
+        .projection_snapshot()
+        .expect("projection snapshot loads");
+    store
+        .rebuild_projections()
+        .expect("migration replay succeeds");
     assert_eq!(
-        store.projection_snapshot().expect("projection snapshot loads"),
+        store
+            .projection_snapshot()
+            .expect("projection snapshot loads"),
         before_rebuild,
         "replay must retain the exact legacy human fingerprint",
     );
@@ -314,8 +361,7 @@ fn migration_keeps_human_fingerprints_and_terminal_coordination_records() {
         )
         .expect("terminal fence remains queryable");
     assert_eq!(
-        serde_json::from_str::<Value>(&fence_payload)
-            .expect("terminal fence payload is JSON")["status"],
+        serde_json::from_str::<Value>(&fence_payload).expect("terminal fence payload is JSON")["status"],
         "released",
     );
 
@@ -449,10 +495,12 @@ fn migrated_claim_conflict_is_frozen_after_blocker_release() {
         event_count,
         "the duplicate must not acquire a now-unblocked claim",
     );
-    assert!(store
-        .active_claims_for_path("workspace-main", "src/state.rs")
-        .expect("active claims load")
-        .is_empty());
+    assert!(
+        store
+            .active_claims_for_path("workspace-main", "src/state.rs")
+            .expect("active claims load")
+            .is_empty()
+    );
 
     let mut changed_actor = contender.clone();
     changed_actor.agent.actor_id = "other-actor".into();
@@ -493,14 +541,18 @@ fn existing_v2_upgrade_repairs_omitted_terminal_seed_projections() {
             .status,
         "expired",
     );
-    assert!(store
-        .active_claims_for_path("workspace-main", "src/review.rs")
-        .expect("active claims load")
-        .is_empty());
-    assert!(store
-        .active_write_fence("workspace-main", "src/review.rs")
-        .expect("active fence loads")
-        .is_none());
+    assert!(
+        store
+            .active_claims_for_path("workspace-main", "src/review.rs")
+            .expect("active claims load")
+            .is_empty()
+    );
+    assert!(
+        store
+            .active_write_fence("workspace-main", "src/review.rs")
+            .expect("active fence loads")
+            .is_none()
+    );
     store
         .rebuild_projections()
         .expect("repaired projections replay identically");
@@ -536,7 +588,10 @@ fn failed_terminal_projection_repair_rolls_back_canonical_tables() {
             |row| row.get(0),
         )
         .expect("canonical table reads");
-    assert_eq!(missing, 0, "failed repair must not commit partial canonical rows");
+    assert_eq!(
+        missing, 0,
+        "failed repair must not commit partial canonical rows"
+    );
 }
 
 #[test]
@@ -570,9 +625,18 @@ fn malformed_legacy_json_rolls_back_and_preserves_original_schema() {
         Err(error) => error,
     };
     assert_eq!(error.code(), "migration_validation");
-    assert!(table_exists(&path, "agents"), "legacy source must remain authoritative");
-    assert!(!table_exists(&path, "journal_events"), "failed preflight must not create journal tables");
-    assert!(!backup_path(&path).exists(), "preflight failure must not create a backup");
+    assert!(
+        table_exists(&path, "agents"),
+        "legacy source must remain authoritative"
+    );
+    assert!(
+        !table_exists(&path, "journal_events"),
+        "failed preflight must not create journal tables"
+    );
+    assert!(
+        !backup_path(&path).exists(),
+        "preflight failure must not create a backup"
+    );
 }
 
 #[test]
@@ -580,34 +644,79 @@ fn migration_rerun_after_checkpoint_is_a_no_op() {
     let temp = TempDir::new().expect("temporary directory should exist");
     let path = legacy_database(&temp, "rerun.sqlite");
     let first = open_legacy(&path).expect("first open should migrate");
-    let event_count = first.journal_event_count().expect("journal count should load");
+    let event_count = first
+        .journal_event_count()
+        .expect("journal count should load");
     drop(first);
     let backup = backup_path(&path);
-    let backup_count = fs::read_dir(temp.path()).expect("temporary directory should open").filter_map(Result::ok).filter(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("sqlite")).count();
+    let backup_count = fs::read_dir(temp.path())
+        .expect("temporary directory should open")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("sqlite"))
+        .count();
 
     let second = open_legacy(&path).expect("second open should validate checkpoint");
-    assert_eq!(second.journal_event_count().expect("journal count should load"), event_count);
+    assert_eq!(
+        second
+            .journal_event_count()
+            .expect("journal count should load"),
+        event_count
+    );
     assert!(backup.exists());
-    assert_eq!(fs::read_dir(temp.path()).expect("temporary directory should open").filter_map(Result::ok).filter(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("sqlite")).count(), backup_count, "second open must not create another backup");
-    assert!(Connection::open(&path)
-        .expect("migrated database should open")
-        .query_row("SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)", [CHECKPOINT], |row| row.get::<_, bool>(0))
-        .expect("checkpoint query should work"));
+    assert_eq!(
+        fs::read_dir(temp.path())
+            .expect("temporary directory should open")
+            .filter_map(Result::ok)
+            .filter(
+                |entry| entry.path().extension().and_then(|value| value.to_str()) == Some("sqlite")
+            )
+            .count(),
+        backup_count,
+        "second open must not create another backup"
+    );
+    assert!(
+        Connection::open(&path)
+            .expect("migrated database should open")
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
+                [CHECKPOINT],
+                |row| row.get::<_, bool>(0)
+            )
+            .expect("checkpoint query should work")
+    );
 }
-
 
 #[test]
 fn new_and_in_memory_databases_skip_legacy_migration() {
     let temp = TempDir::new().expect("temporary directory should exist");
     let path = temp.path().join("new.sqlite");
-    let persistent = Store::open(&path).expect("new persistent database should initialize v2 directly");
-    assert_eq!(persistent.journal_event_count().expect("journal count should load"), 0);
-    assert!(!persistent.has_table("agents").expect("schema lookup should work"));
+    let persistent =
+        Store::open(&path).expect("new persistent database should initialize v2 directly");
+    assert_eq!(
+        persistent
+            .journal_event_count()
+            .expect("journal count should load"),
+        0
+    );
+    assert!(
+        !persistent
+            .has_table("agents")
+            .expect("schema lookup should work")
+    );
     assert!(!backup_path(&path).exists());
 
     let memory = Store::open_in_memory().expect("in-memory database should initialize v2 directly");
-    assert_eq!(memory.journal_event_count().expect("journal count should load"), 0);
-    assert!(!memory.has_table("agents").expect("schema lookup should work"));
+    assert_eq!(
+        memory
+            .journal_event_count()
+            .expect("journal count should load"),
+        0
+    );
+    assert!(
+        !memory
+            .has_table("agents")
+            .expect("schema lookup should work")
+    );
 }
 
 #[test]
@@ -623,7 +732,10 @@ fn migrated_presence_and_handoff_project_to_typed_records_before_commands() {
     assert_eq!(presence.agent_id, "agent-alpha");
     assert_eq!(presence.actor_type, ActorType::Unknown);
     store
-        .resume_presence(&request("agent-alpha", PresenceRegistration { first_prompt: None }))
+        .resume_presence(&request(
+            "agent-alpha",
+            PresenceRegistration { first_prompt: None },
+        ))
         .expect("commands must accept a migrated presence projection");
     let handoff = store
         .handoff_for_request(&request("agent-alpha", ()), "agent-alpha")
@@ -653,22 +765,50 @@ fn finalization_cleans_migrated_coordination_rows_by_journal_owner() {
         )
         .expect("fixture should gain active rows for both agents");
     let mut store = open_legacy(&path).expect("legacy database should migrate");
-    for table in ["reservation_current", "claim_current", "wait_current", "write_fence_current"] {
-        assert!(owned_projection_rows(&path, table, "agent-alpha") > 0, "alpha must own a {table} row");
-        assert!(owned_projection_rows(&path, table, "agent-beta") > 0, "beta must own a {table} row");
+    for table in [
+        "reservation_current",
+        "claim_current",
+        "wait_current",
+        "write_fence_current",
+    ] {
+        assert!(
+            owned_projection_rows(&path, table, "agent-alpha") > 0,
+            "alpha must own a {table} row"
+        );
+        assert!(
+            owned_projection_rows(&path, table, "agent-beta") > 0,
+            "beta must own a {table} row"
+        );
     }
 
-    store.finalize_handoff(&request("agent-alpha", ExplicitHandoff {
-        status: HandoffStatus::Done,
-        summary: "finished".into(),
-        files_changed: vec![],
-        tests_run: vec![],
-        remaining_work: vec![],
-        next_plan: None,
-    })).expect("alpha finalization should succeed");
+    store
+        .finalize_handoff(&request(
+            "agent-alpha",
+            ExplicitHandoff {
+                status: HandoffStatus::Done,
+                summary: "finished".into(),
+                files_changed: vec![],
+                tests_run: vec![],
+                remaining_work: vec![],
+                next_plan: None,
+            },
+        ))
+        .expect("alpha finalization should succeed");
 
-    for table in ["reservation_current", "claim_current", "wait_current", "write_fence_current"] {
-        assert_eq!(owned_projection_rows(&path, table, "agent-alpha"), 0, "alpha {table} rows must be cleaned");
-        assert!(owned_projection_rows(&path, table, "agent-beta") > 0, "beta {table} rows must remain");
+    for table in [
+        "reservation_current",
+        "claim_current",
+        "wait_current",
+        "write_fence_current",
+    ] {
+        assert_eq!(
+            owned_projection_rows(&path, table, "agent-alpha"),
+            0,
+            "alpha {table} rows must be cleaned"
+        );
+        assert!(
+            owned_projection_rows(&path, table, "agent-beta") > 0,
+            "beta {table} rows must remain"
+        );
     }
 }

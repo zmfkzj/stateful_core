@@ -17,12 +17,19 @@ async fn awareness_warns_for_missing_read_provenance_while_enforcement_denies() 
         "targets": [{"path": "src/lib.rs", "before": {"exists": false, "byte_len": 0}}]
     }));
     let awareness_app = app();
-    let awareness = awareness_app.clone().oneshot(post("/v2/authorize", body.clone())).await.unwrap();
+    let awareness = awareness_app
+        .clone()
+        .oneshot(post("/v2/authorize", body.clone()))
+        .await
+        .unwrap();
     assert_eq!(awareness.status(), StatusCode::OK);
     let awareness = response_json(awareness).await;
     assert!(awareness["intent_id"].is_string());
     assert_eq!(awareness["decision"]["decision"], "warn");
-    assert_eq!(awareness["decision"]["reason_code"], "missing_read_provenance");
+    assert_eq!(
+        awareness["decision"]["reason_code"],
+        "missing_read_provenance"
+    );
     assert_eq!(
         response_json(
             awareness_app
@@ -41,7 +48,10 @@ async fn awareness_warns_for_missing_read_provenance_while_enforcement_denies() 
     .await
     .unwrap();
     assert_eq!(enforcement.status(), StatusCode::FORBIDDEN);
-    assert_eq!(response_json(enforcement).await["reason_code"], "missing_read_provenance");
+    assert_eq!(
+        response_json(enforcement).await["reason_code"],
+        "missing_read_provenance"
+    );
 }
 
 #[tokio::test]
@@ -52,77 +62,111 @@ async fn committed_write_requires_a_new_exact_read_before_a_second_enforced_auth
     let reservation = successful_post(
         &app,
         "/v2/reservation/declare",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d201", json!({
-            "scopes": [{"kind": "file", "path": "src/lib.rs"}],
-            "action": "write_file",
-            "purpose": "Update the module."
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d201",
+            json!({
+                "scopes": [{"kind": "file", "path": "src/lib.rs"}],
+                "action": "write_file",
+                "purpose": "Update the module."
+            }),
+        ),
     )
     .await;
-    let reservation_id = reservation["reservation_id"].as_str().expect("reservation id").to_owned();
+    let reservation_id = reservation["reservation_id"]
+        .as_str()
+        .expect("reservation id")
+        .to_owned();
     successful_post(
         &app,
         "/v2/claim/acquire",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d202", json!({
-            "reservation_id": reservation_id,
-            "paths": [{"relative_path": "src/lib.rs", "observation": {"exists": false}}]
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d202",
+            json!({
+                "reservation_id": reservation_id,
+                "paths": [{"relative_path": "src/lib.rs", "observation": {"exists": false}}]
+            }),
+        ),
     )
     .await;
     successful_post(
         &app,
         "/v2/read/start",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d203", json!({
-            "operation_id": "read-1", "path": "src/lib.rs",
-            "before": {"exists": false, "byte_len": 0}
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d203",
+            json!({
+                "operation_id": "read-1", "path": "src/lib.rs",
+                "before": {"exists": false, "byte_len": 0}
+            }),
+        ),
     )
     .await;
     successful_post(
         &app,
         "/v2/read/complete",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d204", json!({
-            "operation_id": "read-1", "path": "src/lib.rs", "classification": "exact",
-            "after": {"exists": false, "byte_len": 0}
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d204",
+            json!({
+                "operation_id": "read-1", "path": "src/lib.rs", "classification": "exact",
+                "after": {"exists": false, "byte_len": 0}
+            }),
+        ),
     )
     .await;
     let first = successful_post(
         &app,
         "/v2/authorize",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d205", json!({
-            "reservation_id": reservation_id,
-            "operation_id": "write-1",
-            "action": "write_file",
-            "targets": [{"path": "src/lib.rs", "before": {"exists": false, "byte_len": 0}}]
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d205",
+            json!({
+                "reservation_id": reservation_id,
+                "operation_id": "write-1",
+                "action": "write_file",
+                "targets": [{"path": "src/lib.rs", "before": {"exists": false, "byte_len": 0}}]
+            }),
+        ),
     )
     .await;
     successful_post(
         &app,
         "/v2/write/complete",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d206", json!({
-            "intent_id": first["intent_id"],
-            "outcome": "committed",
-            "post_fingerprints": [["src/lib.rs", {"exists": false, "byte_len": 0}]]
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d206",
+            json!({
+                "intent_id": first["intent_id"],
+                "outcome": "committed",
+                "post_fingerprints": [["src/lib.rs", {"exists": false, "byte_len": 0}]]
+            }),
+        ),
     )
     .await;
 
     let second = app
         .oneshot(post(
             "/v2/authorize",
-            envelope_for("agent-1", "00000000-0000-4000-8000-00000000d207", json!({
-                "reservation_id": reservation_id,
-                "operation_id": "write-2",
-                "action": "write_file",
-                "targets": [{"path": "src/lib.rs", "before": {"exists": false, "byte_len": 0}}]
-            })),
+            envelope_for(
+                "agent-1",
+                "00000000-0000-4000-8000-00000000d207",
+                json!({
+                    "reservation_id": reservation_id,
+                    "operation_id": "write-2",
+                    "action": "write_file",
+                    "targets": [{"path": "src/lib.rs", "before": {"exists": false, "byte_len": 0}}]
+                }),
+            ),
         ))
         .await
         .expect("second authorization responds");
     assert_eq!(second.status(), StatusCode::FORBIDDEN);
-    assert_eq!(response_json(second).await["reason_code"], "stale_observation");
+    assert_eq!(
+        response_json(second).await["reason_code"],
+        "stale_observation"
+    );
 }
 
 #[tokio::test]
@@ -135,19 +179,27 @@ async fn awareness_treats_expired_partial_and_structural_reads_as_missing_eviden
     successful_post(
         &expired_app,
         "/v2/read/start",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d221", json!({
-            "operation_id": "expired-read", "path": "src/expired.rs",
-            "before": {"exists": false, "byte_len": 0}
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d221",
+            json!({
+                "operation_id": "expired-read", "path": "src/expired.rs",
+                "before": {"exists": false, "byte_len": 0}
+            }),
+        ),
     )
     .await;
     successful_post(
         &expired_app,
         "/v2/read/complete",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d222", json!({
-            "operation_id": "expired-read", "path": "src/expired.rs", "classification": "exact",
-            "after": {"exists": false, "byte_len": 0}
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d222",
+            json!({
+                "operation_id": "expired-read", "path": "src/expired.rs", "classification": "exact",
+                "after": {"exists": false, "byte_len": 0}
+            }),
+        ),
     )
     .await;
     clock.advance(Duration::from_secs(61 * 60));
@@ -162,38 +214,65 @@ async fn awareness_treats_expired_partial_and_structural_reads_as_missing_eviden
         .await
         .expect("expired authorization responds");
     assert_eq!(expired.status(), StatusCode::OK);
-    assert_eq!(response_json(expired).await["decision"]["reason_code"], "missing_read_provenance");
+    assert_eq!(
+        response_json(expired).await["decision"]["reason_code"],
+        "missing_read_provenance"
+    );
 
     for (classification, path, start_id, complete_id, authorize_id) in [
-        ("partial", "src/partial.rs", "00000000-0000-4000-8000-00000000d224", "00000000-0000-4000-8000-00000000d225", "00000000-0000-4000-8000-00000000d226"),
-        ("structural_summary", "src/structural.rs", "00000000-0000-4000-8000-00000000d227", "00000000-0000-4000-8000-00000000d228", "00000000-0000-4000-8000-00000000d229"),
+        (
+            "partial",
+            "src/partial.rs",
+            "00000000-0000-4000-8000-00000000d224",
+            "00000000-0000-4000-8000-00000000d225",
+            "00000000-0000-4000-8000-00000000d226",
+        ),
+        (
+            "structural_summary",
+            "src/structural.rs",
+            "00000000-0000-4000-8000-00000000d227",
+            "00000000-0000-4000-8000-00000000d228",
+            "00000000-0000-4000-8000-00000000d229",
+        ),
     ] {
         let app = app();
         successful_post(
             &app,
             "/v2/read/start",
-            envelope_for("agent-1", start_id, json!({
-                "operation_id": format!("read-{classification}"), "path": path,
-                "before": {"exists": false, "byte_len": 0}
-            })),
+            envelope_for(
+                "agent-1",
+                start_id,
+                json!({
+                    "operation_id": format!("read-{classification}"), "path": path,
+                    "before": {"exists": false, "byte_len": 0}
+                }),
+            ),
         )
         .await;
         successful_post(
             &app,
             "/v2/read/complete",
-            envelope_for("agent-1", complete_id, json!({
-                "operation_id": format!("read-{classification}"), "path": path,
-                "classification": classification, "after": {"exists": false, "byte_len": 0}
-            })),
+            envelope_for(
+                "agent-1",
+                complete_id,
+                json!({
+                    "operation_id": format!("read-{classification}"), "path": path,
+                    "classification": classification, "after": {"exists": false, "byte_len": 0}
+                }),
+            ),
         )
         .await;
         let response = app
             .oneshot(post(
                 "/v2/authorize",
-                envelope_for("agent-1", authorize_id, json!({
-                    "operation_id": format!("write-{classification}"), "action": "write_file",
-                    "targets": [{"path": path, "before": {"exists": false, "byte_len": 0}}]
-                })),
+                envelope_for(
+                    "agent-1",
+                    authorize_id,
+                    json!({
+                        "operation_id": format!("write-{classification}"), "action": "write_file",
+                        "targets": [{"path": path, "before": {"exists": false, "byte_len": 0}}]
+                    }),
+                ),
             ))
             .await
             .expect("incomplete read authorization responds");
@@ -212,106 +291,156 @@ async fn awareness_treats_invalidated_peer_reads_as_missing_evidence() {
     let first_reservation = successful_post(
         &app,
         "/v2/reservation/declare",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d231", json!({
-            "scopes": [{"kind": "file", "path": "src/lib.rs"}],
-            "action": "write_file", "purpose": "Update the module."
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d231",
+            json!({
+                "scopes": [{"kind": "file", "path": "src/lib.rs"}],
+                "action": "write_file", "purpose": "Update the module."
+            }),
+        ),
     )
     .await;
-    let first_reservation_id = first_reservation["reservation_id"].as_str().expect("reservation id").to_owned();
+    let first_reservation_id = first_reservation["reservation_id"]
+        .as_str()
+        .expect("reservation id")
+        .to_owned();
     successful_post(
         &app,
         "/v2/claim/acquire",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d232", json!({
-            "reservation_id": first_reservation_id,
-            "paths": [{"relative_path": "src/lib.rs", "observation": {"exists": false}}]
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d232",
+            json!({
+                "reservation_id": first_reservation_id,
+                "paths": [{"relative_path": "src/lib.rs", "observation": {"exists": false}}]
+            }),
+        ),
     )
     .await;
     successful_post(
         &app,
         "/v2/read/start",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d233", json!({
-            "operation_id": "first-read", "path": "src/lib.rs",
-            "before": {"exists": false, "byte_len": 0}
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d233",
+            json!({
+                "operation_id": "first-read", "path": "src/lib.rs",
+                "before": {"exists": false, "byte_len": 0}
+            }),
+        ),
     )
     .await;
     successful_post(
         &app,
         "/v2/read/complete",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d234", json!({
-            "operation_id": "first-read", "path": "src/lib.rs", "classification": "exact",
-            "after": {"exists": false, "byte_len": 0}
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d234",
+            json!({
+                "operation_id": "first-read", "path": "src/lib.rs", "classification": "exact",
+                "after": {"exists": false, "byte_len": 0}
+            }),
+        ),
     )
     .await;
 
     let second_reservation = successful_post(
         &app,
         "/v2/reservation/declare",
-        envelope_for("agent-2", "00000000-0000-4000-8000-00000000d235", json!({
-            "scopes": [{"kind": "file", "path": "src/lib.rs"}],
-            "action": "write_file", "purpose": "Coordinate the module update."
-        })),
+        envelope_for(
+            "agent-2",
+            "00000000-0000-4000-8000-00000000d235",
+            json!({
+                "scopes": [{"kind": "file", "path": "src/lib.rs"}],
+                "action": "write_file", "purpose": "Coordinate the module update."
+            }),
+        ),
     )
     .await;
-    let second_reservation_id = second_reservation["reservation_id"].as_str().expect("reservation id").to_owned();
+    let second_reservation_id = second_reservation["reservation_id"]
+        .as_str()
+        .expect("reservation id")
+        .to_owned();
     successful_post(
         &app,
         "/v2/claim/acquire",
-        envelope_for("agent-2", "00000000-0000-4000-8000-00000000d236", json!({
-            "reservation_id": second_reservation_id,
-            "paths": [{"relative_path": "src/lib.rs", "observation": {"exists": false}}]
-        })),
+        envelope_for(
+            "agent-2",
+            "00000000-0000-4000-8000-00000000d236",
+            json!({
+                "reservation_id": second_reservation_id,
+                "paths": [{"relative_path": "src/lib.rs", "observation": {"exists": false}}]
+            }),
+        ),
     )
     .await;
     successful_post(
         &app,
         "/v2/read/start",
-        envelope_for("agent-2", "00000000-0000-4000-8000-00000000d237", json!({
-            "operation_id": "second-read", "path": "src/lib.rs",
-            "before": {"exists": false, "byte_len": 0}
-        })),
+        envelope_for(
+            "agent-2",
+            "00000000-0000-4000-8000-00000000d237",
+            json!({
+                "operation_id": "second-read", "path": "src/lib.rs",
+                "before": {"exists": false, "byte_len": 0}
+            }),
+        ),
     )
     .await;
     successful_post(
         &app,
         "/v2/read/complete",
-        envelope_for("agent-2", "00000000-0000-4000-8000-00000000d238", json!({
-            "operation_id": "second-read", "path": "src/lib.rs", "classification": "exact",
-            "after": {"exists": false, "byte_len": 0}
-        })),
+        envelope_for(
+            "agent-2",
+            "00000000-0000-4000-8000-00000000d238",
+            json!({
+                "operation_id": "second-read", "path": "src/lib.rs", "classification": "exact",
+                "after": {"exists": false, "byte_len": 0}
+            }),
+        ),
     )
     .await;
     let second_intent = successful_post(
         &app,
         "/v2/authorize",
-        envelope_for("agent-2", "00000000-0000-4000-8000-00000000d239", json!({
-            "reservation_id": second_reservation_id,
-            "operation_id": "second-write", "action": "write_file",
-            "targets": [{"path": "src/lib.rs", "before": {"exists": false, "byte_len": 0}}]
-        })),
+        envelope_for(
+            "agent-2",
+            "00000000-0000-4000-8000-00000000d239",
+            json!({
+                "reservation_id": second_reservation_id,
+                "operation_id": "second-write", "action": "write_file",
+                "targets": [{"path": "src/lib.rs", "before": {"exists": false, "byte_len": 0}}]
+            }),
+        ),
     )
     .await;
     successful_post(
         &app,
         "/v2/write/complete",
-        envelope_for("agent-2", "00000000-0000-4000-8000-00000000d240", json!({
-            "intent_id": second_intent["intent_id"], "outcome": "committed",
-            "post_fingerprints": [["src/lib.rs", {"exists": false, "byte_len": 0}]]
-        })),
+        envelope_for(
+            "agent-2",
+            "00000000-0000-4000-8000-00000000d240",
+            json!({
+                "intent_id": second_intent["intent_id"], "outcome": "committed",
+                "post_fingerprints": [["src/lib.rs", {"exists": false, "byte_len": 0}]]
+            }),
+        ),
     )
     .await;
 
     let response = app
         .oneshot(post(
             "/v2/authorize",
-            envelope_for("agent-1", "00000000-0000-4000-8000-00000000d241", json!({
-                "reservation_id": first_reservation_id,
-                "operation_id": "first-write", "action": "write_file",
-                "targets": [{"path": "src/lib.rs", "before": {"exists": false, "byte_len": 0}}]
-            })),
+            envelope_for(
+                "agent-1",
+                "00000000-0000-4000-8000-00000000d241",
+                json!({
+                    "reservation_id": first_reservation_id,
+                    "operation_id": "first-write", "action": "write_file",
+                    "targets": [{"path": "src/lib.rs", "before": {"exists": false, "byte_len": 0}}]
+                }),
+            ),
         ))
         .await
         .expect("invalidated peer read responds");
@@ -328,42 +457,64 @@ async fn every_v2_route_executes_a_real_store_flow() {
     successful_post(
         &app,
         "/v2/session/register",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d101", json!({"first_prompt": "work"})),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d101",
+            json!({"first_prompt": "work"}),
+        ),
     )
     .await;
     successful_post(
         &app,
         "/v2/presence/update",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d102", json!({"kind": "update", "phase": "editing"})),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d102",
+            json!({"kind": "update", "phase": "editing"}),
+        ),
     )
     .await;
     successful_post(
         &app,
         "/v2/human/observe",
-        envelope_for("agent-2", "00000000-0000-4000-8000-00000000d110", json!({
-            "relative_path": "src/lib.rs", "kind": "save", "confidence": "high",
-            "source": "watcher", "summary": "human save"
-        })),
+        envelope_for(
+            "agent-2",
+            "00000000-0000-4000-8000-00000000d110",
+            json!({
+                "relative_path": "src/lib.rs", "kind": "save", "confidence": "high",
+                "source": "watcher", "summary": "human save"
+            }),
+        ),
     )
     .await;
     let reservation = successful_post(
         &app,
         "/v2/reservation/declare",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d105", json!({
-            "scopes": [{"kind": "file", "path": "src/lib.rs"}],
-            "action": "write_file",
-            "purpose": "Update the module."
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d105",
+            json!({
+                "scopes": [{"kind": "file", "path": "src/lib.rs"}],
+                "action": "write_file",
+                "purpose": "Update the module."
+            }),
+        ),
     )
     .await;
-    let reservation_id = reservation["reservation_id"].as_str().expect("reservation id");
+    let reservation_id = reservation["reservation_id"]
+        .as_str()
+        .expect("reservation id");
     let claims = successful_post(
         &app,
         "/v2/claim/acquire",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d106", json!({
-            "reservation_id": reservation_id,
-            "paths": [{"relative_path": "src/lib.rs", "observation": {"exists": false}}]
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d106",
+            json!({
+                "reservation_id": reservation_id,
+                "paths": [{"relative_path": "src/lib.rs", "observation": {"exists": false}}]
+            }),
+        ),
     )
     .await;
     let claim_id = claims["claims"][0]["claim_id"].as_str().expect("claim id");
@@ -378,16 +529,24 @@ async fn every_v2_route_executes_a_real_store_flow() {
     successful_post(
         &app,
         "/v2/read/complete",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d104", json!({
-            "operation_id": "read-1", "path": "src/lib.rs", "classification": "exact",
-            "after": {"exists": false, "byte_len": 0}
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d104",
+            json!({
+                "operation_id": "read-1", "path": "src/lib.rs", "classification": "exact",
+                "after": {"exists": false, "byte_len": 0}
+            }),
+        ),
     )
     .await;
     let save_check = successful_post(
         &app,
         "/v2/human/save-check",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d111", json!({"paths": ["src/lib.rs"]})),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d111",
+            json!({"paths": ["src/lib.rs"]}),
+        ),
     )
     .await;
     assert_eq!(save_check["blocked"], true);
@@ -403,12 +562,16 @@ async fn every_v2_route_executes_a_real_store_flow() {
     let intent = successful_post(
         &app,
         "/v2/authorize",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d107", json!({
-            "reservation_id": reservation_id,
-            "operation_id": "write-1",
-            "action": "write_file",
-            "targets": [{"path": "src/lib.rs", "before": {"exists": false, "byte_len": 0}}]
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d107",
+            json!({
+                "reservation_id": reservation_id,
+                "operation_id": "write-1",
+                "action": "write_file",
+                "targets": [{"path": "src/lib.rs", "before": {"exists": false, "byte_len": 0}}]
+            }),
+        ),
     )
     .await;
     assert_eq!(intent["decision"]["decision"], "allow");
@@ -416,34 +579,50 @@ async fn every_v2_route_executes_a_real_store_flow() {
     successful_post(
         &app,
         "/v2/write/complete",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d108", json!({
-            "intent_id": intent_id, "outcome": "committed",
-            "post_fingerprints": [["src/lib.rs", {"exists": false, "byte_len": 0}]]
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d108",
+            json!({
+                "intent_id": intent_id, "outcome": "committed",
+                "post_fingerprints": [["src/lib.rs", {"exists": false, "byte_len": 0}]]
+            }),
+        ),
     )
     .await;
     successful_post(
         &app,
         "/v2/claim/release",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d109", json!({"claim_id": claim_id})),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d109",
+            json!({"claim_id": claim_id}),
+        ),
     )
     .await;
 
     let context = successful_post(
         &app,
         "/v2/context/render",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d113", json!({"mode": "brief"})),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d113",
+            json!({"mode": "brief"}),
+        ),
     )
     .await;
     assert_eq!(context["changed"], true);
     successful_post(
         &app,
         "/v2/context/ack",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d114", json!({
-            "delivery_id": context["delivery_id"],
-            "sequence": context["sequence"],
-            "workspace_version": context["workspace_version"]
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d114",
+            json!({
+                "delivery_id": context["delivery_id"],
+                "sequence": context["sequence"],
+                "workspace_version": context["workspace_version"]
+            }),
+        ),
     )
     .await;
 
@@ -459,14 +638,22 @@ async fn every_v2_route_executes_a_real_store_flow() {
     let granted = successful_post(
         &app,
         "/v2/reservation/claim",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d116", json!({"relative_path": "src/queued.rs"})),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d116",
+            json!({"relative_path": "src/queued.rs"}),
+        ),
     )
     .await;
     assert_eq!(granted["wait_id"], wait_id);
     successful_post(
         &app,
         "/v2/reservation/cancel",
-        envelope_for("agent-2", "00000000-0000-4000-8000-00000000d117", json!({"wait_id": wait_id})),
+        envelope_for(
+            "agent-2",
+            "00000000-0000-4000-8000-00000000d117",
+            json!({"wait_id": wait_id}),
+        ),
     )
     .await;
     assert!(
@@ -501,17 +688,33 @@ async fn every_v2_route_executes_a_real_store_flow() {
 
     let current = app
         .clone()
-        .oneshot(support::query_get("/v2/current", "agent-1", "00000000-0000-4000-8000-00000000d122", "workspace-1"))
+        .oneshot(support::query_get(
+            "/v2/current",
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d122",
+            "workspace-1",
+        ))
         .await
         .unwrap();
     assert_eq!(current.status(), StatusCode::OK);
     let events = app
         .clone()
-        .oneshot(support::query_get("/v2/events", "agent-1", "00000000-0000-4000-8000-00000000d123", "workspace-1"))
+        .oneshot(support::query_get(
+            "/v2/events",
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d123",
+            "workspace-1",
+        ))
         .await
         .unwrap();
     assert_eq!(events.status(), StatusCode::OK);
-    assert!(response_json(events).await["events"].as_array().expect("events array").len() > 1);
+    assert!(
+        response_json(events).await["events"]
+            .as_array()
+            .expect("events array")
+            .len()
+            > 1
+    );
     assert_eq!(
         app.oneshot(support::query_get(
             "/v2/runtime/identity",
@@ -532,52 +735,74 @@ async fn mixed_scope_reservation_authorizes_file_write_with_directory_claim_labe
     let reservation = successful_post(
         &app,
         "/v2/reservation/declare",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d125", json!({
-            "scopes": [
-                {"kind": "directory", "path": "src"},
-                {"kind": "file", "path": "src/lib.rs"}
-            ],
-            "action": "write_directory",
-            "purpose": "Update the directory and its module."
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d125",
+            json!({
+                "scopes": [
+                    {"kind": "directory", "path": "src"},
+                    {"kind": "file", "path": "src/lib.rs"}
+                ],
+                "action": "write_directory",
+                "purpose": "Update the directory and its module."
+            }),
+        ),
     )
     .await;
-    let reservation_id = reservation["reservation_id"].as_str().expect("reservation id");
+    let reservation_id = reservation["reservation_id"]
+        .as_str()
+        .expect("reservation id");
 
     successful_post(
         &app,
         "/v2/claim/acquire",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d126", json!({
-            "reservation_id": reservation_id,
-            "paths": [{"relative_path": "src/lib.rs", "observation": {"exists": false}}]
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d126",
+            json!({
+                "reservation_id": reservation_id,
+                "paths": [{"relative_path": "src/lib.rs", "observation": {"exists": false}}]
+            }),
+        ),
     )
     .await;
     successful_post(
         &app,
         "/v2/read/start",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d127", json!({
-            "operation_id": "read-lib", "path": "src/lib.rs",
-            "before": {"exists": false, "byte_len": 0}
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d127",
+            json!({
+                "operation_id": "read-lib", "path": "src/lib.rs",
+                "before": {"exists": false, "byte_len": 0}
+            }),
+        ),
     )
     .await;
     successful_post(
         &app,
         "/v2/read/complete",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d128", json!({
-            "operation_id": "read-lib", "path": "src/lib.rs", "classification": "exact",
-            "after": {"exists": false, "byte_len": 0}
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d128",
+            json!({
+                "operation_id": "read-lib", "path": "src/lib.rs", "classification": "exact",
+                "after": {"exists": false, "byte_len": 0}
+            }),
+        ),
     )
     .await;
 
-    let authorization = envelope_for("agent-1", "00000000-0000-4000-8000-00000000d129", json!({
-        "reservation_id": reservation_id,
-        "operation_id": "write-lib",
-        "action": "write_file",
-        "targets": [{"path": "src/lib.rs", "before": {"exists": false, "byte_len": 0}}]
-    }));
+    let authorization = envelope_for(
+        "agent-1",
+        "00000000-0000-4000-8000-00000000d129",
+        json!({
+            "reservation_id": reservation_id,
+            "operation_id": "write-lib",
+            "action": "write_file",
+            "targets": [{"path": "src/lib.rs", "before": {"exists": false, "byte_len": 0}}]
+        }),
+    );
     let response = successful_post(&app, "/v2/authorize", authorization.clone()).await;
 
     assert_eq!(response["decision"]["reason_code"], "authorized");
@@ -596,16 +821,23 @@ async fn action_validation_precedes_thin_freshness_policy() {
     let response = app
         .oneshot(post(
             "/v2/authorize",
-            envelope_for("agent-1", "00000000-0000-4000-8000-00000000d400", json!({
-                "operation_id": "write-invalid",
-                "action": "unsupported_write",
-                "targets": [{"path": "src/lib.rs", "before": {"exists": false, "byte_len": 0}}]
-            })),
+            envelope_for(
+                "agent-1",
+                "00000000-0000-4000-8000-00000000d400",
+                json!({
+                    "operation_id": "write-invalid",
+                    "action": "unsupported_write",
+                    "targets": [{"path": "src/lib.rs", "before": {"exists": false, "byte_len": 0}}]
+                }),
+            ),
         ))
         .await
         .expect("invalid action responds");
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    assert_eq!(response_json(response).await["reason_code"], "invalid_write_action");
+    assert_eq!(
+        response_json(response).await["reason_code"],
+        "invalid_write_action"
+    );
 }
 
 #[tokio::test]
@@ -613,11 +845,15 @@ async fn whitespace_operation_denial_is_frozen_and_audited_without_write_lifecyc
     let app = build_router(
         ServerConfig::new("test-token").with_coordination_mode(CoordinationMode::Enforcement),
     );
-    let authorization = envelope_for("agent-1", "00000000-0000-4000-8000-00000000d418", json!({
-        "operation_id": "   ",
-        "action": "write_file",
-        "targets": [{"path": "src/lib.rs", "before": {"exists": false, "byte_len": 0}}]
-    }));
+    let authorization = envelope_for(
+        "agent-1",
+        "00000000-0000-4000-8000-00000000d418",
+        json!({
+            "operation_id": "   ",
+            "action": "write_file",
+            "targets": [{"path": "src/lib.rs", "before": {"exists": false, "byte_len": 0}}]
+        }),
+    );
     let first = app
         .clone()
         .oneshot(post("/v2/authorize", authorization.clone()))
@@ -630,11 +866,15 @@ async fn whitespace_operation_denial_is_frozen_and_audited_without_write_lifecyc
     successful_post(
         &app,
         "/v2/reservation/declare",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d419", json!({
-            "scopes": [{"kind": "file", "path": "src/lib.rs"}],
-            "action": "write_file",
-            "purpose": "Mutate coordination state before retrying."
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d419",
+            json!({
+                "scopes": [{"kind": "file", "path": "src/lib.rs"}],
+                "action": "write_file",
+                "purpose": "Mutate coordination state before retrying."
+            }),
+        ),
     )
     .await;
 
@@ -655,16 +895,31 @@ async fn whitespace_operation_denial_is_frozen_and_audited_without_write_lifecyc
         ))
         .await
         .expect("whitespace denial audit responds");
-    let events = response_json(events).await["events"].as_array().expect("event list").clone();
-    let denials = events.iter().filter(|event| event["event_type"] == "authorization.denied").collect::<Vec<_>>();
+    let events = response_json(events).await["events"]
+        .as_array()
+        .expect("event list")
+        .clone();
+    let denials = events
+        .iter()
+        .filter(|event| event["event_type"] == "authorization.denied")
+        .collect::<Vec<_>>();
     assert_eq!(denials.len(), 1);
-    assert_eq!(denials[0]["payload"]["event"]["data"]["data"]["operation_id"], "   ");
     assert_eq!(
-        events.iter().filter(|event| event["event_type"] == "write_intent.started").count(),
+        denials[0]["payload"]["event"]["data"]["data"]["operation_id"],
+        "   "
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event_type"] == "write_intent.started")
+            .count(),
         0,
     );
     assert_eq!(
-        events.iter().filter(|event| event["event_type"] == "write_fence.acquired").count(),
+        events
+            .iter()
+            .filter(|event| event["event_type"] == "write_fence.acquired")
+            .count(),
         0,
     );
 }
@@ -677,38 +932,57 @@ async fn denied_authorization_is_frozen_audited_and_rejects_reused_actor_uuid() 
     let reservation = successful_post(
         &app,
         "/v2/reservation/declare",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d401", json!({
-            "scopes": [{"kind": "file", "path": "src/lib.rs"}],
-            "action": "write_file",
-            "purpose": "Update the module."
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d401",
+            json!({
+                "scopes": [{"kind": "file", "path": "src/lib.rs"}],
+                "action": "write_file",
+                "purpose": "Update the module."
+            }),
+        ),
     )
     .await;
-    let reservation_id = reservation["reservation_id"].as_str().expect("reservation id").to_owned();
+    let reservation_id = reservation["reservation_id"]
+        .as_str()
+        .expect("reservation id")
+        .to_owned();
     successful_post(
         &app,
         "/v2/read/start",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d402", json!({
-            "operation_id": "read-1", "path": "src/lib.rs",
-            "before": {"exists": false, "byte_len": 0}
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d402",
+            json!({
+                "operation_id": "read-1", "path": "src/lib.rs",
+                "before": {"exists": false, "byte_len": 0}
+            }),
+        ),
     )
     .await;
     successful_post(
         &app,
         "/v2/read/complete",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d403", json!({
-            "operation_id": "read-1", "path": "src/lib.rs", "classification": "exact",
-            "after": {"exists": false, "byte_len": 0}
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d403",
+            json!({
+                "operation_id": "read-1", "path": "src/lib.rs", "classification": "exact",
+                "after": {"exists": false, "byte_len": 0}
+            }),
+        ),
     )
     .await;
-    let authorization = envelope_for("agent-1", "00000000-0000-4000-8000-00000000d404", json!({
-        "reservation_id": reservation_id,
-        "operation_id": "write-1",
-        "action": "unsupported_write",
-        "targets": [{"path": "src/lib.rs", "before": {"exists": false, "byte_len": 0}}]
-    }));
+    let authorization = envelope_for(
+        "agent-1",
+        "00000000-0000-4000-8000-00000000d404",
+        json!({
+            "reservation_id": reservation_id,
+            "operation_id": "write-1",
+            "action": "unsupported_write",
+            "targets": [{"path": "src/lib.rs", "before": {"exists": false, "byte_len": 0}}]
+        }),
+    );
     let first = app
         .clone()
         .oneshot(post("/v2/authorize", authorization.clone()))
@@ -721,10 +995,14 @@ async fn denied_authorization_is_frozen_audited_and_rejects_reused_actor_uuid() 
     successful_post(
         &app,
         "/v2/claim/acquire",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d405", json!({
-            "reservation_id": reservation_id,
-            "paths": [{"relative_path": "src/lib.rs", "observation": {"exists": false}}]
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d405",
+            json!({
+                "reservation_id": reservation_id,
+                "paths": [{"relative_path": "src/lib.rs", "observation": {"exists": false}}]
+            }),
+        ),
     )
     .await;
 
@@ -740,17 +1018,24 @@ async fn denied_authorization_is_frozen_audited_and_rejects_reused_actor_uuid() 
         .clone()
         .oneshot(post(
             "/v2/authorize",
-            envelope_for("agent-2", "00000000-0000-4000-8000-00000000d404", json!({
-                "reservation_id": reservation_id,
-                "operation_id": "write-1",
-                "action": "unsupported_write",
-                "targets": [{"path": "src/lib.rs", "before": {"exists": false, "byte_len": 0}}]
-            })),
+            envelope_for(
+                "agent-2",
+                "00000000-0000-4000-8000-00000000d404",
+                json!({
+                    "reservation_id": reservation_id,
+                    "operation_id": "write-1",
+                    "action": "unsupported_write",
+                    "targets": [{"path": "src/lib.rs", "before": {"exists": false, "byte_len": 0}}]
+                }),
+            ),
         ))
         .await
         .expect("reused actor UUID responds");
     assert_eq!(reused.status(), StatusCode::CONFLICT);
-    assert_eq!(response_json(reused).await["error"]["code"], "idempotency_key_reused");
+    assert_eq!(
+        response_json(reused).await["error"]["code"],
+        "idempotency_key_reused"
+    );
 
     let events = app
         .oneshot(support::query_get(
@@ -761,16 +1046,28 @@ async fn denied_authorization_is_frozen_audited_and_rejects_reused_actor_uuid() 
         ))
         .await
         .expect("event audit responds");
-    let events = response_json(events).await["events"].as_array().expect("event list").clone();
-    let denials = events.iter().filter(|event| event["event_type"] == "authorization.denied").collect::<Vec<_>>();
+    let events = response_json(events).await["events"]
+        .as_array()
+        .expect("event list")
+        .clone();
+    let denials = events
+        .iter()
+        .filter(|event| event["event_type"] == "authorization.denied")
+        .collect::<Vec<_>>();
     assert_eq!(denials.len(), 1);
     assert_eq!(
         denials[0]["payload"]["event"]["data"]["data"]["reason_code"],
         "invalid_write_action",
     );
-    assert_eq!(denials[0]["payload"]["event"]["data"]["data"]["decision"], "deny");
     assert_eq!(
-        events.iter().filter(|event| event["event_type"] == "write_intent.started").count(),
+        denials[0]["payload"]["event"]["data"]["data"]["decision"],
+        "deny"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event_type"] == "write_intent.started")
+            .count(),
         0,
     );
 }
@@ -781,54 +1078,76 @@ async fn awareness_persists_overlapping_reservation_and_claim_warnings() {
     let first_reservation = successful_post(
         &app,
         "/v2/reservation/declare",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d411", json!({
-            "scopes": [{"kind": "file", "path": "src/lib.rs"}],
-            "action": "write_file",
-            "purpose": "Update the module."
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d411",
+            json!({
+                "scopes": [{"kind": "file", "path": "src/lib.rs"}],
+                "action": "write_file",
+                "purpose": "Update the module."
+            }),
+        ),
     )
     .await;
     let second_reservation_response = app
         .clone()
         .oneshot(post(
             "/v2/reservation/declare",
-            envelope_for("agent-2", "00000000-0000-4000-8000-00000000d412", json!({
-                "scopes": [{"kind": "file", "path": "src/lib.rs"}],
-                "action": "write_file",
-                "purpose": "Coordinate the module update."
-            })),
+            envelope_for(
+                "agent-2",
+                "00000000-0000-4000-8000-00000000d412",
+                json!({
+                    "scopes": [{"kind": "file", "path": "src/lib.rs"}],
+                    "action": "write_file",
+                    "purpose": "Coordinate the module update."
+                }),
+            ),
         ))
         .await
         .expect("overlapping reservation responds");
     assert_eq!(second_reservation_response.status(), StatusCode::OK);
     let second_reservation = response_json(second_reservation_response).await;
     assert_eq!(second_reservation["decision"]["decision"], "warn");
-    assert_eq!(second_reservation["decision"]["reason_code"], "coordination_conflict");
+    assert_eq!(
+        second_reservation["decision"]["reason_code"],
+        "coordination_conflict"
+    );
 
     successful_post(
         &app,
         "/v2/claim/acquire",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d413", json!({
-            "reservation_id": first_reservation["reservation_id"],
-            "paths": [{"relative_path": "src/lib.rs", "observation": {"exists": false}}]
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d413",
+            json!({
+                "reservation_id": first_reservation["reservation_id"],
+                "paths": [{"relative_path": "src/lib.rs", "observation": {"exists": false}}]
+            }),
+        ),
     )
     .await;
     let second_claim = app
         .clone()
         .oneshot(post(
             "/v2/claim/acquire",
-            envelope_for("agent-2", "00000000-0000-4000-8000-00000000d414", json!({
-                "reservation_id": second_reservation["reservation_id"],
-                "paths": [{"relative_path": "src/lib.rs", "observation": {"exists": false}}]
-            })),
+            envelope_for(
+                "agent-2",
+                "00000000-0000-4000-8000-00000000d414",
+                json!({
+                    "reservation_id": second_reservation["reservation_id"],
+                    "paths": [{"relative_path": "src/lib.rs", "observation": {"exists": false}}]
+                }),
+            ),
         ))
         .await
         .expect("overlapping claim responds");
     assert_eq!(second_claim.status(), StatusCode::OK);
     let second_claim = response_json(second_claim).await;
     assert_eq!(second_claim["decision"]["decision"], "warn");
-    assert_eq!(second_claim["decision"]["reason_code"], "coordination_conflict");
+    assert_eq!(
+        second_claim["decision"]["reason_code"],
+        "coordination_conflict"
+    );
 
     let events = app
         .oneshot(support::query_get(
@@ -839,11 +1158,18 @@ async fn awareness_persists_overlapping_reservation_and_claim_warnings() {
         ))
         .await
         .expect("warning audit responds");
-    let events = response_json(events).await["events"].as_array().expect("event list").clone();
-    let warnings = events.iter().filter(|event| {
-        event["event_type"] == "authorization.warned"
-            && event["payload"]["event"]["data"]["data"]["reason_code"] == "coordination_conflict"
-    }).count();
+    let events = response_json(events).await["events"]
+        .as_array()
+        .expect("event list")
+        .clone();
+    let warnings = events
+        .iter()
+        .filter(|event| {
+            event["event_type"] == "authorization.warned"
+                && event["payload"]["event"]["data"]["data"]["reason_code"]
+                    == "coordination_conflict"
+        })
+        .count();
     assert_eq!(warnings, 2);
     let enforcement = build_router(
         ServerConfig::new("test-token").with_coordination_mode(CoordinationMode::Enforcement),
@@ -851,21 +1177,29 @@ async fn awareness_persists_overlapping_reservation_and_claim_warnings() {
     successful_post(
         &enforcement,
         "/v2/reservation/declare",
-        envelope_for("agent-1", "00000000-0000-4000-8000-00000000d416", json!({
-            "scopes": [{"kind": "file", "path": "src/lib.rs"}],
-            "action": "write_file",
-            "purpose": "Update the module."
-        })),
+        envelope_for(
+            "agent-1",
+            "00000000-0000-4000-8000-00000000d416",
+            json!({
+                "scopes": [{"kind": "file", "path": "src/lib.rs"}],
+                "action": "write_file",
+                "purpose": "Update the module."
+            }),
+        ),
     )
     .await;
     let denied = enforcement
         .oneshot(post(
             "/v2/reservation/declare",
-            envelope_for("agent-2", "00000000-0000-4000-8000-00000000d417", json!({
-                "scopes": [{"kind": "file", "path": "src/lib.rs"}],
-                "action": "write_file",
-                "purpose": "Coordinate the module update."
-            })),
+            envelope_for(
+                "agent-2",
+                "00000000-0000-4000-8000-00000000d417",
+                json!({
+                    "scopes": [{"kind": "file", "path": "src/lib.rs"}],
+                    "action": "write_file",
+                    "purpose": "Coordinate the module update."
+                }),
+            ),
         ))
         .await
         .expect("enforcement overlap responds");

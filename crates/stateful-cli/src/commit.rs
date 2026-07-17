@@ -223,10 +223,7 @@ struct CommitLifecycle {
     operation_id: String,
 }
 
-fn complete_commit_lifecycles(
-    lifecycles: &[CommitLifecycle],
-    failed: bool,
-) -> anyhow::Result<()> {
+fn complete_commit_lifecycles(lifecycles: &[CommitLifecycle], failed: bool) -> anyhow::Result<()> {
     for lifecycle in lifecycles {
         write_lifecycle::complete(
             &lifecycle.paths,

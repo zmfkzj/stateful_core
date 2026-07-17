@@ -4,7 +4,7 @@ use stateful_core::{
     ReservationEvent, SourceKind, SourceRef, WaitEvent, WorkspaceIdentity,
 };
 use stateful_store::{CommandPlan, FixedClock, ReservationDeclaration, Store};
-use time::{macros::datetime, OffsetDateTime};
+use time::{OffsetDateTime, macros::datetime};
 use uuid::Uuid;
 const NOW: OffsetDateTime = datetime!(2026-07-15 12:00 UTC);
 
@@ -66,7 +66,8 @@ fn reservation_event(request_id: Uuid, ordinal: u32, released: bool) -> NewEvent
 
 #[test]
 fn reservation_lifecycle_is_event_sourced_and_replayable() {
-    let mut store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store should open");
+    let mut store =
+        Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store should open");
     let request = request(Uuid::new_v4());
     store
         .execute_command(&request, "reservation.lifecycle", |_| {
@@ -99,7 +100,9 @@ fn reservation_lifecycle_is_event_sourced_and_replayable() {
             "status": "released"
         }),
     );
-    store.rebuild_projections().expect("reservation projection should replay");
+    store
+        .rebuild_projections()
+        .expect("reservation projection should replay");
 }
 
 fn aggregate_event(
@@ -123,7 +126,8 @@ fn assert_projected_lifecycle(
     last: NewEvent,
     expected: serde_json::Value,
 ) {
-    let mut store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store should open");
+    let mut store =
+        Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store should open");
     let request_id = first.request_id;
     let request = request(request_id);
     store
@@ -140,13 +144,21 @@ fn assert_projected_lifecycle(
         .iter()
         .find(|row| row[1] == format!("t:{aggregate_id}"))
         .expect("aggregate projection should exist");
-    assert_eq!(row.last(), Some(&"i:2".to_string()), "projection must retain its origin event sequence");
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(row[row.len() - 2].strip_prefix("t:").expect("text payload"))
-            .expect("projected payload should be JSON"),
+        row.last(),
+        Some(&"i:2".to_string()),
+        "projection must retain its origin event sequence"
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(
+            row[row.len() - 2].strip_prefix("t:").expect("text payload")
+        )
+        .expect("projected payload should be JSON"),
         expected,
     );
-    store.rebuild_projections().expect("aggregate projection should replay");
+    store
+        .rebuild_projections()
+        .expect("aggregate projection should replay");
 }
 
 #[test]
@@ -159,8 +171,17 @@ fn claim_lifecycle_and_observation_refresh_are_event_sourced() {
         "claim.lifecycle",
         "claim_current",
         "claim-1",
-        aggregate_event(request_id, 0, "claim-1", "claim", active, |data| EventPayload::Claim(ClaimEvent::Acquired(data))),
-        aggregate_event(request_id, 1, "claim-1", "claim", refreshed.clone(), |data| EventPayload::Claim(ClaimEvent::ObservationRefreshed(data))),
+        aggregate_event(request_id, 0, "claim-1", "claim", active, |data| {
+            EventPayload::Claim(ClaimEvent::Acquired(data))
+        }),
+        aggregate_event(
+            request_id,
+            1,
+            "claim-1",
+            "claim",
+            refreshed.clone(),
+            |data| EventPayload::Claim(ClaimEvent::ObservationRefreshed(data)),
+        ),
         refreshed,
     );
 }
@@ -175,8 +196,12 @@ fn wait_fifo_grant_and_cancel_are_event_sourced() {
         "wait.lifecycle",
         "wait_current",
         "wait-1",
-        aggregate_event(request_id, 0, "wait-1", "wait", queued, |data| EventPayload::Wait(WaitEvent::Requested(data))),
-        aggregate_event(request_id, 1, "wait-1", "wait", canceled.clone(), |data| EventPayload::Wait(WaitEvent::Cancelled(data))),
+        aggregate_event(request_id, 0, "wait-1", "wait", queued, |data| {
+            EventPayload::Wait(WaitEvent::Requested(data))
+        }),
+        aggregate_event(request_id, 1, "wait-1", "wait", canceled.clone(), |data| {
+            EventPayload::Wait(WaitEvent::Cancelled(data))
+        }),
         canceled,
     );
 }
@@ -191,8 +216,17 @@ fn fence_conflict_release_and_expiry_are_event_sourced() {
         "fence.lifecycle",
         "write_fence_current",
         "fence-1",
-        aggregate_event(request_id, 0, "fence-1", "write_fence", acquired, |data| EventPayload::WriteFence(WriteFenceEvent::Acquired(data))),
-        aggregate_event(request_id, 1, "fence-1", "write_fence", released.clone(), |data| EventPayload::WriteFence(WriteFenceEvent::Released(data))),
+        aggregate_event(request_id, 0, "fence-1", "write_fence", acquired, |data| {
+            EventPayload::WriteFence(WriteFenceEvent::Acquired(data))
+        }),
+        aggregate_event(
+            request_id,
+            1,
+            "fence-1",
+            "write_fence",
+            released.clone(),
+            |data| EventPayload::WriteFence(WriteFenceEvent::Released(data)),
+        ),
         released,
     );
 }
@@ -207,8 +241,17 @@ fn human_observe_reconcile_and_expire_are_event_sourced() {
         "human.lifecycle",
         "human_observation_current",
         "human-1",
-        aggregate_event(request_id, 0, "human-1", "observation", observed, |data| EventPayload::HumanObservation(HumanObservationEvent::Observed(data))),
-        aggregate_event(request_id, 1, "human-1", "observation", reconciled.clone(), |data| EventPayload::HumanObservation(HumanObservationEvent::Reconciled(data))),
+        aggregate_event(request_id, 0, "human-1", "observation", observed, |data| {
+            EventPayload::HumanObservation(HumanObservationEvent::Observed(data))
+        }),
+        aggregate_event(
+            request_id,
+            1,
+            "human-1",
+            "observation",
+            reconciled.clone(),
+            |data| EventPayload::HumanObservation(HumanObservationEvent::Reconciled(data)),
+        ),
         reconciled,
     );
 }
@@ -223,8 +266,22 @@ fn notification_create_coalesce_deliver_and_expire_are_event_sourced() {
         "notification.lifecycle",
         "notification_current",
         "notification-1",
-        aggregate_event(request_id, 0, "notification-1", "notification", created, |data| EventPayload::Notification(NotificationEvent::Created(data))),
-        aggregate_event(request_id, 1, "notification-1", "notification", delivered.clone(), |data| EventPayload::Notification(NotificationEvent::Delivered(data))),
+        aggregate_event(
+            request_id,
+            0,
+            "notification-1",
+            "notification",
+            created,
+            |data| EventPayload::Notification(NotificationEvent::Created(data)),
+        ),
+        aggregate_event(
+            request_id,
+            1,
+            "notification-1",
+            "notification",
+            delivered.clone(),
+            |data| EventPayload::Notification(NotificationEvent::Delivered(data)),
+        ),
         delivered,
     );
 }
@@ -244,16 +301,31 @@ fn duplicate_grant_request_is_receipted_without_duplicate_notification() {
         |data| EventPayload::Wait(WaitEvent::BecameClaimable(data)),
     );
     let first = store
-        .execute_command(&request, "wait.grant", |_| Ok(CommandPlan { events: vec![event], response: json!({"wait_id": "wait-1"}), http_status: 200 }))
+        .execute_command(&request, "wait.grant", |_| {
+            Ok(CommandPlan {
+                events: vec![event],
+                response: json!({"wait_id": "wait-1"}),
+                http_status: 200,
+            })
+        })
         .expect("first grant should commit");
     let duplicate = store
-        .execute_command(&request, "wait.grant", |_| -> stateful_store::StoreResult<CommandPlan<serde_json::Value>> {
-            panic!("duplicate must return its receipt without replanning")
-        })
+        .execute_command(
+            &request,
+            "wait.grant",
+            |_| -> stateful_store::StoreResult<CommandPlan<serde_json::Value>> {
+                panic!("duplicate must return its receipt without replanning")
+            },
+        )
         .expect("duplicate grant should be idempotent");
     assert!(!first.duplicate);
     assert!(duplicate.duplicate);
-    assert_eq!(store.journal_event_count().expect("journal count should load"), 1);
+    assert_eq!(
+        store
+            .journal_event_count()
+            .expect("journal count should load"),
+        1
+    );
 }
 
 #[test]
@@ -271,18 +343,26 @@ fn terminal_activity_does_not_emit_a_warning_event() {
         |data| EventPayload::Presence(PresenceEvent::Finalized(data)),
     );
     store
-        .execute_command(&request, "activity.finalize", |_| Ok(CommandPlan { events: vec![event], response: json!({}), http_status: 200 }))
+        .execute_command(&request, "activity.finalize", |_| {
+            Ok(CommandPlan {
+                events: vec![event],
+                response: json!({}),
+                http_status: 200,
+            })
+        })
         .expect("activity should finalize");
     assert_eq!(
-        store.journal_event_types_for_request(request_id).expect("journal types should load"),
+        store
+            .journal_event_types_for_request(request_id)
+            .expect("journal types should load"),
         vec!["presence.finalized"],
     );
 }
 
-
 #[test]
 fn reservation_command_is_journaled_receipted_and_replayable() {
-    let mut store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store should open");
+    let mut store =
+        Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store should open");
     let request = reservation_request(Uuid::new_v4());
     let first = store
         .declare_reservation(&request)
@@ -295,7 +375,9 @@ fn reservation_command_is_journaled_receipted_and_replayable() {
     assert!(duplicate.duplicate);
     assert_eq!(store.journal_event_count().expect("journal should load"), 1);
     assert_eq!(first.response, duplicate.response);
-    store.rebuild_projections().expect("reservation must replay");
+    store
+        .rebuild_projections()
+        .expect("reservation must replay");
 }
 
 fn reservation_request(request_id: Uuid) -> RequestEnvelope<ReservationDeclaration> {
@@ -306,27 +388,47 @@ fn reservation_request(request_id: Uuid) -> RequestEnvelope<ReservationDeclarati
         base.agent,
         base.workspace,
         base.source,
-        ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file("src/lib.rs")], action: "write_file".into(), purpose: "Refactor the projector.".into() },
+        ReservationDeclaration {
+            scopes: vec![stateful_core::ReservationScope::file("src/lib.rs")],
+            action: "write_file".into(),
+            purpose: "Refactor the projector.".into(),
+        },
     )
     .expect("reservation request should be valid")
 }
 #[test]
 fn aggregate_failure_rolls_back_a_multi_event_transition() {
-    let mut store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store should open");
+    let mut store =
+        Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store should open");
     store.fail_projector_on_event_for_tests(2);
     let request_id = Uuid::new_v4();
     let request = request(request_id);
-    assert!(store
-        .execute_command(&request, "reservation.failure", |_| {
-            Ok(CommandPlan {
-                events: vec![reservation_event(request_id, 0, false), reservation_event(request_id, 1, true)],
-                response: json!({}),
-                http_status: 200,
+    assert!(
+        store
+            .execute_command(&request, "reservation.failure", |_| {
+                Ok(CommandPlan {
+                    events: vec![
+                        reservation_event(request_id, 0, false),
+                        reservation_event(request_id, 1, true),
+                    ],
+                    response: json!({}),
+                    http_status: 200,
+                })
             })
-        })
-        .is_err());
-    assert_eq!(store.journal_event_count().expect("journal count should load"), 0);
-    assert_eq!(store.command_receipt_count().expect("receipt count should load"), 0);
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .journal_event_count()
+            .expect("journal count should load"),
+        0
+    );
+    assert_eq!(
+        store
+            .command_receipt_count()
+            .expect("receipt count should load"),
+        0
+    );
 }
 
 #[test]
@@ -354,10 +456,33 @@ fn cleanup_removes_granted_records_by_payload_owner_not_event_author() {
         .execute_command(&request, "cleanup.granted_owner", |_| {
             Ok(CommandPlan {
                 events: vec![
-                    aggregate_event(request_id, 0, "reservation-b", "reservation", owned("reservation-b", "active"), |data| EventPayload::Reservation(ReservationEvent::Declared(data))),
-                    aggregate_event(request_id, 1, "claim-b", "claim", owned("claim-b", "active"), |data| EventPayload::Claim(ClaimEvent::Acquired(data))),
-                    aggregate_event(request_id, 2, "wait-b", "wait", owned("wait-b", "claimable"), |data| EventPayload::Wait(WaitEvent::BecameClaimable(data))),
-                    cleanup_event(3, |data| EventPayload::Reservation(ReservationEvent::Released(data))),
+                    aggregate_event(
+                        request_id,
+                        0,
+                        "reservation-b",
+                        "reservation",
+                        owned("reservation-b", "active"),
+                        |data| EventPayload::Reservation(ReservationEvent::Declared(data)),
+                    ),
+                    aggregate_event(
+                        request_id,
+                        1,
+                        "claim-b",
+                        "claim",
+                        owned("claim-b", "active"),
+                        |data| EventPayload::Claim(ClaimEvent::Acquired(data)),
+                    ),
+                    aggregate_event(
+                        request_id,
+                        2,
+                        "wait-b",
+                        "wait",
+                        owned("wait-b", "claimable"),
+                        |data| EventPayload::Wait(WaitEvent::BecameClaimable(data)),
+                    ),
+                    cleanup_event(3, |data| {
+                        EventPayload::Reservation(ReservationEvent::Released(data))
+                    }),
                     cleanup_event(4, |data| EventPayload::Claim(ClaimEvent::Released(data))),
                     cleanup_event(5, |data| EventPayload::Wait(WaitEvent::Cancelled(data))),
                 ],
@@ -374,7 +499,9 @@ fn cleanup_removes_granted_records_by_payload_owner_not_event_author() {
         ("wait_current", "wait-b"),
     ] {
         assert!(
-            snapshot[table].iter().all(|row| row[1] != format!("t:{aggregate_id}")),
+            snapshot[table]
+                .iter()
+                .all(|row| row[1] != format!("t:{aggregate_id}")),
             "{table} must remove records owned by agent-b even when agent-1 authored the grant",
         );
     }

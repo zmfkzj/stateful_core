@@ -774,30 +774,180 @@ def test_omp_low_native_subagent_count_records_usage_without_failure(mod, tmp_pa
 
 def test_orchestration_summaries(mod):
     summary = mod.summarize_orchestration_events([
-        {"event_type": "ReservationDeclared", "agent_id": "omp-agent", "workspace_id": "workspace-a"},
-        {"event_type": "ClaimAcquired", "agent_id": "omp-agent", "workspace_id": "workspace-a"},
-        {"event_type": "AuthorizationDenied", "agent_id": "omp-agent", "workspace_id": "workspace-a"},
-        {"event_type": "AuthorizationDenied", "agent_id": "omp-agent", "workspace_id": "workspace-other"},
-    ], agent_id="denovo-instance", workspace_id="workspace-a")
-    assert summary["event_count"] == 3
+        {"event_type": "presence.finalized", "agent_id": "denovo-agent", "workspace_id": "workspace-a", "created_at": "2026-06-28T14:17:00Z"},
+        {"event_type": "claim.acquired", "agent_id": "denovo-agent", "workspace_id": "workspace-a", "created_at": "2026-06-28T14:16:55Z"},
+        {"event_type": "authorization.denied", "agent_id": "denovo-agent", "workspace_id": "workspace-a", "created_at": "2026-06-28T14:16:50Z", "payload": {"family": "authorization", "event": {"kind": "denied", "data": {"aggregate_id": "intent-1", "repeated": False, "data": {"targets": [{"path": "src/pkg.py"}, {"path": "tests/pkg_test.py"}], "message": "Target existence changed since the supplied base observation."}}}}},
+        {"event_type": "presence.heartbeat", "agent_id": "denovo-agent", "workspace_id": "workspace-a", "created_at": "2026-06-28T14:16:45Z"},
+        {"event_type": "reservation.declared", "agent_id": "denovo-agent", "workspace_id": "workspace-a", "created_at": "2026-06-28T14:16:35Z"},
+        {"event_type": "presence.heartbeat", "agent_id": "denovo-agent", "workspace_id": "workspace-a", "created_at": "2026-06-28T14:16:30Z"},
+        {"event_type": "presence.registered", "agent_id": "denovo-agent", "workspace_id": "workspace-a", "created_at": "2026-06-28T14:16:20Z"},
+        {"event_type": "authorization.denied", "agent_id": "other-agent", "workspace_id": "workspace-other", "created_at": "2026-06-28T14:16:15Z"},
+    ], agent_id="denovo-agent", workspace_id="workspace-a")
+
+    assert summary["event_count"] == 7
+    assert summary["event_types"] == {
+        "authorization.denied": 1,
+        "claim.acquired": 1,
+        "presence.finalized": 1,
+        "presence.heartbeat": 2,
+        "presence.registered": 1,
+        "reservation.declared": 1,
+    }
     assert summary["reservation_events"] == 1
     assert summary["claim_events"] == 1
     assert summary["conflict_events"] == 1
+    assert summary["denial_events"] == 1
+    assert summary["denial_paths"] == {"src/pkg.py": 1, "tests/pkg_test.py": 1}
+    assert summary["denial_messages"] == {
+        "Target existence changed since the supplied base observation.": 1,
+    }
+    assert summary["heartbeat_events"] == 2
+    assert summary["heartbeat_windows"] == 2
+    assert summary["heartbeat_max_gap_ms"] == 15000
 
-    heartbeat = mod.summarize_orchestration_events([
-        {"event_type": "AgentHeartbeat", "timestamp": "2026-06-28T14:16:39Z", "agent_id": "omp-agent", "workspace_id": "workspace-a"},
-        {"event_type": "AgentHeartbeat", "timestamp": "2026-06-28T14:16:44Z", "agent_id": "omp-agent", "workspace_id": "workspace-a"},
-        {"event_type": "AuthorizationDenied", "timestamp": "2026-06-28T14:16:45Z", "agent_id": "omp-agent", "workspace_id": "workspace-a", "payload": {"path": "src/pkg.py", "message": "Target existence changed since the supplied base observation."}},
-        {"event_type": "AgentHeartbeat", "timestamp": "2026-06-28T14:17:30Z", "agent_id": "omp-agent", "workspace_id": "workspace-a"},
-        {"event_type": "AgentHeartbeat", "timestamp": "2026-06-28T14:17:35Z", "agent_id": "omp-agent", "workspace_id": "workspace-a"},
-        {"event_type": "ReservationDeclared", "timestamp": "2026-06-28T14:17:31Z", "agent_id": "omp-agent", "workspace_id": "workspace-a"},
-    ], agent_id="denovo-instance", workspace_id="workspace-a")
-    assert heartbeat["event_count"] == 6
-    assert heartbeat["event_types"]["AgentHeartbeat"] == 4
-    assert heartbeat["heartbeat_windows"] == 2
-    assert heartbeat["heartbeat_max_gap_ms"] == 46000
-    assert heartbeat["denial_paths"]["src/pkg.py"] == 1
 
+def test_orchestration_trace_uses_v2_envelopes_and_preserves_context_text(mod, tmp_path, monkeypatch):
+    calls = []
+    current = {
+        "presence": {"agent_id": "denovo-agent"},
+        "handoff": {"summary": "Continue the migration."},
+        "resources": [],
+        "workspace_version": 7,
+        "context_cursor": 3,
+    }
+    events = [{"event_type": "presence.registered", "workspace_id": "workspace-a"}]
+    context = {
+        "changed": True,
+        "delivery_id": "delivery-1",
+        "sequence": 4,
+        "workspace_version": 7,
+        "prompt_text": "Continue the migration; do not discard the handoff.",
+    }
+
+    def request(env, path, payload=None, **kwargs):
+        calls.append({"path": path, "payload": payload, "query": kwargs.get("query")})
+        if path.endswith("/current"):
+            return current
+        if path.endswith("/events"):
+            return {"events": events}
+        if path.endswith("/context/render"):
+            return context
+        raise AssertionError(f"unexpected stateful route: {path}")
+
+    monkeypatch.setattr(mod, "stateful_http_json", request)
+    trace = mod.write_orchestration_trace(
+        instance_dir=tmp_path / "instance",
+        env={
+            "STATEFUL_SERVER_URL": "http://stateful.test",
+            "STATEFUL_SERVER_TOKEN": "token",
+            "STATEFUL_WORKSPACE_ID": "workspace-a",
+        },
+        instance_id="instance-a",
+        stateful_agent_id="denovo-agent",
+        subagent_usage={},
+    )
+
+    assert [call["path"] for call in calls] == [
+        "/v2/current",
+        "/v2/events",
+        "/v2/context/render",
+    ]
+    for call in calls[:2]:
+        query = call["query"]
+        assert query["protocol_version"] == "stateful.v2"
+        assert query["agent_id"] == "denovo-agent"
+        assert query["actor_id"] == "denovo-agent"
+        assert query["actor_type"] == "agent"
+        assert query["workspace_id"] == "workspace-a"
+        assert query["kind"] == "cli"
+        assert query["event"] == "orchestration_trace"
+        assert query["tool_name"] == "denovo_codex_agent"
+        assert query["source_ref"] == "instance-a"
+        assert call["payload"] is None
+    assert calls[1]["query"]["limit"] == 10_000
+
+    context_request = calls[2]["payload"]
+    assert context_request["protocol_version"] == "stateful.v2"
+    assert context_request["agent"] == {
+        "agent_id": "denovo-agent",
+        "actor_id": "denovo-agent",
+        "actor_type": "agent",
+    }
+    assert context_request["workspace"]["workspace_id"] == "workspace-a"
+    assert context_request["source"] == {
+        "kind": "cli",
+        "event": "orchestration_trace",
+        "tool_name": "denovo_codex_agent",
+        "source_ref": "instance-a",
+    }
+    assert context_request["payload"] == {"mode": "brief"}
+    assert trace["trace_captured"] is True
+    assert json.loads((tmp_path / "instance/orchestration-trace.json").read_text())["current"] == current
+    assert json.loads((tmp_path / "instance/orchestration-trace.json").read_text())["context"] == context
+
+def test_orchestration_trace_queries_run_wide_event_window(mod, tmp_path, monkeypatch):
+    events = [
+        {"event_type": "presence.finalized", "agent_id": "denovo-agent", "workspace_id": "workspace-a"},
+        {"event_type": "presence.heartbeat", "agent_id": "denovo-agent", "workspace_id": "workspace-a"},
+        *[
+            {"event_type": "reservation.declared", "agent_id": "denovo-agent", "workspace_id": "workspace-a"}
+            for _ in range(101)
+        ],
+        {"event_type": "presence.registered", "agent_id": "denovo-agent", "workspace_id": "workspace-a"},
+    ]
+    calls = []
+
+    def request(env, path, payload=None, **kwargs):
+        calls.append({"path": path, "query": kwargs.get("query")})
+        if path.endswith("/current"):
+            return {"presence": None, "handoff": None, "resources": [], "workspace_version": 1, "context_cursor": 0}
+        if path.endswith("/events"):
+            return {"events": events}
+        if path.endswith("/context/render"):
+            return {"changed": False, "workspace_version": 1, "prompt_text": ""}
+        raise AssertionError(f"unexpected stateful route: {path}")
+
+    monkeypatch.setattr(mod, "stateful_http_json", request)
+    trace = mod.write_orchestration_trace(
+        instance_dir=tmp_path / "instance",
+        env={"STATEFUL_SERVER_URL": "http://stateful.test", "STATEFUL_SERVER_TOKEN": "token", "STATEFUL_WORKSPACE_ID": "workspace-a"},
+        instance_id="instance-a",
+        stateful_agent_id="denovo-agent",
+        subagent_usage={},
+    )
+
+    assert calls[1]["path"] == "/v2/events"
+    assert calls[1]["query"]["limit"] == 10_000
+    assert trace["trace_captured"] is True
+    assert trace["event_types"]["presence.registered"] == 1
+    assert trace["event_types"]["presence.heartbeat"] == 1
+    assert trace["event_types"]["presence.finalized"] == 1
+
+
+def test_orchestration_trace_reports_event_window_saturation(mod, tmp_path, monkeypatch):
+    events = [
+        {"event_type": "reservation.declared", "agent_id": "denovo-agent", "workspace_id": "workspace-a"}
+        for _ in range(10_000)
+    ]
+
+    def request(env, path, payload=None, **kwargs):
+        if path.endswith("/current"):
+            return {"presence": None, "handoff": None, "resources": [], "workspace_version": 1, "context_cursor": 0}
+        if path.endswith("/events"):
+            return {"events": events}
+        raise AssertionError(f"context must not render after a saturated event response: {path}")
+
+    monkeypatch.setattr(mod, "stateful_http_json", request)
+    trace = mod.write_orchestration_trace(
+        instance_dir=tmp_path / "instance",
+        env={"STATEFUL_SERVER_URL": "http://stateful.test", "STATEFUL_SERVER_TOKEN": "token", "STATEFUL_WORKSPACE_ID": "workspace-a"},
+        instance_id="instance-a",
+        stateful_agent_id="denovo-agent",
+        subagent_usage={},
+    )
+
+    assert trace["trace_captured"] is False
+    assert trace["trace_error"] == "RuntimeError('stateful event trace reached the 10000-event limit')"
 
 def test_parse_defaults_validate_run_and_empty_stop(mod):
     base = [

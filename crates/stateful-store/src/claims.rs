@@ -1,11 +1,18 @@
 use crate::{
-    CommandOutcome, CommandPlan, CurrentAggregate, Store, StoreError, StoreResult,
-    ReservationRecord, WaitRecord,
-    reservations::{append_grant_for_path, coordination_warning_event, expired_optional, normalized_scope, overlap_warning, record_from_current, reservation_event, scope_path, scopes_conflict, timestamp, typed_records, wait_event},
+    CommandOutcome, CommandPlan, CurrentAggregate, ReservationRecord, Store, StoreError,
+    StoreResult, WaitRecord,
+    reservations::{
+        append_grant_for_path, coordination_warning_event, expired_optional, normalized_scope,
+        overlap_warning, record_from_current, reservation_event, scope_path, scopes_conflict,
+        timestamp, typed_records, wait_event,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use stateful_core::{ClaimEvent, Decision, EventData, EventPayload, NewEvent, RequestEnvelope, ReservationEvent, WaitEvent};
+use stateful_core::{
+    ClaimEvent, Decision, EventData, EventPayload, NewEvent, RequestEnvelope, ReservationEvent,
+    WaitEvent,
+};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -74,13 +81,14 @@ impl Store {
         &self,
         request: &RequestEnvelope<ClaimAcquire>,
     ) -> StoreResult<CommandOutcome<ClaimBatchAcquireResult>> {
-        self.acquire_claim_with_mode(request, false).map(|outcome| CommandOutcome {
-            response: outcome.response.claims,
-            http_status: outcome.http_status,
-            first_event_seq: outcome.first_event_seq,
-            last_event_seq: outcome.last_event_seq,
-            duplicate: outcome.duplicate,
-        })
+        self.acquire_claim_with_mode(request, false)
+            .map(|outcome| CommandOutcome {
+                response: outcome.response.claims,
+                http_status: outcome.http_status,
+                first_event_seq: outcome.first_event_seq,
+                last_event_seq: outcome.last_event_seq,
+                duplicate: outcome.duplicate,
+            })
     }
 
     pub fn acquire_claim_with_mode(
@@ -94,8 +102,14 @@ impl Store {
             if payload.paths.is_empty() {
                 return Err(StoreError::MissingScope);
             }
-            let reservations = typed_records::<ReservationRecord>(reader, CurrentAggregate::Reservation, &request.workspace.workspace_id)?;
-            let reservation = reservations.into_iter().find(|reservation| reservation.reservation_id == payload.reservation_id)
+            let reservations = typed_records::<ReservationRecord>(
+                reader,
+                CurrentAggregate::Reservation,
+                &request.workspace.workspace_id,
+            )?;
+            let reservation = reservations
+                .into_iter()
+                .find(|reservation| reservation.reservation_id == payload.reservation_id)
                 .ok_or(StoreError::MissingReservation)?;
             if reservation.agent_id != request.agent.agent_id
                 || reservation.status != "active"
@@ -103,8 +117,17 @@ impl Store {
             {
                 return Err(StoreError::MissingReservation);
             }
-            let normalized = payload.paths.iter().map(|path| normalized_scope(&path.relative_path)).collect::<StoreResult<Vec<_>>>()?;
-            if normalized.iter().any(|path| !reservation.scopes.iter().any(|scope| scope_covers(&scope_path(scope), path))) {
+            let normalized = payload
+                .paths
+                .iter()
+                .map(|path| normalized_scope(&path.relative_path))
+                .collect::<StoreResult<Vec<_>>>()?;
+            if normalized.iter().any(|path| {
+                !reservation
+                    .scopes
+                    .iter()
+                    .any(|scope| scope_covers(&scope_path(scope), path))
+            }) {
                 return Err(StoreError::MissingReservation);
             }
             if normalized.iter().enumerate().any(|(index, path)| {
@@ -114,10 +137,17 @@ impl Store {
             }) {
                 return Err(StoreError::ClaimConflict);
             }
-            if let Some(path) = normalized.iter().find(|path| *path == "tmp" || *path == "tmp/") {
+            if let Some(path) = normalized
+                .iter()
+                .find(|path| *path == "tmp" || *path == "tmp/")
+            {
                 return Err(StoreError::InvalidClaimPath(path.clone()));
             }
-            let existing = typed_records::<ClaimRecord>(reader, CurrentAggregate::Claim, &request.workspace.workspace_id)?;
+            let existing = typed_records::<ClaimRecord>(
+                reader,
+                CurrentAggregate::Claim,
+                &request.workspace.workspace_id,
+            )?;
             let conflict = normalized.iter().any(|path| {
                 existing.iter().any(|claim| {
                     claim.status == "active"
@@ -146,17 +176,27 @@ impl Store {
             let mut acquired = 0;
             let mut already_held = 0;
             for (input, relative_path) in payload.paths.iter().zip(normalized) {
-                if let Some(mut claim) = existing.iter().find(|claim| {
-                    claim.status == "active"
-                        && !expired_optional(claim.expires_at.as_deref(), now)
-                        && claim.agent_id == request.agent.agent_id
-                        && claim.relative_path == relative_path
-                }).cloned() {
+                if let Some(mut claim) = existing
+                    .iter()
+                    .find(|claim| {
+                        claim.status == "active"
+                            && !expired_optional(claim.expires_at.as_deref(), now)
+                            && claim.agent_id == request.agent.agent_id
+                            && claim.relative_path == relative_path
+                    })
+                    .cloned()
+                {
                     already_held += 1;
                     if claim.observation != input.observation {
                         claim.observation = input.observation.clone();
                         claim.expires_at = Some(timestamp(now + CLAIM_TTL)?);
-                        events.push(claim_event(request, events.len() as u32, now, ClaimEvent::ObservationRefreshed, &claim)?);
+                        events.push(claim_event(
+                            request,
+                            events.len() as u32,
+                            now,
+                            ClaimEvent::ObservationRefreshed,
+                            &claim,
+                        )?);
                     }
                     claims.push(claim);
                     continue;
@@ -174,23 +214,44 @@ impl Store {
                     observation: input.observation.clone(),
                     origin_event_seq: 0,
                 };
-                events.push(claim_event(request, events.len() as u32, now, ClaimEvent::Acquired, &claim)?);
+                events.push(claim_event(
+                    request,
+                    events.len() as u32,
+                    now,
+                    ClaimEvent::Acquired,
+                    &claim,
+                )?);
                 claims.push(claim);
                 acquired += 1;
             }
             if let Some(wait_id) = &reservation.wait_id {
-                if let Some(mut wait) = typed_records::<WaitRecord>(reader, CurrentAggregate::Wait, &request.workspace.workspace_id)?
-                    .into_iter().find(|wait| wait.wait_id == *wait_id && wait.status == "claimable")
+                if let Some(mut wait) = typed_records::<WaitRecord>(
+                    reader,
+                    CurrentAggregate::Wait,
+                    &request.workspace.workspace_id,
+                )?
+                .into_iter()
+                .find(|wait| wait.wait_id == *wait_id && wait.status == "claimable")
                 {
                     wait.status = "claimed".into();
                     wait.reservation_expires_at = None;
-                    events.push(wait_event(request, events.len() as u32, now, WaitEvent::Claimed, &wait)?);
+                    events.push(wait_event(
+                        request,
+                        events.len() as u32,
+                        now,
+                        WaitEvent::Claimed,
+                        &wait,
+                    )?);
                 }
             }
             Ok(CommandPlan {
                 events,
                 response: ClaimAcquireResponse {
-                    claims: ClaimBatchAcquireResult { claims, acquired, already_held },
+                    claims: ClaimBatchAcquireResult {
+                        claims,
+                        acquired,
+                        already_held,
+                    },
                     decision,
                 },
                 http_status: 200,
@@ -205,15 +266,23 @@ impl Store {
         let now = self.clock.now();
         let claim_id = request.payload.claim_id.clone();
         self.execute_command(request, "claim.release", |reader| {
-            let mut claim = typed_records::<ClaimRecord>(reader, CurrentAggregate::Claim, &request.workspace.workspace_id)?
-                .into_iter()
-                .find(|claim| claim.claim_id == claim_id)
-                .ok_or(StoreError::ClaimNotFound)?;
+            let mut claim = typed_records::<ClaimRecord>(
+                reader,
+                CurrentAggregate::Claim,
+                &request.workspace.workspace_id,
+            )?
+            .into_iter()
+            .find(|claim| claim.claim_id == claim_id)
+            .ok_or(StoreError::ClaimNotFound)?;
             if claim.agent_id != request.agent.agent_id {
                 return Err(StoreError::ClaimOwnerMismatch);
             }
             if claim.status != "active" {
-                return Ok(CommandPlan { events: Vec::new(), response: claim, http_status: 200 });
+                return Ok(CommandPlan {
+                    events: Vec::new(),
+                    response: claim,
+                    http_status: 200,
+                });
             }
             claim.status = "released".into();
             let mut events = vec![claim_event(request, 0, now, ClaimEvent::Released, &claim)?];
@@ -230,7 +299,11 @@ impl Store {
                     && !expired_optional(other.expires_at.as_deref(), now)
             });
             if has_active_sibling {
-                return Ok(CommandPlan { events, response: claim, http_status: 200 });
+                return Ok(CommandPlan {
+                    events,
+                    response: claim,
+                    http_status: 200,
+                });
             }
             if let Some(mut reservation) = typed_records::<ReservationRecord>(
                 reader,
@@ -239,8 +312,7 @@ impl Store {
             )?
             .into_iter()
             .find(|reservation| {
-                reservation.reservation_id == claim.reservation_id
-                    && reservation.status == "active"
+                reservation.reservation_id == claim.reservation_id && reservation.status == "active"
             }) {
                 reservation.status = "released".into();
                 events.push(reservation_event(
@@ -264,7 +336,11 @@ impl Store {
                     )?;
                 }
             }
-            Ok(CommandPlan { events, response: claim, http_status: 200 })
+            Ok(CommandPlan {
+                events,
+                response: claim,
+                http_status: 200,
+            })
         })
     }
 
@@ -276,19 +352,34 @@ impl Store {
         self.execute_command(request, "claim.expire", |reader| {
             let mut events = Vec::new();
             let mut expired_claims = Vec::new();
-            for mut claim in typed_records::<ClaimRecord>(reader, CurrentAggregate::Claim, &request.workspace.workspace_id)? {
+            for mut claim in typed_records::<ClaimRecord>(
+                reader,
+                CurrentAggregate::Claim,
+                &request.workspace.workspace_id,
+            )? {
                 if claim.status == "active" && expired_optional(claim.expires_at.as_deref(), now) {
                     claim.status = "expired".into();
                     expired_claims.push(claim.claim_id.clone());
-                    events.push(claim_event(request, events.len() as u32, now, ClaimEvent::Expired, &claim)?);
+                    events.push(claim_event(
+                        request,
+                        events.len() as u32,
+                        now,
+                        ClaimEvent::Expired,
+                        &claim,
+                    )?);
                 }
             }
-            Ok(CommandPlan { events, response: expired_claims, http_status: 200 })
+            Ok(CommandPlan {
+                events,
+                response: expired_claims,
+                http_status: 200,
+            })
         })
     }
 
     pub fn claim(&self, workspace_id: &str, claim_id: &str) -> StoreResult<Option<ClaimRecord>> {
-        self.current_records(CurrentAggregate::Claim, workspace_id)?.into_iter()
+        self.current_records(CurrentAggregate::Claim, workspace_id)?
+            .into_iter()
             .map(record_from_current::<ClaimRecord>)
             .collect::<StoreResult<Vec<_>>>()?
             .into_iter()
@@ -297,15 +388,24 @@ impl Store {
             .transpose()
     }
 
-    pub fn active_claims_for_path(&self, workspace_id: &str, path: &str) -> StoreResult<Vec<ClaimRecord>> {
+    pub fn active_claims_for_path(
+        &self,
+        workspace_id: &str,
+        path: &str,
+    ) -> StoreResult<Vec<ClaimRecord>> {
         let path = normalized_scope(path)?;
         let now = self.clock.now();
-        let claims = self.current_records(CurrentAggregate::Claim, workspace_id)?
+        let claims = self
+            .current_records(CurrentAggregate::Claim, workspace_id)?
             .into_iter()
             .map(record_from_current::<ClaimRecord>)
             .collect::<StoreResult<Vec<_>>>()?
             .into_iter()
-            .filter(|claim| claim.status == "active" && !expired_optional(claim.expires_at.as_deref(), now) && claim.relative_path == path)
+            .filter(|claim| {
+                claim.status == "active"
+                    && !expired_optional(claim.expires_at.as_deref(), now)
+                    && claim.relative_path == path
+            })
             .collect();
         Ok(claims)
     }
@@ -320,7 +420,13 @@ pub(crate) fn claim_event<T>(
 ) -> StoreResult<NewEvent> {
     let mut data = EventData::new(&claim.claim_id);
     data.data = json!({"claim": claim});
-    NewEvent::new(request.request_id, ordinal, now, EventPayload::Claim(variant(data))).map_err(StoreError::from)
+    NewEvent::new(
+        request.request_id,
+        ordinal,
+        now,
+        EventPayload::Claim(variant(data)),
+    )
+    .map_err(StoreError::from)
 }
 
 fn scope_covers(scope: &str, path: &str) -> bool {

@@ -333,10 +333,13 @@ pub fn resolve_runtime_origin(
 ) -> anyhow::Result<ServerRuntime> {
     match origin {
         RuntimeOrigin::EnvOverride { base_url } => {
-            let runtime = runtime_from_env()?
-                .ok_or_else(|| anyhow::anyhow!("captured environment runtime override is unavailable"))?;
+            let runtime = runtime_from_env()?.ok_or_else(|| {
+                anyhow::anyhow!("captured environment runtime override is unavailable")
+            })?;
             if runtime.base_url != *base_url {
-                anyhow::bail!("environment runtime override no longer matches the captured base URL");
+                anyhow::bail!(
+                    "environment runtime override no longer matches the captured base URL"
+                );
             }
             Ok(runtime)
         }
@@ -1330,7 +1333,11 @@ mod tests {
         assert_eq!(
             origin,
             RuntimeOrigin::RepoLocal {
-                repo_root: repo.canonicalize().expect("repo root should canonicalize").to_string_lossy().into_owned(),
+                repo_root: repo
+                    .canonicalize()
+                    .expect("repo root should canonicalize")
+                    .to_string_lossy()
+                    .into_owned(),
             }
         );
 
@@ -1389,5 +1396,4 @@ mod tests {
         assert_eq!(body["payload"]["relative_path"], "src/auth.ts");
         assert_eq!(body["payload"]["reservation_id"], "reservation-1");
     }
-
 }

@@ -144,3 +144,43 @@ def test_metadata_omits_agent_time_when_error_happens_before_agent_starts(tmp_pa
     assert exit_code == 1
     assert metadata["error"] == "prompt failed before agent"
     assert "agent_running_time_ms" not in metadata
+
+
+def test_omp_docker_records_only_agent_command_time(tmp_path, monkeypatch):
+    mod = load_script("programbench_omp_agent.py")
+    clock = FakeClock()
+    args = base_args(tmp_path)
+    args.agent_docker_image = "omp-image"
+    args.agent_docker_omp_bin = "omp"
+    args.docker_bin = "docker"
+    args.stateful = False
+    args.stateful_binary = "/bin/stateful"
+    args.thinking = None
+    monkeypatch.setattr(mod, "now_ms", clock.now_ms)
+
+    def advance_by(delta_ms: int):
+        def inner(*_args, **_kwargs):
+            clock.advance(delta_ms)
+        return inner
+
+    def fake_docker_exec(*_args, **_kwargs):
+        return ["docker", "exec", "agent"]
+
+    def fake_run(command, **_kwargs):
+        clock.advance(500)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(mod, "start_agent_docker_container", lambda _args: "agent")
+    monkeypatch.setattr(mod, "agent_docker_env", lambda *_args: {})
+    monkeypatch.setattr(mod, "copy_airlock_to_agent_container", advance_by(100))
+    monkeypatch.setattr(mod, "seed_omp_auth_credentials_into_container", advance_by(100))
+    monkeypatch.setattr(mod, "docker_agent_exec_command", fake_docker_exec)
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(mod, "copy_agent_workspace_to_airlock", advance_by(200))
+    monkeypatch.setattr(mod, "smoke_compile_airlock", advance_by(300))
+    monkeypatch.setattr(mod, "remove_agent_docker_container", advance_by(100))
+
+    result = mod.run_agent(args, "prompt")
+
+    assert result.returncode == 0
+    assert args.agent_running_time_ms == 500

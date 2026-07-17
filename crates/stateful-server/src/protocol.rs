@@ -10,7 +10,6 @@ use serde_json::{Value, json};
 use stateful_core::{QueryEnvelope, RequestEnvelope, V2Error};
 use stateful_store::{CommandOutcome, StoreError};
 
-
 pub(crate) struct V2Json(pub Value);
 
 impl<S> FromRequest<S> for V2Json
@@ -24,51 +23,81 @@ where
             .headers()
             .get(CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.split(';').next().is_some_and(|kind| kind.trim() == "application/json"));
+            .is_some_and(|value| {
+                value
+                    .split(';')
+                    .next()
+                    .is_some_and(|kind| kind.trim() == "application/json")
+            });
         if !is_json {
             return Err(error_response(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 None,
-                V2Error::new("unsupported_media_type", "POST requests require application/json."),
+                V2Error::new(
+                    "unsupported_media_type",
+                    "POST requests require application/json.",
+                ),
             ));
         }
-        let bytes = to_bytes(request.into_body(), 2 * 1024 * 1024).await.map_err(|_| {
+        let bytes = to_bytes(request.into_body(), 2 * 1024 * 1024)
+            .await
+            .map_err(|_| {
+                error_response(
+                    StatusCode::BAD_REQUEST,
+                    None,
+                    V2Error::new("invalid_json", "Request body could not be read."),
+                )
+            })?;
+        serde_json::from_slice(&bytes).map(Self).map_err(|_| {
             error_response(
                 StatusCode::BAD_REQUEST,
                 None,
-                V2Error::new("invalid_json", "Request body could not be read."),
-            )
-        })?;
-        serde_json::from_slice(&bytes)
-            .map(Self)
-            .map_err(|_| error_response(
-                StatusCode::BAD_REQUEST,
-                None,
                 V2Error::new("invalid_json", "Request body must be valid JSON."),
-            ))
+            )
+        })
     }
 }
 
-pub(crate) fn parse_query<T: DeserializeOwned>(raw: Option<String>) -> Result<QueryEnvelope<T>, Response> {
+#[expect(
+    clippy::result_large_err,
+    reason = "Axum responses are returned directly to preserve the protocol error contract."
+)]
+pub(crate) fn parse_query<T: DeserializeOwned>(
+    raw: Option<String>,
+) -> Result<QueryEnvelope<T>, Response> {
     let mut parameters = serde_json::Map::new();
-    for pair in raw.as_deref().unwrap_or_default().split('&').filter(|pair| !pair.is_empty()) {
+    for pair in raw
+        .as_deref()
+        .unwrap_or_default()
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+    {
         let Some((key, value)) = pair.split_once('=') else {
             return Err(error_response(
                 StatusCode::BAD_REQUEST,
                 None,
-                V2Error::new("invalid_query_envelope", "Query parameters must be key-value pairs."),
+                V2Error::new(
+                    "invalid_query_envelope",
+                    "Query parameters must be key-value pairs.",
+                ),
             ));
         };
         let (key, value) = match (decode_query_component(key), decode_query_component(value)) {
             (Ok(key), Ok(value)) => (key, value),
-            _ => return Err(error_response(
-                StatusCode::BAD_REQUEST,
-                None,
-                V2Error::new("invalid_query_envelope", "Query parameters contain invalid percent encoding."),
-            )),
+            _ => {
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    None,
+                    V2Error::new(
+                        "invalid_query_envelope",
+                        "Query parameters contain invalid percent encoding.",
+                    ),
+                ));
+            }
         };
         let value = if key == "limit" {
-            value.parse::<u64>()
+            value
+                .parse::<u64>()
                 .map(serde_json::Number::from)
                 .map(Value::Number)
                 .unwrap_or_else(|_| Value::String(value))
@@ -79,27 +108,44 @@ pub(crate) fn parse_query<T: DeserializeOwned>(raw: Option<String>) -> Result<Qu
             return Err(error_response(
                 StatusCode::BAD_REQUEST,
                 None,
-                V2Error::new("invalid_query_envelope", "Query parameters must not repeat a field."),
+                V2Error::new(
+                    "invalid_query_envelope",
+                    "Query parameters must not repeat a field.",
+                ),
             ));
         }
     }
-    let request_id = parameters.get("request_id").and_then(Value::as_str).map(str::to_owned);
+    let request_id = parameters
+        .get("request_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     if parameters.get("protocol_version").and_then(Value::as_str) == Some("stateful.v1") {
         return Err(error_response(
             StatusCode::BAD_REQUEST,
             request_id.as_deref(),
-            V2Error::new("unsupported_protocol", "Only protocol_version stateful.v2 is supported."),
+            V2Error::new(
+                "unsupported_protocol",
+                "Only protocol_version stateful.v2 is supported.",
+            ),
         ));
     }
-    let request = serde_json::from_value::<QueryEnvelope<T>>(Value::Object(parameters)).map_err(|_| {
+    let request =
+        serde_json::from_value::<QueryEnvelope<T>>(Value::Object(parameters)).map_err(|_| {
+            error_response(
+                StatusCode::BAD_REQUEST,
+                request_id.as_deref(),
+                V2Error::new(
+                    "invalid_query_envelope",
+                    "Query parameters must form a valid V2 query envelope.",
+                ),
+            )
+        })?;
+    request.validate().map_err(|error| {
         error_response(
             StatusCode::BAD_REQUEST,
-            request_id.as_deref(),
-            V2Error::new("invalid_query_envelope", "Query parameters must form a valid V2 query envelope."),
+            Some(&request.request_id.to_string()),
+            error,
         )
-    })?;
-    request.validate().map_err(|error| {
-        error_response(StatusCode::BAD_REQUEST, Some(&request.request_id.to_string()), error)
     })?;
     Ok(request)
 }
@@ -128,8 +174,17 @@ fn decode_query_component(value: &str) -> Result<String, ()> {
     }
     String::from_utf8(decoded).map_err(|_| ())
 }
-pub(crate) fn parse_request<T: DeserializeOwned>(body: Value) -> Result<RequestEnvelope<T>, Response> {
-    let request_id = body.get("request_id").and_then(Value::as_str).map(str::to_owned);
+#[expect(
+    clippy::result_large_err,
+    reason = "Axum responses are returned directly to preserve the protocol error contract."
+)]
+pub(crate) fn parse_request<T: DeserializeOwned>(
+    body: Value,
+) -> Result<RequestEnvelope<T>, Response> {
+    let request_id = body
+        .get("request_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let raw = serde_json::to_string(&body).map_err(|error| {
         error_response(
             StatusCode::BAD_REQUEST,
@@ -137,7 +192,8 @@ pub(crate) fn parse_request<T: DeserializeOwned>(body: Value) -> Result<RequestE
             V2Error::new("invalid_request_envelope", error.to_string()),
         )
     })?;
-    RequestEnvelope::from_json(raw).map_err(|error| error_response(StatusCode::BAD_REQUEST, request_id.as_deref(), error))
+    RequestEnvelope::from_json(raw)
+        .map_err(|error| error_response(StatusCode::BAD_REQUEST, request_id.as_deref(), error))
 }
 
 pub(crate) fn command_response<T: Serialize>(
@@ -155,11 +211,19 @@ pub(crate) fn store_error_response(request_id: &str, error: StoreError) -> Respo
         StoreError::V2(error) => (StatusCode::BAD_REQUEST, error),
         StoreError::IdempotencyKeyReused => (
             StatusCode::CONFLICT,
-            V2Error::new("idempotency_key_reused", "request_id was already used for a different command."),
+            V2Error::new(
+                "idempotency_key_reused",
+                "request_id was already used for a different command.",
+            ),
         ),
-        StoreError::ClaimConflict | StoreError::ClaimAlreadyHeld | StoreError::WriteFenceConflict { .. } => (
+        StoreError::ClaimConflict
+        | StoreError::ClaimAlreadyHeld
+        | StoreError::WriteFenceConflict { .. } => (
             StatusCode::CONFLICT,
-            V2Error::new("coordination_conflict", "The requested coordination state conflicts with an active record."),
+            V2Error::new(
+                "coordination_conflict",
+                "The requested coordination state conflicts with an active record.",
+            ),
         ),
         StoreError::StaleAuthorization => (
             StatusCode::CONFLICT,
@@ -171,21 +235,30 @@ pub(crate) fn store_error_response(request_id: &str, error: StoreError) -> Respo
         ),
         StoreError::MissingReservation => (
             StatusCode::CONFLICT,
-            V2Error::new("missing_reservation", "A matching active reservation is required."),
+            V2Error::new(
+                "missing_reservation",
+                "A matching active reservation is required.",
+            ),
         ),
         StoreError::ReservationOwnerMismatch
         | StoreError::ReservationRequestOwnerMismatch
         | StoreError::ClaimOwnerMismatch
         | StoreError::WriteIntentOwnerMismatch => (
             StatusCode::FORBIDDEN,
-            V2Error::new("owner_mismatch", "The request identity does not own this coordination record."),
+            V2Error::new(
+                "owner_mismatch",
+                "The request identity does not own this coordination record.",
+            ),
         ),
         StoreError::ReservationRequestNotFound
         | StoreError::ClaimNotFound
         | StoreError::ReadOperationNotFound
         | StoreError::WriteIntentNotFound => (
             StatusCode::NOT_FOUND,
-            V2Error::new("not_found", "The requested coordination record does not exist."),
+            V2Error::new(
+                "not_found",
+                "The requested coordination record does not exist.",
+            ),
         ),
         StoreError::ReservationRequestNotCancelable
         | StoreError::InvalidClaimPath(_)
@@ -195,7 +268,10 @@ pub(crate) fn store_error_response(request_id: &str, error: StoreError) -> Respo
         | StoreError::InvalidReadOperation
         | StoreError::InvalidWriteIntent => (
             StatusCode::BAD_REQUEST,
-            V2Error::new("invalid_request", "The request violates a command validation rule."),
+            V2Error::new(
+                "invalid_request",
+                "The request violates a command validation rule.",
+            ),
         ),
         StoreError::Io(_)
         | StoreError::Sqlite(_)
@@ -206,7 +282,10 @@ pub(crate) fn store_error_response(request_id: &str, error: StoreError) -> Respo
         | StoreError::ProjectorFailure
         | StoreError::ReplayMismatch => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            V2Error::new("internal_error", "The server could not complete the request."),
+            V2Error::new(
+                "internal_error",
+                "The server could not complete the request.",
+            ),
         ),
     };
     error_response(status, Some(request_id), error)

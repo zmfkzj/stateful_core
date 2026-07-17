@@ -32,6 +32,7 @@ from programbench_codex_agent import (  # noqa: E402
     smoke_compile_airlock,
     stop_stateful_server,
     token_usage_from_value,
+    now_ms,
 )
 
 
@@ -380,13 +381,17 @@ def run_agent_in_docker(args, prompt: str, airlock: str, base_env: dict[str, str
             prompt,
             env=container_env,
         )
+        agent_started_at_ms = now_ms()
         try:
-            return subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=args.timeout_seconds,
-            )
+            try:
+                return subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=args.timeout_seconds,
+                )
+            finally:
+                args.agent_running_time_ms = max(now_ms() - agent_started_at_ms, 0)
         finally:
             try:
                 copy_agent_workspace_to_airlock(args, airlock, agent_container_id)
@@ -403,6 +408,7 @@ def run_agent_in_docker(args, prompt: str, airlock: str, base_env: dict[str, str
 
 
 def run_agent(args, prompt):
+    args.agent_running_time_ms = None
     airlock = getattr(args, "airlock", "/tmp/programbench-airlock")
     env = airlock_env(airlock, args.stateful_binary if args.stateful else None)
     env.pop("OMP_AUTH_SOURCE_AGENT_DIR", None)
@@ -439,13 +445,17 @@ def run_agent(args, prompt):
         if getattr(args, "thinking", None):
             command.extend(["--thinking", args.thinking])
         command.extend(["-p", prompt])
+        agent_started_at_ms = now_ms()
         try:
-            return run_omp_command(
-                command,
-                cwd=airlock,
-                env=env,
-                timeout_seconds=args.timeout_seconds,
-            )
+            try:
+                return run_omp_command(
+                    command,
+                    cwd=airlock,
+                    env=env,
+                    timeout_seconds=args.timeout_seconds,
+                )
+            finally:
+                args.agent_running_time_ms = max(now_ms() - agent_started_at_ms, 0)
         finally:
             if hasattr(args, "condition_dir"):
                 try:

@@ -1,4 +1,7 @@
-use std::{sync::{Arc, Mutex}, time::Duration as StdDuration};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration as StdDuration,
+};
 use time::{Duration, OffsetDateTime};
 
 pub trait Clock: Send + Sync {
@@ -38,11 +41,14 @@ pub struct MutableClock {
 
 impl MutableClock {
     pub fn from_system_now() -> Self {
-        Self { now: Arc::new(Mutex::new(OffsetDateTime::now_utc())) }
+        Self {
+            now: Arc::new(Mutex::new(OffsetDateTime::now_utc())),
+        }
     }
 
     pub fn advance(&self, duration: StdDuration) {
-        let duration = Duration::try_from(duration).expect("test clock duration must fit time::Duration");
+        let duration =
+            Duration::try_from(duration).expect("test clock duration must fit time::Duration");
         *self.now.lock().expect("test clock lock") += duration;
     }
 }

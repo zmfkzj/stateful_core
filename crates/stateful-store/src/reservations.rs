@@ -1,6 +1,6 @@
 use crate::{
-    ClaimRecord, CommandOutcome, CommandPlan, CurrentAggregate, CurrentRecord, ProjectionReader, Store,
-    StoreError, StoreResult,
+    ClaimRecord, CommandOutcome, CommandPlan, CurrentAggregate, CurrentRecord, ProjectionReader,
+    Store, StoreError, StoreResult,
     claims::claim_event,
     notifications::{DeliveryRecord, delivery_event},
 };
@@ -108,13 +108,14 @@ impl Store {
         &self,
         request: &RequestEnvelope<ReservationDeclaration>,
     ) -> StoreResult<CommandOutcome<ReservationRecord>> {
-        self.declare_reservation_with_mode(request, false).map(|outcome| CommandOutcome {
-            response: outcome.response.reservation,
-            http_status: outcome.http_status,
-            first_event_seq: outcome.first_event_seq,
-            last_event_seq: outcome.last_event_seq,
-            duplicate: outcome.duplicate,
-        })
+        self.declare_reservation_with_mode(request, false)
+            .map(|outcome| CommandOutcome {
+                response: outcome.response.reservation,
+                http_status: outcome.http_status,
+                first_event_seq: outcome.first_event_seq,
+                last_event_seq: outcome.last_event_seq,
+                duplicate: outcome.duplicate,
+            })
     }
 
     pub fn declare_reservation_with_mode(
@@ -137,7 +138,9 @@ impl Store {
                     && !expired_optional(reservation.expires_at.as_deref(), now)
                     && reservation.agent_id != request.agent.agent_id
                     && reservation.scopes.iter().any(|existing| {
-                        scopes.iter().any(|scope| scopes_conflict(&scope_path(existing), &scope_path(scope)))
+                        scopes
+                            .iter()
+                            .any(|scope| scopes_conflict(&scope_path(existing), &scope_path(scope)))
                     })
             });
             if conflict && !awareness {
@@ -175,7 +178,10 @@ impl Store {
             )?);
             Ok(CommandPlan {
                 events,
-                response: ReservationDeclarationResponse { reservation, decision },
+                response: ReservationDeclarationResponse {
+                    reservation,
+                    decision,
+                },
                 http_status: 200,
             })
         })
@@ -188,21 +194,38 @@ impl Store {
         let now = self.clock.now();
         let reservation_id = request.payload.reservation_id.clone();
         self.execute_command(request, "reservation.heartbeat", |reader| {
-            let mut reservation = typed_records::<ReservationRecord>(reader, CurrentAggregate::Reservation, &request.workspace.workspace_id)?
-                .into_iter()
-                .find(|record| record.reservation_id == reservation_id)
-                .ok_or(StoreError::ReservationRequestNotFound)?;
+            let mut reservation = typed_records::<ReservationRecord>(
+                reader,
+                CurrentAggregate::Reservation,
+                &request.workspace.workspace_id,
+            )?
+            .into_iter()
+            .find(|record| record.reservation_id == reservation_id)
+            .ok_or(StoreError::ReservationRequestNotFound)?;
             if reservation.agent_id != request.agent.agent_id {
                 return Err(StoreError::ReservationOwnerMismatch);
             }
-            if reservation.status != "active" || expired_optional(reservation.expires_at.as_deref(), now) {
+            if reservation.status != "active"
+                || expired_optional(reservation.expires_at.as_deref(), now)
+            {
                 return Err(StoreError::ReservationRequestNotCancelable);
             }
-            if let Some(maximum) = reservation.max_expires_at.as_deref().map(parse_time).transpose()? {
+            if let Some(maximum) = reservation
+                .max_expires_at
+                .as_deref()
+                .map(parse_time)
+                .transpose()?
+            {
                 reservation.expires_at = Some(timestamp((now + RESERVATION_TTL).min(maximum))?);
             }
             Ok(CommandPlan {
-                events: vec![reservation_event(request, 0, now, ReservationEvent::Refreshed, &reservation)?],
+                events: vec![reservation_event(
+                    request,
+                    0,
+                    now,
+                    ReservationEvent::Refreshed,
+                    &reservation,
+                )?],
                 response: reservation,
                 http_status: 200,
             })
@@ -216,31 +239,66 @@ impl Store {
         let now = self.clock.now();
         let reservation_id = request.payload.reservation_id.clone();
         self.execute_command(request, "reservation.release", |reader| {
-            let mut reservation = typed_records::<ReservationRecord>(reader, CurrentAggregate::Reservation, &request.workspace.workspace_id)?
-                .into_iter()
-                .find(|record| record.reservation_id == reservation_id)
-                .ok_or(StoreError::ReservationRequestNotFound)?;
+            let mut reservation = typed_records::<ReservationRecord>(
+                reader,
+                CurrentAggregate::Reservation,
+                &request.workspace.workspace_id,
+            )?
+            .into_iter()
+            .find(|record| record.reservation_id == reservation_id)
+            .ok_or(StoreError::ReservationRequestNotFound)?;
             if reservation.agent_id != request.agent.agent_id {
                 return Err(StoreError::ReservationOwnerMismatch);
             }
             if reservation.status != "active" {
-                return Ok(CommandPlan { events: Vec::new(), response: reservation, http_status: 200 });
+                return Ok(CommandPlan {
+                    events: Vec::new(),
+                    response: reservation,
+                    http_status: 200,
+                });
             }
             reservation.status = "released".into();
-            let mut events = vec![reservation_event(request, 0, now, ReservationEvent::Released, &reservation)?];
-            for mut claim in typed_records::<ClaimRecord>(reader, CurrentAggregate::Claim, &reservation.workspace_id)? {
+            let mut events = vec![reservation_event(
+                request,
+                0,
+                now,
+                ReservationEvent::Released,
+                &reservation,
+            )?];
+            for mut claim in typed_records::<ClaimRecord>(
+                reader,
+                CurrentAggregate::Claim,
+                &reservation.workspace_id,
+            )? {
                 if claim.reservation_id == reservation.reservation_id && claim.status == "active" {
                     claim.status = "released".into();
-                    events.push(claim_event(request, events.len() as u32, now, ClaimEvent::Released, &claim)?);
+                    events.push(claim_event(
+                        request,
+                        events.len() as u32,
+                        now,
+                        ClaimEvent::Released,
+                        &claim,
+                    )?);
                 }
             }
             for scope in &reservation.scopes {
                 append_grant_for_path(
-                    request, reader, now, &reservation.workspace_id, &scope_path(scope),
-                    std::slice::from_ref(&reservation.reservation_id), &[], true, &mut events,
+                    request,
+                    reader,
+                    now,
+                    &reservation.workspace_id,
+                    &scope_path(scope),
+                    std::slice::from_ref(&reservation.reservation_id),
+                    &[],
+                    true,
+                    &mut events,
                 )?;
             }
-            Ok(CommandPlan { events, response: reservation, http_status: 200 })
+            Ok(CommandPlan {
+                events,
+                response: reservation,
+                http_status: 200,
+            })
         })
     }
 
@@ -251,16 +309,25 @@ impl Store {
         let now = self.clock.now();
         let payload = request.payload.clone();
         self.execute_command(request, "wait.request", |reader| {
-            let relative_path = normalized_wait_relative_path(&payload.relative_path, &payload.action)?;
+            let relative_path =
+                normalized_wait_relative_path(&payload.relative_path, &payload.action)?;
             let purpose = required_purpose(&payload.purpose)?;
-            let waits = typed_records::<WaitRecord>(reader, CurrentAggregate::Wait, &request.workspace.workspace_id)?;
+            let waits = typed_records::<WaitRecord>(
+                reader,
+                CurrentAggregate::Wait,
+                &request.workspace.workspace_id,
+            )?;
             if let Some(existing) = waits.into_iter().find(|wait| {
                 wait.agent_id == request.agent.agent_id
                     && wait.relative_path == relative_path
                     && wait.action == payload.action
                     && matches!(wait.status.as_str(), "queued" | "claimable")
             }) {
-                return Ok(CommandPlan { events: Vec::new(), response: existing, http_status: 200 });
+                return Ok(CommandPlan {
+                    events: Vec::new(),
+                    response: existing,
+                    http_status: 200,
+                });
             }
             let wait = WaitRecord {
                 wait_id: Uuid::new_v4().to_string(),
@@ -292,15 +359,23 @@ impl Store {
         let now = self.clock.now();
         let wait_id = request.payload.wait_id.clone();
         self.execute_command(request, "wait.cancel", |reader| {
-            let mut wait = typed_records::<WaitRecord>(reader, CurrentAggregate::Wait, &request.workspace.workspace_id)?
-                .into_iter()
-                .find(|record| record.wait_id == wait_id)
-                .ok_or(StoreError::ReservationRequestNotFound)?;
+            let mut wait = typed_records::<WaitRecord>(
+                reader,
+                CurrentAggregate::Wait,
+                &request.workspace.workspace_id,
+            )?
+            .into_iter()
+            .find(|record| record.wait_id == wait_id)
+            .ok_or(StoreError::ReservationRequestNotFound)?;
             if wait.agent_id != request.agent.agent_id {
                 return Err(StoreError::ReservationRequestOwnerMismatch);
             }
             if !matches!(wait.status.as_str(), "queued" | "claimable") {
-                return Ok(CommandPlan { events: Vec::new(), response: wait, http_status: 200 });
+                return Ok(CommandPlan {
+                    events: Vec::new(),
+                    response: wait,
+                    http_status: 200,
+                });
             }
             let claimable_reservation = wait.reservation_id.clone();
             wait.status = "canceled".into();
@@ -308,19 +383,42 @@ impl Store {
             let mut events = vec![wait_event(request, 0, now, WaitEvent::Cancelled, &wait)?];
             if let Some(reservation_id) = claimable_reservation {
                 if let Some(mut reservation) = typed_records::<ReservationRecord>(
-                    reader, CurrentAggregate::Reservation, &request.workspace.workspace_id,
-                )?.into_iter().find(|reservation| reservation.reservation_id == reservation_id && reservation.status == "active") {
+                    reader,
+                    CurrentAggregate::Reservation,
+                    &request.workspace.workspace_id,
+                )?
+                .into_iter()
+                .find(|reservation| {
+                    reservation.reservation_id == reservation_id && reservation.status == "active"
+                }) {
                     reservation.status = "released".into();
-                    events.push(reservation_event(request, events.len() as u32, now, ReservationEvent::Released, &reservation)?);
+                    events.push(reservation_event(
+                        request,
+                        events.len() as u32,
+                        now,
+                        ReservationEvent::Released,
+                        &reservation,
+                    )?);
                     for scope in &reservation.scopes {
                         append_grant_for_path(
-                            request, reader, now, &reservation.workspace_id, &scope_path(scope),
-                            std::slice::from_ref(&reservation.reservation_id), &[], true, &mut events,
+                            request,
+                            reader,
+                            now,
+                            &reservation.workspace_id,
+                            &scope_path(scope),
+                            std::slice::from_ref(&reservation.reservation_id),
+                            &[],
+                            true,
+                            &mut events,
                         )?;
                     }
                 }
             }
-            Ok(CommandPlan { events, response: wait, http_status: 200 })
+            Ok(CommandPlan {
+                events,
+                response: wait,
+                http_status: 200,
+            })
         })
     }
 
@@ -333,9 +431,21 @@ impl Store {
         self.execute_command(request, "wait.grant", |reader| {
             let mut events = Vec::new();
             let wait = append_grant_for_path(
-                request, reader, now, &request.workspace.workspace_id, &relative_path, &[], &[], false, &mut events,
+                request,
+                reader,
+                now,
+                &request.workspace.workspace_id,
+                &relative_path,
+                &[],
+                &[],
+                false,
+                &mut events,
             )?;
-            Ok(CommandPlan { events, response: wait, http_status: 200 })
+            Ok(CommandPlan {
+                events,
+                response: wait,
+                http_status: 200,
+            })
         })
     }
 
@@ -348,8 +458,14 @@ impl Store {
             let mut events = Vec::new();
             let mut expired_ids = Vec::new();
             let mut released_paths = Vec::new();
-            for mut reservation in typed_records::<ReservationRecord>(reader, CurrentAggregate::Reservation, &request.workspace.workspace_id)? {
-                if reservation.status == "active" && expired_optional(reservation.expires_at.as_deref(), now) {
+            for mut reservation in typed_records::<ReservationRecord>(
+                reader,
+                CurrentAggregate::Reservation,
+                &request.workspace.workspace_id,
+            )? {
+                if reservation.status == "active"
+                    && expired_optional(reservation.expires_at.as_deref(), now)
+                {
                     reservation.status = "expired".into();
                     for scope in &reservation.scopes {
                         let path = scope_path(scope);
@@ -358,35 +474,81 @@ impl Store {
                         }
                     }
                     expired_ids.push(reservation.reservation_id.clone());
-                    events.push(reservation_event(request, events.len() as u32, now, ReservationEvent::Expired, &reservation)?);
+                    events.push(reservation_event(
+                        request,
+                        events.len() as u32,
+                        now,
+                        ReservationEvent::Expired,
+                        &reservation,
+                    )?);
                 }
             }
-            for mut claim in typed_records::<ClaimRecord>(reader, CurrentAggregate::Claim, &request.workspace.workspace_id)? {
+            for mut claim in typed_records::<ClaimRecord>(
+                reader,
+                CurrentAggregate::Claim,
+                &request.workspace.workspace_id,
+            )? {
                 if claim.status == "active" && expired_ids.contains(&claim.reservation_id) {
                     claim.status = "released".into();
-                    events.push(claim_event(request, events.len() as u32, now, ClaimEvent::Released, &claim)?);
+                    events.push(claim_event(
+                        request,
+                        events.len() as u32,
+                        now,
+                        ClaimEvent::Released,
+                        &claim,
+                    )?);
                 }
             }
-            for mut wait in typed_records::<WaitRecord>(reader, CurrentAggregate::Wait, &request.workspace.workspace_id)? {
+            for mut wait in typed_records::<WaitRecord>(
+                reader,
+                CurrentAggregate::Wait,
+                &request.workspace.workspace_id,
+            )? {
                 if wait.status == "claimable"
-                    && wait.reservation_expires_at.as_deref().is_some_and(|value| expired(value, now))
+                    && wait
+                        .reservation_expires_at
+                        .as_deref()
+                        .is_some_and(|value| expired(value, now))
                 {
                     wait.status = "expired".into();
                     wait.reservation_expires_at = None;
-                    events.push(wait_event(request, events.len() as u32, now, WaitEvent::Expired, &wait)?);
+                    events.push(wait_event(
+                        request,
+                        events.len() as u32,
+                        now,
+                        WaitEvent::Expired,
+                        &wait,
+                    )?);
                 }
             }
             for path in released_paths {
                 append_grant_for_path(
-                    request, reader, now, &request.workspace.workspace_id, &path, &expired_ids, &[], true, &mut events,
+                    request,
+                    reader,
+                    now,
+                    &request.workspace.workspace_id,
+                    &path,
+                    &expired_ids,
+                    &[],
+                    true,
+                    &mut events,
                 )?;
             }
-            Ok(CommandPlan { events, response: expired_ids, http_status: 200 })
+            Ok(CommandPlan {
+                events,
+                response: expired_ids,
+                http_status: 200,
+            })
         })
     }
 
-    pub fn reservation(&self, workspace_id: &str, reservation_id: &str) -> StoreResult<Option<ReservationRecord>> {
-        self.current_records(CurrentAggregate::Reservation, workspace_id)?.into_iter()
+    pub fn reservation(
+        &self,
+        workspace_id: &str,
+        reservation_id: &str,
+    ) -> StoreResult<Option<ReservationRecord>> {
+        self.current_records(CurrentAggregate::Reservation, workspace_id)?
+            .into_iter()
             .map(record_from_current::<ReservationRecord>)
             .collect::<StoreResult<Vec<_>>>()?
             .into_iter()
@@ -396,7 +558,8 @@ impl Store {
     }
 
     pub fn wait(&self, workspace_id: &str, wait_id: &str) -> StoreResult<Option<WaitRecord>> {
-        self.current_records(CurrentAggregate::Wait, workspace_id)?.into_iter()
+        self.current_records(CurrentAggregate::Wait, workspace_id)?
+            .into_iter()
             .map(|record| {
                 let mut wait = record_from_current::<WaitRecord>(record)?;
                 normalize_wait(&mut wait)?;
@@ -415,13 +578,20 @@ pub(crate) fn typed_records<T: DeserializeOwned>(
     aggregate: CurrentAggregate,
     workspace_id: &str,
 ) -> StoreResult<Vec<T>> {
-    reader.aggregate_records(aggregate, workspace_id)?.into_iter().map(record_from_current).collect()
+    reader
+        .aggregate_records(aggregate, workspace_id)?
+        .into_iter()
+        .map(record_from_current)
+        .collect()
 }
 
 pub(crate) fn record_from_current<T: DeserializeOwned>(record: CurrentRecord) -> StoreResult<T> {
     let mut payload = record.payload;
     if let Some(data) = payload.as_object_mut() {
-        data.insert("origin_event_seq".into(), serde_json::Value::from(record.origin_event_seq));
+        data.insert(
+            "origin_event_seq".into(),
+            serde_json::Value::from(record.origin_event_seq),
+        );
     }
     serde_json::from_value(payload).map_err(StoreError::from)
 }
@@ -435,7 +605,13 @@ pub(crate) fn reservation_event<T>(
 ) -> StoreResult<NewEvent> {
     let mut data = EventData::new(&reservation.reservation_id);
     data.data = json!({"reservation": reservation});
-    NewEvent::new(request.request_id, ordinal, now, EventPayload::Reservation(variant(data))).map_err(StoreError::from)
+    NewEvent::new(
+        request.request_id,
+        ordinal,
+        now,
+        EventPayload::Reservation(variant(data)),
+    )
+    .map_err(StoreError::from)
 }
 
 pub(crate) fn wait_event<T>(
@@ -447,9 +623,19 @@ pub(crate) fn wait_event<T>(
 ) -> StoreResult<NewEvent> {
     let mut data = EventData::new(&wait.wait_id);
     data.data = json!({"wait": wait});
-    NewEvent::new(request.request_id, ordinal, now, EventPayload::Wait(variant(data))).map_err(StoreError::from)
+    NewEvent::new(
+        request.request_id,
+        ordinal,
+        now,
+        EventPayload::Wait(variant(data)),
+    )
+    .map_err(StoreError::from)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "grant selection needs the complete reservation conflict context"
+)]
 pub(crate) fn append_grant_for_path<T>(
     request: &RequestEnvelope<T>,
     reader: &dyn ProjectionReader,
@@ -461,8 +647,10 @@ pub(crate) fn append_grant_for_path<T>(
     grant_all_non_conflicting: bool,
     events: &mut Vec<NewEvent>,
 ) -> StoreResult<Option<WaitRecord>> {
-    let active_reservations = typed_records::<ReservationRecord>(reader, CurrentAggregate::Reservation, workspace_id)?;
-    let active_claims = typed_records::<ClaimRecord>(reader, CurrentAggregate::Claim, workspace_id)?;
+    let active_reservations =
+        typed_records::<ReservationRecord>(reader, CurrentAggregate::Reservation, workspace_id)?;
+    let active_claims =
+        typed_records::<ClaimRecord>(reader, CurrentAggregate::Claim, workspace_id)?;
     let candidate_is_blocked = |candidate_path: &str| {
         active_reservations.iter().any(|reservation| {
             reservation.status == "active"
@@ -485,13 +673,20 @@ pub(crate) fn append_grant_for_path<T>(
         normalize_wait(wait)?;
     }
     waits.sort_by(|left, right| {
-        left.requested_at.cmp(&right.requested_at)
+        left.requested_at
+            .cmp(&right.requested_at)
             .then_with(|| left.origin_event_seq.cmp(&right.origin_event_seq))
             .then_with(|| left.wait_id.cmp(&right.wait_id))
     });
-    let notifications = typed_records::<serde_json::Value>(reader, CurrentAggregate::Notification, workspace_id)?;
-    let mut sequence = notifications.iter()
-        .filter_map(|notification| notification.get("sequence").and_then(serde_json::Value::as_u64))
+    let notifications =
+        typed_records::<serde_json::Value>(reader, CurrentAggregate::Notification, workspace_id)?;
+    let mut sequence = notifications
+        .iter()
+        .filter_map(|notification| {
+            notification
+                .get("sequence")
+                .and_then(serde_json::Value::as_u64)
+        })
         .max()
         .unwrap_or(0)
         + 1;
@@ -503,7 +698,9 @@ pub(crate) fn append_grant_for_path<T>(
             || !scopes_conflict(&wait.relative_path, relative_path)
             || candidate_is_blocked(&wait.relative_path)
             || pending_grant_conflicts(events, &wait.relative_path)
-            || granted.iter().any(|scope| scopes_conflict(scope, &wait.relative_path))
+            || granted
+                .iter()
+                .any(|scope| scopes_conflict(scope, &wait.relative_path))
         {
             continue;
         }
@@ -526,8 +723,20 @@ pub(crate) fn append_grant_for_path<T>(
         wait.status = "claimable".into();
         wait.reservation_id = Some(reservation.reservation_id.clone());
         wait.reservation_expires_at = reservation.expires_at.clone();
-        events.push(reservation_event(request, events.len() as u32, now, ReservationEvent::Declared, &reservation)?);
-        events.push(wait_event(request, events.len() as u32, now, WaitEvent::BecameClaimable, &wait)?);
+        events.push(reservation_event(
+            request,
+            events.len() as u32,
+            now,
+            ReservationEvent::Declared,
+            &reservation,
+        )?);
+        events.push(wait_event(
+            request,
+            events.len() as u32,
+            now,
+            WaitEvent::BecameClaimable,
+            &wait,
+        )?);
         let mut data = EventData::new(&wait.wait_id);
         data.data = json!({"notification": {
             "notification_id": wait.wait_id,
@@ -540,7 +749,12 @@ pub(crate) fn append_grant_for_path<T>(
             "created_at": timestamp(now)?,
             "expires_at": reservation.expires_at,
         }});
-        events.push(NewEvent::new(request.request_id, events.len() as u32, now, EventPayload::Notification(NotificationEvent::Created(data)))?);
+        events.push(NewEvent::new(
+            request.request_id,
+            events.len() as u32,
+            now,
+            EventPayload::Notification(NotificationEvent::Created(data)),
+        )?);
         let delivery = DeliveryRecord {
             delivery_id: wait.wait_id.clone(),
             notification_id: wait.wait_id.clone(),
@@ -552,7 +766,13 @@ pub(crate) fn append_grant_for_path<T>(
             delivered_at: None,
             origin_event_seq: 0,
         };
-        events.push(delivery_event(request, events.len() as u32, now, RecoveryEvent::Queued, &delivery)?);
+        events.push(delivery_event(
+            request,
+            events.len() as u32,
+            now,
+            RecoveryEvent::Queued,
+            &delivery,
+        )?);
         sequence += 1;
         granted.push(wait.relative_path.clone());
         if first.is_none() {
@@ -578,16 +798,22 @@ fn pending_grant_conflicts(events: &[NewEvent], candidate_path: &str) -> bool {
             .flatten()
             .filter_map(|scope| {
                 let path = scope.get("path")?.as_str()?;
-                Some(if scope.get("kind").and_then(serde_json::Value::as_str) == Some("directory") {
-                    format!("{path}/")
-                } else {
-                    path.into()
-                })
+                Some(
+                    if scope.get("kind").and_then(serde_json::Value::as_str) == Some("directory") {
+                        format!("{path}/")
+                    } else {
+                        path.into()
+                    },
+                )
             })
             .any(|scope| scopes_conflict(&scope, candidate_path))
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "reservation records retain the complete reservation domain fields"
+)]
 fn reservation_record<T>(
     request: &RequestEnvelope<T>,
     reservation_id: String,
@@ -608,7 +834,9 @@ fn reservation_record<T>(
         status: "active".into(),
         declared_at: timestamp(now).expect("fixed command time must format"),
         expires_at: Some(timestamp(now + ttl).expect("fixed command time must format")),
-        max_expires_at: Some(timestamp(now + RESERVATION_MAX_LIFETIME).expect("fixed command time must format")),
+        max_expires_at: Some(
+            timestamp(now + RESERVATION_MAX_LIFETIME).expect("fixed command time must format"),
+        ),
         wait_id,
         origin_event_seq: 0,
     }
@@ -619,7 +847,11 @@ pub(crate) fn normalized_scope(value: &str) -> StoreResult<String> {
     if normalized.is_empty() {
         return Err(StoreError::MissingScope);
     }
-    Ok(if value.ends_with('/') { format!("{}/", normalized.trim_end_matches('/')) } else { normalized })
+    Ok(if value.ends_with('/') {
+        format!("{}/", normalized.trim_end_matches('/'))
+    } else {
+        normalized
+    })
 }
 
 fn normalize_wait(wait: &mut WaitRecord) -> StoreResult<()> {
@@ -635,7 +867,9 @@ fn normalized_wait_relative_path(relative_path: &str, action: &str) -> StoreResu
     Ok(relative_path)
 }
 
-pub(crate) fn normalized_reservation_scopes(scopes: &[ReservationScope]) -> StoreResult<Vec<ReservationScope>> {
+pub(crate) fn normalized_reservation_scopes(
+    scopes: &[ReservationScope],
+) -> StoreResult<Vec<ReservationScope>> {
     if scopes.is_empty() {
         return Err(StoreError::MissingScope);
     }
@@ -647,7 +881,9 @@ pub(crate) fn normalized_reservation_scopes(scopes: &[ReservationScope]) -> Stor
             })?;
             Ok(match scope {
                 ReservationScope::File(_) => ReservationScope::file(path.trim_end_matches('/')),
-                ReservationScope::Directory(_) => ReservationScope::directory(path.trim_end_matches('/')),
+                ReservationScope::Directory(_) => {
+                    ReservationScope::directory(path.trim_end_matches('/'))
+                }
             })
         })
         .collect()
@@ -662,7 +898,9 @@ pub(crate) fn scope_path(scope: &ReservationScope) -> String {
 
 pub(crate) fn required_purpose(value: &str) -> StoreResult<String> {
     let purpose = value.trim();
-    if purpose.is_empty() { return Err(StoreError::MissingPurpose); }
+    if purpose.is_empty() {
+        return Err(StoreError::MissingPurpose);
+    }
     Ok(purpose.into())
 }
 
@@ -675,7 +913,11 @@ pub(crate) fn scopes_conflict(left: &str, right: &str) -> bool {
         (false, false) => left == right,
         (true, false) => right.starts_with(&format!("{left}/")),
         (false, true) => left.starts_with(&format!("{right}/")),
-        (true, true) => left == right || left.starts_with(&format!("{right}/")) || right.starts_with(&format!("{left}/")),
+        (true, true) => {
+            left == right
+                || left.starts_with(&format!("{right}/"))
+                || right.starts_with(&format!("{left}/"))
+        }
     }
 }
 
@@ -718,7 +960,8 @@ pub(crate) fn coordination_warning_event<T: Serialize, U: Serialize>(
 }
 
 pub(crate) fn timestamp(value: OffsetDateTime) -> StoreResult<String> {
-    value.format(&time::format_description::well_known::Rfc3339)
+    value
+        .format(&time::format_description::well_known::Rfc3339)
         .map_err(|error| StoreError::InvalidTimestamp(error.to_string()))
 }
 

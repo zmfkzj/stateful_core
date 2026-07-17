@@ -11,8 +11,8 @@ use stateful_store::{
     HumanObservationKind, NotificationCreate, NotificationDelivery, PresenceRegistration,
     PresenceResourceUpdate, ReservationDeclaration, ReservationRelease, Store, WaitRequest,
 };
-use tempfile::TempDir;
 use std::sync::{Arc, Mutex};
+use tempfile::TempDir;
 use time::{Duration, OffsetDateTime, macros::datetime};
 use uuid::Uuid;
 
@@ -37,7 +37,11 @@ impl Clock for MutableClock {
     }
 }
 
-fn request<T: serde::Serialize>(agent_id: &str, request_id: Uuid, payload: T) -> RequestEnvelope<T> {
+fn request<T: serde::Serialize>(
+    agent_id: &str,
+    request_id: Uuid,
+    payload: T,
+) -> RequestEnvelope<T> {
     RequestEnvelope::new(
         request_id,
         NOW,
@@ -111,7 +115,11 @@ fn render_redelivers_until_matching_cumulative_ack() {
         .declare_reservation(&request(
             "agent-1",
             Uuid::new_v4(),
-            ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file("src/lib.rs")], action: "write_file".into(), purpose: "Update the library.".into() },
+            ReservationDeclaration {
+                scopes: vec![stateful_core::ReservationScope::file("src/lib.rs")],
+                action: "write_file".into(),
+                purpose: "Update the library.".into(),
+            },
         ))
         .expect("state change succeeds");
 
@@ -119,7 +127,10 @@ fn render_redelivers_until_matching_cumulative_ack() {
         .render_context(&request(
             "agent-2",
             Uuid::new_v4(),
-            ContextRender { mode: RenderMode::Brief, resource: None },
+            ContextRender {
+                mode: RenderMode::Brief,
+                resource: None,
+            },
         ))
         .expect("first render succeeds")
         .response;
@@ -127,14 +138,20 @@ fn render_redelivers_until_matching_cumulative_ack() {
         .render_context(&request(
             "agent-2",
             Uuid::new_v4(),
-            ContextRender { mode: RenderMode::Brief, resource: None },
+            ContextRender {
+                mode: RenderMode::Brief,
+                resource: None,
+            },
         ))
         .expect("unacknowledged render succeeds")
         .response;
 
     assert_eq!(first.workspace_version, 1);
     assert!(first.changed);
-    assert_eq!(second, first, "replay must preserve the sent payload exactly");
+    assert_eq!(
+        second, first,
+        "replay must preserve the sent payload exactly"
+    );
 
     let acknowledgement = ContextAcknowledgement {
         delivery_id: first.delivery_id.clone().expect("delivery id"),
@@ -149,7 +166,10 @@ fn render_redelivers_until_matching_cumulative_ack() {
         .render_context(&request(
             "agent-2",
             Uuid::new_v4(),
-            ContextRender { mode: RenderMode::Brief, resource: None },
+            ContextRender {
+                mode: RenderMode::Brief,
+                resource: None,
+            },
         ))
         .expect("render after acknowledgement succeeds")
         .response;
@@ -165,14 +185,21 @@ fn acknowledgements_are_cumulative_and_isolated_per_agent() {
             .declare_reservation(&request(
                 "agent-1",
                 Uuid::new_v4(),
-                ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file(relative_path)], action: "write_file".into(), purpose: "Update source.".into() },
+                ReservationDeclaration {
+                    scopes: vec![stateful_core::ReservationScope::file(relative_path)],
+                    action: "write_file".into(),
+                    purpose: "Update source.".into(),
+                },
             ))
             .expect("state change succeeds");
         let _ = store
             .render_context(&request(
                 "agent-2",
                 Uuid::new_v4(),
-                ContextRender { mode: RenderMode::Brief, resource: None },
+                ContextRender {
+                    mode: RenderMode::Brief,
+                    resource: None,
+                },
             ))
             .expect("render succeeds");
     }
@@ -195,7 +222,12 @@ fn acknowledgements_are_cumulative_and_isolated_per_agent() {
             },
         ))
         .expect("older acknowledgement succeeds");
-    assert_eq!(store.context_cursor("workspace-1", "agent-2").expect("cursor loads"), first.workspace_version);
+    assert_eq!(
+        store
+            .context_cursor("workspace-1", "agent-2")
+            .expect("cursor loads"),
+        first.workspace_version
+    );
     assert_eq!(
         store
             .pending_context_deliveries("agent-2", "workspace-1")
@@ -231,11 +263,18 @@ fn acknowledgements_are_cumulative_and_isolated_per_agent() {
             },
         ))
         .expect("latest acknowledgement succeeds");
-    assert_eq!(store.context_cursor("workspace-1", "agent-2").expect("cursor loads"), second.workspace_version);
-    assert!(store
-        .pending_context_deliveries("agent-2", "workspace-1")
-        .expect("deliveries load")
-        .is_empty());
+    assert_eq!(
+        store
+            .context_cursor("workspace-1", "agent-2")
+            .expect("cursor loads"),
+        second.workspace_version
+    );
+    assert!(
+        store
+            .pending_context_deliveries("agent-2", "workspace-1")
+            .expect("deliveries load")
+            .is_empty()
+    );
 }
 
 #[test]
@@ -245,14 +284,21 @@ fn newer_delivery_keeps_sent_payload_immutable_and_coalesces_one_unread_notifica
         .declare_reservation(&request(
             "agent-1",
             Uuid::new_v4(),
-            ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file("src/one.rs")], action: "write_file".into(), purpose: "First change.".into() },
+            ReservationDeclaration {
+                scopes: vec![stateful_core::ReservationScope::file("src/one.rs")],
+                action: "write_file".into(),
+                purpose: "First change.".into(),
+            },
         ))
         .expect("first state succeeds");
     let first = store
         .render_context(&request(
             "agent-2",
             Uuid::new_v4(),
-            ContextRender { mode: RenderMode::Brief, resource: None },
+            ContextRender {
+                mode: RenderMode::Brief,
+                resource: None,
+            },
         ))
         .expect("first delivery succeeds")
         .response;
@@ -260,14 +306,21 @@ fn newer_delivery_keeps_sent_payload_immutable_and_coalesces_one_unread_notifica
         .declare_reservation(&request(
             "agent-1",
             Uuid::new_v4(),
-            ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file("src/two.rs")], action: "write_file".into(), purpose: "Second change.".into() },
+            ReservationDeclaration {
+                scopes: vec![stateful_core::ReservationScope::file("src/two.rs")],
+                action: "write_file".into(),
+                purpose: "Second change.".into(),
+            },
         ))
         .expect("second state succeeds");
     let second = store
         .render_context(&request(
             "agent-2",
             Uuid::new_v4(),
-            ContextRender { mode: RenderMode::Brief, resource: None },
+            ContextRender {
+                mode: RenderMode::Brief,
+                resource: None,
+            },
         ))
         .expect("second delivery succeeds")
         .response;
@@ -288,7 +341,10 @@ fn newer_delivery_keeps_sent_payload_immutable_and_coalesces_one_unread_notifica
         .pending_notifications("agent-2", "workspace-1")
         .expect("notification loads");
     assert_eq!(notifications.len(), 1);
-    assert_eq!(notifications[0].payload["target_version"], second.workspace_version);
+    assert_eq!(
+        notifications[0].payload["target_version"],
+        second.workspace_version
+    );
 }
 
 #[test]
@@ -298,7 +354,11 @@ fn irrelevant_final_state_still_delivers_an_empty_delta_until_acknowledged() {
         .declare_reservation(&request(
             "agent-1",
             Uuid::new_v4(),
-            ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file("src/transient.rs")], action: "write_file".into(), purpose: "Temporary work.".into() },
+            ReservationDeclaration {
+                scopes: vec![stateful_core::ReservationScope::file("src/transient.rs")],
+                action: "write_file".into(),
+                purpose: "Temporary work.".into(),
+            },
         ))
         .expect("reservation succeeds")
         .response;
@@ -306,7 +366,9 @@ fn irrelevant_final_state_still_delivers_an_empty_delta_until_acknowledged() {
         .release_reservation(&request(
             "agent-1",
             Uuid::new_v4(),
-            ReservationRelease { reservation_id: reservation.reservation_id },
+            ReservationRelease {
+                reservation_id: reservation.reservation_id,
+            },
         ))
         .expect("release succeeds");
 
@@ -314,7 +376,10 @@ fn irrelevant_final_state_still_delivers_an_empty_delta_until_acknowledged() {
         .render_context(&request(
             "agent-2",
             Uuid::new_v4(),
-            ContextRender { mode: RenderMode::Brief, resource: None },
+            ContextRender {
+                mode: RenderMode::Brief,
+                resource: None,
+            },
         ))
         .expect("empty delta renders")
         .response;
@@ -332,15 +397,20 @@ fn irrelevant_final_state_still_delivers_an_empty_delta_until_acknowledged() {
             },
         ))
         .expect("empty delta acknowledgement succeeds");
-    assert!(!store
-        .render_context(&request(
-            "agent-2",
-            Uuid::new_v4(),
-            ContextRender { mode: RenderMode::Brief, resource: None },
-        ))
-        .expect("post-ack render succeeds")
-        .response
-        .changed);
+    assert!(
+        !store
+            .render_context(&request(
+                "agent-2",
+                Uuid::new_v4(),
+                ContextRender {
+                    mode: RenderMode::Brief,
+                    resource: None
+                },
+            ))
+            .expect("post-ack render succeeds")
+            .response
+            .changed
+    );
 }
 
 #[test]
@@ -350,28 +420,37 @@ fn acknowledgements_require_bound_sequence_and_are_idempotent() {
         .declare_reservation(&request(
             "agent-1",
             Uuid::new_v4(),
-            ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file("src/ack.rs")], action: "write_file".into(), purpose: "Ack test.".into() },
+            ReservationDeclaration {
+                scopes: vec![stateful_core::ReservationScope::file("src/ack.rs")],
+                action: "write_file".into(),
+                purpose: "Ack test.".into(),
+            },
         ))
         .expect("state change succeeds");
     let delta = store
         .render_context(&request(
             "agent-2",
             Uuid::new_v4(),
-            ContextRender { mode: RenderMode::Brief, resource: None },
+            ContextRender {
+                mode: RenderMode::Brief,
+                resource: None,
+            },
         ))
         .expect("render succeeds")
         .response;
-    assert!(store
-        .acknowledge_context(&request(
-            "agent-2",
-            Uuid::new_v4(),
-            ContextAcknowledgement {
-                delivery_id: delta.delivery_id.clone().expect("delivery id"),
-                sequence: delta.sequence.expect("sequence") + 1,
-                workspace_version: delta.workspace_version,
-            },
-        ))
-        .is_err());
+    assert!(
+        store
+            .acknowledge_context(&request(
+                "agent-2",
+                Uuid::new_v4(),
+                ContextAcknowledgement {
+                    delivery_id: delta.delivery_id.clone().expect("delivery id"),
+                    sequence: delta.sequence.expect("sequence") + 1,
+                    workspace_version: delta.workspace_version,
+                },
+            ))
+            .is_err()
+    );
     let acknowledgement = ContextAcknowledgement {
         delivery_id: delta.delivery_id.expect("delivery id"),
         sequence: delta.sequence.expect("sequence"),
@@ -384,7 +463,10 @@ fn acknowledgements_require_bound_sequence_and_are_idempotent() {
     store
         .acknowledge_context(&request("agent-2", Uuid::new_v4(), acknowledgement))
         .expect("repeat acknowledgement succeeds");
-    assert_eq!(store.journal_event_count().expect("journal count"), journal_count);
+    assert_eq!(
+        store.journal_event_count().expect("journal count"),
+        journal_count
+    );
 }
 
 #[test]
@@ -395,14 +477,21 @@ fn deliveries_expire_to_replayable_dead_letters_after_twenty_four_hours() {
         .declare_reservation(&request(
             "agent-1",
             Uuid::new_v4(),
-            ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file("src/expiry.rs")], action: "write_file".into(), purpose: "Expiry test.".into() },
+            ReservationDeclaration {
+                scopes: vec![stateful_core::ReservationScope::file("src/expiry.rs")],
+                action: "write_file".into(),
+                purpose: "Expiry test.".into(),
+            },
         ))
         .expect("state change succeeds");
     let delta = store
         .render_context(&request(
             "agent-2",
             Uuid::new_v4(),
-            ContextRender { mode: RenderMode::Brief, resource: None },
+            ContextRender {
+                mode: RenderMode::Brief,
+                resource: None,
+            },
         ))
         .expect("render succeeds")
         .response;
@@ -442,14 +531,23 @@ fn overflow_uses_an_exact_summary_after_twenty_and_dead_letters_after_sixty_four
             .declare_reservation(&request(
                 "agent-1",
                 Uuid::new_v4(),
-                ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file(format!("src/{index}.rs"))], action: "write_file".into(), purpose: "Overflow test.".into() },
+                ReservationDeclaration {
+                    scopes: vec![stateful_core::ReservationScope::file(format!(
+                        "src/{index}.rs"
+                    ))],
+                    action: "write_file".into(),
+                    purpose: "Overflow test.".into(),
+                },
             ))
             .expect("state change succeeds");
         let delta = store
             .render_context(&request(
                 "agent-2",
                 Uuid::new_v4(),
-                ContextRender { mode: RenderMode::Brief, resource: None },
+                ContextRender {
+                    mode: RenderMode::Brief,
+                    resource: None,
+                },
             ))
             .expect("render succeeds")
             .response;
@@ -497,14 +595,21 @@ fn dead_letter_acknowledgement_keeps_the_persisted_cursor() {
         .declare_reservation(&request(
             "agent-1",
             Uuid::new_v4(),
-            ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file("src/dead.rs")], action: "write_file".into(), purpose: "Dead letter test.".into() },
+            ReservationDeclaration {
+                scopes: vec![stateful_core::ReservationScope::file("src/dead.rs")],
+                action: "write_file".into(),
+                purpose: "Dead letter test.".into(),
+            },
         ))
         .expect("state change succeeds");
     let delta = store
         .render_context(&request(
             "agent-2",
             Uuid::new_v4(),
-            ContextRender { mode: RenderMode::Brief, resource: None },
+            ContextRender {
+                mode: RenderMode::Brief,
+                resource: None,
+            },
         ))
         .expect("render succeeds")
         .response;
@@ -526,7 +631,12 @@ fn dead_letter_acknowledgement_keeps_the_persisted_cursor() {
         .expect("dead letter acknowledgement is inert")
         .response;
     assert_eq!(acknowledgement.cursor, 0);
-    assert_eq!(store.context_cursor("workspace-1", "agent-2").expect("cursor loads"), 0);
+    assert_eq!(
+        store
+            .context_cursor("workspace-1", "agent-2")
+            .expect("cursor loads"),
+        0
+    );
 }
 
 #[test]
@@ -536,7 +646,11 @@ fn claimable_wait_is_actionable_and_own_coordination_is_active_scope() {
         .declare_reservation(&request(
             "agent-1",
             Uuid::new_v4(),
-            ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file("src/granted.rs")], action: "write_file".into(), purpose: "Current owner.".into() },
+            ReservationDeclaration {
+                scopes: vec![stateful_core::ReservationScope::file("src/granted.rs")],
+                action: "write_file".into(),
+                purpose: "Current owner.".into(),
+            },
         ))
         .expect("reservation succeeds")
         .response;
@@ -556,7 +670,9 @@ fn claimable_wait_is_actionable_and_own_coordination_is_active_scope() {
         .release_reservation(&request(
             "agent-1",
             Uuid::new_v4(),
-            ReservationRelease { reservation_id: reservation.reservation_id },
+            ReservationRelease {
+                reservation_id: reservation.reservation_id,
+            },
         ))
         .expect("release grants the wait");
 
@@ -564,7 +680,10 @@ fn claimable_wait_is_actionable_and_own_coordination_is_active_scope() {
         .render_context(&request(
             "agent-2",
             Uuid::new_v4(),
-            ContextRender { mode: RenderMode::Brief, resource: None },
+            ContextRender {
+                mode: RenderMode::Brief,
+                resource: None,
+            },
         ))
         .expect("render succeeds")
         .response;
@@ -573,14 +692,25 @@ fn claimable_wait_is_actionable_and_own_coordination_is_active_scope() {
         .iter()
         .find(|item| item.kind == CurrentItemKind::ClaimableReservation)
         .expect("claimable wait is included");
-    assert_eq!(grant.next_action.as_deref(), Some("Claim the granted reservation before it expires."));
-    assert!(grant.source_refs.iter().any(|source| source == AGENT_CONTEXT_SCOPE_SOURCE_REF));
+    assert_eq!(
+        grant.next_action.as_deref(),
+        Some("Claim the granted reservation before it expires.")
+    );
+    assert!(
+        grant
+            .source_refs
+            .iter()
+            .any(|source| source == AGENT_CONTEXT_SCOPE_SOURCE_REF)
+    );
     assert!(
         delta
             .items
             .iter()
             .filter(|item| item.agent_id.as_deref() == Some("agent-2"))
-            .all(|item| item.source_refs.iter().any(|source| source == AGENT_CONTEXT_SCOPE_SOURCE_REF)),
+            .all(|item| item
+                .source_refs
+                .iter()
+                .any(|source| source == AGENT_CONTEXT_SCOPE_SOURCE_REF)),
         "own coordination items are never represented as another agent's blocker",
     );
 }
@@ -654,7 +784,9 @@ fn context_invalidated_notification_lifecycle_does_not_advance_context_version()
         ))
         .expect("notification queues");
     assert_eq!(
-        store.workspace_version("workspace-1").expect("version loads"),
+        store
+            .workspace_version("workspace-1")
+            .expect("version loads"),
         0,
         "delivery transport is not coordination state",
     );
@@ -674,7 +806,10 @@ fn own_outcome_unknown_remains_a_blocking_safety_state() {
             WriteIntentStart {
                 operation_id: "write-unknown".into(),
                 action: "write_file".into(),
-                targets: vec![WriteTarget { path: "src/unknown.rs".into(), before }],
+                targets: vec![WriteTarget {
+                    path: "src/unknown.rs".into(),
+                    before,
+                }],
             },
         ))
         .expect("intent starts")
@@ -691,7 +826,10 @@ fn own_outcome_unknown_remains_a_blocking_safety_state() {
         .render_context(&request(
             "agent-1",
             Uuid::new_v4(),
-            ContextRender { mode: RenderMode::Brief, resource: Some("src/unknown.rs".into()) },
+            ContextRender {
+                mode: RenderMode::Brief,
+                resource: Some("src/unknown.rs".into()),
+            },
         ))
         .expect("render succeeds")
         .response;
@@ -702,7 +840,10 @@ fn own_outcome_unknown_remains_a_blocking_safety_state() {
         .expect("own unknown write is included");
     assert_eq!(safety.severity, CurrentSeverity::Block);
     assert!(
-        !safety.source_refs.iter().any(|source| source == AGENT_CONTEXT_SCOPE_SOURCE_REF),
+        !safety
+            .source_refs
+            .iter()
+            .any(|source| source == AGENT_CONTEXT_SCOPE_SOURCE_REF),
         "safety state must not become an active-scope FYI",
     );
     assert_eq!(
@@ -728,7 +869,12 @@ fn notification_lifecycle_transport_never_advances_context_version() {
         ))
         .expect("notification queues")
         .response;
-    assert_eq!(store.workspace_version("workspace-1").expect("version loads"), 0);
+    assert_eq!(
+        store
+            .workspace_version("workspace-1")
+            .expect("version loads"),
+        0
+    );
     let coalesced = store
         .create_notification(&request(
             "agent-1",
@@ -743,8 +889,17 @@ fn notification_lifecycle_transport_never_advances_context_version() {
         .expect("notification coalesces")
         .response;
     assert_eq!(first.notification_id, coalesced.notification_id);
-    assert_eq!(store.workspace_version("workspace-1").expect("version loads"), 0);
-    for outcome in [DeliveryAttempt::Attempted, DeliveryAttempt::Failed, DeliveryAttempt::Delivered] {
+    assert_eq!(
+        store
+            .workspace_version("workspace-1")
+            .expect("version loads"),
+        0
+    );
+    for outcome in [
+        DeliveryAttempt::Attempted,
+        DeliveryAttempt::Failed,
+        DeliveryAttempt::Delivered,
+    ] {
         store
             .record_notification_delivery(&request(
                 "agent-2",
@@ -758,7 +913,12 @@ fn notification_lifecycle_transport_never_advances_context_version() {
                 },
             ))
             .expect("current callback succeeds");
-        assert_eq!(store.workspace_version("workspace-1").expect("version loads"), 0);
+        assert_eq!(
+            store
+                .workspace_version("workspace-1")
+                .expect("version loads"),
+            0
+        );
     }
     let queued = store
         .create_notification(&request(
@@ -778,7 +938,12 @@ fn notification_lifecycle_transport_never_advances_context_version() {
         .expire_notifications(&request("agent-1", Uuid::new_v4(), ()))
         .expect("queued notification expires");
     assert_eq!(queued.status, "queued");
-    assert_eq!(store.workspace_version("workspace-1").expect("version loads"), 0);
+    assert_eq!(
+        store
+            .workspace_version("workspace-1")
+            .expect("version loads"),
+        0
+    );
 }
 
 #[test]
@@ -790,7 +955,11 @@ fn same_agent_context_deliveries_and_cursors_are_isolated_by_workspace() {
                 workspace_id,
                 "owner",
                 Uuid::new_v4(),
-                ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file("src/shared.rs")], action: "write_file".into(), purpose: "State change.".into() },
+                ReservationDeclaration {
+                    scopes: vec![stateful_core::ReservationScope::file("src/shared.rs")],
+                    action: "write_file".into(),
+                    purpose: "State change.".into(),
+                },
             ))
             .expect("state change succeeds");
     }
@@ -799,7 +968,10 @@ fn same_agent_context_deliveries_and_cursors_are_isolated_by_workspace() {
             "workspace-a",
             "same-agent",
             Uuid::new_v4(),
-            ContextRender { mode: RenderMode::Brief, resource: None },
+            ContextRender {
+                mode: RenderMode::Brief,
+                resource: None,
+            },
         ))
         .expect("workspace a renders")
         .response;
@@ -808,7 +980,10 @@ fn same_agent_context_deliveries_and_cursors_are_isolated_by_workspace() {
             "workspace-b",
             "same-agent",
             Uuid::new_v4(),
-            ContextRender { mode: RenderMode::Brief, resource: None },
+            ContextRender {
+                mode: RenderMode::Brief,
+                resource: None,
+            },
         ))
         .expect("workspace b renders")
         .response;
@@ -840,8 +1015,18 @@ fn same_agent_context_deliveries_and_cursors_are_isolated_by_workspace() {
             },
         ))
         .expect("workspace a acknowledgement succeeds");
-    assert_eq!(store.context_cursor("workspace-a", "same-agent").expect("cursor loads"), 1);
-    assert_eq!(store.context_cursor("workspace-b", "same-agent").expect("cursor loads"), 0);
+    assert_eq!(
+        store
+            .context_cursor("workspace-a", "same-agent")
+            .expect("cursor loads"),
+        1
+    );
+    assert_eq!(
+        store
+            .context_cursor("workspace-b", "same-agent")
+            .expect("cursor loads"),
+        0
+    );
     assert_eq!(
         store
             .pending_context_deliveries("same-agent", "workspace-b")
@@ -854,7 +1039,10 @@ fn same_agent_context_deliveries_and_cursors_are_isolated_by_workspace() {
 #[test]
 fn resource_filter_keeps_only_relevant_presence_handoff_and_coordination_state() {
     let mut store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
-    for (agent_id, path) in [("present", "src/relevant.rs"), ("other-present", "src/other.rs")] {
+    for (agent_id, path) in [
+        ("present", "src/relevant.rs"),
+        ("other-present", "src/other.rs"),
+    ] {
         store
             .register_presence(&request(
                 agent_id,
@@ -873,7 +1061,10 @@ fn resource_filter_keeps_only_relevant_presence_handoff_and_coordination_state()
             ))
             .expect("resource updates");
     }
-    for (agent_id, path) in [("handoff", "src/relevant.rs"), ("other-handoff", "src/other.rs")] {
+    for (agent_id, path) in [
+        ("handoff", "src/relevant.rs"),
+        ("other-handoff", "src/other.rs"),
+    ] {
         store
             .register_presence(&request(
                 agent_id,
@@ -901,7 +1092,11 @@ fn resource_filter_keeps_only_relevant_presence_handoff_and_coordination_state()
             .declare_reservation(&request(
                 "owner",
                 Uuid::new_v4(),
-                ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file(path)], action: "write_file".into(), purpose: "Coordinate state.".into() },
+                ReservationDeclaration {
+                    scopes: vec![stateful_core::ReservationScope::file(path)],
+                    action: "write_file".into(),
+                    purpose: "Coordinate state.".into(),
+                },
             ))
             .expect("reservation declares");
     }
@@ -909,14 +1104,37 @@ fn resource_filter_keeps_only_relevant_presence_handoff_and_coordination_state()
         .render_context(&request(
             "reader",
             Uuid::new_v4(),
-            ContextRender { mode: RenderMode::Detailed, resource: Some("src/relevant.rs".into()) },
+            ContextRender {
+                mode: RenderMode::Detailed,
+                resource: Some("src/relevant.rs".into()),
+            },
         ))
         .expect("filtered render succeeds")
         .response;
-    assert!(delta.items.iter().any(|item| item.kind == CurrentItemKind::Agent));
-    assert!(delta.items.iter().any(|item| item.kind == CurrentItemKind::Finalization));
-    assert!(delta.items.iter().any(|item| item.kind == CurrentItemKind::Reservation));
-    assert!(delta.items.iter().all(|item| item.resource == "src/relevant.rs"));
+    assert!(
+        delta
+            .items
+            .iter()
+            .any(|item| item.kind == CurrentItemKind::Agent)
+    );
+    assert!(
+        delta
+            .items
+            .iter()
+            .any(|item| item.kind == CurrentItemKind::Finalization)
+    );
+    assert!(
+        delta
+            .items
+            .iter()
+            .any(|item| item.kind == CurrentItemKind::Reservation)
+    );
+    assert!(
+        delta
+            .items
+            .iter()
+            .all(|item| item.resource == "src/relevant.rs")
+    );
 }
 
 #[test]
@@ -940,7 +1158,10 @@ fn heartbeat_and_identical_resource_refresh_do_not_churn_delivery_versions() {
         .render_context(&request(
             "reader",
             Uuid::new_v4(),
-            ContextRender { mode: RenderMode::Brief, resource: None },
+            ContextRender {
+                mode: RenderMode::Brief,
+                resource: None,
+            },
         ))
         .expect("initial render succeeds")
         .response;
@@ -955,20 +1176,35 @@ fn heartbeat_and_identical_resource_refresh_do_not_churn_delivery_versions() {
             },
         ))
         .expect("acknowledgement succeeds");
-    let version = store.workspace_version("workspace-1").expect("version loads");
+    let version = store
+        .workspace_version("workspace-1")
+        .expect("version loads");
     store
         .heartbeat_presence(&request("owner", Uuid::new_v4(), ()))
         .expect("heartbeat succeeds");
-    assert_eq!(store.workspace_version("workspace-1").expect("version loads"), version);
+    assert_eq!(
+        store
+            .workspace_version("workspace-1")
+            .expect("version loads"),
+        version
+    );
     store
         .update_presence_resource(&request("owner", Uuid::new_v4(), relation))
         .expect("identical resource refresh succeeds");
-    assert_eq!(store.workspace_version("workspace-1").expect("version loads"), version);
+    assert_eq!(
+        store
+            .workspace_version("workspace-1")
+            .expect("version loads"),
+        version
+    );
     let unchanged = store
         .render_context(&request(
             "reader",
             Uuid::new_v4(),
-            ContextRender { mode: RenderMode::Brief, resource: None },
+            ContextRender {
+                mode: RenderMode::Brief,
+                resource: None,
+            },
         ))
         .expect("render after no-op transitions succeeds")
         .response;
@@ -987,14 +1223,21 @@ fn reconnect_replays_pending_delivery_then_persists_the_ack_cursor() {
             .declare_reservation(&request(
                 "owner",
                 Uuid::new_v4(),
-                ReservationDeclaration { scopes: vec![stateful_core::ReservationScope::file("src/reconnect.rs")], action: "write_file".into(), purpose: "Reconnect state.".into() },
+                ReservationDeclaration {
+                    scopes: vec![stateful_core::ReservationScope::file("src/reconnect.rs")],
+                    action: "write_file".into(),
+                    purpose: "Reconnect state.".into(),
+                },
             ))
             .expect("state change succeeds");
         store
             .render_context(&request(
                 "reader",
                 Uuid::new_v4(),
-                ContextRender { mode: RenderMode::Brief, resource: None },
+                ContextRender {
+                    mode: RenderMode::Brief,
+                    resource: None,
+                },
             ))
             .expect("initial render succeeds")
             .response
@@ -1006,11 +1249,17 @@ fn reconnect_replays_pending_delivery_then_persists_the_ack_cursor() {
             .render_context(&request(
                 "reader",
                 Uuid::new_v4(),
-                ContextRender { mode: RenderMode::Brief, resource: None },
+                ContextRender {
+                    mode: RenderMode::Brief,
+                    resource: None,
+                },
             ))
             .expect("reconnect render succeeds")
             .response;
-        assert_eq!(replayed, first, "pending delivery survives reconnect exactly");
+        assert_eq!(
+            replayed, first,
+            "pending delivery survives reconnect exactly"
+        );
         store
             .acknowledge_context(&request(
                 "reader",
@@ -1024,13 +1273,21 @@ fn reconnect_replays_pending_delivery_then_persists_the_ack_cursor() {
             .expect("replayed delivery acknowledges");
     }
     let store = Store::open_with_clock(&path, clock).expect("store reopens after acknowledgement");
-    assert_eq!(store.context_cursor("workspace-1", "reader").expect("cursor loads"), acknowledged_version);
+    assert_eq!(
+        store
+            .context_cursor("workspace-1", "reader")
+            .expect("cursor loads"),
+        acknowledged_version
+    );
     assert!(
         !store
             .render_context(&request(
                 "reader",
                 Uuid::new_v4(),
-                ContextRender { mode: RenderMode::Brief, resource: None },
+                ContextRender {
+                    mode: RenderMode::Brief,
+                    resource: None
+                },
             ))
             .expect("post-ack reconnect render succeeds")
             .response
@@ -1093,7 +1350,10 @@ fn context_cursor_uses_event_sequence_across_legacy_audit_gaps() {
         .render_context(&request(
             "reader",
             Uuid::new_v4(),
-            ContextRender { mode: RenderMode::Brief, resource: None },
+            ContextRender {
+                mode: RenderMode::Brief,
+                resource: None,
+            },
         ))
         .expect("first context renders")
         .response;
@@ -1110,14 +1370,24 @@ fn context_cursor_uses_event_sequence_across_legacy_audit_gaps() {
             },
         ))
         .expect("context acknowledges");
-    assert_eq!(store.context_cursor("workspace-1", "reader").expect("cursor loads"), 3);
+    assert_eq!(
+        store
+            .context_cursor("workspace-1", "reader")
+            .expect("cursor loads"),
+        3
+    );
 
     let later_request_id = Uuid::new_v4();
     let later_request = request("owner", later_request_id, ());
     store
         .execute_command(&later_request, "test.later_change", |_| {
             Ok(CommandPlan {
-                events: vec![reservation_context_event(later_request_id, 0, "reservation-3", "src/three.rs")],
+                events: vec![reservation_context_event(
+                    later_request_id,
+                    0,
+                    "reservation-3",
+                    "src/three.rs",
+                )],
                 response: (),
                 http_status: 200,
             })
@@ -1127,13 +1397,19 @@ fn context_cursor_uses_event_sequence_across_legacy_audit_gaps() {
         .render_context(&request(
             "reader",
             Uuid::new_v4(),
-            ContextRender { mode: RenderMode::Brief, resource: None },
+            ContextRender {
+                mode: RenderMode::Brief,
+                resource: None,
+            },
         ))
         .expect("later context renders")
         .response;
     assert_eq!(next.workspace_version, 8);
     assert_eq!(
-        next.items.iter().map(|item| item.resource.as_str()).collect::<Vec<_>>(),
+        next.items
+            .iter()
+            .map(|item| item.resource.as_str())
+            .collect::<Vec<_>>(),
         vec!["src/three.rs"],
         "the audit gap and already acknowledged events must not be redelivered",
     );
@@ -1204,14 +1480,18 @@ fn pending_human_writes_render_while_reconciled_and_expired_writes_do_not() {
                         resolution_request.request_id,
                         0,
                         NOW,
-                        EventPayload::HumanObservation(HumanObservationEvent::Reconciled(reconciled_data)),
+                        EventPayload::HumanObservation(HumanObservationEvent::Reconciled(
+                            reconciled_data,
+                        )),
                     )
                     .expect("reconciled event builds"),
                     NewEvent::new(
                         resolution_request.request_id,
                         1,
                         NOW,
-                        EventPayload::HumanObservation(HumanObservationEvent::Expired(expired_data)),
+                        EventPayload::HumanObservation(HumanObservationEvent::Expired(
+                            expired_data,
+                        )),
                     )
                     .expect("expired event builds"),
                 ],
@@ -1225,19 +1505,30 @@ fn pending_human_writes_render_while_reconciled_and_expired_writes_do_not() {
         .render_context(&request(
             "reader",
             Uuid::new_v4(),
-            ContextRender { mode: RenderMode::Brief, resource: None },
+            ContextRender {
+                mode: RenderMode::Brief,
+                resource: None,
+            },
         ))
         .expect("context renders")
         .response;
     assert_eq!(
-        delta.items.iter().filter(|item| item.kind == CurrentItemKind::Claim).map(|item| item.resource.as_str()).collect::<Vec<_>>(),
+        delta
+            .items
+            .iter()
+            .filter(|item| item.kind == CurrentItemKind::Claim)
+            .map(|item| item.resource.as_str())
+            .collect::<Vec<_>>(),
         vec![pending.relative_path.as_str()],
     );
 }
 
 fn migration_seed(aggregate_id: &str, entity_kind: &str, payload: serde_json::Value) -> EventData {
     let mut data = EventData::new(aggregate_id);
-    let mut payload = payload.as_object().expect("seed payload is an object").clone();
+    let mut payload = payload
+        .as_object()
+        .expect("seed payload is an object")
+        .clone();
     payload.insert("legacy_entity_kind".into(), entity_kind.into());
     payload.insert("legacy_primary_key".into(), aggregate_id.into());
     data.data = payload.into();
@@ -1257,100 +1548,108 @@ fn cursor_zero_context_includes_migrated_items_in_event_order_and_honors_filters
                         request_id,
                         0,
                         NOW,
-                        EventPayload::Migration(MigrationEvent::PresenceSnapshotSeeded(migration_seed(
-                            "agent-peer",
-                            "presence",
-                            serde_json::json!({
-                                "agent_id": "agent-peer",
-                                "phase": "working",
-                                "expires_at": "2026-07-16T12:00:00Z"
-                            }),
-                        ))),
+                        EventPayload::Migration(MigrationEvent::PresenceSnapshotSeeded(
+                            migration_seed(
+                                "agent-peer",
+                                "presence",
+                                serde_json::json!({
+                                    "agent_id": "agent-peer",
+                                    "phase": "working",
+                                    "expires_at": "2026-07-16T12:00:00Z"
+                                }),
+                            ),
+                        )),
                     )
                     .expect("presence seed builds"),
                     NewEvent::new(
                         request_id,
                         1,
                         NOW,
-                        EventPayload::Migration(MigrationEvent::ReservationSnapshotSeeded(migration_seed(
-                            "reservation-seed",
-                            "reservation",
-                            serde_json::json!({
-                                "reservation_id": "reservation-seed",
-                                "agent_id": "agent-peer",
-                                "workspace_id": "workspace-1",
-                                "scopes": [{"kind": "file", "path": "src/reserved.rs"}],
-                                "action": "write_file",
-                                "purpose": "Coordinate migrated work.",
-                                "status": "active"
-                            }),
-                        ))),
+                        EventPayload::Migration(MigrationEvent::ReservationSnapshotSeeded(
+                            migration_seed(
+                                "reservation-seed",
+                                "reservation",
+                                serde_json::json!({
+                                    "reservation_id": "reservation-seed",
+                                    "agent_id": "agent-peer",
+                                    "workspace_id": "workspace-1",
+                                    "scopes": [{"kind": "file", "path": "src/reserved.rs"}],
+                                    "action": "write_file",
+                                    "purpose": "Coordinate migrated work.",
+                                    "status": "active"
+                                }),
+                            ),
+                        )),
                     )
                     .expect("reservation seed builds"),
                     NewEvent::new(
                         request_id,
                         2,
                         NOW,
-                        EventPayload::Migration(MigrationEvent::ClaimSnapshotSeeded(migration_seed(
-                            "claim-seed",
-                            "claim",
-                            serde_json::json!({
-                                "claim_id": "claim-seed",
-                                "reservation_id": "reservation-seed",
-                                "agent_id": "agent-peer",
-                                "workspace_id": "workspace-1",
-                                "relative_path": "src/claimed.rs",
-                                "action": "write_file",
-                                "status": "active"
-                            }),
-                        ))),
+                        EventPayload::Migration(MigrationEvent::ClaimSnapshotSeeded(
+                            migration_seed(
+                                "claim-seed",
+                                "claim",
+                                serde_json::json!({
+                                    "claim_id": "claim-seed",
+                                    "reservation_id": "reservation-seed",
+                                    "agent_id": "agent-peer",
+                                    "workspace_id": "workspace-1",
+                                    "relative_path": "src/claimed.rs",
+                                    "action": "write_file",
+                                    "status": "active"
+                                }),
+                            ),
+                        )),
                     )
                     .expect("claim seed builds"),
                     NewEvent::new(
                         request_id,
                         3,
                         NOW,
-                        EventPayload::Migration(MigrationEvent::WriteFenceSnapshotSeeded(migration_seed(
-                            "fence-seed",
-                            "write_fence",
-                            serde_json::json!({
-                                "fence_id": "fence-seed",
-                                "agent_id": "agent-peer",
-                                "workspace_id": "workspace-1",
-                                "relative_path": "src/fenced.rs",
-                                "action": "write_file",
-                                "status": "active"
-                            }),
-                        ))),
+                        EventPayload::Migration(MigrationEvent::WriteFenceSnapshotSeeded(
+                            migration_seed(
+                                "fence-seed",
+                                "write_fence",
+                                serde_json::json!({
+                                    "fence_id": "fence-seed",
+                                    "agent_id": "agent-peer",
+                                    "workspace_id": "workspace-1",
+                                    "relative_path": "src/fenced.rs",
+                                    "action": "write_file",
+                                    "status": "active"
+                                }),
+                            ),
+                        )),
                     )
                     .expect("fence seed builds"),
                     NewEvent::new(
                         request_id,
                         4,
                         NOW,
-                        EventPayload::Migration(MigrationEvent::HumanObservationSnapshotSeeded(migration_seed(
-                            "human-seed",
-                            "human_observation",
-                            serde_json::json!({
-                                "observation_id": "human-seed",
-                                "workspace_id": "workspace-1",
-                                "relative_path": "src/human.rs",
-                                "kind": "save",
-                                "confidence": "high",
-                                "status": "pending"
-                            }),
-                        ))),
+                        EventPayload::Migration(MigrationEvent::HumanObservationSnapshotSeeded(
+                            migration_seed(
+                                "human-seed",
+                                "human_observation",
+                                serde_json::json!({
+                                    "observation_id": "human-seed",
+                                    "workspace_id": "workspace-1",
+                                    "relative_path": "src/human.rs",
+                                    "kind": "save",
+                                    "confidence": "high",
+                                    "status": "pending"
+                                }),
+                            ),
+                        )),
                     )
                     .expect("human seed builds"),
                     NewEvent::new(
                         request_id,
                         5,
                         NOW,
-                        EventPayload::Migration(MigrationEvent::LegacyHandoffSnapshotSeeded(migration_seed(
-                            "legacy-handoff",
-                            "handoff",
-                            serde_json::json!({}),
-                        ))),
+                        EventPayload::Migration(MigrationEvent::LegacyHandoffSnapshotSeeded(
+                            migration_seed("legacy-handoff", "handoff", serde_json::json!({})),
+                        )),
                     )
                     .expect("handoff seed builds"),
                 ],
@@ -1364,13 +1663,26 @@ fn cursor_zero_context_includes_migrated_items_in_event_order_and_honors_filters
         .render_context(&request(
             "reader",
             Uuid::new_v4(),
-            ContextRender { mode: RenderMode::Brief, resource: None },
+            ContextRender {
+                mode: RenderMode::Brief,
+                resource: None,
+            },
         ))
         .expect("cursor-zero context renders")
         .response;
     assert_eq!(
-        all.items.iter().map(|item| item.resource.as_str()).collect::<Vec<_>>(),
-        vec!["presence", "src/reserved.rs", "src/claimed.rs", "src/fenced.rs", "src/human.rs", "handoff"],
+        all.items
+            .iter()
+            .map(|item| item.resource.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "presence",
+            "src/reserved.rs",
+            "src/claimed.rs",
+            "src/fenced.rs",
+            "src/human.rs",
+            "handoff"
+        ],
     );
     store
         .acknowledge_context(&request(
@@ -1384,7 +1696,9 @@ fn cursor_zero_context_includes_migrated_items_in_event_order_and_honors_filters
         ))
         .expect("context acknowledges");
     assert_eq!(
-        store.context_cursor("workspace-1", "reader").expect("cursor loads"),
+        store
+            .context_cursor("workspace-1", "reader")
+            .expect("cursor loads"),
         all.workspace_version,
     );
 
@@ -1392,12 +1706,19 @@ fn cursor_zero_context_includes_migrated_items_in_event_order_and_honors_filters
         .render_context(&request(
             "filtered-reader",
             Uuid::new_v4(),
-            ContextRender { mode: RenderMode::Brief, resource: Some("src/fenced.rs".into()) },
+            ContextRender {
+                mode: RenderMode::Brief,
+                resource: Some("src/fenced.rs".into()),
+            },
         ))
         .expect("filtered cursor-zero context renders")
         .response;
     assert_eq!(
-        filtered.items.iter().map(|item| item.resource.as_str()).collect::<Vec<_>>(),
+        filtered
+            .items
+            .iter()
+            .map(|item| item.resource.as_str())
+            .collect::<Vec<_>>(),
         vec!["src/fenced.rs"],
     );
 }
@@ -1429,22 +1750,24 @@ fn migrated_multi_scope_reservation_refreshed_later_is_delivered_once_per_scope(
                         request_id,
                         0,
                         NOW,
-                        EventPayload::Migration(MigrationEvent::ReservationSnapshotSeeded(migration_seed(
-                            "reservation-multi",
-                            "reservation",
-                            serde_json::json!({
-                                "reservation_id": "reservation-multi",
-                                "agent_id": "agent-peer",
-                                "workspace_id": "workspace-1",
-                                "scopes": [
-                                    {"kind": "file", "path": "src/alpha.rs"},
-                                    {"kind": "file", "path": "src/beta.rs"}
-                                ],
-                                "action": "write_file",
-                                "purpose": "Coordinate refreshed work.",
-                                "status": "active"
-                            }),
-                        ))),
+                        EventPayload::Migration(MigrationEvent::ReservationSnapshotSeeded(
+                            migration_seed(
+                                "reservation-multi",
+                                "reservation",
+                                serde_json::json!({
+                                    "reservation_id": "reservation-multi",
+                                    "agent_id": "agent-peer",
+                                    "workspace_id": "workspace-1",
+                                    "scopes": [
+                                        {"kind": "file", "path": "src/alpha.rs"},
+                                        {"kind": "file", "path": "src/beta.rs"}
+                                    ],
+                                    "action": "write_file",
+                                    "purpose": "Coordinate refreshed work.",
+                                    "status": "active"
+                                }),
+                            ),
+                        )),
                     )
                     .expect("reservation seed builds"),
                     NewEvent::new(
@@ -1465,12 +1788,19 @@ fn migrated_multi_scope_reservation_refreshed_later_is_delivered_once_per_scope(
         .render_context(&request(
             "reader",
             Uuid::new_v4(),
-            ContextRender { mode: RenderMode::Brief, resource: None },
+            ContextRender {
+                mode: RenderMode::Brief,
+                resource: None,
+            },
         ))
         .expect("cursor-zero context renders")
         .response;
     assert_eq!(
-        delta.items.iter().map(|item| item.resource.as_str()).collect::<Vec<_>>(),
+        delta
+            .items
+            .iter()
+            .map(|item| item.resource.as_str())
+            .collect::<Vec<_>>(),
         vec!["src/alpha.rs", "src/beta.rs"],
     );
 }
@@ -1479,10 +1809,26 @@ fn migrated_multi_scope_reservation_refreshed_later_is_delivered_once_per_scope(
 fn only_high_confidence_write_observations_are_hard_context_blocks() {
     let store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
     for (path, kind, confidence) in [
-        ("src/low-write.rs", HumanObservationKind::Save, HumanObservationConfidence::Low),
-        ("src/presence.rs", HumanObservationKind::Presence, HumanObservationConfidence::High),
-        ("src/dirty.rs", HumanObservationKind::Dirty, HumanObservationConfidence::High),
-        ("src/high-write.rs", HumanObservationKind::Change, HumanObservationConfidence::High),
+        (
+            "src/low-write.rs",
+            HumanObservationKind::Save,
+            HumanObservationConfidence::Low,
+        ),
+        (
+            "src/presence.rs",
+            HumanObservationKind::Presence,
+            HumanObservationConfidence::High,
+        ),
+        (
+            "src/dirty.rs",
+            HumanObservationKind::Dirty,
+            HumanObservationConfidence::High,
+        ),
+        (
+            "src/high-write.rs",
+            HumanObservationKind::Change,
+            HumanObservationConfidence::High,
+        ),
     ] {
         store
             .record_human_observation(&request(
@@ -1504,12 +1850,19 @@ fn only_high_confidence_write_observations_are_hard_context_blocks() {
         .render_context(&request(
             "reader",
             Uuid::new_v4(),
-            ContextRender { mode: RenderMode::Brief, resource: None },
+            ContextRender {
+                mode: RenderMode::Brief,
+                resource: None,
+            },
         ))
         .expect("context renders")
         .response;
     for path in ["src/low-write.rs", "src/presence.rs", "src/dirty.rs"] {
-        let item = delta.items.iter().find(|item| item.resource == path).expect("advisory item");
+        let item = delta
+            .items
+            .iter()
+            .find(|item| item.resource == path)
+            .expect("advisory item");
         assert_eq!(item.severity, CurrentSeverity::Warn);
         assert!(item.next_action.is_none());
     }
@@ -1543,7 +1896,10 @@ fn active_claim_is_advisory_in_default_context() {
             Uuid::new_v4(),
             ClaimAcquire {
                 reservation_id: reservation.reservation_id,
-                paths: vec![ClaimPath { relative_path: "src/claimed.rs".into(), observation: None }],
+                paths: vec![ClaimPath {
+                    relative_path: "src/claimed.rs".into(),
+                    observation: None,
+                }],
             },
         ))
         .expect("claim acquires");
@@ -1552,7 +1908,10 @@ fn active_claim_is_advisory_in_default_context() {
         .render_context(&request(
             "agent-2",
             Uuid::new_v4(),
-            ContextRender { mode: RenderMode::Brief, resource: Some("src/claimed.rs".into()) },
+            ContextRender {
+                mode: RenderMode::Brief,
+                resource: Some("src/claimed.rs".into()),
+            },
         ))
         .expect("context renders")
         .response;

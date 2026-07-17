@@ -1,6 +1,6 @@
 # DeNovoSWE Benchmark Commands
 
-Last updated: 2026-06-30.
+Last updated: 2026-07-17.
 
 Use this file to relaunch the OMP-backed DeNovoSWE benchmark without
 reconstructing the command line.
@@ -82,7 +82,9 @@ file, not the public full JSONL. The aborted r36 attempt duplicated the full
   create `omp-homes/<instance>/home` on the host, but Docker can still fail with
   `invalid mount config for type "bind": bind source path does not exist`
   because the daemon cannot see that tree.
-- Change run IDs and isolated OMP home directories before reusing commands.
+- Change run IDs, output directories, and isolated OMP home directories before
+  reusing commands. Never append, merge, or relabel rows from an earlier
+  invocation as a new trial.
 - For Docker-isolated OMP runs, build or tag the agent image from
   `crates/stateful-bench/docker/denovo-omp-agent.Dockerfile`. The image includes
   Bun-installed `omp`, the Linux `stateful` binary, and `bubblewrap` for
@@ -108,6 +110,13 @@ For each trial, launch the same shard files and condition matrix with a fresh
 `RUN_ID` and fresh isolated OMP home directories. Aggregate only after all
 three trials finish. One-off, interrupted, or partial runs are useful for
 debugging and failure analysis, but should be labeled non-comparable.
+
+DeNovoSWE has explicit `--condition` values, not the real-world runner's arm
+selector. Every model-backed command below names its condition matrix. The
+Task 14 `linux/arm64` image, qualification receipt, six-tool identity, and
+explicit `--arms sequential,parallel-off,parallel-on` gate apply only to
+`statefulbench_realworld.py`; see
+`docs/statefulbench-realworld-design.md#qualification-and-launch-gates`.
 
 ## Prompt Policy
 
@@ -177,6 +186,9 @@ unless deliberately testing another model:
   --eval-iters 1
 ```
 
+`stateful:on` is V2 awareness by default, not enforcement. This is a
+four-condition DeNovoSWE comparison, not the real-world three-arm gate.
+
 For a one-instance stateful smoke run, keep the same defaults and narrow the
 matrix:
 
@@ -243,16 +255,16 @@ default in-image `stateful` path explicitly; omit
 ## Current 12-Instance Docker OMP Subagent-On Run
 
 This is the relaunch shape used for the 2026-06-24 OMP Docker run over 12
-instances with `subagent:on`, `stateful:on/off`, six-way instance concurrency,
-and three independent trials. It is a declared subagent/concurrency behavior
-test, not the official-style `--max-concurrent 1` default from
-`docs/denovo-benchmark-guide.md`.
+instances with `subagent:on`, `stateful:on/off` (awareness/no-state), six-way
+instance concurrency, and three independent trials. It is a declared
+subagent/concurrency behavior test, not the official-style `--max-concurrent 1`
+default from `docs/denovo-benchmark-guide.md`.
 
 Report and collection commands in this section summarize that behavior run only.
 They do not convert the 12-instance `--max-concurrent 6` reduced matrix into
 official-style `--max-concurrent 1` quality evidence. Final comparison tables
-must state both `max-concurrent` and matrix type, for example `reduced
-stateful:on/off,subagent:on` versus the full four-axis matrix.
+must state both `max-concurrent` and matrix type, for example reduced
+awareness/no-state `subagent:on` versus the full four-axis matrix.
 
 Rebuild the Docker agent image before relaunching after local `stateful` or OMP
 integration changes. The examples below pass `--agent-docker-sandbox off`
@@ -376,9 +388,9 @@ Relaunch pitfalls observed while debugging single-instance Docker OMP runs:
   OMP runs now also pre-block configured target-source patterns before tool use,
   and Docker OMP runs deny matching GitHub/raw/patch/API HTTP and `CONNECT`
   traffic through the adapter proxy.
-- A `stateful:on` Docker run that emits `SessionRegistered` but no nested
-  `SessionHeartbeat` or `ActivityFinalized` is not lifecycle-valid. Report it as
-  a runtime/lifecycle failure, not as a model-quality score.
+- A `stateful:on` Docker run that emits `presence.registered` but no nested
+  `presence.heartbeat` or `presence.finalized` is not awareness-lifecycle-valid.
+  Report it as a runtime/lifecycle failure, not as a model-quality score.
 - Do not keep abandoned runtime containers around after a failed launch. Remove
   containers named for the instance, such as
   `awe-agent-denovoswe-<instance-id>-<suffix>`, before rerunning the same
@@ -404,13 +416,12 @@ The Docker agent image at
 defaults to `/usr/local/bin/stateful`; override it with
 `--agent-docker-stateful-binary <path>` when the image uses another path.
 
-A lifecycle-valid Docker `stateful:on` run should emit `SessionRegistered`,
-repeated `SessionHeartbeat`, and `ActivityFinalized` for the nested OMP session.
-The verified smoke run
-`r110-denovo-one-omp-docker-stateful-onoff-subagent-on` completed
-stateful-off/stateful-on with `subagent:on` and emitted that sequence. Treat a
-missing registration, absent heartbeat, or missing finalization as a lifecycle
-failure rather than a model-quality result.
+A lifecycle-valid V2 Docker `stateful:on` run should emit
+`presence.registered`, repeated `presence.heartbeat`, and
+`presence.finalized` for the nested OMP session; a completed handoff also emits
+`handoff.finalized`. Treat legacy lifecycle labels as historical, not V2
+evidence. A missing registration, absent heartbeat, or missing finalization is a
+lifecycle failure rather than a model-quality result.
 
 For `subagent:on`, the generated DeNovo prompt appends only `orchestrate`.
 `subagent:off` does not add a custom subagent prompt. OMP runs also unpack

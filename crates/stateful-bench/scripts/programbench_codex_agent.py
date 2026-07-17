@@ -517,10 +517,14 @@ def run_main(
     error = None
     cleanup_error = None
 
+    agent_started_at_ms = None
+    agent_running_time_ms = None
     airlock_tmp = tempfile.TemporaryDirectory(prefix="programbench-airlock-")
     args.airlock = airlock_tmp.name
     try:
-        result = run_agent_func(args, prompt_for_args(args))
+        prompt = prompt_for_args(args)
+        agent_started_at_ms = now_ms()
+        result = run_agent_func(args, prompt)
         stdout = output_text(result.stdout)
         stderr = output_text(result.stderr)
         exit_code = int(result.returncode)
@@ -535,6 +539,11 @@ def run_main(
     except Exception as exc:  # noqa: BLE001 - adapter must record unexpected runner failures.
         exit_code = 1
         error = str(exc)
+    finally:
+        if hasattr(args, "agent_running_time_ms"):
+            agent_running_time_ms = args.agent_running_time_ms
+        elif agent_started_at_ms is not None:
+            agent_running_time_ms = max(now_ms() - agent_started_at_ms, 0)
 
     (instance_dir / "agent.stdout.log").write_text(stdout, encoding="utf-8")
     (instance_dir / "agent.stderr.log").write_text(stderr, encoding="utf-8")
@@ -568,6 +577,8 @@ def run_main(
         "error": error,
         "token_usage": token_usage_from_output(stdout),
     }
+    if agent_running_time_ms is not None:
+        metadata["agent_running_time_ms"] = agent_running_time_ms
     if archive_error is not None:
         metadata["archive_error"] = archive_error
     if workspace_copy_error is not None:

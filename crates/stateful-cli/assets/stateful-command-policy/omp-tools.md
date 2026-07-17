@@ -2,6 +2,8 @@
 
 ## Use OMP-Native Stateful Tools
 
+OMP uses the shipped `stateful.v2` runtime through native tools and hooks, not direct `/v2/**` requests. Awareness is the normal server mode; use `--coordination-mode enforcement` only when explicit enforcement is required. Presence, complete exact reads, rendered delivery/ACK context, and handoffs guide work; invalid targets, unknown outcomes, stale exact evidence, active fences, and unreconciled high-confidence human writes remain hard stops.
+
 - If Stateful native tools are missing from the active OMP tool list and a tool-discovery tool such as `search_tool_bm25` is exposed, use it once with a query such as `stateful state current read`, then call the activated runtime-specific tool names. If no discovery tool is exposed, use the active tool list plus the documented auto-declare, lazy-resume, or write-boundary path; do not name nonexistent tools as guaranteed.
 - Never fall back to Bash for Stateful coordination.
 - OMP built-in Bash may run strict trusted `stateful sandbox run ...` and `stateful sandbox process find ...` commands: bare `stateful` is trusted only after session-start or per-tool preflight hash-verifies the first PATH `stateful` binary against the installed Stateful binary; commands using the installed absolute binary path remain trusted. Arbitrary raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied.

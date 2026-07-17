@@ -304,9 +304,7 @@ pub(crate) fn create_projection_tables_with_prefix(
             |row| row.get(0),
         )?;
         let prefixed_ddl = ddl.replacen(table, &prefixed, 1);
-        connection.execute_batch(&format!(
-            "DROP TABLE IF EXISTS {prefixed}; {prefixed_ddl};"
-        ))?;
+        connection.execute_batch(&format!("DROP TABLE IF EXISTS {prefixed}; {prefixed_ddl};"))?;
     }
     Ok(())
 }

@@ -113,7 +113,10 @@ fn migration_snapshot_seeds_require_the_fixed_legacy_entity_identifier() {
         "affects_context": event.affects_context,
         "payload": event.payload,
     });
-    assert!(serde_json::from_value::<StoredEvent>(wrong_identifier).is_err(), "wrong seed ID must be rejected");
+    assert!(
+        serde_json::from_value::<StoredEvent>(wrong_identifier).is_err(),
+        "wrong seed ID must be rejected"
+    );
 }
 
 #[test]
@@ -127,11 +130,16 @@ fn non_snapshot_migration_events_keep_request_ordinal_type_identifiers() {
             &time::format_description::well_known::Rfc3339,
         )
         .expect("valid RFC3339 timestamp"),
-        EventPayload::Migration(MigrationEvent::Started(EventData::new("stateful.v2.event-journal"))),
+        EventPayload::Migration(MigrationEvent::Started(EventData::new(
+            "stateful.v2.event-journal",
+        ))),
     )
     .expect("migration lifecycle event is valid");
 
-    assert_eq!(event.event_id, Uuid::new_v5(&request_id, b"3:migration.started"));
+    assert_eq!(
+        event.event_id,
+        Uuid::new_v5(&request_id, b"3:migration.started")
+    );
 }
 
 #[test]
@@ -141,11 +149,17 @@ fn migration_snapshot_seed_rejects_aggregate_key_mismatch() {
         "legacy_entity_kind": "claim",
         "legacy_primary_key": "claim-active",
     });
-    assert!(NewEvent::new(
-        Uuid::parse_str("8d5ddf45-9ce3-44ac-953e-3b776cd1783d").expect("valid UUID"),
-        3,
-        OffsetDateTime::parse("2026-05-31T12:00:00Z", &time::format_description::well_known::Rfc3339).expect("valid timestamp"),
-        EventPayload::Migration(MigrationEvent::ClaimSnapshotSeeded(data)),
-    )
-    .is_err());
+    assert!(
+        NewEvent::new(
+            Uuid::parse_str("8d5ddf45-9ce3-44ac-953e-3b776cd1783d").expect("valid UUID"),
+            3,
+            OffsetDateTime::parse(
+                "2026-05-31T12:00:00Z",
+                &time::format_description::well_known::Rfc3339
+            )
+            .expect("valid timestamp"),
+            EventPayload::Migration(MigrationEvent::ClaimSnapshotSeeded(data)),
+        )
+        .is_err()
+    );
 }

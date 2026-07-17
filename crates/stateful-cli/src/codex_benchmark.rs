@@ -411,9 +411,15 @@ mod tests {
 
     fn spawn_benchmark_fake_server() -> (ServerRuntime, mpsc::Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-        let address = listener.local_addr().expect("listener address should resolve");
+        let address = listener
+            .local_addr()
+            .expect("listener address should resolve");
         let (tx, rx) = mpsc::channel();
+        let pid = std::process::id();
         thread::spawn(move || {
+            let identity = format!(
+                r#"{{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":{pid},"workspace_id":"w1","workspace_version":1,"capabilities":["presence"]}}"#
+            );
             while let Ok((mut stream, _)) = listener.accept() {
                 let mut request = Vec::new();
                 let mut byte = [0_u8; 1];
@@ -438,7 +444,7 @@ mod tests {
                 );
                 tx.send(request.clone()).expect("request should send");
                 let body = if request.starts_with("GET /v2/runtime/identity?") {
-                    r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":42,"workspace_id":"w1","workspace_version":1,"capabilities":["presence"]}"#
+                    identity.as_str()
                 } else if request.starts_with("POST /v2/authorize ") {
                     r#"{"intent_id":"intent-1","decision":{"decision":"deny","reason_code":"denied","message":"blocked"}}"#
                 } else {
@@ -454,7 +460,7 @@ mod tests {
             }
         });
         (
-            ServerRuntime::new(format!("http://{address}"), "token", "w1", 1),
+            ServerRuntime::new(format!("http://{address}"), "token", "w1", pid),
             rx,
         )
     }
@@ -485,17 +491,27 @@ mod tests {
             },
         )
         .expect_err("denied benchmark should fail");
-        assert!(error.to_string().contains("target authorization denied"), "{error}");
-        for expected in ["/v2/runtime/identity?", "/v2/runtime/identity?"] {
+        assert!(
+            error.to_string().contains("target authorization denied"),
+            "{error}"
+        );
+        for expected in [
+            "GET /v2/runtime/identity?",
+            "GET /v2/runtime/identity?",
+            "GET /v2/runtime/identity?",
+        ] {
             let request = requests
                 .recv_timeout(Duration::from_secs(2))
-                .expect("authorization identity request should arrive");
-            assert!(request.contains(expected), "expected {expected}, got {request}");
+                .expect("identity request should arrive");
+            assert!(
+                request.starts_with(expected),
+                "expected {expected}, got {request}"
+            );
         }
         let authorize = requests
             .recv_timeout(Duration::from_secs(2))
             .expect("authorization request should arrive");
-        assert!(authorize.contains("POST /v2/authorize"), "{authorize}");
+        assert!(authorize.starts_with("POST /v2/authorize "), "{authorize}");
         let authorize_body = serde_json::from_str::<serde_json::Value>(
             authorize
                 .split_once("\r\n\r\n")
@@ -507,11 +523,17 @@ mod tests {
         let identity = requests
             .recv_timeout(Duration::from_millis(500))
             .expect("completion identity should arrive");
-        assert!(identity.contains("/v2/runtime/identity?"));
+        assert!(
+            identity.starts_with("GET /v2/runtime/identity?"),
+            "{identity}"
+        );
         let completion = requests
             .recv_timeout(Duration::from_millis(500))
             .expect("failed completion should arrive");
-        assert!(completion.contains("POST /v2/write/complete "), "{completion}");
+        assert!(
+            completion.starts_with("POST /v2/write/complete "),
+            "{completion}"
+        );
         let body = serde_json::from_str::<serde_json::Value>(
             completion
                 .split_once("\r\n\r\n")

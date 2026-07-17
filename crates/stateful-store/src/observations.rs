@@ -1,13 +1,13 @@
 use crate::{
     CommandOutcome, CommandPlan, CurrentAggregate, Store, StoreError, StoreResult,
-    reservations::{normalized_scope, record_from_current, typed_records},
     presence::{lifecycle_presence_for_resource_update, resource_update_event},
+    reservations::{normalized_scope, record_from_current, typed_records},
 };
 use serde_json::json;
 use stateful_core::{
-    EventData, EventPayload, NewEvent, OBSERVATION_TTL, ReadCompletion, ReadObservationRecord,
-    ReadObservationStart, ReadObservationStatus, RequestEnvelope, ResourceVersion,
-    ReadObservationEvent, PresenceResourceRelation, observation_status,
+    EventData, EventPayload, NewEvent, OBSERVATION_TTL, PresenceResourceRelation, ReadCompletion,
+    ReadObservationEvent, ReadObservationRecord, ReadObservationStart, ReadObservationStatus,
+    RequestEnvelope, ResourceVersion, observation_status,
 };
 use time::OffsetDateTime;
 
@@ -48,7 +48,13 @@ impl Store {
                 origin_event_seq: 0,
             };
             Ok(CommandPlan {
-                events: vec![read_event(request, 0, now, ReadObservationEvent::Started, &record)?],
+                events: vec![read_event(
+                    request,
+                    0,
+                    now,
+                    ReadObservationEvent::Started,
+                    &record,
+                )?],
                 response: record,
                 http_status: 200,
             })
@@ -90,7 +96,9 @@ impl Store {
                 payload.after.as_ref(),
                 payload.semantic_marker.as_deref(),
             );
-            if current_resource_version != start.resource_version && status == ReadObservationStatus::Stabilized {
+            if current_resource_version != start.resource_version
+                && status == ReadObservationStatus::Stabilized
+            {
                 status = ReadObservationStatus::Unstable;
             }
             let record = ReadObservationRecord {
@@ -105,7 +113,8 @@ impl Store {
                 after: payload.after,
                 semantic_marker: payload.semantic_marker,
                 observed_at: now,
-                expires_at: (status == ReadObservationStatus::Stabilized).then_some(now + OBSERVATION_TTL),
+                expires_at: (status == ReadObservationStatus::Stabilized)
+                    .then_some(now + OBSERVATION_TTL),
                 resource_version: start.resource_version,
                 origin_event_seq: 0,
             };
@@ -174,7 +183,11 @@ impl Store {
                     )?);
                 }
             }
-            Ok(CommandPlan { events, response: expired, http_status: 200 })
+            Ok(CommandPlan {
+                events,
+                response: expired,
+                http_status: 200,
+            })
         })
     }
 
@@ -208,6 +221,11 @@ pub(crate) fn read_event<T>(
         _ => record.path.clone(),
     });
     data.data = json!({"read_observation": record});
-    NewEvent::new(request.request_id, ordinal, now, EventPayload::ReadObservation(variant(data)))
-        .map_err(StoreError::from)
+    NewEvent::new(
+        request.request_id,
+        ordinal,
+        now,
+        EventPayload::ReadObservation(variant(data)),
+    )
+    .map_err(StoreError::from)
 }

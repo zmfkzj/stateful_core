@@ -154,14 +154,9 @@ event_family!(HumanObservationEvent {
     Expired,
 });
 
-event_family!(HumanAcknowledgementEvent {
-    Recorded,
-});
+event_family!(HumanAcknowledgementEvent { Recorded });
 
-event_family!(HandoffEvent {
-    Finalized,
-    Expired,
-});
+event_family!(HandoffEvent { Finalized, Expired });
 
 event_family!(AuthorizationEvent {
     Allowed,
@@ -306,27 +301,39 @@ impl NewEvent {
 fn migration_snapshot_event_id(payload: &EventPayload) -> Result<Option<Uuid>, V2Error> {
     let (expected_kind, data) = match payload {
         EventPayload::Migration(MigrationEvent::PresenceSnapshotSeeded(data)) => ("presence", data),
-        EventPayload::Migration(MigrationEvent::ReservationSnapshotSeeded(data)) => ("reservation", data),
+        EventPayload::Migration(MigrationEvent::ReservationSnapshotSeeded(data)) => {
+            ("reservation", data)
+        }
         EventPayload::Migration(MigrationEvent::ClaimSnapshotSeeded(data)) => ("claim", data),
         EventPayload::Migration(MigrationEvent::WaitSnapshotSeeded(data)) => ("wait", data),
-        EventPayload::Migration(MigrationEvent::WriteFenceSnapshotSeeded(data)) => ("write_fence", data),
-        EventPayload::Migration(MigrationEvent::HumanObservationSnapshotSeeded(data)) => ("human_observation", data),
-        EventPayload::Migration(MigrationEvent::LegacyHandoffSnapshotSeeded(data)) => ("handoff", data),
+        EventPayload::Migration(MigrationEvent::WriteFenceSnapshotSeeded(data)) => {
+            ("write_fence", data)
+        }
+        EventPayload::Migration(MigrationEvent::HumanObservationSnapshotSeeded(data)) => {
+            ("human_observation", data)
+        }
+        EventPayload::Migration(MigrationEvent::LegacyHandoffSnapshotSeeded(data)) => {
+            ("handoff", data)
+        }
         EventPayload::Migration(MigrationEvent::DeliverySnapshotSeeded(data)) => ("delivery", data),
         _ => return Ok(None),
     };
-    let object = data.data.as_object().ok_or_else(|| V2Error::new(
-        "invalid_migration_seed",
-        "migration snapshot seed data must include its legacy entity identity.",
-    ))?;
+    let object = data.data.as_object().ok_or_else(|| {
+        V2Error::new(
+            "invalid_migration_seed",
+            "migration snapshot seed data must include its legacy entity identity.",
+        )
+    })?;
     let entity_kind = object
         .get("legacy_entity_kind")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| V2Error::new(
-            "invalid_migration_seed",
-            "migration snapshot seed data must include legacy_entity_kind.",
-        ))?;
+        .ok_or_else(|| {
+            V2Error::new(
+                "invalid_migration_seed",
+                "migration snapshot seed data must include legacy_entity_kind.",
+            )
+        })?;
     if entity_kind != expected_kind {
         return Err(V2Error::new(
             "invalid_migration_seed",
@@ -337,10 +344,12 @@ fn migration_snapshot_event_id(payload: &EventPayload) -> Result<Option<Uuid>, V
         .get("legacy_primary_key")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| V2Error::new(
-            "invalid_migration_seed",
-            "migration snapshot seed data must include legacy_primary_key.",
-        ))?;
+        .ok_or_else(|| {
+            V2Error::new(
+                "invalid_migration_seed",
+                "migration snapshot seed data must include legacy_primary_key.",
+            )
+        })?;
     if data.aggregate_id != primary_key {
         return Err(V2Error::new(
             "invalid_migration_seed",
@@ -503,7 +512,7 @@ impl StoredEvent {
 }
 
 fn affects_context(family: &str, variant: &str, data: &EventData) -> bool {
-    !matches!(
+    let non_context_event = matches!(
         (family, variant),
         ("presence", "heartbeat")
             | ("authorization", "allowed")
@@ -512,32 +521,38 @@ fn affects_context(family: &str, variant: &str, data: &EventData) -> bool {
             | ("context", "delivery_acknowledged")
             | ("context", "delivery_superseded")
             | ("notification", "delivered")
-    ) && !(
-        matches!(
-            (family, variant),
-            ("notification", "created") | ("notification", "coalesced") | ("notification", "expired")
-        ) && data
-            .data
-            .get("notification")
-            .and_then(serde_json::Value::as_object)
-            .and_then(|notification| notification.get("kind"))
-            .and_then(serde_json::Value::as_str)
-            == Some("context_invalidated")
-    ) && !(
-        matches!((family, variant), ("recovery", "queued" | "attempted" | "delivered" | "failed"))
-            && data
-                .data
-                .get("notification_kind")
-                .and_then(serde_json::Value::as_str)
-                == Some("context_invalidated")
-    ) && !(
-        matches!((family, variant), ("recovery", "failed"))
-            && data.data.get("context_delivery").is_some()
-    ) && !(data.repeated
+    );
+    let context_invalidation_notification = matches!(
+        (family, variant),
+        ("notification", "created") | ("notification", "coalesced") | ("notification", "expired")
+    ) && data
+        .data
+        .get("notification")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|notification| notification.get("kind"))
+        .and_then(serde_json::Value::as_str)
+        == Some("context_invalidated");
+    let context_invalidation_recovery = matches!(
+        (family, variant),
+        ("recovery", "queued" | "attempted" | "delivered" | "failed")
+    ) && data
+        .data
+        .get("notification_kind")
+        .and_then(serde_json::Value::as_str)
+        == Some("context_invalidated");
+    let failed_context_delivery = matches!((family, variant), ("recovery", "failed"))
+        && data.data.get("context_delivery").is_some();
+    let repeated_projection_only = data.repeated
         && matches!(
             (family, variant),
             ("presence", "resources_updated") | ("read_observation", "stabilized")
-        ))
+        );
+
+    !(non_context_event
+        || context_invalidation_notification
+        || context_invalidation_recovery
+        || failed_context_delivery
+        || repeated_projection_only)
 }
 
 fn snake_case(value: &str) -> String {

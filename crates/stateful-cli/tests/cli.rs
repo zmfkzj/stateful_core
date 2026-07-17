@@ -21,7 +21,9 @@ use std::{
 use time::OffsetDateTime;
 use uuid::Uuid;
 fn journal_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
-    let file_name = path.file_name().expect("journal path should have a filename");
+    let file_name = path
+        .file_name()
+        .expect("journal path should have a filename");
     path.with_file_name(format!("{}{suffix}", file_name.to_string_lossy()))
 }
 
@@ -34,7 +36,9 @@ fn journal_baseline_path(path: &Path) -> PathBuf {
 }
 
 fn journal_file_len(path: &Path) -> u64 {
-    fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0)
+    fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
 }
 
 fn journal_footprint(path: &Path) -> u64 {
@@ -294,7 +298,10 @@ fn doctor_reports_journal_size_rows_types_time_range_growth_and_threshold() {
         "growth_status",
         "threshold_bytes",
     ] {
-        assert!(journal.get(field).is_some(), "journal diagnostic missing {field}");
+        assert!(
+            journal.get(field).is_some(),
+            "journal diagnostic missing {field}"
+        );
     }
     assert_eq!(
         journal
@@ -322,7 +329,10 @@ fn doctor_counts_main_and_wal_footprint_without_mutating_them() {
     let wal_path = journal_wal_path(&paths.state_db);
     let main_before = fs::read(&paths.state_db).expect("main database should be readable");
     let wal_before = fs::read(&wal_path).expect("live WAL should be readable");
-    assert!(!wal_before.is_empty(), "persistent store mutation should retain a live WAL");
+    assert!(
+        !wal_before.is_empty(),
+        "persistent store mutation should retain a live WAL"
+    );
     let footprint_before = journal_footprint(&paths.state_db);
 
     let report = serde_json::to_value(doctor_report_with_global(&repo, &paths))
@@ -381,7 +391,8 @@ fn doctor_captures_then_measures_recent_physical_growth() {
     let main_after_mutation =
         fs::read(&paths.state_db).expect("main database should be readable after mutation");
     let wal_path = journal_wal_path(&paths.state_db);
-    let wal_after_mutation = fs::read(&wal_path).expect("live WAL should be readable after mutation");
+    let wal_after_mutation =
+        fs::read(&wal_path).expect("live WAL should be readable after mutation");
 
     let second = serde_json::to_value(doctor_report_with_global(&repo, &paths))
         .expect("second doctor report should serialize");
@@ -442,7 +453,11 @@ fn doctor_recaptures_corrupt_future_and_expired_baselines() {
     );
     assert_journal_baseline(&baseline_path, footprint);
 
-    write_journal_baseline(&baseline_path, now.saturating_add(Duration::from_secs(3600).as_secs()), 1);
+    write_journal_baseline(
+        &baseline_path,
+        now.saturating_add(Duration::from_secs(3600).as_secs()),
+        1,
+    );
     let future = serde_json::to_value(doctor_report_with_global(&repo, &paths))
         .expect("doctor should tolerate a future baseline");
     assert_eq!(
@@ -500,7 +515,10 @@ fn doctor_warns_at_default_five_hundred_twelve_mib_without_pruning() {
     let wal_before = fs::read(&wal_path).unwrap_or_default();
     let before = journal_file_len(&paths.state_db);
     let target_main_len = (512_u64 * 1024 * 1024).saturating_sub(wal_before.len() as u64);
-    assert!(before < target_main_len, "fixture must grow the main database");
+    assert!(
+        before < target_main_len,
+        "fixture must grow the main database"
+    );
     let file = fs::OpenOptions::new()
         .write(true)
         .open(&paths.state_db)

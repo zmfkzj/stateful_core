@@ -1,6 +1,6 @@
 use stateful_core::{
-    ExplicitHandoff, HandoffStatus, PresenceUpdate, HANDOFF_LIST_MAX_ENTRIES,
-    HANDOFF_SUMMARY_MAX_SCALARS, PRESENCE_GOAL_EXCERPT_MAX_SCALARS,
+    ExplicitHandoff, HANDOFF_LIST_MAX_ENTRIES, HANDOFF_SUMMARY_MAX_SCALARS, HandoffStatus,
+    PRESENCE_GOAL_EXCERPT_MAX_SCALARS, PresenceUpdate,
 };
 
 #[test]
@@ -22,7 +22,9 @@ fn goal_excerpt_normalizes_whitespace_and_counts_unicode_scalars() {
         goal_excerpt: Some("🦀".repeat(PRESENCE_GOAL_EXCERPT_MAX_SCALARS + 1)),
         ..Default::default()
     };
-    let error = over_limit.normalized().expect_err("over-limit goal must fail");
+    let error = over_limit
+        .normalized()
+        .expect_err("over-limit goal must fail");
     assert_eq!(error.code, "goal_excerpt_too_long");
 }
 

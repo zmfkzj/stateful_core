@@ -268,7 +268,6 @@ fn retire_incompatible_runtime(paths: &GlobalPaths, runtime: &ServerRuntime) -> 
 
     let _ = fs::remove_file(&paths.server_json);
     Ok(())
-
 }
 
 fn terminate_runtime(paths: &GlobalPaths, runtime: &ServerRuntime) -> anyhow::Result<()> {
@@ -507,7 +506,10 @@ fn pid_matches_current_exe(pid: u32) -> anyhow::Result<bool> {
         return Ok(false);
     };
     let current_exe = std::env::current_exe()?;
-    Ok(executable_path_matches_current_exe(&executable, &current_exe))
+    Ok(executable_path_matches_current_exe(
+        &executable,
+        &current_exe,
+    ))
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -669,12 +671,7 @@ mod tests {
             fake_response(200, identity),
             fake_response(200, identity),
         ]);
-        let runtime = ServerRuntime::new(
-            fake.base_url(),
-            "token",
-            "w1",
-            std::process::id(),
-        );
+        let runtime = ServerRuntime::new(fake.base_url(), "token", "w1", std::process::id());
         write_global_runtime_file(&paths, &runtime).expect("runtime should write");
 
         assert!(
@@ -695,8 +692,10 @@ mod tests {
         let root = temp_home("stateful-executable-proof");
         let expected = root.join("expected").join("stateful");
         let different = root.join("different").join("stateful");
-        fs::create_dir_all(expected.parent().expect("expected parent")).expect("parent should create");
-        fs::create_dir_all(different.parent().expect("different parent")).expect("parent should create");
+        fs::create_dir_all(expected.parent().expect("expected parent"))
+            .expect("parent should create");
+        fs::create_dir_all(different.parent().expect("different parent"))
+            .expect("parent should create");
         fs::write(&expected, "expected").expect("expected executable marker should write");
         fs::write(&different, "different").expect("different executable marker should write");
 

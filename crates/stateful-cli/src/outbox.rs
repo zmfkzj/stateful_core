@@ -73,7 +73,7 @@ pub fn sync_outbox_with_runtime(
     };
 
     let mut synced = 0_usize;
-    'pending_files: for path in pending_paths {
+    for path in pending_paths {
         if path.file_name().and_then(|name| name.to_str()).is_none() {
             continue;
         }
@@ -151,7 +151,6 @@ pub fn sync_outbox_with_runtime(
 fn is_deterministic_client_rejection(status_code: u16) -> bool {
     (400..500).contains(&status_code) && !matches!(status_code, 408 | 429)
 }
-
 
 pub(crate) fn queue_session_heartbeat_outbox(
     paths: &GlobalPaths,
@@ -315,11 +314,14 @@ pub(crate) fn acknowledge_exact_envelope(
                 return true;
             };
             !(record.get("request_id").and_then(Value::as_str) == Some(request_id.as_str())
-                && record.get("route").and_then(Value::as_str).is_some_and(|route| {
-                    route == "/v2/read/start"
-                        || route == "/v2/read/complete"
-                        || route == "/v2/activity/finalize"
-                }))
+                && record
+                    .get("route")
+                    .and_then(Value::as_str)
+                    .is_some_and(|route| {
+                        route == "/v2/read/start"
+                            || route == "/v2/read/complete"
+                            || route == "/v2/activity/finalize"
+                    }))
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -329,10 +331,15 @@ pub(crate) fn acknowledge_exact_envelope(
 fn rewrite_outbox(path: &Path, contents: &str) -> anyhow::Result<()> {
     let temporary = path.with_file_name(format!(
         "{}.ack-{}",
-        path.file_name().and_then(|name| name.to_str()).unwrap_or("outbox.jsonl"),
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("outbox.jsonl"),
         uuid::Uuid::new_v4()
     ));
-    let mut file = OpenOptions::new().create_new(true).write(true).open(&temporary)?;
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)?;
     if !contents.is_empty() {
         file.write_all(contents.as_bytes())?;
         if !contents.ends_with('\n') {
@@ -343,7 +350,6 @@ fn rewrite_outbox(path: &Path, contents: &str) -> anyhow::Result<()> {
     fs::rename(temporary, path)?;
     Ok(())
 }
-
 
 fn safe_file_stem(value: &str) -> String {
     value.replace(['/', '\\'], "_")
@@ -796,7 +802,8 @@ fn read_pending_records(path: &Path) -> anyhow::Result<Vec<PendingOutboxRecord>>
             && request.agent.agent_id == record.agent_id
             && request.workspace.workspace_id == record.workspace_id
             && (record.route != "/v2/outbox/sync"
-                || request.payload.get("outbox_id").and_then(Value::as_str) == Some(&record.outbox_id))
+                || request.payload.get("outbox_id").and_then(Value::as_str)
+                    == Some(&record.outbox_id))
         {
             records.push(PendingOutboxRecord { record, raw });
         }

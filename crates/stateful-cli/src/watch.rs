@@ -73,7 +73,7 @@ pub fn run_watch(repo: Option<PathBuf>) -> anyhow::Result<()> {
                 ) {
                     eprintln!("stateful watch warning: {error}");
                 }
-            },
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
@@ -89,18 +89,16 @@ pub fn run_watch(repo: Option<PathBuf>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn queue_event_paths(
-    repo_root: &Path,
-    paths: Vec<PathBuf>,
-    pending: &mut PendingObservations,
-) {
+fn queue_event_paths(repo_root: &Path, paths: Vec<PathBuf>, pending: &mut PendingObservations) {
     for path in paths {
         let absolute = if path.is_absolute() {
             path
         } else {
             repo_root.join(path)
         };
-        pending.entry(absolute).or_insert_with(PendingObservation::new);
+        pending
+            .entry(absolute)
+            .or_insert_with(PendingObservation::new);
     }
 }
 
@@ -123,8 +121,7 @@ fn flush_pending(
             pending.remove(&path);
             continue;
         };
-        if prefix_excluded(&relative)
-            || absolute.metadata().is_ok_and(|metadata| metadata.is_dir())
+        if prefix_excluded(&relative) || absolute.metadata().is_ok_and(|metadata| metadata.is_dir())
         {
             pending.remove(&absolute);
             continue;
@@ -174,7 +171,10 @@ fn flush_pending(
         let response = post_v2(
             runtime,
             "/v2/human/observe",
-            entry.request.as_ref().expect("request should be initialized"),
+            entry
+                .request
+                .as_ref()
+                .expect("request should be initialized"),
         )?;
         if !(200..300).contains(&response.status_code) {
             anyhow::bail!(
@@ -421,7 +421,10 @@ fn watcher_retries_failed_and_unsent_paths_with_exact_request_envelopes() {
     );
     flush_pending(&repo, &runtime, None, "human-1", "w1", &mut pending)
         .expect("retry should deliver the retained observations");
-    assert!(pending.is_empty(), "only acknowledged observations may be removed");
+    assert!(
+        pending.is_empty(),
+        "only acknowledged observations may be removed"
+    );
 
     let requests = (0..3)
         .map(|_| rx.recv().expect("all observation requests should arrive"))
@@ -444,7 +447,12 @@ fn watcher_retries_failed_and_unsent_paths_with_exact_request_envelopes() {
     );
     let delivered = requests[1..]
         .iter()
-        .map(|request| request["payload"]["relative_path"].as_str().expect("path").to_string())
+        .map(|request| {
+            request["payload"]["relative_path"]
+                .as_str()
+                .expect("path")
+                .to_string()
+        })
         .collect::<HashSet<_>>();
     assert_eq!(
         delivered,
@@ -454,7 +462,6 @@ fn watcher_retries_failed_and_unsent_paths_with_exact_request_envelopes() {
 }
 
 #[cfg(test)]
-
 #[test]
 fn watcher_discards_permanently_undeliverable_paths() {
     let temp = tempfile::tempdir().expect("temp dir should create");
@@ -484,7 +491,6 @@ fn watcher_discards_permanently_undeliverable_paths() {
 }
 
 #[cfg(test)]
-
 fn read_watcher_http_request(stream: &mut std::net::TcpStream) -> String {
     let mut request = Vec::new();
     let mut byte = [0_u8; 1];
@@ -505,9 +511,12 @@ fn read_watcher_http_request(stream: &mut std::net::TcpStream) -> String {
 }
 
 #[cfg(test)]
-
 fn write_watcher_http_response(stream: &mut std::net::TcpStream, status: u16, body: &str) {
-    let reason = if status == 200 { "OK" } else { "Service Unavailable" };
+    let reason = if status == 200 {
+        "OK"
+    } else {
+        "Service Unavailable"
+    };
     std::io::Write::write_all(
         stream,
         format!(

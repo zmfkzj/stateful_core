@@ -341,7 +341,6 @@ pub fn run_sandbox_in_repo(
         )?;
     }
 
-
     let mut allowed_write_targets = Vec::new();
     let mut denied_write_targets = Vec::new();
     let mut authorization_warnings = Vec::new();
@@ -477,7 +476,6 @@ pub fn run_sandbox_in_repo(
                     }
                 }
 
-
                 if !denied_write_targets.is_empty() {
                     let body = sandbox_authorization_denied_body(
                         allowed_write_targets,
@@ -498,9 +496,9 @@ pub fn run_sandbox_in_repo(
                 ) {
                     Ok(paths) => writable_paths.extend(paths),
                     Err(error) => {
-                    if let Some(release_context) = &release_after_run {
-                        complete_sandbox_write_intents(paths, runtime, release_context, true)?;
-                    }
+                        if let Some(release_context) = &release_after_run {
+                            complete_sandbox_write_intents(paths, runtime, release_context, true)?;
+                        }
                         return Err(error);
                     }
                 }
@@ -616,7 +614,6 @@ pub fn run_sandbox_in_repo(
                     }
                 }
             }
-
 
             if !denied_write_targets.is_empty() {
                 let body =
@@ -3813,7 +3810,9 @@ mod tests {
 
     fn spawn_sandbox_fake_server() -> (ServerRuntime, mpsc::Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-        let address = listener.local_addr().expect("listener address should resolve");
+        let address = listener
+            .local_addr()
+            .expect("listener address should resolve");
         let (tx, rx) = mpsc::channel();
         let pid = std::process::id();
         thread::spawn(move || {
@@ -3864,8 +3863,11 @@ mod tests {
 
     fn spawn_server_dropping_second_authorization() -> (ServerRuntime, mpsc::Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
-        let address = listener.local_addr().expect("listener address should resolve");
+        let address = listener
+            .local_addr()
+            .expect("listener address should resolve");
         let (tx, rx) = mpsc::channel();
+        let pid = std::process::id();
         thread::spawn(move || {
             let mut authorizations = 0;
             while let Ok((mut stream, _)) = listener.accept() {
@@ -3893,11 +3895,13 @@ mod tests {
                     }
                 }
                 let body = if request.starts_with("GET /v2/runtime/identity?") {
-                    r#"{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":42,"workspace_id":"w1","workspace_version":1,"capabilities":["presence"]}"#
+                    format!(
+                        r#"{{"protocol_version":"stateful.v2","journal_schema_version":2,"coordination_mode":"awareness","pid":{pid},"workspace_id":"w1","workspace_version":1,"capabilities":["presence"]}}"#
+                    )
                 } else if request.starts_with("POST /v2/authorize ") {
-                    r#"{"intent_id":"intent-first","decision":{"decision":"allow","reason_code":"allowed","message":"ok"}}"#
+                    r#"{"intent_id":"intent-first","decision":{"decision":"allow","reason_code":"allowed","message":"ok"}}"#.to_string()
                 } else {
-                    r#"{"status":"completed"}"#
+                    r#"{"status":"completed"}"#.to_string()
                 };
                 write!(
                     stream,
@@ -3909,7 +3913,7 @@ mod tests {
             }
         });
         (
-            ServerRuntime::new(format!("http://{address}"), "token", "w1", 1),
+            ServerRuntime::new(format!("http://{address}"), "token", "w1", pid),
             rx,
         )
     }
@@ -3930,32 +3934,54 @@ mod tests {
             error.to_string().contains("target") || error.to_string().contains("exist"),
             "unexpected setup error: {error}"
         );
-        for expected in ["/v2/runtime/identity?", "/v2/runtime/identity?", "/v2/authorize"] {
+        for expected in [
+            "GET /v2/runtime/identity?",
+            "GET /v2/runtime/identity?",
+            "GET /v2/runtime/identity?",
+            "POST /v2/authorize ",
+            "GET /v2/runtime/identity?",
+            "POST /v2/write/complete ",
+        ] {
             let request = requests
                 .recv_timeout(Duration::from_secs(2))
                 .expect("setup request should arrive");
-            assert!(request.contains(expected), "expected {expected}, got {request}");
+            assert!(
+                request.starts_with(expected),
+                "expected {expected}, got {request}"
+            );
+            if expected == "POST /v2/write/complete " {
+                assert!(request.contains(r#""outcome":"failed""#));
+            }
         }
-        let identity = requests
-            .recv_timeout(Duration::from_millis(500))
-            .expect("cleanup identity should arrive");
-        assert!(identity.contains("/v2/runtime/identity?"));
-        let completion = requests
-            .recv_timeout(Duration::from_millis(500))
-            .expect("failed completion should arrive");
-        assert!(completion.contains("POST /v2/write/complete "));
-        assert!(completion.contains(r#""outcome":"failed""#));
     }
 
     #[test]
     fn sandbox_replays_only_profiles_that_can_mutate_repo_files() {
-        assert!(!sandbox_profile_mutates_repo(SandboxFsProfile::ReadOnly, false));
-        assert!(!sandbox_profile_mutates_repo(SandboxFsProfile::Build, false));
-        assert!(!sandbox_profile_mutates_repo(SandboxFsProfile::External, false));
-        assert!(sandbox_profile_mutates_repo(SandboxFsProfile::External, true));
-        assert!(sandbox_profile_mutates_repo(SandboxFsProfile::WriteTargets, false));
+        assert!(!sandbox_profile_mutates_repo(
+            SandboxFsProfile::ReadOnly,
+            false
+        ));
+        assert!(!sandbox_profile_mutates_repo(
+            SandboxFsProfile::Build,
+            false
+        ));
+        assert!(!sandbox_profile_mutates_repo(
+            SandboxFsProfile::External,
+            false
+        ));
+        assert!(sandbox_profile_mutates_repo(
+            SandboxFsProfile::External,
+            true
+        ));
+        assert!(sandbox_profile_mutates_repo(
+            SandboxFsProfile::WriteTargets,
+            false
+        ));
         assert!(sandbox_profile_mutates_repo(SandboxFsProfile::Git, false));
-        assert!(sandbox_profile_mutates_repo(SandboxFsProfile::GithubPr, false));
+        assert!(sandbox_profile_mutates_repo(
+            SandboxFsProfile::GithubPr,
+            false
+        ));
     }
 
     #[test]
@@ -4044,21 +4070,37 @@ mod tests {
         .expect_err("second authorization transport failure should fail");
 
         let mut completion = None;
-        for _ in 0..8 {
-            let Ok(request) = requests.recv_timeout(Duration::from_millis(250)) else {
-                break;
-            };
-            if request.starts_with("POST /v2/write/complete ") {
-                completion = Some(serde_json::from_str::<serde_json::Value>(
-                    request
-                        .split_once("\r\n\r\n")
-                        .expect("completion should have a body")
-                        .1,
-                )
-                .expect("completion body should be JSON"));
+        for expected in [
+            "GET /v2/runtime/identity?",
+            "GET /v2/runtime/identity?",
+            "GET /v2/runtime/identity?",
+            "POST /v2/authorize ",
+            "GET /v2/runtime/identity?",
+            "POST /v2/authorize ",
+            "GET /v2/runtime/identity?",
+            "POST /v2/write/complete ",
+        ] {
+            let request = requests
+                .recv_timeout(Duration::from_secs(2))
+                .expect("lifecycle request should arrive");
+            assert!(
+                request.starts_with(expected),
+                "expected {expected}, got {request}"
+            );
+            if expected == "POST /v2/write/complete " {
+                completion = Some(
+                    serde_json::from_str::<serde_json::Value>(
+                        request
+                            .split_once("\r\n\r\n")
+                            .expect("completion should have a body")
+                            .1,
+                    )
+                    .expect("completion body should be JSON"),
+                );
             }
         }
-        let completion = completion.expect("first started intent should complete after later failure");
+        let completion =
+            completion.expect("first started intent should complete after later failure");
         assert_eq!(completion["payload"]["intent_id"], "intent-first");
         assert_eq!(completion["payload"]["outcome"], "failed");
     }

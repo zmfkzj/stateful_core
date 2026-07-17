@@ -1,5 +1,8 @@
 use crate::commands;
-use axum::{Router, routing::{get, post}};
+use axum::{
+    Router,
+    routing::{get, post},
+};
 
 pub(crate) fn router() -> Router<crate::ServerConfig> {
     Router::new()
@@ -10,8 +13,14 @@ pub(crate) fn router() -> Router<crate::ServerConfig> {
         .route("/v2/write/complete", post(commands::write_complete))
         .route("/v2/write/recover", post(commands::write_recover))
         .route("/v2/activity/finalize", post(commands::activity_finalize))
-        .route("/v2/reservation/declare", post(commands::reservation_declare))
-        .route("/v2/reservation/request", post(commands::reservation_request))
+        .route(
+            "/v2/reservation/declare",
+            post(commands::reservation_declare),
+        )
+        .route(
+            "/v2/reservation/request",
+            post(commands::reservation_request),
+        )
         .route("/v2/reservation/claim", post(commands::reservation_claim))
         .route("/v2/reservation/cancel", post(commands::reservation_cancel))
         .route("/v2/claim/acquire", post(commands::claim_acquire))
@@ -27,6 +36,9 @@ pub(crate) fn router() -> Router<crate::ServerConfig> {
         .route("/v2/outbox/sync", post(commands::outbox_sync))
         .route("/v2/current", get(commands::current))
         .route("/v2/events", get(commands::events))
-        .route("/v2/notifications/stream", get(commands::notifications_stream))
+        .route(
+            "/v2/notifications/stream",
+            get(commands::notifications_stream),
+        )
         .route("/v2/runtime/identity", get(commands::runtime_identity))
 }
