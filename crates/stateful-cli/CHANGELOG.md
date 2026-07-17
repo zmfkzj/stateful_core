@@ -1,5 +1,86 @@
 # Changelog
 
+## [1.0.0](https://github.com/zmfkzj/stateful_core/compare/stateful-cli-v0.1.1...stateful-cli-v1.0.0) (2026-07-17)
+
+
+### Features
+
+* accept sandbox run sequences ([8ed052e](https://github.com/zmfkzj/stateful_core/commit/8ed052e326ade2b2b621c5d142c3789b5ecc9546))
+* add OMP sandbox job polling ([ebb251f](https://github.com/zmfkzj/stateful_core/commit/ebb251fc79118db07a6ddfd13eb464ae0db53e46))
+* add OMP sandbox tooling, external command policy, and DeNovo coverage ([4e1869e](https://github.com/zmfkzj/stateful_core/commit/4e1869ef4ea0fc33d7f3dc1f930232476dc83cb7))
+* add user tool allowlist ([b56732b](https://github.com/zmfkzj/stateful_core/commit/b56732b7da90aaaec23b255008909c8efb5a8b47))
+* allow explicit plain HTTP server joins ([33aa7b0](https://github.com/zmfkzj/stateful_core/commit/33aa7b0f5c32b584ab5e6baf9439c5b4b573a0fb))
+* allow OMP sandbox run sequences ([32dffd3](https://github.com/zmfkzj/stateful_core/commit/32dffd3bd1e1996b96699b5f6b0c247c3662da71))
+* complete denovoswe official integration ([aac3c68](https://github.com/zmfkzj/stateful_core/commit/aac3c6861271393655451c0921392b77a92b5201))
+* complete presence-first v2 cutover ([329f9d5](https://github.com/zmfkzj/stateful_core/commit/329f9d54e698ce270e62a37b7206077015df445a))
+* deliver v2 context to omp ([e0cee60](https://github.com/zmfkzj/stateful_core/commit/e0cee60a2d32383b2d54f351ef57b63698c86331))
+* finalize reservation id authorization ([ba976de](https://github.com/zmfkzj/stateful_core/commit/ba976de86e1129d28a604075a9fda8f9cd2dc789))
+* finalize reservation id authorization ([b8af2e1](https://github.com/zmfkzj/stateful_core/commit/b8af2e1edf5ac997000c33eebb547c05ad2a150e))
+* fold external writes into sandbox ([3a0ad24](https://github.com/zmfkzj/stateful_core/commit/3a0ad24c852bc5c06bfc943ac478a6feab723f21))
+* improve OMP sandbox and DeNovo Docker workflows ([9f507f7](https://github.com/zmfkzj/stateful_core/commit/9f507f72fdde34781c8dff796ccede94840026e4))
+* install dispatching skill ([67dff27](https://github.com/zmfkzj/stateful_core/commit/67dff2779c643f3dd951d4df4a6009d578dd703e))
+* make OMP bash tools background by default ([618d641](https://github.com/zmfkzj/stateful_core/commit/618d641725e3cc578eafeeb6bceaa3687a734fff))
+* **mcp:** batch claim acquisition ([2abbba7](https://github.com/zmfkzj/stateful_core/commit/2abbba7a066dff24594ddfd00cf1ca7ad2c8d833))
+* migrate stateful cli clients to v2 ([2b95351](https://github.com/zmfkzj/stateful_core/commit/2b95351a72a0c307b4acd3f91755069cdfd1a4c9))
+* **omp:** improve sandbox tool UX and reservation recovery ([a10dfa7](https://github.com/zmfkzj/stateful_core/commit/a10dfa70b2e4f6c2db4a18ec9ab045e4179e23ac))
+* resolve sandbox run sequences ([33bfde2](https://github.com/zmfkzj/stateful_core/commit/33bfde2dbc254918650f67cc910752459381a354))
+* **sandbox:** add GitHub PR sandbox profile ([0fe7ff2](https://github.com/zmfkzj/stateful_core/commit/0fe7ff237ce61b3f1a86b47a129719497d80a18f))
+* show unclassified tools in tool list ([021e3e8](https://github.com/zmfkzj/stateful_core/commit/021e3e8eaba0515e0bc6536cda92944b03ba8c89))
+* thread reservation id through clients ([5569193](https://github.com/zmfkzj/stateful_core/commit/5569193a9e871471c73d7f55a484655ffa2362c2))
+
+
+### Bug Fixes
+
+* address final v2 verification findings ([8f39d2f](https://github.com/zmfkzj/stateful_core/commit/8f39d2ff083dad751bef72610f97cb0516459ffd))
+* align context rendering verification ([e6a426d](https://github.com/zmfkzj/stateful_core/commit/e6a426d8e11250f96c72f357c8ea671bfc225e5b))
+* align hook guidance with build profile ([f66d7e3](https://github.com/zmfkzj/stateful_core/commit/f66d7e3248aee91653369a5755e02b109435384f))
+* allow current OMP lifecycle tools ([2390148](https://github.com/zmfkzj/stateful_core/commit/239014834a3a7096e492e0d5f88e942115563018))
+* allow glob by default ([18c8685](https://github.com/zmfkzj/stateful_core/commit/18c86853a01614d9522dbf32e2f0f25795b11fbc))
+* allow omp stateful lifecycle ([67cf14f](https://github.com/zmfkzj/stateful_core/commit/67cf14f14f39ac3dc554b3dd40af3fc856cadeaa))
+* bind granted lazy reservations ([9dcb3d8](https://github.com/zmfkzj/stateful_core/commit/9dcb3d87f1a99ccec88fe7794d1149a4ae943b40))
+* bind lifecycle replay to runtime origin ([7823486](https://github.com/zmfkzj/stateful_core/commit/782348664fcf8da33556cf47a34d4d6b76c72ba7))
+* bind runtime endpoint to process pid ([cb0adce](https://github.com/zmfkzj/stateful_core/commit/cb0adce20b935dd4b0f47d0a70af8d6857cf2b2b))
+* classify stateful hook tools ([2c70ff0](https://github.com/zmfkzj/stateful_core/commit/2c70ff053721ef37a95ec1792e42672e6bdec427))
+* **cli:** allow OMP glob tool ([158f1a0](https://github.com/zmfkzj/stateful_core/commit/158f1a0c2c40cb933b0bc2bf4482e46dc1057974))
+* **cli:** harden durable hook lifecycles ([7645eca](https://github.com/zmfkzj/stateful_core/commit/7645ecafce8ff78ea041ee0600552dfeea4fc32d))
+* close CLI lifecycle identity gaps ([12d5900](https://github.com/zmfkzj/stateful_core/commit/12d590072ffdd89a6610403d7c13ae32d97095d5))
+* close task nine review findings ([412740b](https://github.com/zmfkzj/stateful_core/commit/412740b6d78f112f1c61e39ffe5761331d9b29a1))
+* enable OMP Bash during tool removal upgrade ([28724dc](https://github.com/zmfkzj/stateful_core/commit/28724dcac7dc9d4287e4c2a4e8a0582d7cfa453d))
+* escape skill URL single quotes ([e6c2713](https://github.com/zmfkzj/stateful_core/commit/e6c271341a9279bcc66604a7d32634bf228f8cdf))
+* finalize failed OMP sandbox jobs ([9f9fa85](https://github.com/zmfkzj/stateful_core/commit/9f9fa855cea3e495828de37aea2a774a1c74fc9b))
+* include OMP update install option ([6a2b0a2](https://github.com/zmfkzj/stateful_core/commit/6a2b0a21e51bdbdd5c182d1fff792dd8f1a4ae80))
+* install omp stateful profile ([5080815](https://github.com/zmfkzj/stateful_core/commit/508081588eb974a2359f1b3bd76b8649561cb3eb))
+* **install:** target live OMP profile ([4e6c34a](https://github.com/zmfkzj/stateful_core/commit/4e6c34a4fd820f2f3b6840fb26a2f53749777a1b))
+* measure journal diagnostic growth ([c8fe93e](https://github.com/zmfkzj/stateful_core/commit/c8fe93ec0a320eeae41d695661ad16b18dc285f1))
+* narrow sandbox resolver lint allow ([12421d8](https://github.com/zmfkzj/stateful_core/commit/12421d8ee6265271aa93bed2f94f2e880d5c7085))
+* **omp:** cancel sandbox bash cleanly ([1371dbd](https://github.com/zmfkzj/stateful_core/commit/1371dbdbf5b394adc8d49a56976d0506290e58bb))
+* **omp:** stream bash output inline ([c3a7e0f](https://github.com/zmfkzj/stateful_core/commit/c3a7e0fb1cee36b99bb66c3fdb8601e6acc1f2ec))
+* **omp:** wait for sandbox bash completion ([95db06c](https://github.com/zmfkzj/stateful_core/commit/95db06c2eb2c2d618e51ef4007947b14037244df))
+* pass through process find output ([2f3c59d](https://github.com/zmfkzj/stateful_core/commit/2f3c59d1f93c10c017239bedb6cf66ac0ad507ae))
+* pass through sandbox run output ([a877568](https://github.com/zmfkzj/stateful_core/commit/a877568d0b97cccab5cb68deff65b6b4b417fa1f))
+* preserve cli v2 request identity ([fc79f00](https://github.com/zmfkzj/stateful_core/commit/fc79f00c311aa62ed5e144297cd6187ac86ca3ae))
+* preserve integration repository identities ([da1770b](https://github.com/zmfkzj/stateful_core/commit/da1770ba6176036286f1fd342a40f43a2a27a710))
+* preserve v2 delivery lifecycles ([538ad6e](https://github.com/zmfkzj/stateful_core/commit/538ad6e39294208ce24b583c7886d79896588c35))
+* prove live server executable before signaling ([689957e](https://github.com/zmfkzj/stateful_core/commit/689957e9264bee3c0b7007f4114efcf400099ffa))
+* reject OMP sequences for direct sandbox profiles ([d6752a6](https://github.com/zmfkzj/stateful_core/commit/d6752a6e1d990ea3ba8e98519346582c1f9ba3b4))
+* remove sandbox denial context rendering ([dbcd1cc](https://github.com/zmfkzj/stateful_core/commit/dbcd1cc571dce4a2c63f6474911365845a88dfea))
+* replace hardcoded home paths ([ff2db8b](https://github.com/zmfkzj/stateful_core/commit/ff2db8b5b5adfa53a328c36d0f9b83c4261bc804))
+* replay unresolved write lifecycles ([546ed1e](https://github.com/zmfkzj/stateful_core/commit/546ed1efeea13d78476239d8ec07df810a51e4ec))
+* retain watcher retries and verify executable path ([4d8a2e5](https://github.com/zmfkzj/stateful_core/commit/4d8a2e58779d74346afb307a0dea30f41e1b2e88))
+* sandbox-git-command-quoting ([08f6897](https://github.com/zmfkzj/stateful_core/commit/08f68976f843d031858322c29244ab96b25354b9))
+* **sandbox:** allow GitHub PR TLS trust on macOS ([9aaf4be](https://github.com/zmfkzj/stateful_core/commit/9aaf4be3054870ec793dcd8b0e8b55fbf317c5b8))
+* scope resumed claims and IDE actors ([3a6689c](https://github.com/zmfkzj/stateful_core/commit/3a6689ce78a40cbfbe3edb0b6160b5b50ae47ff5))
+* signal sandbox process groups portably ([8b0dcab](https://github.com/zmfkzj/stateful_core/commit/8b0dcab070a4b206a6f4f9141a49fa03c20c97f3))
+* stream OMP sandbox job stderr state ([f685a5f](https://github.com/zmfkzj/stateful_core/commit/f685a5fe5ba385bda707f754d16f893426790a3b))
+* update ProgramBench OMP lifecycle ([cdb4d97](https://github.com/zmfkzj/stateful_core/commit/cdb4d9726dc8271e3cfa4c2e761a253b529ca021))
+* use supported lazy hook fields ([4aba6b3](https://github.com/zmfkzj/stateful_core/commit/4aba6b353aca1bce4b9b7411162cf93cbe4db84d))
+* wait for detached server readiness ([8a789e3](https://github.com/zmfkzj/stateful_core/commit/8a789e382916e454dca408f745523c82b4389612))
+
+
+### Miscellaneous Chores
+
+* release 1.0.0 ([97745c7](https://github.com/zmfkzj/stateful_core/commit/97745c77ffe77543b94a372fdb7861df2b854ea7))
+
 ## [0.1.1](https://github.com/zmfkzj/stateful_core/compare/stateful-cli-v0.1.0...stateful-cli-v0.1.1) (2026-06-23)
 
 
