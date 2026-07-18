@@ -97,10 +97,11 @@ indefinite; events are not deleted solely because of their age.
 ## Day-to-day coordination
 
 The enabled Codex and OMP integrations register sessions, maintain presence, and
-render context for the active actor. Rendered context has a delivery ID,
-sequence, and workspace version; the client acknowledges the delivered context,
-so an unacknowledged delivery is retried for that agent on a later turn or
-resumed session.
+render context for the active actor. On session start, the current context is
+available on the first model turn. Rendered context has a delivery ID, sequence,
+and workspace version; the client acknowledges the delivered context, so an
+unacknowledged delivery is retried for that agent on a later turn or resumed
+session.
 
 Before a supported write, inspect current context, declare the known scope, then
 complete an exact read of each target. Freshness is evidence from that completed
@@ -183,6 +184,8 @@ three arms, for example:
 ```text
 --arms sequential,parallel-off,parallel-on
 ```
+
+The StatefulBench Docker runtime defaults to OMP 17.0.4.
 
 A credit-free smoke or a single trial validates plumbing only. It does not prove
 causal, statistical, quality, or safety superiority. See the benchmark guidance

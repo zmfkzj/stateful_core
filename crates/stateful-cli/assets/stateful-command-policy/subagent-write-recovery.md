@@ -12,12 +12,13 @@ When a subagent hits `apply_patch writes require ... same-reservation file claim
 2. Re-read the exact target if it exists.
 3. Use active Stateful native tools in the same subagent tool context. Codex
    contexts may call `state_session_register` when the denial asks for session
-   registration. OMP contexts do not supply or repair identity: OMP derives the
-   active Stateful `agent_id` from `ctx.sessionManager.getSessionId()` and
-   `ctx.sessionManager.getLeafId()` when present, producing
-   `omp-${sessionId}-${leafId}` or `omp-${sessionId}`. If `getSessionId()` is
-   unavailable or invalid, OMP Stateful actions fail closed and the subagent
-   should report the denial.
+   registration. At `session_start`, OMP captures the active Stateful `agent_id`
+   from `ctx.sessionManager.getSessionId()` and `ctx.sessionManager.getLeafId()`
+   when present, producing `omp-${sessionId}-${leafId}` or
+   `omp-${sessionId}`. OMP reuses that captured id for the session regardless
+   of later leaf changes. If a `session_start` has no valid `getSessionId()`,
+   OMP discards any prior cached id, Stateful actions fail closed, and the
+   subagent should report the denial.
 4. For simple OMP native `edit`/`write` with no explicit `reservation_id`, let the extension auto-declare and claim the exact tool-visible file scope when the only denial is missing reservation/scope.
 5. For new files outside that simple path, reserve and claim every exact new file path, not only the parent directory.
 6. Edit with native tools such as `apply_patch`/`edit`, or use `sandbox run --fs write-targets` with matching targets for command-shaped writes.

@@ -836,6 +836,7 @@ def prepare_arm_runtime(
             runner=runner,
         )
     if arm == "parallel-on" and activate_stateful:
+        token = secrets.token_hex(32)
         exec_in_container(
             container, stateful_binary, "enable", "--repo", "/workspace", env=env, runner=runner
         )
@@ -846,9 +847,13 @@ def prepare_arm_runtime(
             "start",
             "--coordination-mode",
             "awareness",
+            "--token",
+            token,
             env=env,
             runner=runner,
         )
+        env["STATEFUL_SERVER_URL"] = "http://127.0.0.1:43873"
+        env["STATEFUL_SERVER_TOKEN"] = token
     return env
 
 

@@ -90,6 +90,7 @@ When changed, it has `delivery_id`, `sequence`, `workspace_version`, and
 prompt text. `/v2/context/ack` accepts `ContextAcknowledgement` with those
 three fields and returns `ContextAcknowledgementResult` with
 `acknowledged_version` and `cursor`.
+At OMP session start, the extension appends the current render with `{ deliverAs: "nextTurn", triggerTurn: false }`, so that initial context is included in the session's first model turn without starting a competing turn. Later context changes retain their existing turn-triggering delivery path, and SSE and reservation notifications retain their existing handling.
 
 A render is not considered consumed merely because a session started. Missing
 acknowledgement leaves it eligible for redelivery. Notification poll and SSE

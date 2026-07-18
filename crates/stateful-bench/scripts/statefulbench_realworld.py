@@ -2194,6 +2194,7 @@ def _run_container_repo_arm(
                 omp_binary=cfg.omp_bin,
                 stateful_binary=cfg.stateful_binary or "/usr/local/bin/stateful",
             )
+            environment.update(common_env)
             snapshot("initialized")
         cfg.usage_from_log = _LITE.usage_from_log
         versions = _capture_tool_provenance(

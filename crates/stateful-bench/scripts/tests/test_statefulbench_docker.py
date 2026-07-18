@@ -317,7 +317,10 @@ class DockerArmContainerTests(unittest.TestCase):
         runner = Mock(return_value=subprocess.CompletedProcess([], 0, "", ""))
         credential = Path("/runs/seed/agent.db")
 
-        with patch.object(self.mod, "copy_to_container") as copy:
+        with (
+            patch.object(self.mod, "copy_to_container") as copy,
+            patch.object(self.mod.secrets, "token_hex", return_value="runtime-token"),
+        ):
             env = self.mod.prepare_arm_runtime(
                 container,
                 "parallel-on",
@@ -330,6 +333,8 @@ class DockerArmContainerTests(unittest.TestCase):
             env["PI_CODING_AGENT_DIR"], "/home/stateful/.omp/profiles/stateful/agent"
         )
         self.assertEqual(env["STATEFUL_OMP_SANDBOX"], "off")
+        self.assertEqual(env["STATEFUL_SERVER_URL"], "http://127.0.0.1:43873")
+        self.assertEqual(env["STATEFUL_SERVER_TOKEN"], "runtime-token")
         copy.assert_called_once_with(
             container,
             credential,
@@ -342,8 +347,15 @@ class DockerArmContainerTests(unittest.TestCase):
         self.assertEqual(sum(command[-3:] == ["enable", "--repo", "/workspace"] for command in commands), 1)
         self.assertEqual(
             sum(
-                command[-4:]
-                == ["server", "start", "--coordination-mode", "awareness"]
+                command[-6:]
+                == [
+                    "server",
+                    "start",
+                    "--coordination-mode",
+                    "awareness",
+                    "--token",
+                    "runtime-token",
+                ]
                 for command in commands
             ),
             1,
