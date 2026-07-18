@@ -1,4 +1,6 @@
 # StatefulBench parallel-on OMP Upgrade Implementation Plan
+> **상태: Superseded.** OMP 17.0.4 단독 상향은 `AgentBusyError`를 해결하지 못했습니다. 이 plan은 [2026-07-18-statefulbench-parallel-on-context-injection.md](2026-07-18-statefulbench-parallel-on-context-injection.md)로 대체되었습니다.
+
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

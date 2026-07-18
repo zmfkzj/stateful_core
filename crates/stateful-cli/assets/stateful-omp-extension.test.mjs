@@ -247,7 +247,10 @@ test("tool results recover a missed context invalidation through V2 notification
   calls.length = 0;
   await pi.handlers.get("tool_result")({ toolCallId: "call-4", toolName: "bash", input: { command: "true" } }, context());
   assert.ok(calls.includes("/v2/notifications/poll"));
-  assert.equal(pi.messages.at(-1).message.content, "Recovered context");
+  const recovered = pi.messages.at(-1);
+  assert.equal(recovered.message.customType, "stateful_context");
+  assert.equal(recovered.message.content, "Recovered context");
+  assert.deepEqual(recovered.options, { triggerTurn: true, deliverAs: "nextTurn" });
 });
 
 test("SSE notification transport dispatches payload kinds before acknowledgement", async (t) => {
@@ -308,6 +311,10 @@ test("SSE notification transport dispatches payload kinds before acknowledgement
     { sequence: 2, contextDelivered: true, reservationDelivered: false },
     { sequence: 3, contextDelivered: true, reservationDelivered: true },
   ]);
+  const streamedContext = pi.messages.find(({ message }) => message.customType === "stateful_context");
+  const streamedReservation = pi.messages.find(({ message }) => message.customType === "stateful_reservation_ready");
+  assert.deepEqual(streamedContext.options, { triggerTurn: true, deliverAs: "nextTurn" });
+  assert.deepEqual(streamedReservation.options, { triggerTurn: true, deliverAs: "nextTurn" });
 });
 
 test("awareness warnings are queued for the next turn without a lazy write", async (t) => {

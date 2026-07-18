@@ -1,4 +1,6 @@
 # StatefulBench parallel-on OMP 업그레이드 설계
+> **상태: Superseded.** OMP 17.0.4 단독 상향은 `AgentBusyError`를 해결하지 못했습니다. 이 design은 [2026-07-18-statefulbench-parallel-on-context-injection-design.md](2026-07-18-statefulbench-parallel-on-context-injection-design.md)로 대체되었습니다.
+
 
 ## 목표
 

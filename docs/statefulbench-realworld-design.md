@@ -1,6 +1,6 @@
 # StatefulBench Real-World Corpus Design
 
-**Status:** approved for implementation planning  
+**Status:** implementation and scoped validation complete  
 **Approved:** 2026-07-11
 
 ## Goal
@@ -129,11 +129,12 @@ The fixed object reports only:
 
 The object contains no payloads, identifiers, paths, resources, timestamps, free-form messages, raw database rows, raw server-log lines, or per-agent data. `mean` is `total / count` (or `null` at zero); summary means are weighted from totals and counts, and unmeasured grants are not zero-duration waits. `results.json` preserves the row's sanitized evidence and qualification identity; `summary.json` contains only sanitized report rows and locked aggregates.
 
-These are observational coordination diagnostics, not causal proof. The credit-free Docker E2E and one model-backed trial are descriptive smoke/scoped evidence only. Do not make behavioral-quality, causal, safety, statistical, or superiority claims without an appropriately qualified multi-trial study.
+These are observational coordination diagnostics, not causal proof. The credit-free Docker E2E and one cleared `requests` `parallel-on` trial are descriptive smoke/scoped evidence only. Do not make behavioral-quality, causal, safety, statistical, or superiority claims without an appropriately qualified multi-trial study.
 
 ## Qualification and launch gates
 
 The Docker real-world runner is distinct from ProgramBench and DeNovoSWE. Its qualification receipt authorizes only this corpus/image identity.
+The image pins OMP 17.0.4.
 
 1. Build and inspect a `linux/arm64` image; the inspected image itself must report `linux/arm64`. A non-arm Docker daemon is private provenance, not an admission substitute.
 2. Qualify the selected repository set against that exact image. A passing receipt at `CACHE/qualification/receipts/KEY.json` binds the manifest, corpus, archive, commit, staged graded inputs, image ID/platform/digests, and the six-tool map: Python, OMP, Stateful SHA, Git, Rustc, and Cargo. Rebuild, retag, or any bound-input change requires requalification.
