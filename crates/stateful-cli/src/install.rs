@@ -1623,7 +1623,7 @@ mod tests {
             .map(|offset| helper_start + offset)
             .expect("identity helpers should end before reservationIdFromValue");
         let script = format!(
-            "{}\nlet missing;\ntry {{ agentId({{ agent_id: 'adapter-agent', session: {{ id: 'legacy-session' }} }}, {{}}); }} catch (error) {{ missing = error.message; }}\nconst branchCtx = {{ sessionManager: {{ getSessionId: () => '019f1a33-e3c1-7000-b2a6-d16cc4f05a52', getLeafId: () => 'leaf_42' }} }};\nconst sessionCtx = {{ sessionManager: {{ getSessionId: () => '019f1a33-e3c1-7000-b2a6-d16cc4f05a53', getLeafId: () => undefined }} }};\nconst values = [agentId({{ agent_id: 'ignored-adapter' }}, branchCtx), agentId({{ session: {{ id: 'ignored-session' }} }}, sessionCtx), missing];\nconsole.log(JSON.stringify(values));",
+            "{}\nlet missing;\ntry {{ agentId(undefined); }} catch (error) {{ missing = error.message; }}\nconst branchCtx = {{ sessionManager: {{ getSessionId: () => '019f1a33-e3c1-7000-b2a6-d16cc4f05a52', getLeafId: () => 'leaf_42' }} }};\nconst sessionCtx = {{ sessionManager: {{ getSessionId: () => '019f1a33-e3c1-7000-b2a6-d16cc4f05a53', getLeafId: () => undefined }} }};\nconst values = [detectAgentId({{}}, branchCtx), detectAgentId({{}}, sessionCtx), missing];\nconsole.log(JSON.stringify(values));",
             &contents[helper_start..helper_end]
         );
         let output = std::process::Command::new("node")

@@ -6,7 +6,7 @@ stateful_core의 OMP 확장이 세션 시작 컨텍스트를 별도 turn 없이 
 
 ## 확인된 원인
 
-OMP 16.4.2와 17.0.4 모두 `parallel-on`의 모든 에이전트가 첫 프롬프트에서 `AgentBusyError: Agent is already processing`으로 종료됐다. stateful_core의 `stateful-omp-extension.js`는 `session_start` 중 초기 컨텍스트를 `deliverAs: "nextTurn", triggerTurn: true`로 보낸다. OMP 세션은 이 시점에 `isStreaming`을 아직 true로 노출하지 않지만 첫 프롬프트 처리는 이미 진행 중이므로, 새 agent-initiated turn 시작이 기존 프롬프트와 충돌한다.
+OMP 16.4.2와 17.0.4 모두 `parallel-on`의 모든 에이전트가 첫 프롬프트에서 `AgentBusyError: Agent is already processing`으로 종료됐다. 변경 전 stateful_core의 `stateful-omp-extension.js`는 `session_start` 중 초기 컨텍스트를 `deliverAs: "nextTurn", triggerTurn: true`로 보냈다. OMP 세션은 이 시점에 `isStreaming`을 아직 true로 노출하지 않지만 첫 프롬프트 처리는 이미 진행 중이므로, 새 agent-initiated turn 시작이 기존 프롬프트와 충돌했다.
 
 OMP 17.0.4의 `sendCustomMessage` 계약상 non-streaming 상태에서 `deliverAs: "nextTurn", triggerTurn: false`는 메시지를 agent/session 상태에 append하고 새 turn을 시작하지 않는다. 따라서 session-start handler가 반환된 뒤 시작되는 최초 프롬프트가 해당 컨텍스트를 읽을 수 있다.
 

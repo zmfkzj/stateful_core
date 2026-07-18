@@ -53,7 +53,7 @@ node --test \
   crates/stateful-cli/assets/stateful-omp-extension.test.mjs
 ```
 
-Expected: FAIL because the current implementation sends `triggerTurn: true`.
+Expected: FAIL because the pre-change implementation sends `triggerTurn: true`.
 
 - [ ] **Step 3: Implement the minimal stateful_core fix**
 

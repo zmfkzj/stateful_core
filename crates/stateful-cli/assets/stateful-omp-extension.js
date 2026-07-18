@@ -147,10 +147,9 @@ function missingAgentIdReason() {
 }
 
 
-function agentId(event, ctx) {
-  const id = detectAgentId(event, ctx);
-  if (!id) throw new Error(missingAgentIdReason());
-  return id;
+function agentId(activeSessionAgentId) {
+  if (!activeSessionAgentId) throw new Error(missingAgentIdReason());
+  return activeSessionAgentId;
 }
 
 function reservationIdFromValue(value) {
@@ -722,7 +721,7 @@ function readOperationBases(cwd, targets) {
   return bases;
 }
 
-function rememberLazyEditOperation(event, ctx, decision) {
+function rememberLazyEditOperation(event, ctx, decision, activeSessionAgentId) {
   if (event?.toolName !== "edit") return "";
   const targets = editPatchTargets(event.input || {});
   if (targets.length === 0 || !targets.every(safeLazyOperationTarget)) return "";
@@ -736,7 +735,7 @@ function rememberLazyEditOperation(event, ctx, decision) {
   const operationId = waitId || nextLazyEditOperationId();
   lazyEditOperations.set(operationId, {
     tool_call_id: toolCallId,
-    agent_id: agentId(event, ctx),
+    agent_id: agentId(activeSessionAgentId),
     workspace_id: detectWorkspaceId(event, ctx),
     wait_id: waitId,
     reservation_id: structuredLazyReservationId(event, decision),
@@ -756,7 +755,7 @@ function writeToolTarget(input) {
   return safeLazyOperationTarget(target) ? target : "";
 }
 
-function rememberLazyWriteOperation(event, ctx, decision) {
+function rememberLazyWriteOperation(event, ctx, decision, activeSessionAgentId) {
   if (event?.toolName !== "write") return "";
   const target = writeToolTarget(event.input || {});
   if (!target) return "";
@@ -771,7 +770,7 @@ function rememberLazyWriteOperation(event, ctx, decision) {
   const operationId = waitId || nextLazyWriteOperationId();
   lazyWriteOperations.set(operationId, {
     tool_call_id: toolCallId,
-    agent_id: agentId(event, ctx),
+    agent_id: agentId(activeSessionAgentId),
     workspace_id: detectWorkspaceId(event, ctx),
     wait_id: waitId,
     reservation_id: structuredLazyReservationId(event, decision),
@@ -792,13 +791,13 @@ function normalizedStatefulCommandWords(words) {
   return normalized;
 }
 
-function rememberLazyBashOperation(event, ctx, decision) {
+function rememberLazyBashOperation(event, ctx, decision, activeSessionAgentId) {
   if (event?.toolName !== "bash" && event?.toolName !== "functions.bash") return "";
   if (!decision?.externalGrantParams || !Array.isArray(decision?.words)) return "";
   const operationId = nextLazyBashOperationId();
   lazyBashOperations.set(operationId, {
     operation_id: operationId,
-    agent_id: agentId(event, ctx),
+    agent_id: agentId(activeSessionAgentId),
     cwd: ctx.cwd,
     tool_name: event.toolName,
     tool_input: event.input || {},
@@ -1199,11 +1198,11 @@ function insertSandboxIdentityFlag(words, flag, value) {
   return words;
 }
 
-function commandWithActiveSandboxIdentity(words, event, ctx) {
+function commandWithActiveSandboxIdentity(words, event, ctx, activeSessionAgentId) {
   if (!Array.isArray(words) || words[1] !== "sandbox" || words[2] !== "run") {
     return { words, command: undefined };
   }
-  const activeAgentId = agentId(event, ctx);
+  const activeAgentId = agentId(activeSessionAgentId);
   const suppliedAgentId = flagValue(words, "--agent-id");
   if (suppliedAgentId !== undefined && suppliedAgentId !== activeAgentId) {
     throw new Error("stateful sandbox run --agent-id must match the active agent_id");
@@ -1365,13 +1364,14 @@ function statefulBashPassthroughDecision(command, cwd) {
 
 
 export default function statefulOmpExtension(pi) {
+  let activeSessionAgentId;
   pi.setLabel("Stateful");
   pi.on("tool_call", async (event, ctx) => {
     if (event?.toolName !== "bash" && event?.toolName !== "functions.bash") return;
     const decision = statefulBashPassthroughDecision(event?.input?.command, ctx?.cwd);
     if (!decision.allow) return { block: true, reason: decision.reason };
     try {
-      const rewritten = commandWithActiveSandboxIdentity(decision.words, event, ctx);
+      const rewritten = commandWithActiveSandboxIdentity(decision.words, event, ctx, activeSessionAgentId);
       decision.words = rewritten.words;
       if (rewritten.command && event?.input) event.input.command = rewritten.command;
     } catch (error) {
@@ -1384,7 +1384,7 @@ export default function statefulOmpExtension(pi) {
         return;
       }
       if (typeof ctx?.ui?.confirm !== "function") {
-        const operationId = rememberLazyBashOperation(event, ctx, decision);
+        const operationId = rememberLazyBashOperation(event, ctx, decision, activeSessionAgentId);
         const suffix = operationId
           ? "\n\nQueued lazy bash operation_id: " + operationId + "\nNext: approve the external sandbox grant, then call lazy_bash_resume with this operation_id."
           : "";
@@ -1576,12 +1576,14 @@ function state_reservation_claim(operation, _ctx) {
     },
   });
   pi.on("session_start", async (event, ctx) => {
+    activeSessionAgentId = undefined;
     verifyBareStateful(ctx.cwd);
     const activeAgentId = detectAgentId(event, ctx);
     if (!activeAgentId) {
       stopContextStream();
       return;
     }
+    activeSessionAgentId = activeAgentId;
     const result = runStatefulHook("session-start", {
       agent_id: activeAgentId,
       cwd: ctx.cwd,
@@ -1603,7 +1605,7 @@ function state_reservation_claim(operation, _ctx) {
   pi.on("tool_call", async (event, ctx) => {
     const benchmarkBlockReason = benchmarkSourceBlockReason(event);
     if (benchmarkBlockReason) return { block: true, reason: benchmarkBlockReason };
-    const activeAgentId = detectAgentId(event, ctx);
+    const activeAgentId = activeSessionAgentId;
     if (!activeAgentId) return { block: true, reason: missingAgentIdReason() };
     const decision = runStatefulHook("pre-tool-use", {
       agent_id: activeAgentId,
@@ -1643,8 +1645,8 @@ function state_reservation_claim(operation, _ctx) {
       return;
     }
     if (decision.decision === "block") {
-      const editOperationId = rememberLazyEditOperation(event, ctx, decision);
-      const writeOperationId = rememberLazyWriteOperation(event, ctx, decision);
+      const editOperationId = rememberLazyEditOperation(event, ctx, decision, activeSessionAgentId);
+      const writeOperationId = rememberLazyWriteOperation(event, ctx, decision, activeSessionAgentId);
       const suffix = editOperationId
         ? "\n\nQueued lazy edit operation_id: " + editOperationId + "\nNext: when reservation or claim is ready, call lazy_edit_resume with this operation_id."
         : writeOperationId
@@ -1654,7 +1656,7 @@ function state_reservation_claim(operation, _ctx) {
     }
   });
   pi.on("tool_result", async (event, ctx) => {
-    const activeAgentId = detectAgentId(event, ctx);
+    const activeAgentId = activeSessionAgentId;
     if (!activeAgentId) return;
     const resultMetadata = event?.resultMetadata
       ?? event?.result_metadata
@@ -1684,7 +1686,8 @@ function state_reservation_claim(operation, _ctx) {
   });
   pi.on("session_shutdown", async (event, ctx) => {
     stopContextStream();
-    const activeAgentId = detectAgentId(event, ctx);
+    const activeAgentId = activeSessionAgentId;
+    activeSessionAgentId = undefined;
     if (!activeAgentId) return;
     runStatefulHook("stop", {
       agent_id: activeAgentId,

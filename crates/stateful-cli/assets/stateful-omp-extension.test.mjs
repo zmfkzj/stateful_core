@@ -31,7 +31,7 @@ function fakePi() {
   };
 }
 
-async function loadExtension(t, { decision = { decision: "allow" }, yoloDecision = { decision: "allow" }, fetchImpl, claimRequiresPath = false, claimAlwaysFails = false } = {}) {
+async function loadExtension(t, { decision = { decision: "allow" }, yoloDecision = { decision: "allow" }, fetchImpl, claimRequiresPath = false, claimAlwaysFails = false, startSession = false } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "stateful-omp-extension-"));
   await mkdir(join(directory, ".git"));
   const extensionContext = context(directory);
@@ -80,7 +80,15 @@ process.stdin.on("end", () => {
   await chmod(statefulPath, 0o755);
   await writeFile(modulePath, assetSource.replace("__STATEFUL_BINARY_JSON__", JSON.stringify(statefulPath)));
   const previousFetch = globalThis.fetch;
-  globalThis.fetch = fetchImpl || (async () => { throw new Error("unexpected fetch"); });
+  globalThis.fetch = fetchImpl || (async (url) => {
+    const pathname = new URL(url).pathname;
+    if (pathname === "/v2/context/render") {
+      return jsonResponse({ changed: false, workspace_version: 1, prompt_text: "" });
+    }
+    if (pathname === "/v2/notifications/poll") return jsonResponse({});
+    if (pathname === "/v2/notifications/stream") return openStream();
+    throw new Error(`unexpected URL ${url}`);
+  });
   const extension = await import(`${pathToFileURL(modulePath).href}?${Date.now()}-${Math.random()}`);
   const pi = fakePi();
   extension.default(pi);
@@ -92,6 +100,9 @@ process.stdin.on("end", () => {
     globalThis.fetch = previousFetch;
     await rm(directory, { recursive: true, force: true });
   });
+  if (startSession) {
+    await pi.handlers.get("session_start")({ workspaceId: "workspace-1" }, extensionContext);
+  }
   return { extension, pi, hookLog, context: extensionContext, directory };
 }
 
@@ -147,6 +158,74 @@ test("shouldDeliverContextVersion suppresses duplicate and out-of-order versions
   assert.equal(extension.shouldDeliverContextVersion(3, 4), true);
   assert.equal(extension.shouldDeliverContextVersion(4, 4), false);
   assert.equal(extension.shouldDeliverContextVersion(4, 3), false);
+});
+
+test("a session keeps one Stateful agent id while the OMP leaf advances", async (t) => {
+  let leafId = "leaf-start";
+  const sessionContext = context();
+  sessionContext.sessionManager.getLeafId = () => leafId;
+  const { pi, hookLog } = await loadExtension(t, {
+    fetchImpl: async (url) => {
+      const pathname = new URL(url).pathname;
+      if (pathname === "/v2/context/render") {
+        return jsonResponse({ changed: false, workspace_version: 1, prompt_text: "" });
+      }
+      if (pathname === "/v2/notifications/poll") return jsonResponse({});
+      if (pathname === "/v2/notifications/stream") return openStream();
+      throw new Error(`unexpected URL ${url}`);
+    },
+  });
+
+  await pi.handlers.get("session_start")({ workspaceId: "workspace-1" }, sessionContext);
+  leafId = "leaf-after-start";
+  await pi.handlers.get("tool_call")({
+    toolCallId: "call-stable-agent",
+    toolName: "read",
+    input: { path: "src/lib.rs" },
+  }, sessionContext);
+  leafId = "leaf-after-tool";
+  await pi.handlers.get("tool_result")({
+    toolCallId: "call-stable-agent",
+    toolName: "read",
+    input: { path: "src/lib.rs" },
+  }, sessionContext);
+
+  assert.deepEqual(
+    (await hooks(hookLog)).map(({ payload }) => payload.agent_id),
+    Array(3).fill("omp-00000000-0000-4000-8000-000000000011-leaf-start"),
+  );
+});
+
+test("a session start without an id clears the prior session identity", async (t) => {
+  const validContext = context();
+  validContext.sessionManager.getLeafId = () => "leaf-first";
+  const { pi, hookLog } = await loadExtension(t, {
+    fetchImpl: async (url) => {
+      const pathname = new URL(url).pathname;
+      if (pathname === "/v2/context/render") {
+        return jsonResponse({ changed: false, workspace_version: 1, prompt_text: "" });
+      }
+      if (pathname === "/v2/notifications/stream") return openStream();
+      throw new Error(`unexpected URL ${url}`);
+    },
+  });
+
+  await pi.handlers.get("session_start")({ workspaceId: "workspace-1" }, validContext);
+  const missingIdContext = context();
+  missingIdContext.sessionManager.getSessionId = () => undefined;
+  await pi.handlers.get("session_start")({ workspaceId: "workspace-1" }, missingIdContext);
+  const blocked = await pi.handlers.get("tool_call")({
+    toolCallId: "call-missing-agent",
+    toolName: "read",
+    input: { path: "src/lib.rs" },
+  }, validContext);
+
+  assert.equal(blocked.block, true);
+  assert.match(blocked.reason, /no session id was available/);
+  assert.deepEqual(
+    (await hooks(hookLog)).map(({ event }) => event),
+    ["session-start"],
+  );
 });
 
 test("session start queues initial context for the next turn then acknowledges it", async (t) => {
@@ -318,7 +397,7 @@ test("SSE notification transport dispatches payload kinds before acknowledgement
 });
 
 test("awareness warnings are queued for the next turn without a lazy write", async (t) => {
-  const { pi } = await loadExtension(t, { decision: { decision: "warn", message: "overlapping work" } });
+  const { pi } = await loadExtension(t, { decision: { decision: "warn", message: "overlapping work" }, startSession: true });
   const result = await pi.handlers.get("tool_call")({ toolCallId: "call-warn", toolName: "functions.write", input: { path: "src/lib.rs", content: "x" } }, context());
   assert.equal(result, undefined);
   assert.deepEqual(pi.messages, [{
@@ -331,14 +410,14 @@ test("awareness warnings are queued for the next turn without a lazy write", asy
 });
 
 test("enforcement denials retain lazy write replay", async (t) => {
-  const { pi, context: extensionContext } = await loadExtension(t, { decision: { decision: "block", reason: "reservation pending", wait: { wait_id: "wait-8" } } });
+  const { pi, context: extensionContext } = await loadExtension(t, { decision: { decision: "block", reason: "reservation pending", wait: { wait_id: "wait-8" } }, startSession: true });
   const result = await pi.handlers.get("tool_call")({ toolCallId: "call-block", toolName: "write", input: { path: "src/lib.rs", content: "x" } }, extensionContext);
   assert.equal(result.block, true);
   assert.match(result.reason, /Queued lazy write operation_id: wait-8/);
 });
 
 test("pre and post hooks retain the tool call ID and result metadata", async (t) => {
-  const { pi, hookLog } = await loadExtension(t);
+  const { pi, hookLog } = await loadExtension(t, { startSession: true });
   const event = {
     toolCallId: "call-correlation",
     toolName: "functions.read",
@@ -361,7 +440,7 @@ test("pre and post hooks retain the tool call ID and result metadata", async (t)
 });
 
 test("truncated raw OMP reads report top-level truncation", async (t) => {
-  const { pi, hookLog } = await loadExtension(t);
+  const { pi, hookLog } = await loadExtension(t, { startSession: true });
   const event = {
     toolCallId: "call-truncated",
     toolName: "functions.read",
@@ -386,6 +465,7 @@ test("lazy edit resume preserves the original tool-call identity through both ho
       wait: { wait_id: "wait-edit", reservation_id: "reservation-edit" },
     },
     claimRequiresPath: true,
+    startSession: true,
   });
   await writeFile(join(directory, "resume-edit.js"), "before\n");
   const input = { input: "[resume-edit.js#0000]\nSWAP 1.=1:\n+after" };
@@ -441,6 +521,7 @@ test("lazy write resume preserves the original tool-call identity through both h
       wait: { wait_id: "wait-write", reservation_id: "reservation-write" },
     },
     claimRequiresPath: true,
+    startSession: true,
   });
   await writeFile(join(directory, "resume-write.js"), "before\n");
   const input = { path: "resume-write.js", content: "after\n" };
@@ -493,6 +574,7 @@ test("lazy write resume executes through a yolo warning and completes the origin
     decision: { decision: "block", reason: "reservation pending", wait: { wait_id: "wait-warn", reservation_id: "reservation-warn" } },
     yoloDecision: { decision: "warn", message: "overlapping work" },
     claimRequiresPath: true,
+    startSession: true,
   });
   const input = { path: "resume-warn.js", content: "after\n" };
   const blocked = await pi.handlers.get("tool_call")({
@@ -538,6 +620,7 @@ test("lazy write resume uses its granted subdirectory reservation without a redu
       wait: { wait_id: "wait-subdir", reservation_id: "reservation-subdir" },
     },
     claimRequiresPath: true,
+    startSession: true,
   });
   const cwd = join(directory, "packages", "client");
   await mkdir(join(cwd, "src"), { recursive: true });
@@ -571,6 +654,8 @@ test("lazy write waits for its reservation grant and preserves it through comple
   let reads = 0;
   let grantAcknowledged;
   const granted = new Promise((resolve) => { grantAcknowledged = resolve; });
+  let releaseGrant;
+  const grantReady = new Promise((resolve) => { releaseGrant = resolve; });
   const { extension, pi, hookLog, context: extensionContext, directory } = await loadExtension(t, {
     decision: { decision: "block", reason: "reservation pending", wait: { wait_id: "wait-grant" } },
     fetchImpl: async (url) => {
@@ -589,6 +674,7 @@ test("lazy write waits for its reservation grant and preserves it through comple
             getReader: () => ({
               read: async () => {
                 if (reads++ === 0) {
+                  await grantReady;
                   const frame = "event: notification\n"
                     + "data: {\"notification_id\":\"wait-grant\",\"sequence\":1,\"kind\":\"reservation_granted\",\"payload\":{\"wait_id\":\"wait-grant\",\"reservation_id\":\"reservation-grant\"}}\n\n";
                   return { done: false, value: new TextEncoder().encode(frame) };
@@ -603,6 +689,7 @@ test("lazy write waits for its reservation grant and preserves it through comple
     },
     claimAlwaysFails: true,
   });
+  await pi.handlers.get("session_start")({ workspaceId: "workspace-1" }, extensionContext);
   await writeFile(join(directory, "granted.js"), "before\n");
   const input = { path: "granted.js", content: "after\n" };
   await pi.handlers.get("tool_call")({
@@ -625,7 +712,7 @@ test("lazy write waits for its reservation grant and preserves it through comple
     payload: { wait_id: "wait-grant", reservation_id: "wrong-reservation", relative_path: "other.js" },
   }), false);
 
-  await pi.handlers.get("session_start")({ workspaceId: "workspace-1" }, extensionContext);
+  releaseGrant();
   await granted;
   const resumed = await pi.tools.get("lazy_write_resume").execute(
     "resume-after-grant",

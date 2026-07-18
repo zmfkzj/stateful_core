@@ -295,15 +295,19 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
     assert!(!extension.contains("ctx?.runtime?.session?.id"));
     assert!(!extension.contains("function processAgentId()"));
     assert!(!extension.contains("omp-pid-"));
-    assert!(extension.contains("function agentId(event, ctx)"));
+    assert!(extension.contains("function agentId(activeSessionAgentId)"));
     assert!(extension.contains("Stateful requires OMP ctx.sessionManager.getSessionId()"));
     assert!(
         extension.contains(
             "if (!activeAgentId) return { block: true, reason: missingAgentIdReason() };"
         )
     );
+    assert!(extension.contains("const activeAgentId = activeSessionAgentId;"));
+    assert!(!extension.contains("activeSessionAgentId || detectAgentId"));
     assert!(extension.contains("function detectWorkspaceId(event, ctx)"));
-    assert!(extension.contains("function commandWithActiveSandboxIdentity(words, event, ctx)"));
+    assert!(extension.contains(
+        "function commandWithActiveSandboxIdentity(words, event, ctx, activeSessionAgentId)"
+    ));
     assert!(extension.contains("stateful sandbox run --agent-id must match the active agent_id"));
     assert!(
         extension
@@ -317,7 +321,9 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
     assert!(extension.contains("name: \"lazy_write_resume\""));
     assert!(extension.contains("name: \"lazy_bash_resume\""));
     assert!(extension.contains("lazyBashOperations"));
-    assert!(extension.contains("rememberLazyBashOperation(event, ctx, decision)"));
+    assert!(extension.contains(
+        "rememberLazyBashOperation(event, ctx, decision, activeSessionAgentId)"
+    ));
     assert!(extension.contains("Queued lazy bash operation_id"));
     assert!(
         extension.contains(
@@ -445,7 +451,7 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
     assert!(
         extension.contains("Built-in Bash external sandbox command requires OMP UI confirmation")
     );
-    assert!(extension.contains("agent_id: agentId(event, ctx)"));
+    assert!(extension.contains("agent_id: agentId(activeSessionAgentId)"));
     assert!(extension.contains("pre-tool-use"));
     assert!(extension.contains("decision: \"block\""));
     assert!(extension.contains("if (decision.decision === \"prompt\" && !shouldAutoApproveStatefulPrompt(ctx, event.input || {}))"));
