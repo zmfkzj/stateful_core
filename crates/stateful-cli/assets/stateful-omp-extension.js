@@ -385,7 +385,7 @@ async function acknowledgeNotification(stream, notification) {
   return response?.ok === true;
 }
 
-async function deliverContext(pi, stream, targetVersion) {
+async function deliverContext(pi, stream, targetVersion, triggerTurn = true) {
   if (targetVersion !== undefined && !shouldDeliverContextVersion(contextState.deliveredVersion, targetVersion)) {
     return true;
   }
@@ -415,7 +415,7 @@ async function deliverContext(pi, stream, targetVersion) {
         content: String(context.prompt_text || ""),
         display: true,
       },
-      { triggerTurn: true, deliverAs: "nextTurn" }
+      { triggerTurn, deliverAs: "nextTurn" }
     );
   } catch (_) {
     return false;
@@ -1597,7 +1597,7 @@ function state_reservation_claim(operation, _ctx) {
       return;
     }
     activateContextStream(stream, true);
-    if (!await deliverContext(pi, stream)) contextState.initialPending = true;
+    if (!await deliverContext(pi, stream, undefined, false)) contextState.initialPending = true;
     startContextStream(pi, stream);
   });
   pi.on("tool_call", async (event, ctx) => {

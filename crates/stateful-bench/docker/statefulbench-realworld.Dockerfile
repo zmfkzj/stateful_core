@@ -5,7 +5,7 @@ COPY crates ./crates
 RUN cargo build --release -p stateful-cli
 
 FROM python:3.14.6-slim-bookworm
-ARG OMP_VERSION=16.4.2
+ARG OMP_VERSION=17.0.4
 ENV DEBIAN_FRONTEND=noninteractive \
     BUN_INSTALL=/opt/bun \
     CARGO_HOME=/usr/local/cargo \

@@ -165,7 +165,7 @@ test("session start queues initial context for the next turn then acknowledges i
   await pi.handlers.get("session_start")({ workspaceId: "workspace-1" }, context());
   assert.deepEqual(pi.messages, [{
     message: { customType: "stateful_context", content: "Initial context", display: true },
-    options: { triggerTurn: true, deliverAs: "nextTurn" },
+    options: { triggerTurn: false, deliverAs: "nextTurn" },
   }]);
   assert.deepEqual(calls.map(({ url }) => new URL(url).pathname).slice(0, 2), ["/v2/context/render", "/v2/context/ack"]);
 });
