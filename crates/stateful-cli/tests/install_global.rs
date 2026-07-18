@@ -321,9 +321,9 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
     assert!(extension.contains("name: \"lazy_write_resume\""));
     assert!(extension.contains("name: \"lazy_bash_resume\""));
     assert!(extension.contains("lazyBashOperations"));
-    assert!(extension.contains(
-        "rememberLazyBashOperation(event, ctx, decision, activeSessionAgentId)"
-    ));
+    assert!(
+        extension.contains("rememberLazyBashOperation(event, ctx, decision, activeSessionAgentId)")
+    );
     assert!(extension.contains("Queued lazy bash operation_id"));
     assert!(
         extension.contains(
