@@ -5,7 +5,8 @@ use crate::{
         lifecycle_presence_for_resource_update, resource_update_event, tool_completed_event,
     },
     reservations::{
-        expired, normalized_scope, record_from_current, scopes_conflict, timestamp, typed_records,
+        ReservationRecord, expired, expired_optional, normalized_scope, record_from_current,
+        scopes_conflict, timestamp, typed_records,
     },
     write_fences::{WriteFenceRecord, fence_event},
 };
@@ -13,7 +14,7 @@ use serde_json::json;
 use stateful_core::{
     AuthorizationEvent, Decision, DecisionKind, EventData, EventPayload, NewEvent,
     PresenceResourceRelation, ReadClassification, ReadObservationEvent, ReadObservationRecord,
-    ReadObservationStatus, RequestEnvelope, ResourceVersion, WriteFenceEvent,
+    ReadObservationStatus, RequestEnvelope, ReservationScope, ResourceVersion, WriteFenceEvent,
     WriteIntentCompletion, WriteIntentEvent, WriteIntentOutcome, WriteIntentRecord,
     WriteIntentStart, WriteIntentStatus, WriteTarget,
 };
@@ -412,10 +413,30 @@ impl Store {
         &self,
         request: &RequestEnvelope<String>,
     ) -> StoreResult<CommandOutcome<WriteIntentRecord>> {
+        self.reconcile_write_intent_for(request, &request.payload, None)
+    }
+
+    pub fn reconcile_write_intent_with_reservation<T: serde::Serialize>(
+        &self,
+        request: &RequestEnvelope<T>,
+        intent_id: &str,
+        reservation_id: Option<&str>,
+    ) -> StoreResult<CommandOutcome<WriteIntentRecord>> {
+        self.reconcile_write_intent_for(request, intent_id, reservation_id)
+    }
+
+    fn reconcile_write_intent_for<T: serde::Serialize>(
+        &self,
+        request: &RequestEnvelope<T>,
+        intent_id: &str,
+        reservation_id: Option<&str>,
+    ) -> StoreResult<CommandOutcome<WriteIntentRecord>> {
         let now = self.clock.now();
-        let intent_id = request.payload.clone();
         self.execute_command(request, "write_intent.reconcile", |reader| {
-            let intent = find_owned_intent(reader, request, &intent_id)?;
+            let intent = find_intent(reader, request, intent_id)?;
+            if !intent.is_owned_by(&request.agent) {
+                authorize_reconciliation_successor(reader, request, &intent, reservation_id, now)?;
+            }
             if intent.status != WriteIntentStatus::OutcomeUnknown {
                 return Err(StoreError::InvalidWriteIntent);
             }
@@ -431,7 +452,7 @@ impl Store {
                     .iter()
                     .find(|observation| {
                         observation.agent_id == request.agent.agent_id
-                            && observation.actor_id == intent.actor_id
+                            && observation.actor_id == request.agent.actor_id
                             && observation.path == target.path
                             && observation.classification == ReadClassification::Exact
                             && observation.is_fresh_at(now)
@@ -599,19 +620,70 @@ fn normalize_targets(targets: Vec<WriteTarget>) -> StoreResult<Vec<WriteTarget>>
     Ok(normalized)
 }
 
-fn find_owned_intent<T>(
+fn find_intent<T>(
     reader: &dyn crate::ProjectionReader,
     request: &RequestEnvelope<T>,
     intent_id: &str,
 ) -> StoreResult<WriteIntentRecord> {
-    let intent = typed_records::<WriteIntentRecord>(
+    typed_records::<WriteIntentRecord>(
         reader,
         CurrentAggregate::WriteIntent,
         &request.workspace.workspace_id,
     )?
     .into_iter()
     .find(|intent| intent.intent_id == intent_id)
-    .ok_or(StoreError::WriteIntentNotFound)?;
+    .ok_or(StoreError::WriteIntentNotFound)
+}
+
+fn authorize_reconciliation_successor<T>(
+    reader: &dyn crate::ProjectionReader,
+    request: &RequestEnvelope<T>,
+    intent: &WriteIntentRecord,
+    reservation_id: Option<&str>,
+    now: OffsetDateTime,
+) -> StoreResult<()> {
+    let owner_active = reader
+        .presence(&request.workspace.workspace_id, &intent.agent_id)?
+        .is_some_and(|presence| {
+            presence.actor_id == intent.actor_id
+                && presence.actor_type == intent.actor_type
+                && presence.owner_id == intent.owner_id
+                && presence.parent_agent_id == intent.parent_agent_id
+                && presence.parent_actor_id == intent.parent_actor_id
+                && presence.expires_at > now
+        });
+    if owner_active {
+        return Err(StoreError::WriteIntentOwnerMismatch);
+    }
+    let reservation_id = reservation_id.ok_or(StoreError::WriteIntentOwnerMismatch)?;
+    let reservation = typed_records::<ReservationRecord>(
+        reader,
+        CurrentAggregate::Reservation,
+        &request.workspace.workspace_id,
+    )?
+    .into_iter()
+    .find(|reservation| reservation.reservation_id == reservation_id)
+    .filter(|reservation| {
+        reservation.agent_id == request.agent.agent_id
+            && reservation.status == "active"
+            && !expired_optional(reservation.expires_at.as_deref(), now)
+            && intent.targets.iter().all(|target| {
+                reservation.scopes.iter().any(
+                    |scope| matches!(scope, ReservationScope::File(path) if path == &target.path),
+                )
+            })
+    });
+    reservation
+        .map(|_| ())
+        .ok_or(StoreError::WriteIntentOwnerMismatch)
+}
+
+fn find_owned_intent<T>(
+    reader: &dyn crate::ProjectionReader,
+    request: &RequestEnvelope<T>,
+    intent_id: &str,
+) -> StoreResult<WriteIntentRecord> {
+    let intent = find_intent(reader, request, intent_id)?;
     if !intent.is_owned_by(&request.agent) {
         return Err(StoreError::WriteIntentOwnerMismatch);
     }

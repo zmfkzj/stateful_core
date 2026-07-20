@@ -83,9 +83,12 @@ Both modes retain the same narrow hard stops:
 5. an unreconciled high-confidence human write.
 
 The recovery is specific: reread exactly for stale evidence, complete and
-reconcile an unknown write outcome, wait for the in-flight fence then reread,
-or acknowledge the human change after rereading. Warnings are not permission to
-replay an unsafe patch.
+reconcile an unknown write outcome with its denial-provided `intent_id`, wait
+for the in-flight fence then reread, or acknowledge the human change after
+rereading. A non-owner cannot reconcile an unknown outcome while the owner is
+active; after the owner leaves, it needs an active reservation with exact file
+scope for every recovered target. Warnings are not permission to replay an
+unsafe patch.
 
 ## V2 Lifecycle
 

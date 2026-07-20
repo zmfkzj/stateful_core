@@ -13,8 +13,7 @@ OMP uses the shipped `stateful.v2` runtime through native tools and hooks, not d
 
 ## OMP Agent Identity
 
-- OMP derives the active Stateful `agent_id` from `ctx.sessionManager.getSessionId()` and, when present, `ctx.sessionManager.getLeafId()`.
-- The generated id is `omp-${sessionId}-${leafId}` when a leaf id exists; otherwise it is `omp-${sessionId}`.
+- OMP derives the active Stateful `agent_id` solely from `ctx.sessionManager.getSessionId()`, producing `omp-${sessionId}`. `getLeafId()` may change per tool call and is not used for identity.
 - If `getSessionId()` is unavailable or invalid, OMP Stateful actions fail closed. Do not repair identity through event fields, context fields, environment variables, or current-session shell probes.
 
 ## Installed OMP Profile

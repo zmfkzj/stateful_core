@@ -314,7 +314,15 @@ class DockerArmContainerTests(unittest.TestCase):
             Path("/runs/workspace"),
             Path("/runs/runtime"),
         )
-        runner = Mock(return_value=subprocess.CompletedProcess([], 0, "", ""))
+        def run(command, **_kwargs):
+            stdout = (
+                '{"base_url":"http://127.0.0.1:43873","token":"runtime-token"}'
+                if command[-2:] == ["cat", "/home/stateful/.stateful/runtime/server.json"]
+                else ""
+            )
+            return subprocess.CompletedProcess(command, 0, stdout, "")
+
+        runner = Mock(side_effect=run)
         credential = Path("/runs/seed/agent.db")
 
         with patch.object(self.mod, "copy_to_container") as copy:
@@ -330,6 +338,8 @@ class DockerArmContainerTests(unittest.TestCase):
             env["PI_CODING_AGENT_DIR"], "/home/stateful/.omp/profiles/stateful/agent"
         )
         self.assertEqual(env["STATEFUL_OMP_SANDBOX"], "off")
+        self.assertEqual(env["STATEFUL_SERVER_URL"], "http://127.0.0.1:43873")
+        self.assertEqual(env["STATEFUL_SERVER_TOKEN"], "runtime-token")
         copy.assert_called_once_with(
             container,
             credential,
@@ -1207,7 +1217,7 @@ class DockerEndToEndTests(unittest.TestCase):
     """Credit-free proof that the live Docker arm path shares one HOME/workspace."""
 
     def setUp(self) -> None:
-        self.tempdir = tempfile.TemporaryDirectory()
+        self.tempdir = tempfile.TemporaryDirectory(dir=Path.home())
         self.root = Path(self.tempdir.name)
         self.docker = load_script("statefulbench_docker.py")
         self.realworld = load_script("statefulbench_realworld.py")

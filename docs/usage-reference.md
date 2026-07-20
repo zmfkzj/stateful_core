@@ -123,6 +123,19 @@ stateful reconcile ack \
 control from the human. A high-confidence unreconciled human write stops a later
 agent write until the agent rereads and records reconciliation.
 
+`unknown_write_outcome` is reconciled against the denied write intent: first
+complete an exact reread of every intent target, then pass the denial's
+`intent_id` to `state_reconcile_ack` (or `--intent-id` to the CLI). The native
+tool accepts optional `read_tokens` as a path-to-token map; each path must also
+appear in `files_reread`. For an `adopt` or `reapply` unknown-outcome
+recovery, the OMP extension declares the exact-file reservation when one is
+omitted and forwards its `reservation_id`; a direct CLI successor must declare
+and pass that reservation itself.
+The owner may reconcile its own intent. Another agent is rejected while the
+owner is active; once that presence ends, it may reconcile only with an active
+reservation whose file scopes exactly cover every intent target.
+A `continuation_token` or `reconciliation_token` is bound to its issuing OMP session/workspace and cannot be passed to another agent or session.
+
 ## Awareness, Enforcement, and Hard Stops
 
 Awareness is the product default: reservations, claims, phases, and overlap

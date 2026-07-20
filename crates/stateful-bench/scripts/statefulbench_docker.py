@@ -849,6 +849,22 @@ def prepare_arm_runtime(
             env=env,
             runner=runner,
         )
+        runtime_record = json.loads(
+            exec_in_container(
+                container,
+                "cat",
+                f"{env['STATEFUL_HOME']}/runtime/server.json",
+                env=env,
+                runner=runner,
+            ).stdout
+        )
+        if not isinstance(runtime_record, dict) or not all(
+            isinstance(runtime_record.get(key), str) and runtime_record[key]
+            for key in ("base_url", "token")
+        ):
+            raise RuntimeError("stateful server runtime identity is invalid")
+        env["STATEFUL_SERVER_URL"] = runtime_record["base_url"]
+        env["STATEFUL_SERVER_TOKEN"] = runtime_record["token"]
     return env
 
 

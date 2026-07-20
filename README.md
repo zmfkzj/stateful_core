@@ -117,8 +117,13 @@ Humans participate explicitly and remain in control:
 ```bash
 stateful human observe <path> [--summary <text>]
 stateful human save-check <paths...>
-stateful reconcile ack --reservation-id <reservation_id> --resource <path> --files-reread <path> --summary <text> --decision adopt|reapply|ask_user|abandon
+stateful reconcile ack --reservation-id <reservation_id> [--intent-id <intent_id>] --resource <path> --files-reread <path> --summary <text> --decision adopt|reapply|ask_user|abandon
 ```
+
+For `unknown_write_outcome`, complete an exact reread of every affected target,
+then reconcile with the denial's `intent_id`. A different agent is rejected
+while the original owner's presence is active; after it ends, that successor
+also needs an active reservation with an exact file scope for every target.
 
 The VS Code save gate is advisory. A completed handoff records the work, tests,
 and remaining work explicitly; when a session ends without one, the rendered

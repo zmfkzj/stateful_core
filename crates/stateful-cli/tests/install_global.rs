@@ -268,15 +268,13 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
     assert!(!extension.contains("Type.Object"));
     assert!(extension.contains("export default function statefulOmpExtension"));
     assert!(extension.contains("[\"hook\", \"omp\", event]"));
-    assert!(extension.contains("function agentIdFragmentFromString(value)"));
+    assert!(!extension.contains("function agentIdFragmentFromString"));
     assert!(extension.contains("function sessionIdFromString(value)"));
     assert!(extension.contains("function sessionManagerString(ctx, method, parse)"));
     assert!(extension.contains("function detectAgentId(_event, ctx)"));
     assert!(extension.contains("sessionManagerString(ctx, \"getSessionId\", sessionIdFromString)"));
-    assert!(
-        extension.contains("sessionManagerString(ctx, \"getLeafId\", agentIdFragmentFromString)")
-    );
-    assert!(extension.contains("`omp-${sessionId}-${leafId}`"));
+    assert!(!extension.contains("getLeafId"));
+    assert!(extension.contains("return sessionId ? `omp-${sessionId}` : undefined;"));
     assert!(!extension.contains("function detectAdapterAgentId"));
     assert!(!extension.contains("function detectOmpSessionAgentId"));
     assert!(!extension.contains("event?.agentId"));
@@ -386,7 +384,9 @@ fn install_omp_yes_creates_extension_without_mcp_config() {
     assert!(extension.contains("validateOmpLinePatchBases"));
     assert!(extension.contains("line === \"*** Begin Patch\""));
     assert!(extension.contains("import { spawnSync } from \"node:child_process\""));
-    assert!(extension.contains("import { createHash, randomUUID } from \"node:crypto\""));
+    assert!(
+        extension.contains("import { createHash, createHmac, randomUUID } from \"node:crypto\"")
+    );
     assert!(extension.contains(
         "import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from \"node:fs\""
     ));

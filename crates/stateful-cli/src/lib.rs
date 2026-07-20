@@ -253,6 +253,8 @@ pub enum ReconcileCommand {
         summary: String,
         #[arg(long, value_parser = ["adopt", "reapply", "ask_user", "abandon"])]
         decision: String,
+        #[arg(long = "intent-id")]
+        intent_id: Option<String>,
         #[arg(long = "reservation-id")]
         reservation_id: Option<String>,
         #[arg(long = "agent-id", default_value = "cli-reconcile")]
@@ -1097,6 +1099,7 @@ pub fn run() -> anyhow::Result<()> {
             files_reread,
             summary,
             decision,
+            intent_id,
             reservation_id,
             agent_id,
             workspace_id,
@@ -1112,6 +1115,20 @@ pub fn run() -> anyhow::Result<()> {
             let identity = GlobalPaths::from_env()
                 .ok()
                 .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok());
+            let payload = match intent_id {
+                Some(intent_id) => serde_json::json!({
+                    "intent_id": intent_id,
+                    "reservation_id": reservation_id,
+                }),
+                None => serde_json::json!({
+                    "decision": decision,
+                    "files_reread": files_reread,
+                    "human_change_summary": summary,
+                    "resources": resources,
+                    "reservation_id": reservation_id,
+                    "conflict_with_plan": conflict_with_plan
+                }),
+            };
             let request = v2_request_envelope(
                 uuid::Uuid::new_v4(),
                 agent_id,
@@ -1122,14 +1139,7 @@ pub fn run() -> anyhow::Result<()> {
                 "reconcile_ack",
                 "stateful-reconcile-ack",
                 None,
-                serde_json::json!({
-                    "decision": decision,
-                    "files_reread": files_reread,
-                    "human_change_summary": summary,
-                    "resources": resources,
-                    "reservation_id": reservation_id,
-                    "conflict_with_plan": conflict_with_plan
-                }),
+                payload,
             )?;
             print_http_response(post_v2(&runtime, "/v2/reconcile/ack", &request)?)?;
         }

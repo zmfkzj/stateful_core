@@ -18,7 +18,7 @@ Exact file claims cover file writes, deletes, renames, and moves. Directory clai
 
 `unknown_write_outcome`, `stale_observation`, and `write_fence_conflict` deny in both modes. A missing or expired read is a warning in awareness and a denial in explicit enforcement.
 
-1. For `unknown_write_outcome`, complete a matching exact reread and reconcile that write intent before another write.
+1. For `unknown_write_outcome`, reread each affected file with one complete OMP native `read(path="<file>:raw")` call and verify the result is not truncated. If that raw read is truncated and the active tool list exposes `state_exact_read`, pass both returned `next_offset` and `continuation_token` until `complete` is true, then add each returned `reconciliation_token` to the `state_reconcile_ack` `read_tokens` path-to-token map. A `continuation_token` or `reconciliation_token` is bound to its issuing OMP session/workspace and cannot be passed to another agent or session. Call `state_reconcile_ack` with the denial's exact `intent_id`; the owning agent can reconcile directly, while a successor can do so only after the owner presence ends and with an exact-file reservation. Only then retry the write. A structural summary, range, or incomplete read is not exact provenance.
 2. For `stale_observation`, reread every affected exact path, including both source and destination for moves or renames, then regenerate the edit from the current contents.
 3. For `write_fence_conflict`, wait for the in-flight write to complete, then reread before retrying.
 4. If a freshness issue repeats, stop and report the path and response instead of forcing the write.

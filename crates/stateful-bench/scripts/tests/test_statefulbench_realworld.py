@@ -3044,13 +3044,20 @@ class RealWorldRunnerTests(unittest.TestCase):
             runtime, "container-1", "arm", workspace, self.root / "runtime"
         )
         events = []
+        launched_envs = []
 
         def prepare(_container, _arm, *, activate_stateful=True, **_kwargs):
             events.append(("prepare", activate_stateful))
-            return {
+            env = {
                 "HOME": "/home/stateful",
                 "PI_CODING_AGENT_DIR": "/home/stateful/.omp/profiles/stateful/agent",
             }
+            if activate_stateful:
+                env.update({
+                    "STATEFUL_SERVER_URL": "http://127.0.0.1:43873",
+                    "STATEFUL_SERVER_TOKEN": "runtime-token",
+                })
+            return env
 
         def execute(_container, *argv, **_kwargs):
             if argv == ("git", "init"):
@@ -3072,7 +3079,8 @@ class RealWorldRunnerTests(unittest.TestCase):
             events.append(("snapshot", phase))
             return self.container_diagnostics(container, phase)
 
-        def launch(_container, _arm_dir, agent_id, _prompt, _cfg, _env):
+        def launch(_container, _arm_dir, agent_id, _prompt, _cfg, env):
+            launched_envs.append(env.copy())
             return type("Handle", (), {"agent_id": agent_id, "started_monotonic": 0.0})()
 
         def wait(_container, handle, _arm_dir, kind, _cfg):
@@ -3139,6 +3147,9 @@ class RealWorldRunnerTests(unittest.TestCase):
             events.index(("prepare", True)),
             events.index(("snapshot", "initialized")),
         )
+        self.assertTrue(launched_envs)
+        self.assertTrue(all(env["STATEFUL_SERVER_URL"] == "http://127.0.0.1:43873" for env in launched_envs))
+        self.assertTrue(all(env["STATEFUL_SERVER_TOKEN"] == "runtime-token" for env in launched_envs))
 
     def test_runner_requires_a_docker_runtime_for_live_execution(self) -> None:
         archive_loader = mock.Mock(side_effect=AssertionError("host execution must not start"))

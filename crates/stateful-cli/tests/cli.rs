@@ -1113,6 +1113,8 @@ fn parses_reconcile_ack() {
         "Adopted human auth edit.",
         "--decision",
         "adopt",
+        "--intent-id",
+        "intent-1",
         "--reservation-id",
         "reservation-1",
         "--agent-id",
@@ -1126,6 +1128,7 @@ fn parses_reconcile_ack() {
             files_reread,
             summary,
             decision,
+            intent_id,
             reservation_id,
             agent_id,
             workspace_id,
@@ -1135,6 +1138,7 @@ fn parses_reconcile_ack() {
             assert_eq!(files_reread, vec!["src/auth.ts"]);
             assert_eq!(summary, "Adopted human auth edit.");
             assert_eq!(decision, "adopt");
+            assert_eq!(intent_id.as_deref(), Some("intent-1"));
             assert_eq!(reservation_id.as_deref(), Some("reservation-1"));
             assert_eq!(agent_id, "agent-1");
             assert_eq!(workspace_id, None);
@@ -1287,14 +1291,12 @@ fn omp_extension_uses_strict_agent_id_identity() {
     let extension = fs::read_to_string(agent_dir.join("extensions/stateful-omp-extension.js"))
         .expect("generated OMP extension should be readable");
 
-    assert!(extension.contains("function agentIdFragmentFromString"));
+    assert!(!extension.contains("function agentIdFragmentFromString"));
     assert!(extension.contains("function sessionManagerString"));
     assert!(extension.contains("function detectAgentId(_event, ctx)"));
     assert!(extension.contains("sessionManagerString(ctx, \"getSessionId\", sessionIdFromString)"));
-    assert!(
-        extension.contains("sessionManagerString(ctx, \"getLeafId\", agentIdFragmentFromString)")
-    );
-    assert!(extension.contains("`omp-${sessionId}-${leafId}`"));
+    assert!(!extension.contains("getLeafId"));
+    assert!(extension.contains("return sessionId ? `omp-${sessionId}` : undefined;"));
     assert!(extension.contains("agent_id"));
     assert!(!extension.contains("event?.agentId"));
     assert!(!extension.contains("event?.agent_id"));

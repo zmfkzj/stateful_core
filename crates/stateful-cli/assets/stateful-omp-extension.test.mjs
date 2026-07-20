@@ -51,6 +51,10 @@ process.stdin.on("end", () => {
     process.exitCode = 1;
     return;
   }
+  if (process.argv[2] === "reservation" && process.argv[3] === "declare") {
+    process.stdout.write(JSON.stringify({ reservation_id: "reservation-auto" }));
+    return;
+  }
   const decision = ${JSON.stringify(decision)};
   if (${JSON.stringify(claimRequiresPath)} && process.argv[2] === "reservation" && process.argv[3] === "claim" && !process.argv.includes("--path")) {
     process.stderr.write("reservation claim requires --path");
@@ -95,12 +99,16 @@ process.stdin.on("end", () => {
   return { extension, pi, hookLog, context: extensionContext, directory };
 }
 
-function context(cwd = "/workspace") {
+function context(
+  cwd = "/workspace",
+  sessionId = "00000000-0000-4000-8000-000000000011",
+  workspaceId = "workspace-1"
+) {
   return {
     cwd,
-    workspaceId: "workspace-1",
+    workspaceId,
     sessionManager: {
-      getSessionId: () => "00000000-0000-4000-8000-000000000011",
+      getSessionId: () => sessionId,
     },
   };
 }
@@ -131,6 +139,245 @@ test("exactReadCandidate accepts only full raw, no-range, non-truncated reads", 
   assert.equal(extension.exactReadCandidate({ ...candidate, input: { path: "src/lib.rs:50-:raw" } }), false);
   assert.equal(extension.exactReadCandidate({ ...candidate, input: { path: "src/lib.rs" } }), false);
   assert.equal(extension.exactReadCandidate({ ...candidate, result: { truncated: true } }), false);
+});
+
+test("state_exact_read returns every chunk before recording provenance", async (t) => {
+  const { pi, hookLog, directory } = await loadExtension(t);
+  const text = "first line\n" + "한".repeat(13000) + "\nlast line\n";
+  await writeFile(join(directory, "large.py"), text);
+  const exactRead = pi.tools.get("state_exact_read");
+  const first = await exactRead.execute(
+    "exact-read-1",
+    { path: "large.py" },
+    undefined,
+    undefined,
+    context(directory)
+  );
+  assert.equal(first.details.complete, false);
+  assert.ok(first.content[0].text.startsWith("first line\n"));
+  assert.ok(Buffer.byteLength(first.content[0].text, "utf8") < 24500);
+  const started = await hooks(hookLog);
+  assert.equal(started.at(-1).event, "pre-tool-use");
+  assert.equal(started.at(-1).payload.tool_input.path, "large.py:raw");
+  const stale = await exactRead.execute(
+    "exact-read-stale",
+    { path: "large.py", offset: first.details.next_offset, continuation_token: "invalid" },
+    undefined,
+    undefined,
+    context(directory)
+  );
+  assert.equal(stale.isError, true);
+  const second = await exactRead.execute(
+    "exact-read-2",
+    { path: "large.py", offset: first.details.next_offset, continuation_token: first.details.continuation_token },
+    undefined,
+    undefined,
+    context(directory)
+  );
+  assert.equal(second.details.complete, true);
+  assert.ok(second.content[0].text.includes("last line\n"));
+  const recorded = await hooks(hookLog);
+  assert.equal(recorded.at(-1).event, "post-tool-use");
+  assert.equal(recorded.at(-1).payload.exact_read_candidate, true);
+  assert.equal(recorded.at(-1).payload.tool_input.path, "large.py:raw");
+  assert.equal(recorded.at(-1).payload.tool_call_id, started.at(-1).payload.tool_call_id);
+  assert.equal(recorded.at(-1).payload.agent_id, started.at(-1).payload.agent_id);
+});
+
+test("state_exact_read resolves paths from a repository subdirectory", async (t) => {
+  const { pi, hookLog, directory } = await loadExtension(t);
+  const nested = join(directory, "crates", "example");
+  await mkdir(nested, { recursive: true });
+  await writeFile(join(nested, "source.py"), "contents\n");
+  const result = await pi.tools.get("state_exact_read").execute(
+    "nested-read",
+    { path: "source.py" },
+    undefined,
+    undefined,
+    context(nested)
+  );
+  assert.equal(result.isError, false);
+  assert.equal(result.details.path, "crates/example/source.py");
+  const recorded = await hooks(hookLog);
+  assert.equal(recorded.at(-1).payload.cwd, directory);
+  assert.equal(recorded.at(-1).payload.tool_input.path, "crates/example/source.py:raw");
+});
+
+test("state_exact_read keeps surrogate pairs in one chunk", async (t) => {
+  const { pi, directory } = await loadExtension(t);
+  const text = "x".repeat(11999) + "😀" + "y".repeat(2000);
+  await writeFile(join(directory, "unicode.py"), text);
+  const exactRead = pi.tools.get("state_exact_read");
+  const first = await exactRead.execute(
+    "unicode-1",
+    { path: "unicode.py" },
+    undefined,
+    undefined,
+    context(directory)
+  );
+  const offset = first.details.next_offset;
+  assert.equal(first.content[0].text.slice(0, offset), text.slice(0, offset));
+  assert.notEqual(text.charCodeAt(offset), 0xDE00);
+  const second = await exactRead.execute(
+    "unicode-2",
+    { path: "unicode.py", offset, continuation_token: first.details.continuation_token },
+    undefined,
+    undefined,
+    context(directory)
+  );
+  assert.equal(second.details.complete, true);
+  assert.equal(second.content[0].text.slice(0, text.length - offset), text.slice(offset));
+});
+
+test("state_exact_read isolates concurrent agent progress", async (t) => {
+  const { pi, directory } = await loadExtension(t);
+  await writeFile(join(directory, "shared.py"), "x".repeat(13000));
+  const exactRead = pi.tools.get("state_exact_read");
+  const agentA = context(directory, "00000000-0000-4000-8000-000000000011");
+  const agentB = context(directory, "00000000-0000-4000-8000-000000000012");
+  const firstA = await exactRead.execute("a-1", { path: "shared.py" }, undefined, undefined, agentA);
+  const firstB = await exactRead.execute("b-1", { path: "shared.py" }, undefined, undefined, agentB);
+  const secondA = await exactRead.execute(
+    "a-2",
+    { path: "shared.py", offset: firstA.details.next_offset, continuation_token: firstA.details.continuation_token },
+    undefined,
+    undefined,
+    agentA
+  );
+  const secondB = await exactRead.execute(
+    "b-2",
+    { path: "shared.py", offset: firstB.details.next_offset, continuation_token: firstB.details.continuation_token },
+    undefined,
+    undefined,
+    agentB
+  );
+  assert.equal(secondA.details.complete, true);
+  assert.equal(secondB.details.complete, true);
+});
+
+test("state_exact_read keeps one agent identity when OMP leaf ids change", async (t) => {
+  const { pi, hookLog, directory } = await loadExtension(t);
+  await writeFile(join(directory, "drift.py"), "x".repeat(13000));
+  let leaf = 0;
+  const changingLeafContext = context(directory);
+  changingLeafContext.sessionManager.getLeafId = () => `leaf-${++leaf}`;
+  const exactRead = pi.tools.get("state_exact_read");
+
+  const first = await exactRead.execute("first", { path: "drift.py" }, undefined, undefined, changingLeafContext);
+  const second = await exactRead.execute(
+    "second",
+    { path: "drift.py", offset: first.details.next_offset, continuation_token: first.details.continuation_token },
+    undefined,
+    undefined,
+    changingLeafContext
+  );
+
+  assert.equal(second.details.complete, true);
+  const recorded = await hooks(hookLog);
+  assert.equal(recorded[0].payload.agent_id, recorded.at(-1).payload.agent_id);
+  assert.equal(recorded[0].payload.agent_id, "omp-00000000-0000-4000-8000-000000000011");
+});
+
+test("state_exact_read rejects a continuation from another OMP session", async (t) => {
+  const { pi, directory } = await loadExtension(t);
+  await writeFile(join(directory, "drift.py"), "x".repeat(13000));
+  const exactRead = pi.tools.get("state_exact_read");
+  const first = await exactRead.execute(
+    "drift-1",
+    { path: "drift.py" },
+    undefined,
+    undefined,
+    context(directory, "00000000-0000-4000-8000-000000000011")
+  );
+  const second = await exactRead.execute(
+    "drift-2",
+    { path: "drift.py", offset: first.details.next_offset, continuation_token: first.details.continuation_token },
+    undefined,
+    undefined,
+    context(directory, "00000000-0000-4000-8000-000000000012")
+  );
+
+  assert.equal(second.isError, true);
+  assert.match(second.content[0].text, /belongs to another identity/);
+});
+test("state_reconcile_ack rejects a read token from another OMP session", async (t) => {
+  const { pi, directory } = await loadExtension(t);
+  await writeFile(join(directory, "proof.py"), "proof");
+  const proof = await pi.tools.get("state_exact_read").execute(
+    "proof-read",
+    { path: "proof.py" },
+    undefined,
+    undefined,
+    context(directory, "00000000-0000-4000-8000-000000000011")
+  );
+  const reconciled = await pi.tools.get("state_reconcile_ack").execute(
+    "proof-reconcile",
+    {
+      resources: ["proof.py"],
+      files_reread: ["proof.py"],
+      read_tokens: { "proof.py": proof.details.reconciliation_token },
+      summary: "Adopt the completed exact reread.",
+      decision: "adopt",
+    },
+    undefined,
+    undefined,
+    context(directory, "00000000-0000-4000-8000-000000000012")
+  );
+
+  assert.equal(reconciled.isError, true);
+  assert.match(reconciled.content[0].text, /belongs to another identity/);
+});
+
+test("state_reconcile_ack exposes the native reconciliation path", async (t) => {
+  const { pi, hookLog, directory } = await loadExtension(t);
+  const result = await pi.tools.get("state_reconcile_ack").execute(
+    "reconcile-call",
+    {
+      resources: ["src/lib.rs"],
+      files_reread: ["src/lib.rs"],
+      summary: "Adopt the integrated agent change.",
+      decision: "adopt",
+    },
+    undefined,
+    undefined,
+    context(directory)
+  );
+  assert.equal(result.isError, false);
+  assert.equal(result.details.reservation_id, "reservation-auto");
+  const records = await hooks(hookLog);
+  const declarationArgs = records.at(-2).args;
+  assert.deepEqual(declarationArgs.slice(0, 2), ["reservation", "declare"]);
+  assert.equal(declarationArgs.at(-1), "src/lib.rs");
+  const args = records.at(-1).args;
+  assert.deepEqual(args.slice(0, 2), ["reconcile", "ack"]);
+  assert.equal(args[args.indexOf("--resource") + 1], "src/lib.rs");
+  assert.equal(args[args.indexOf("--files-reread") + 1], "src/lib.rs");
+  assert.equal(args[args.indexOf("--decision") + 1], "adopt");
+  assert.equal(args[args.indexOf("--workspace-id") + 1], "workspace-1");
+  assert.equal(args[args.indexOf("--reservation-id") + 1], "reservation-auto");
+});
+
+test("state_reconcile_ack forwards write intent recovery", async (t) => {
+  const { pi, hookLog, directory } = await loadExtension(t);
+  const result = await pi.tools.get("state_reconcile_ack").execute(
+    "reconcile-intent",
+    {
+      resources: ["src/lib.rs"],
+      files_reread: ["src/lib.rs"],
+      summary: "Reconcile the unknown write.",
+      decision: "reapply",
+      intent_id: "intent-1",
+    },
+    undefined,
+    undefined,
+    context(directory)
+  );
+  assert.equal(result.isError, false);
+  const records = await hooks(hookLog);
+  assert.deepEqual(records.at(-2).args.slice(0, 2), ["reservation", "declare"]);
+  const args = records.at(-1).args;
+  assert.equal(args[args.indexOf("--intent-id") + 1], "intent-1");
+  assert.equal(args[args.indexOf("--reservation-id") + 1], "reservation-auto");
 });
 
 test("coalesceContextInvalidation retains the latest valid target version", async (t) => {
@@ -165,7 +412,7 @@ test("session start queues initial context for the next turn then acknowledges i
   await pi.handlers.get("session_start")({ workspaceId: "workspace-1" }, context());
   assert.deepEqual(pi.messages, [{
     message: { customType: "stateful_context", content: "Initial context", display: true },
-    options: { triggerTurn: true, deliverAs: "nextTurn" },
+    options: { triggerTurn: false, deliverAs: "nextTurn" },
   }]);
   assert.deepEqual(calls.map(({ url }) => new URL(url).pathname).slice(0, 2), ["/v2/context/render", "/v2/context/ack"]);
 });
@@ -341,7 +588,13 @@ test("pre and post hooks retain the tool call ID and result metadata", async (t)
     resultMetadata: { truncated: false, bytes: 12 },
   };
   await pi.handlers.get("tool_call")(event, context());
-  await pi.handlers.get("tool_result")(event, context());
+  await pi.handlers.get("tool_result")({
+    toolCallId: event.toolCallId,
+    toolName: event.toolName,
+    isError: event.isError,
+    isComplete: event.isComplete,
+    resultMetadata: event.resultMetadata,
+  }, context());
   const recorded = await hooks(hookLog);
   const pre = recorded.find(({ event: name }) => name === "pre-tool-use").payload;
   const post = recorded.find(({ event: name }) => name === "post-tool-use").payload;
@@ -350,6 +603,7 @@ test("pre and post hooks retain the tool call ID and result metadata", async (t)
   assert.equal(post.is_error, false);
   assert.equal(post.is_complete, true);
   assert.equal(post.exact_read_candidate, true);
+  assert.deepEqual(post.tool_input, { path: "src/lib.rs:raw" });
   assert.deepEqual(post.result_metadata, { truncated: false, bytes: 12 });
 });
 

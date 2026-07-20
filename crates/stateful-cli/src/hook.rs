@@ -698,7 +698,15 @@ fn authorize_omp_targets(
                             &OMP_WRITE_LIFECYCLE,
                         )?;
                         OmpHookOutcome::Block {
-                            reason: format!("{}: {}", decision.reason_code, decision.message),
+                            reason: match decision.required_next_action {
+                                Some(action) => format!(
+                                    "{}: {} Next: {action}",
+                                    decision.reason_code, decision.message
+                                ),
+                                None => {
+                                    format!("{}: {}", decision.reason_code, decision.message)
+                                }
+                            },
                         }
                     }
                     _ => OmpHookOutcome::Allow,
@@ -993,7 +1001,7 @@ fn extract_omp_edit_targets(input: &serde_json::Value) -> Vec<PatchTarget> {
     let Some(edit_input) = input.get("input").and_then(serde_json::Value::as_str) else {
         return Vec::new();
     };
-    let mut targets = Vec::new();
+    let mut targets: Vec<PatchTarget> = Vec::new();
     let mut current_path: Option<String> = None;
     let mut current_target_index: Option<usize> = None;
     for line in edit_input.lines().map(str::trim) {
@@ -1011,8 +1019,13 @@ fn extract_omp_edit_targets(input: &serde_json::Value) -> Vec<PatchTarget> {
                 continue;
             }
             current_path = Some(path.to_string());
-            current_target_index = Some(targets.len());
-            targets.push(PatchTarget::write(path));
+            current_target_index = targets
+                .iter()
+                .position(|target| target.action == "write_file" && target.path == path);
+            if current_target_index.is_none() {
+                current_target_index = Some(targets.len());
+                targets.push(PatchTarget::write(path));
+            }
             continue;
         }
 
@@ -2274,6 +2287,8 @@ fn is_canonical_stateful_mcp_tool(tool_name: &str) -> bool {
             | "state.events.read"
             | "state_context_render"
             | "state.context.render"
+            | "state_exact_read"
+            | "state.exact.read"
             | "state_reconcile_ack"
             | "state.reconcile.ack"
             | "state_notifications_poll"

@@ -2,7 +2,7 @@
 // extension's command parsing/preflight is advisory UX only; do not extend
 // its quoting rules independently of crates/stateful-cli/src/shell_command.rs.
 import { spawnSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -88,14 +88,6 @@ function firstString(...values) {
   return undefined;
 }
 
-function agentIdFragmentFromString(value) {
-  if (typeof value !== "string") return undefined;
-  const id = value.trim();
-  if (!id) return undefined;
-  if (!/^[A-Za-z0-9_-]+$/.test(id)) return undefined;
-  return id;
-}
-
 function sessionIdFromString(value) {
   if (typeof value !== "string") return undefined;
   const id = value.trim();
@@ -122,9 +114,7 @@ function sessionManagerString(ctx, method, parse) {
 
 function detectAgentId(_event, ctx) {
   const sessionId = sessionManagerString(ctx, "getSessionId", sessionIdFromString);
-  if (!sessionId) return undefined;
-  const leafId = sessionManagerString(ctx, "getLeafId", agentIdFragmentFromString);
-  return leafId ? `omp-${sessionId}-${leafId}` : `omp-${sessionId}`;
+  return sessionId ? `omp-${sessionId}` : undefined;
 }
 
 function detectWorkspaceId(event, ctx) {
@@ -140,6 +130,10 @@ function detectWorkspaceId(event, ctx) {
     workspaceIdFromString(ctx?.workspace?.workspaceId),
     workspaceIdFromString(ctx?.workspace?.workspace_id)
   );
+}
+
+function effectiveOmpWorkspaceId(event, ctx) {
+  return firstString(activeContextStream?.workspace_id, detectWorkspaceId(event, ctx));
 }
 
 function missingAgentIdReason() {
@@ -177,6 +171,8 @@ let contextStreamAbort;
 let contextStreamKey = "";
 let contextStreamLastEventId = "";
 let activeContextStream;
+const toolInputsByCallId = new Map();
+const exactReadTokenKey = randomUUID();
 let contextState = {
   deliveredVersion: undefined,
   pendingVersion: undefined,
@@ -415,7 +411,7 @@ async function deliverContext(pi, stream, targetVersion) {
         content: String(context.prompt_text || ""),
         display: true,
       },
-      { triggerTurn: true, deliverAs: "nextTurn" }
+      { triggerTurn: false, deliverAs: "nextTurn" }
     );
   } catch (_) {
     return false;
@@ -689,17 +685,53 @@ function safeLazyOperationTarget(target) {
     && !target.split("/").some((part) => part === "" || part === "." || part === "..");
 }
 
-function repoRelativeLazyTarget(cwd, target) {
-  if (!safeLazyOperationTarget(target)) return "";
-  const base = resolve(cwd || process.cwd());
-  let root = base;
+function repositoryRoot(cwd) {
+  let root = resolve(cwd || process.cwd());
   while (!existsSync(resolve(root, ".git"))) {
     const parent = dirname(root);
     if (parent === root) return "";
     root = parent;
   }
+  return root;
+}
+
+function repoRelativeLazyTarget(cwd, target) {
+  if (!safeLazyOperationTarget(target)) return "";
+  const base = resolve(cwd || process.cwd());
+  const root = repositoryRoot(base);
+  if (!root) return "";
   const normalized = relative(root, resolve(base, target)).replace(/\\/g, "/");
   return safeLazyOperationTarget(normalized) ? normalized : "";
+}
+
+function exactReadContinuationToken(resource, digest, offset, operationId, agentId, workspaceId) {
+  const payload = Buffer.from(JSON.stringify([operationId, agentId, workspaceId]), "utf8").toString("base64url");
+  const signature = createHmac("sha256", exactReadTokenKey)
+    .update(JSON.stringify([resource, digest, offset, payload]))
+    .digest("hex");
+  return payload + "." + signature;
+}
+
+function exactReadContinuation(token, resource, digest, offset) {
+  const separator = token.lastIndexOf(".");
+  if (separator < 0) return undefined;
+  try {
+    const [operationId, agentId, workspaceId] = JSON.parse(
+      Buffer.from(token.slice(0, separator), "base64url").toString("utf8")
+    );
+    if (
+      typeof operationId !== "string"
+      || !operationId
+      || typeof agentId !== "string"
+      || !agentId
+      || (workspaceId != null && (typeof workspaceId !== "string" || !workspaceId))
+    ) return undefined;
+    return token === exactReadContinuationToken(resource, digest, offset, operationId, agentId, workspaceId)
+      ? { operationId, agentId, workspaceId: workspaceId || undefined }
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function readOperationBase(path) {
@@ -1405,6 +1437,233 @@ function state_reservation_claim(operation, _ctx) {
 }
 
   pi.registerTool({
+    name: "state_exact_read",
+    label: "Stateful Exact Read",
+    description: "Read one repository file in complete untruncated chunks for Stateful provenance. Continue with both next_offset and continuation_token until complete before calling state_reconcile_ack.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        offset: { type: "integer", minimum: 0 },
+        continuation_token: { type: "string" },
+      },
+      required: ["path"],
+    },
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const path = repoRelativeLazyTarget(ctx.cwd, String(params.path || ""));
+      const offset = Number(params.offset || 0);
+      if (!path || !Number.isSafeInteger(offset) || offset < 0) {
+        return lazyToolResult("failed", "Stateful exact read requires a repository-relative file path and non-negative integer offset.", {});
+      }
+      const agentId = detectAgentId({}, ctx);
+      if (!agentId) return lazyToolResult("failed", missingAgentIdReason(), { path });
+      const workspaceId = effectiveOmpWorkspaceId({}, ctx);
+      const root = repositoryRoot(ctx.cwd);
+      const filePath = resolve(root, path);
+      let text;
+      try {
+        text = readFileSync(filePath, "utf8");
+      } catch (error) {
+        return lazyToolResult("failed", error?.message || String(error), { path });
+      }
+      const digest = createHash("sha256").update(text).digest("hex");
+      const resource = filePath;
+      let operationId;
+      let readAgentId;
+      let readWorkspaceId;
+      if (offset === 0) {
+        operationId = "exact-read-" + randomUUID();
+        readAgentId = agentId;
+        readWorkspaceId = workspaceId;
+        const started = runStatefulHook("pre-tool-use", {
+          agent_id: agentId,
+          workspace_id: readWorkspaceId,
+          tool_call_id: operationId,
+          cwd: root,
+          tool_name: "read",
+          tool_input: { path: path + ":raw" },
+        });
+        if (started.decision === "block") {
+          return lazyToolResult("failed", started.reason || "Stateful exact read start failed.", { path });
+        }
+      } else {
+        const continuation = exactReadContinuation(
+          String(params.continuation_token || ""),
+          resource,
+          digest,
+          offset
+        );
+        if (
+          !continuation?.operationId
+          || continuation.agentId !== agentId
+          || continuation.workspaceId !== workspaceId
+        ) {
+          return lazyToolResult("failed", "File changed or exact-read continuation token is stale or belongs to another identity; restart with offset 0.", { path });
+        }
+        operationId = continuation.operationId;
+        readAgentId = agentId;
+        readWorkspaceId = workspaceId;
+      }
+      let low = offset;
+      let high = Math.min(offset + 12000, text.length);
+      while (low < high) {
+        const middle = Math.ceil((low + high) / 2);
+        if (Buffer.byteLength(text.slice(offset, middle), "utf8") <= 24000) low = middle;
+        else high = middle - 1;
+      }
+      let end = low;
+      if (
+        end < text.length
+        && text.charCodeAt(end - 1) >= 0xD800
+        && text.charCodeAt(end - 1) <= 0xDBFF
+        && text.charCodeAt(end) >= 0xDC00
+        && text.charCodeAt(end) <= 0xDFFF
+      ) end -= 1;
+      if (end < text.length) {
+        const newline = text.lastIndexOf("\n", end);
+        if (newline > offset + Math.floor((end - offset) / 2)) end = newline + 1;
+      }
+      const complete = end === text.length;
+      const chunk = text.slice(offset, end);
+      if (complete) {
+        const recorded = runStatefulHook("post-tool-use", {
+          agent_id: readAgentId,
+          workspace_id: readWorkspaceId,
+          tool_call_id: operationId,
+          cwd: root,
+          tool_name: "read",
+          tool_input: { path: path + ":raw" },
+          is_error: false,
+          is_complete: true,
+          exact_read_candidate: true,
+          is_truncated: false,
+          result_metadata: { truncated: false, sha256: digest },
+        });
+        if (recorded.decision === "block") {
+          return lazyToolResult("failed", recorded.reason || "Stateful exact read recording failed.", { path });
+        }
+      }
+      const nextToken = complete
+        ? undefined
+        : exactReadContinuationToken(
+          resource,
+          digest,
+          end,
+          operationId,
+          readAgentId,
+          readWorkspaceId
+        );
+      const reconciliationToken = complete
+        ? exactReadContinuationToken(resource, digest, end, operationId, readAgentId, readWorkspaceId)
+        : undefined;
+      const next = complete
+        ? "\n\nExact reread complete. Use this state_reconcile_ack read_tokens entry: " + JSON.stringify({ [path]: reconciliationToken }) + "."
+        : "\n\nContinue with state_exact_read(path=\"" + path + "\", offset=" + end + ", continuation_token=\"" + nextToken + "\").";
+      return lazyToolResult("applied", chunk + next, {
+        path,
+        offset,
+        next_offset: complete ? undefined : end,
+        continuation_token: nextToken,
+        reconciliation_token: reconciliationToken,
+        complete,
+        sha256: digest,
+      });
+    },
+  });
+
+  pi.registerTool({
+    name: "state_reconcile_ack",
+    label: "Stateful Reconcile Acknowledge",
+    description: "Acknowledge a prior exact reread of a Stateful write outcome. For unknown_write_outcome, pass its intent_id. Otherwise pass state_exact_read reconciliation_token values as read_tokens. Adopt/reapply creates the required exact-resource reservation when omitted.",
+    parameters: {
+      type: "object",
+      properties: {
+        resources: { type: "array", items: { type: "string" } },
+        files_reread: { type: "array", items: { type: "string" } },
+        read_tokens: { type: "object", additionalProperties: { type: "string" } },
+        summary: { type: "string" },
+        decision: { type: "string", enum: ["adopt", "reapply", "ask_user", "abandon"] },
+        reservation_id: { type: "string" },
+        intent_id: { type: "string" },
+        conflict_with_plan: { type: "boolean" },
+      },
+      required: ["resources", "files_reread", "summary", "decision"],
+    },
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const agentId = detectAgentId({}, ctx);
+      if (!agentId) return lazyToolResult("failed", missingAgentIdReason(), {});
+      const workspaceId = effectiveOmpWorkspaceId({}, ctx);
+      const resources = (params.resources || []).map((path) => repoRelativeLazyTarget(ctx.cwd, String(path)));
+      const filesReread = (params.files_reread || []).map((path) => repoRelativeLazyTarget(ctx.cwd, String(path)));
+      if (resources.some((path) => !path) || filesReread.some((path) => !path)) {
+        return lazyToolResult("failed", "Stateful reconciliation accepts only repository-relative file paths.", {});
+      }
+      for (const [rawPath, token] of Object.entries(params.read_tokens || {})) {
+        const path = repoRelativeLazyTarget(ctx.cwd, String(rawPath));
+        if (!path || !filesReread.includes(path)) {
+          return lazyToolResult("failed", "Stateful reconciliation read token path must match a reread file.", {});
+        }
+        const filePath = resolve(repositoryRoot(ctx.cwd), path);
+        let text;
+        try {
+          text = readFileSync(filePath, "utf8");
+        } catch (error) {
+          return lazyToolResult("failed", error?.message || String(error), { path });
+        }
+        const digest = createHash("sha256").update(text).digest("hex");
+        const proof = exactReadContinuation(String(token), filePath, digest, text.length);
+        if (
+          !proof
+          || proof.agentId !== agentId
+          || proof.workspaceId !== workspaceId
+        ) {
+          return lazyToolResult("failed", "Stateful reconciliation read token is invalid, stale, or belongs to another identity.", {});
+        }
+      }
+      let reservationId = String(params.reservation_id || "").trim();
+      if (!reservationId && ["adopt", "reapply"].includes(params.decision)) {
+        const declareArgs = [
+          "reservation", "declare",
+          "--agent-id", agentId,
+          "--purpose", "Reconcile exact rereads",
+        ];
+        if (workspaceId) declareArgs.push("--workspace-id", workspaceId);
+        for (const resource of new Set([...resources, ...filesReread])) declareArgs.push(resource);
+        const declaration = spawnSync(STATEFUL, declareArgs, { cwd: ctx.cwd, encoding: "utf8" });
+        if (declaration.status !== 0) {
+          return lazyToolResult("failed", bashResumeText(declaration), { exit_code: declaration.status });
+        }
+        try {
+          reservationId = String(JSON.parse(declaration.stdout || "{}").reservation_id || "").trim();
+        } catch {
+          reservationId = "";
+        }
+        if (!reservationId) {
+          return lazyToolResult("failed", "Stateful reservation declaration returned no reservation_id.", { exit_code: declaration.status });
+        }
+      }
+      const args = ["reconcile", "ack"];
+      for (const resource of resources) args.push("--resource", resource);
+      for (const file of filesReread) args.push("--files-reread", file);
+      args.push(
+        "--summary", String(params.summary || ""),
+        "--decision", String(params.decision || ""),
+        "--agent-id", agentId
+      );
+      if (workspaceId) args.push("--workspace-id", workspaceId);
+      if (params.intent_id) args.push("--intent-id", String(params.intent_id));
+      if (reservationId) args.push("--reservation-id", reservationId);
+      if (params.conflict_with_plan === true) args.push("--conflict-with-plan");
+      const result = spawnSync(STATEFUL, args, { cwd: ctx.cwd, encoding: "utf8" });
+      return lazyToolResult(
+        result.status === 0 ? "applied" : "failed",
+        bashResumeText(result),
+        { exit_code: result.status, reservation_id: reservationId || undefined }
+      );
+    },
+  });
+
+  pi.registerTool({
     name: "lazy_edit_resume",
     label: "Lazy Edit Resume",
     description: "Resume a blocked OMP edit operation after the needed reservation or claim is ready. Applies only strict line-based OMP edit patches captured in this live extension session.",
@@ -1607,6 +1866,7 @@ function state_reservation_claim(operation, _ctx) {
     if (!activeAgentId) return { block: true, reason: missingAgentIdReason() };
     const decision = runStatefulHook("pre-tool-use", {
       agent_id: activeAgentId,
+      workspace_id: effectiveOmpWorkspaceId(event, ctx),
       tool_call_id: event?.toolCallId,
       reservation_id: reservationId(event),
       cwd: ctx.cwd,
@@ -1629,6 +1889,18 @@ function state_reservation_claim(operation, _ctx) {
         return { block: true, reason: decision.reason || "Blocked by user" };
       }
     }
+    if (decision.decision === "block") {
+      const editOperationId = rememberLazyEditOperation(event, ctx, decision);
+      const writeOperationId = rememberLazyWriteOperation(event, ctx, decision);
+      const suffix = editOperationId
+        ? "\n\nQueued lazy edit operation_id: " + editOperationId + "\nNext: when reservation or claim is ready, call lazy_edit_resume with this operation_id."
+        : writeOperationId
+          ? "\n\nQueued lazy write operation_id: " + writeOperationId + "\nNext: when reservation or claim is ready, call lazy_write_resume with this operation_id."
+          : "";
+      return { block: true, reason: decision.reason + suffix };
+    }
+    const toolCallId = String(event?.toolCallId || "").trim();
+    if (toolCallId) toolInputsByCallId.set(toolCallId, { agentId: activeAgentId, input: event.input || {} });
     if (decision.decision === "warn") {
       if (typeof pi?.sendMessage === "function") {
         pi.sendMessage(
@@ -1642,18 +1914,12 @@ function state_reservation_claim(operation, _ctx) {
       }
       return;
     }
-    if (decision.decision === "block") {
-      const editOperationId = rememberLazyEditOperation(event, ctx, decision);
-      const writeOperationId = rememberLazyWriteOperation(event, ctx, decision);
-      const suffix = editOperationId
-        ? "\n\nQueued lazy edit operation_id: " + editOperationId + "\nNext: when reservation or claim is ready, call lazy_edit_resume with this operation_id."
-        : writeOperationId
-          ? "\n\nQueued lazy write operation_id: " + writeOperationId + "\nNext: when reservation or claim is ready, call lazy_write_resume with this operation_id."
-          : "";
-      return { block: true, reason: decision.reason + suffix };
-    }
   });
   pi.on("tool_result", async (event, ctx) => {
+    const toolCallId = String(event?.toolCallId || "").trim();
+    const remembered = toolInputsByCallId.get(toolCallId);
+    const toolInput = event?.input ?? remembered?.input ?? {};
+    if (toolCallId) toolInputsByCallId.delete(toolCallId);
     const activeAgentId = detectAgentId(event, ctx);
     if (!activeAgentId) return;
     const resultMetadata = event?.resultMetadata
@@ -1664,13 +1930,14 @@ function state_reservation_claim(operation, _ctx) {
       ?? {};
     runStatefulHook("post-tool-use", {
       agent_id: activeAgentId,
+      workspace_id: effectiveOmpWorkspaceId(event, ctx),
       tool_call_id: event?.toolCallId,
       cwd: ctx.cwd,
       tool_name: event.toolName,
-      tool_input: event.input || {},
+      tool_input: toolInput,
       is_error: event?.isError === true,
       is_complete: event?.isComplete !== false && event?.complete !== false,
-      exact_read_candidate: exactReadCandidate(event),
+      exact_read_candidate: exactReadCandidate({ ...event, input: toolInput }),
       is_truncated: event?.truncated === true
         || event?.isTruncated === true
         || resultMetadata?.truncated === true
@@ -1686,8 +1953,12 @@ function state_reservation_claim(operation, _ctx) {
     stopContextStream();
     const activeAgentId = detectAgentId(event, ctx);
     if (!activeAgentId) return;
+    for (const [toolCallId, remembered] of toolInputsByCallId) {
+      if (remembered.agentId === activeAgentId) toolInputsByCallId.delete(toolCallId);
+    }
     runStatefulHook("stop", {
       agent_id: activeAgentId,
+      workspace_id: effectiveOmpWorkspaceId(event, ctx),
       cwd: ctx.cwd,
     });
   });

@@ -3473,6 +3473,8 @@ fn pre_tool_use_allows_known_non_repo_write_tools_without_runtime() {
         "state_claim_acquire",
         "state_current_read",
         "state_context_render",
+        "state_exact_read",
+        "state.exact.read",
         "state_reconcile_ack",
         "state.reconcile.ack",
         "mcp__stateful__state_reservation_declare",
@@ -3788,7 +3790,7 @@ fn omp_write_authorize_records_runtime_lineage_without_commit_policy_input() {
     let (runtime, rx) = spawn_fake_stateful_server_sequence(vec![
         identity,
         identity,
-        r#"{"intent_id":"intent-1","decision":{"decision":"deny","reason_code":"active_claim_conflict","message":"blocked"}}"#,
+        r#"{"intent_id":"intent-1","decision":{"decision":"deny","reason_code":"unknown_write_outcome","message":"blocked","required_next_action":"Call state_reconcile_ack with intent_id `intent-1`."}}"#,
         r#"{"status":"completed"}"#,
     ]);
     write_global_runtime_file(&paths, &runtime).expect("runtime file should write");
@@ -3812,6 +3814,11 @@ fn omp_write_authorize_records_runtime_lineage_without_commit_policy_input() {
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("intent_id `intent-1`"),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
     );
     for _ in 0..2 {
         let identity_request = rx.recv().expect("identity request should arrive");
@@ -4351,7 +4358,7 @@ fn omp_edit_extracts_hashline_file_targets() {
         "yolo": false,
         "operation_id": "omp-edit-hashline",
         "tool_name": "edit",
-        "tool_input": { "input": "[docs/a.md#ABCD]\nSWAP 1.=1:\n+new\n" }
+        "tool_input": { "input": "[docs/a.md#ABCD]\nSWAP 1.=1:\n+first\n[docs/a.md#EF01]\nSWAP 1.=1:\n+second\n" }
     })
     .to_string();
 
@@ -4367,6 +4374,7 @@ fn omp_edit_extracts_hashline_file_targets() {
     }
     let body = request_json_body(&rx.recv().expect("authorize request should arrive"));
     assert_eq!(body["payload"]["action"], "write_file");
+    assert_eq!(body["payload"]["targets"].as_array().unwrap().len(), 1);
     assert_eq!(body["payload"]["targets"][0]["path"], "docs/a.md");
 }
 

@@ -49,9 +49,11 @@ pub(crate) struct AuthorizePayload {
     targets: Vec<WriteTarget>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct WriteReconcilePayload {
     intent_id: String,
+    #[serde(default)]
+    reservation_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -334,10 +336,15 @@ pub(crate) async fn reconcile_ack(
             Err(response) => return response,
         };
         let request_id = request.request_id.to_string();
-        let request = retarget(&request, request.payload.intent_id.clone());
         return protocol::command_response(
             &request_id,
-            lock_store(&config.store).and_then(|store| store.reconcile_write_intent(&request)),
+            lock_store(&config.store).and_then(|store| {
+                store.reconcile_write_intent_with_reservation(
+                    &request,
+                    &request.payload.intent_id,
+                    request.payload.reservation_id.as_deref(),
+                )
+            }),
         );
     }
     command(config, body, |store, request| {
@@ -665,8 +672,24 @@ fn authorize_request(
     };
     let mut result = Decision::allow("authorized", "Action is authorized.");
     for target in &request.payload.targets {
-        let decision =
+        let mut decision =
             evaluate_thin_safety(thin_safety_state(store, request, target)?, freshness_mode);
+        if decision.reason_code == "unknown_write_outcome"
+            && let Some(intent) =
+                store.active_write_intent(&request.workspace.workspace_id, &target.path)?
+        {
+            let target_paths = intent
+                .targets
+                .iter()
+                .map(|target| target.path.as_str())
+                .collect::<Vec<_>>();
+            decision.required_next_action = Some(format!(
+                "Complete exact rereads of all intent targets {}, then call state_reconcile_ack with intent_id `{}`. Owning agent `{}` may reconcile directly; after its presence ends, another agent also needs exact-file reservations for every target.",
+                json!(target_paths),
+                intent.intent_id,
+                intent.agent_id
+            ));
+        }
         if decision.decision == DecisionKind::Deny {
             return Ok(decision);
         }
@@ -735,7 +758,10 @@ fn thin_safety_state(
         intent.agent_id == request.agent.agent_id
             && intent.operation_id == request.payload.operation_id
     });
-    let unknown_write_outcome = active_intent.is_some() && !duplicate_intent;
+    let unknown_write_outcome = active_intent
+        .as_ref()
+        .is_some_and(|intent| intent.status == stateful_core::WriteIntentStatus::OutcomeUnknown)
+        && !duplicate_intent;
     let active_fence = store
         .active_write_fence(&request.workspace.workspace_id, &target.path)?
         .is_some()

@@ -1639,7 +1639,7 @@ mod tests {
         );
         assert_eq!(
             String::from_utf8(output.stdout).expect("stdout should be utf8"),
-            "[\"omp-019f1a33-e3c1-7000-b2a6-d16cc4f05a52-leaf_42\",\"omp-019f1a33-e3c1-7000-b2a6-d16cc4f05a53\",\"Stateful requires OMP ctx.sessionManager.getSessionId() to derive the active agent_id; no session id was available, so Stateful actions are disabled for this agent.\"]\n"
+            "[\"omp-019f1a33-e3c1-7000-b2a6-d16cc4f05a52\",\"omp-019f1a33-e3c1-7000-b2a6-d16cc4f05a53\",\"Stateful requires OMP ctx.sessionManager.getSessionId() to derive the active agent_id; no session id was available, so Stateful actions are disabled for this agent.\"]\n"
         );
 
         fs::remove_dir_all(&temp_dir).expect("temp dir should be removable");

@@ -1,12 +1,12 @@
 use stateful_core::{
     ActorType, AgentIdentity, ContentFingerprint, Decision, DecisionKind, PresencePhase,
     PresenceResourceRelation, ReadClassification, ReadCompletion, ReadObservationStart,
-    RequestEnvelope, SourceKind, SourceRef, WorkspaceIdentity, WriteIntentCompletion,
-    WriteIntentStart, WriteIntentStatus, WriteTarget,
+    RequestEnvelope, ReservationScope, SourceKind, SourceRef, WorkspaceIdentity,
+    WriteIntentCompletion, WriteIntentStart, WriteIntentStatus, WriteTarget,
 };
 use stateful_store::{
-    ActivityFinalization, ActivityStart, FixedClock, PresenceRegistration, Store,
-    WriteFenceAcquire, WriteFenceRelease,
+    ActivityFinalization, ActivityStart, FixedClock, PresenceRegistration, ReservationDeclaration,
+    Store, WriteFenceAcquire, WriteFenceRelease,
 };
 use time::{Duration, OffsetDateTime, macros::datetime};
 use uuid::Uuid;
@@ -1207,6 +1207,135 @@ fn changed_unknown_requires_an_exact_reread_after_the_unknown_event() {
     store
         .reconcile_write_intent(&request("agent-1", intent.intent_id))
         .expect("reread after the unknown outcome reconciles");
+}
+
+#[test]
+fn inactive_owner_intent_can_be_reconciled_by_reserved_successor() {
+    let mut store = Store::open_in_memory_with_clock(FixedClock::new(NOW)).expect("store opens");
+    store
+        .register_presence(&request(
+            "agent-1",
+            PresenceRegistration { first_prompt: None },
+        ))
+        .expect("owner presence registers");
+    let before = fingerprint(b"before");
+    let intent = store
+        .start_write_intent(&request(
+            "agent-1",
+            WriteIntentStart {
+                operation_id: "write-1".into(),
+                action: "write_file".into(),
+                targets: vec![
+                    WriteTarget {
+                        path: "src/lib.rs".into(),
+                        before: before.clone(),
+                    },
+                    WriteTarget {
+                        path: "src/other.rs".into(),
+                        before,
+                    },
+                ],
+            },
+        ))
+        .expect("owner starts intent")
+        .response;
+    let changed = fingerprint(b"changed");
+    store
+        .recover_write_intent(&request(
+            "agent-1",
+            (
+                intent.intent_id.clone(),
+                vec![
+                    ("src/lib.rs".into(), changed.clone()),
+                    ("src/other.rs".into(), changed.clone()),
+                ],
+            ),
+        ))
+        .expect("owner records unknown outcome");
+    start_read(
+        &store,
+        "agent-2",
+        "successor-read",
+        "src/lib.rs",
+        changed.clone(),
+    );
+    complete_read(
+        &store,
+        "agent-2",
+        "successor-read",
+        "src/lib.rs",
+        ReadClassification::Exact,
+        Some(changed.clone()),
+        None,
+    );
+    start_read(
+        &store,
+        "agent-2",
+        "successor-read-other",
+        "src/other.rs",
+        changed.clone(),
+    );
+    complete_read(
+        &store,
+        "agent-2",
+        "successor-read-other",
+        "src/other.rs",
+        ReadClassification::Exact,
+        Some(changed),
+        None,
+    );
+    let reservation = store
+        .declare_reservation(&request(
+            "agent-2",
+            ReservationDeclaration {
+                scopes: vec![ReservationScope::File("src/lib.rs".into())],
+                action: "write_file".into(),
+                purpose: "Recover the inactive owner write.".into(),
+            },
+        ))
+        .expect("successor reservation declares")
+        .response;
+    let active_owner = request("agent-2", ());
+    assert!(matches!(
+        store.reconcile_write_intent_with_reservation(
+            &active_owner,
+            &intent.intent_id,
+            Some(&reservation.reservation_id),
+        ),
+        Err(stateful_store::StoreError::WriteIntentOwnerMismatch)
+    ));
+    store
+        .finalize_activity(&request("agent-1", ActivityFinalization {}))
+        .expect("owner presence finalizes");
+    assert!(matches!(
+        store.reconcile_write_intent_with_reservation(
+            &request("agent-2", ()),
+            &intent.intent_id,
+            Some(&reservation.reservation_id),
+        ),
+        Err(stateful_store::StoreError::WriteIntentOwnerMismatch)
+    ));
+    let full_reservation = store
+        .declare_reservation(&request(
+            "agent-2",
+            ReservationDeclaration {
+                scopes: vec![
+                    ReservationScope::File("src/lib.rs".into()),
+                    ReservationScope::File("src/other.rs".into()),
+                ],
+                action: "write_file".into(),
+                purpose: "Recover every inactive-owner target.".into(),
+            },
+        ))
+        .expect("full successor reservation declares")
+        .response;
+    store
+        .reconcile_write_intent_with_reservation(
+            &request("agent-2", ()),
+            &intent.intent_id,
+            Some(&full_reservation.reservation_id),
+        )
+        .expect("fully reserved successor reconciles inactive owner intent");
 }
 
 #[test]
