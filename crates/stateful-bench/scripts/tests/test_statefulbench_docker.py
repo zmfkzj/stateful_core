@@ -347,6 +347,13 @@ class DockerArmContainerTests(unittest.TestCase):
             runner=runner,
         )
         commands = [call.args[0] for call in runner.call_args_list]
+        self.assertEqual(
+            sum(
+                command[-4:] == ["/usr/local/bin/omp", "token", "openai-codex", "--list"]
+                for command in commands
+            ),
+            1,
+        )
         self.assertIn(["rm", "-rf", "/home/stateful/.stateful"], [command[-3:] for command in commands])
         self.assertEqual(sum(command[-4:] == ["install", "--agent", "omp", "--yes"] for command in commands), 1)
         self.assertEqual(sum(command[-3:] == ["enable", "--repo", "/workspace"] for command in commands), 1)

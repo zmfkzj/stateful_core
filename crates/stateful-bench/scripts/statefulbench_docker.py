@@ -835,6 +835,15 @@ def prepare_arm_runtime(
             f"{env['PI_CODING_AGENT_DIR']}/agent.db",
             runner=runner,
         )
+        exec_in_container(
+            container,
+            omp_binary,
+            "token",
+            "openai-codex",
+            "--list",
+            env=env,
+            runner=runner,
+        )
     if arm == "parallel-on" and activate_stateful:
         exec_in_container(
             container, stateful_binary, "enable", "--repo", "/workspace", env=env, runner=runner
