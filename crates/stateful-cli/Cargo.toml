@@ -1,6 +1,6 @@
 [package]
 name = "stateful-cli"
-version = "0.1.1"
+version = "0.1.2"
 description = "CLI and runtime adapters for collision-free coding-agent writes."
 edition.workspace = true
 license.workspace = true

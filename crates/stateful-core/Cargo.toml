@@ -1,6 +1,6 @@
 [package]
 name = "stateful-core"
-version = "0.1.1"
+version = "0.1.2"
 description = "Core types and policy for collision-free coding-agent writes."
 edition.workspace = true
 license.workspace = true

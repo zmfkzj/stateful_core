@@ -1,6 +1,6 @@
 [package]
 name = "stateful-store"
-version = "0.1.1"
+version = "0.1.2"
 description = "SQLite event store and lease state for collision-free coding-agent writes."
 edition.workspace = true
 license.workspace = true
