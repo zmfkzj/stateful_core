@@ -7,9 +7,8 @@ sandbox, access-control system, or hard file-locking boundary.
 ## Supported Scope
 
 Security fixes are handled for the current `v0_main` branch until a stable release
-policy exists. The current platform support posture is macOS first. Linux
-bubblewrap support is implemented but experimental until release verification is
-in place.
+policy exists. The current platform support posture is macOS first. The Rust CI
+matrix exercises Linux bubblewrap, but Linux support remains experimental.
 
 ## Reporting a Vulnerability
 

@@ -18,6 +18,10 @@ Build and install the CLI from this checkout:
 cargo install --path crates/stateful-cli
 ```
 
+On Linux, install `bubblewrap`. On Ubuntu/AppArmor hosts that restrict
+unprivileged user namespaces, grant `/usr/bin/bwrap` the `userns` rule before
+using sandboxed commands.
+
 Install the OMP integration and opt the repository in:
 
 ```bash

@@ -32,7 +32,7 @@ Public release archives should be produced from Git, such as with `git archive` 
 
 ## Platform Scope
 
-The current release posture is macOS first. The macOS Seatbelt sandbox backend is the verified path. Linux bubblewrap support is implemented but experimental until it is verified in a Linux release environment.
+The Rust CI matrix exercises both the macOS Seatbelt and Linux bubblewrap sandbox backends. macOS remains the primary release platform; Linux support remains experimental.
 
 ## Security
 
