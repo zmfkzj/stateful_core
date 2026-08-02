@@ -1,6 +1,7 @@
 {
-  "crates/stateful-core": "0.1.1",
-  "crates/stateful-store": "0.1.1",
-  "crates/stateful-server": "0.1.1",
-  "crates/stateful-cli": "0.1.1"
+  "crates/stateful-core": "0.1.2",
+  "crates/stateful-store": "0.1.2",
+  "crates/stateful-server": "0.1.2",
+  "crates/stateful-cli": "0.1.2",
+  "crates/stateful-bench": "0.1.1"
 }
