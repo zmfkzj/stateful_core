@@ -40,6 +40,29 @@ impl RepoRegistry {
         })
     }
 
+    pub(crate) fn migrate_legacy_writer_policy(paths: &GlobalPaths) -> anyhow::Result<()> {
+        let config = fs::read_to_string(&paths.config_yml).with_context(|| {
+            format!(
+                "failed to read repo registry config {}",
+                paths.config_yml.display()
+            )
+        })?;
+        if config.trim().is_empty() || serde_yaml::from_str::<Self>(&config).is_ok() {
+            return Ok(());
+        }
+
+        let legacy: LegacyRepoRegistry = serde_yaml::from_str(&config).with_context(|| {
+            format!(
+                "failed to parse repo registry config {}",
+                paths.config_yml.display()
+            )
+        })?;
+        Self {
+            repos: legacy.repos.into_iter().map(RepoEntry::from).collect(),
+        }
+        .save(paths)
+    }
+
     pub fn save(&self, paths: &GlobalPaths) -> anyhow::Result<()> {
         if let Some(parent) = paths.config_yml.parent() {
             fs::create_dir_all(parent).with_context(|| {
@@ -90,6 +113,42 @@ pub struct RepoEntry {
     pub policy_config_path: PathBuf,
     #[serde(default)]
     pub policy_revision: u64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyRepoRegistry {
+    #[serde(default)]
+    repos: Vec<LegacyRepoEntry>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyRepoEntry {
+    repo_id: String,
+    root: PathBuf,
+    enabled: bool,
+    enabled_at: String,
+    policy_config_path: PathBuf,
+    #[serde(default)]
+    policy_revision: u64,
+    #[serde(default, rename = "allowed_tools")]
+    _allowed_tools: Vec<String>,
+    #[serde(default, rename = "unclassified_tools")]
+    _unclassified_tools: Vec<String>,
+}
+
+impl From<LegacyRepoEntry> for RepoEntry {
+    fn from(entry: LegacyRepoEntry) -> Self {
+        Self {
+            repo_id: entry.repo_id,
+            root: entry.root,
+            enabled: entry.enabled,
+            enabled_at: entry.enabled_at,
+            policy_config_path: entry.policy_config_path,
+            policy_revision: entry.policy_revision,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -90,11 +90,13 @@ pub fn apply_global_install(options: InstallOptions) -> anyhow::Result<InstallPl
         )
     })?;
 
-    if !options.paths.config_yml.exists() {
+    if options.paths.config_yml.exists() {
+        RepoRegistry::migrate_legacy_writer_policy(&options.paths)?;
+    } else {
         RepoRegistry::default().save(&options.paths)?;
     }
 
-    initialize_state_database_if_missing(&options.paths.state_db)?;
+    initialize_state_database(&options.paths.state_db)?;
 
     plan.summary = format!(
         "apply: installed stateful global files under {}",
@@ -104,9 +106,9 @@ pub fn apply_global_install(options: InstallOptions) -> anyhow::Result<InstallPl
     Ok(plan)
 }
 
-fn initialize_state_database_if_missing(path: &Path) -> anyhow::Result<()> {
+fn initialize_state_database(path: &Path) -> anyhow::Result<()> {
     match path.metadata() {
-        Ok(metadata) if metadata.is_file() => return Ok(()),
+        Ok(metadata) if metadata.is_file() => {}
         Ok(_) => anyhow::bail!(
             "state database path exists but is not a file: {}",
             path.display()

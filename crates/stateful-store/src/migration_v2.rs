@@ -490,6 +490,40 @@ const LEGACY_SCHEMA: &[(&str, &[LegacyColumn])] = &[
     ),
 ];
 
+const LEGACY_HUMAN_OBSERVATIONS_SCHEMA: &[(&str, &[LegacyColumn])] = &[(
+    "human_observations",
+    &[
+        legacy_column("observation_id", "TEXT", false, true),
+        legacy_column("workspace_id", "TEXT", true, false),
+        legacy_column("relative_path", "TEXT", true, false),
+        legacy_column("kind", "TEXT", true, false),
+        legacy_column("source", "TEXT", true, false),
+        legacy_column("confidence", "TEXT", true, false),
+        legacy_column("observed_exists", "INTEGER", true, false),
+        legacy_column("observed_content_hash", "TEXT", false, false),
+        legacy_column("observed_at", "TEXT", true, false),
+        legacy_column("summary", "TEXT", true, false),
+        legacy_column("expires_at", "TEXT", false, false),
+        legacy_column("reconciled_at", "TEXT", false, false),
+        legacy_column("reconcile_decision", "TEXT", false, false),
+        legacy_column("reconciled_by_agent_id", "TEXT", false, false),
+    ],
+)];
+
+const LEGACY_WRITE_FENCES_SCHEMA: &[(&str, &[LegacyColumn])] = &[(
+    "write_fences",
+    &[
+        legacy_column("fence_id", "TEXT", false, true),
+        legacy_column("agent_id", "TEXT", true, false),
+        legacy_column("workspace_id", "TEXT", true, false),
+        legacy_column("relative_path", "TEXT", true, false),
+        legacy_column("action", "TEXT", true, false),
+        legacy_column("acquired_at", "TEXT", true, false),
+        legacy_column("expires_at", "TEXT", true, false),
+        legacy_column("released_at", "TEXT", false, false),
+    ],
+)];
+
 const LEGACY_INDEXES: &[&str] = &[
     "idx_activities_agent_workspace_expires_at",
     "idx_activities_workspace_expires_at",
@@ -514,6 +548,12 @@ const LEGACY_INDEXES: &[&str] = &[
     "idx_wait_queue_workspace_path_status",
 ];
 
+const LEGACY_HUMAN_OBSERVATIONS_INDEXES: &[&str] = &["idx_human_obs_unreconciled"];
+const LEGACY_WRITE_FENCES_INDEXES: &[&str] = &[
+    "idx_write_fences_agent_workspace_active",
+    "idx_write_fences_workspace_path_active",
+];
+
 const fn legacy_column(
     name: &'static str,
     sql_type: &'static str,
@@ -530,18 +570,65 @@ const fn legacy_column(
 
 fn has_legacy_layout(conn: &Connection) -> StoreResult<bool> {
     let objects = user_schema_objects(conn)?;
+    let has_human_observations = objects
+        .iter()
+        .any(|(kind, name)| kind == "table" && name == "human_observations");
+    let has_write_fences = objects
+        .iter()
+        .any(|(kind, name)| kind == "table" && name == "write_fences");
+    let mut expected_objects = LEGACY_INDEXES
+        .iter()
+        .map(|name| ("index", *name))
+        .chain(LEGACY_SCHEMA.iter().map(|(name, _)| ("table", *name)))
+        .collect::<Vec<_>>();
+    if has_human_observations {
+        expected_objects.extend(
+            LEGACY_HUMAN_OBSERVATIONS_INDEXES
+                .iter()
+                .map(|name| ("index", *name)),
+        );
+        expected_objects.extend(
+            LEGACY_HUMAN_OBSERVATIONS_SCHEMA
+                .iter()
+                .map(|(name, _)| ("table", *name)),
+        );
+    }
+    if has_write_fences {
+        expected_objects.extend(
+            LEGACY_WRITE_FENCES_INDEXES
+                .iter()
+                .map(|name| ("index", *name)),
+        );
+        expected_objects.extend(
+            LEGACY_WRITE_FENCES_SCHEMA
+                .iter()
+                .map(|(name, _)| ("table", *name)),
+        );
+    }
+    expected_objects.sort_unstable();
     if !objects
         .iter()
         .map(|(kind, name)| (kind.as_str(), name.as_str()))
-        .eq(LEGACY_INDEXES
-            .iter()
-            .map(|name| ("index", *name))
-            .chain(LEGACY_SCHEMA.iter().map(|(name, _)| ("table", *name))))
+        .eq(expected_objects)
     {
         return Ok(false);
     }
 
-    for (table, columns) in LEGACY_SCHEMA {
+    for (table, columns) in LEGACY_SCHEMA
+        .iter()
+        .chain(
+            has_human_observations
+                .then_some(LEGACY_HUMAN_OBSERVATIONS_SCHEMA)
+                .into_iter()
+                .flatten(),
+        )
+        .chain(
+            has_write_fences
+                .then_some(LEGACY_WRITE_FENCES_SCHEMA)
+                .into_iter()
+                .flatten(),
+        )
+    {
         if !has_column_shape(conn, table, columns)? {
             return Ok(false);
         }
@@ -981,6 +1068,60 @@ mod tests {
         assert_private_file(&path)?;
         assert_private_file(&paths.backup)?;
         Ok(())
+    }
+
+    #[test]
+    fn legacy_database_with_obsolete_current_state_tables_migrates() -> StoreResult<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("state.db");
+        write_legacy_database(&path)?;
+        let legacy = Connection::open(&path)?;
+        legacy.execute_batch(
+            "CREATE TABLE human_observations (
+                 observation_id TEXT PRIMARY KEY,
+                 workspace_id TEXT NOT NULL,
+                 relative_path TEXT NOT NULL,
+                 kind TEXT NOT NULL,
+                 source TEXT NOT NULL,
+                 confidence TEXT NOT NULL,
+                 observed_exists INTEGER NOT NULL DEFAULT 1,
+                 observed_content_hash TEXT,
+                 observed_at TEXT NOT NULL,
+                 summary TEXT NOT NULL,
+                 expires_at TEXT,
+                 reconciled_at TEXT,
+                 reconcile_decision TEXT,
+                 reconciled_by_agent_id TEXT
+             );
+             CREATE INDEX idx_human_obs_unreconciled
+                 ON human_observations(
+                     workspace_id, relative_path, kind, confidence, reconciled_at
+                 );
+             CREATE TABLE write_fences (
+                 fence_id TEXT PRIMARY KEY,
+                 agent_id TEXT NOT NULL,
+                 workspace_id TEXT NOT NULL,
+                 relative_path TEXT NOT NULL,
+                 action TEXT NOT NULL,
+                 acquired_at TEXT NOT NULL,
+                 expires_at TEXT NOT NULL,
+                 released_at TEXT
+             );
+             CREATE INDEX idx_write_fences_agent_workspace_active
+                 ON write_fences(agent_id, workspace_id, released_at, expires_at);
+             CREATE INDEX idx_write_fences_workspace_path_active
+                 ON write_fences(workspace_id, relative_path, released_at, expires_at);",
+        )?;
+        close_connection(legacy)?;
+
+        let conn = open_file(&path)?;
+        assert!(has_v2_marker(&conn)?);
+        close_connection(conn)?;
+
+        let backup = Connection::open(MigrationPaths::new(&path)?.backup)?;
+        assert!(table_exists(&backup, "human_observations")?);
+        assert!(table_exists(&backup, "write_fences")?);
+        close_connection(backup)
     }
 
     #[test]

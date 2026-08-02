@@ -140,11 +140,14 @@ already contain at most one active or draining lease per workspace and agent.
 The opener creates that index. Duplicate slots and every other current-marker
 partial or mixed layout fail closed without modifying the database.
 
-The only recognized legacy schema is the final V1 set: `schema_migrations`,
+The recognized legacy schema is the final V1 set: `schema_migrations`,
 `events`, `agents`, `activities`, `reservations`, `claims`, `wait_queue`,
 `notifications`, and `outbox`, with their final required column shapes and named
-indexes. Partial, mixed, and unknown layouts fail closed. SQLite internal objects
-are ignored; every other unexpected schema object rejects migration.
+indexes. It may also contain either or both exact obsolete current-state groups:
+`human_observations` with `idx_human_obs_unreconciled`, and `write_fences` with
+its two named indexes. Partial optional groups, mixed layouts, and unknown
+layouts fail closed. SQLite internal objects are ignored; every other unexpected
+schema object rejects migration.
 
 For a known legacy layout, the opener uses an exclusive migration lock and
 writes a small manifest beside the database. It takes a SQLite backup from one
