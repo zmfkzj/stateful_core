@@ -1,6 +1,6 @@
 # Contributing
 
-This project is pre-release. Keep changes scoped, documented, and verified against the current implementation contract.
+This project is pre-release. Keep changes scoped, documented, and verified against the active V2 contracts.
 
 ## Development Setup
 
@@ -9,27 +9,24 @@ This project is pre-release. Keep changes scoped, documented, and verified again
 - Run tests with `cargo test --workspace`.
 - Run formatting and lint checks with `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings`.
 
-In a repository with stateful hooks enabled, Codex raw Bash is denied, and OMP restricts built-in Bash to strict trusted `stateful sandbox run ...` and `stateful sandbox process find ...` commands after Stateful preflight; the previously generated OMP command tools were removed. Use native read/search tools for ordinary read work, and `stateful sandbox run --fs read-only --network disabled` for shell-based read-only inspection. For command-shaped repo writes, use `stateful sandbox run --fs write-targets --reservation-id <reservation_id>` with exact repo-relative targets plus matching reservation and same-session claim; for repo-external work, use `stateful sandbox run --fs external --purpose ...`. Use native edit tools for repo file edits after matching reservation and same-session claim.
+When Stateful hooks are enabled, use native repository tools for reads and edits. Hooks authorize supported mutations through the V2 task, evidence, and lease flow; do not bypass a denial with raw shell writes.
 
 ## Documentation
 
-Behavioral changes should update the relevant contract documents:
+Behavioral changes should update the relevant canonical documents:
 
 - `README.md` for user-facing setup and command guidance.
-- `docs/state-model.md` for state and policy semantics.
-- `docs/implementation-contract.md` for concrete API, storage, hook, and test contracts.
-- `docs/architecture.md` for product-level architecture.
-
-Historical records under `docs/superpowers/` are kept for traceability. Do not treat them as current user-facing guidance.
+- `docs/architecture.md` for components, flows, and invariants.
+- `docs/usage-reference.md` for CLI, HTTP, and hook contracts.
+- `docs/state-model.md` for storage, audit, projection, and migration semantics.
 
 ## Generated Local State
 
-Do not commit generated runtime, integration, or benchmark state. The ignored paths may contain local paths, tokens, runtime databases, or benchmark artifacts:
+Do not commit generated runtime or integration state. Ignored paths may contain local paths, tokens, or runtime databases:
 
 - `.codex/`
 - `.stateful/`
 - `.stateful_core/`
-- `.stateful_bench/`
 
 Public release archives should be produced from Git, such as with `git archive` or a clean clone.
 

@@ -1,7 +1,7 @@
 [package]
 name = "stateful-core"
 version = "0.1.1"
-description = "Core domain types and policy engine for current-state agent coordination."
+description = "Core types and policy for collision-free coding-agent writes."
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -10,11 +10,15 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+blake3.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

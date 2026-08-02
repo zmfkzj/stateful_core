@@ -1,7 +1,7 @@
 use std::{
     fs,
     fs::OpenOptions,
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
     path::Path,
     process::{Child, Command, Stdio},
     thread,
@@ -9,21 +9,39 @@ use std::{
 };
 
 use crate::{
-    GlobalPaths, ServerRuntime, get_json, runtime_has_required_identity,
-    runtime_identity_matches_pid, write_global_runtime_file,
+    global_paths::GlobalPaths,
+    runtime::{
+        ServerRuntime, get_payload, get_response, runtime_base_url_is_loopback,
+        validate_runtime_process_identity, write_global_runtime_file,
+    },
 };
+
+#[cfg(test)]
+use crate::process_start_identity_for_pid;
 
 const START_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const START_LOCK_RETRY_DELAY: Duration = Duration::from_millis(50);
 const START_LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
 const STARTUP_HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 const STARTUP_HEALTH_RETRY_DELAY: Duration = Duration::from_millis(50);
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ServerStartOptions {
     pub host: String,
     pub port: u16,
     pub token: Option<String>,
     pub workspace_id: String,
+}
+
+impl std::fmt::Debug for ServerStartOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ServerStartOptions")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("workspace_id", &self.workspace_id)
+            .finish()
+    }
 }
 
 impl Default for ServerStartOptions {
@@ -47,14 +65,14 @@ where
     S: Fn() -> anyhow::Result<ServerRuntime>,
 {
     if let Some(runtime) = read_runtime_file(paths)? {
-        if health(&runtime) {
+        if validate_runtime_process_identity(&runtime).is_ok() && health(&runtime) {
             return Ok(runtime);
         }
     }
 
     let _lock = acquire_start_lock(paths)?;
     if let Some(runtime) = read_runtime_file(paths)? {
-        if health(&runtime) {
+        if validate_runtime_process_identity(&runtime).is_ok() && health(&runtime) {
             return Ok(runtime);
         }
     }
@@ -91,6 +109,7 @@ pub fn ensure_server_with_options(
     paths: &GlobalPaths,
     options: ServerStartOptions,
 ) -> anyhow::Result<ServerRuntime> {
+    validate_server_start_options(&options)?;
     ensure_current_server_with_options(paths, &options)
 }
 
@@ -126,6 +145,7 @@ pub(crate) fn register_foreground_runtime(
     runtime: &ServerRuntime,
     options: &ServerStartOptions,
 ) -> anyhow::Result<()> {
+    validate_server_start_options(options)?;
     register_foreground_runtime_with_health(paths, runtime, options, runtime_is_healthy)
 }
 
@@ -140,6 +160,7 @@ where
 {
     let _lock = acquire_start_lock(paths)?;
     if let Some(existing) = read_runtime_file(paths)?
+        && validate_runtime_process_identity(&existing).is_ok()
         && health(&existing)
     {
         ensure_runtime_matches_options(&existing, options)?;
@@ -156,40 +177,16 @@ where
 }
 
 pub fn runtime_is_healthy(runtime: &ServerRuntime) -> bool {
-    runtime_is_basic_healthy(runtime) && runtime_has_required_identity(runtime)
-}
-
-fn runtime_is_basic_healthy(runtime: &ServerRuntime) -> bool {
-    let Ok(health) = get_json(runtime, "/health") else {
-        return false;
-    };
-    if health.status_code != 200 {
-        return false;
-    }
-
-    let Ok(current) = get_json(runtime, "/v1/current") else {
-        return false;
-    };
-    if current.status_code != 200 {
-        return false;
-    }
-
-    serde_json::from_str::<serde_json::Value>(&current.body)
-        .ok()
-        .and_then(|body| {
-            let status = body.get("status")?.as_str()?;
-            let current = body.get("current")?;
-            Some(status == "ok" && current.is_object())
-        })
-        .unwrap_or(false)
+    validate_runtime_process_identity(runtime).is_ok()
+        && get_response(runtime, "/health").is_ok_and(|health| health.status_code == 200)
+        && get_payload::<stateful_store::StatusSnapshot>(runtime, "/v2/status").is_ok()
 }
 
 pub fn stop_server(paths: &GlobalPaths) -> anyhow::Result<()> {
     let contents = fs::read_to_string(&paths.server_json)?;
     let runtime: ServerRuntime = serde_json::from_str(&contents)?;
-    if runtime.pid == 0
-        || !runtime_is_basic_healthy(&runtime)
-        || !runtime_identity_matches_pid(&runtime)?
+    if !runtime_file_is_local_and_complete(&runtime)
+        || validate_runtime_process_identity(&runtime).is_err()
         || !pid_matches_current_exe(runtime.pid)?
     {
         anyhow::bail!(
@@ -204,24 +201,17 @@ pub fn stop_server(paths: &GlobalPaths) -> anyhow::Result<()> {
 pub fn restart_server(paths: &GlobalPaths) -> anyhow::Result<ServerRuntime> {
     let runtime = read_runtime_file(paths)?
         .ok_or_else(|| anyhow::anyhow!("no stateful server runtime file found to restart"))?;
-    if runtime.pid == 0 {
-        return Err(remote_runtime_cannot_be_killed(&runtime));
-    }
     let options = server_start_options_from_runtime(&runtime)?;
     stop_server(paths)?;
     ensure_server_with_options(paths, options)
 }
 
-fn remote_runtime_cannot_be_killed(runtime: &ServerRuntime) -> anyhow::Error {
-    anyhow::anyhow!(
-        "remote stateful server cannot be killed from this machine: {}; restart it on the host running that server or start a local stateful server",
-        runtime.base_url
-    )
-}
-
 pub fn server_start_options_from_runtime(
     runtime: &ServerRuntime,
 ) -> anyhow::Result<ServerStartOptions> {
+    if !runtime_base_url_is_loopback(&runtime.base_url) {
+        anyhow::bail!("only loopback stateful server URLs can be restarted");
+    }
     let (host, port) = parse_runtime_base_url(&runtime.base_url)?;
     Ok(ServerStartOptions {
         host,
@@ -261,41 +251,38 @@ fn parse_runtime_base_url(base_url: &str) -> anyhow::Result<(String, u16)> {
 }
 
 fn retire_incompatible_runtime(paths: &GlobalPaths, runtime: &ServerRuntime) -> anyhow::Result<()> {
-    if !runtime_is_basic_healthy(runtime) {
-        if runtime.pid == 0 {
-            anyhow::bail!(
-                "remote stateful runtime at {} is unreachable or unavailable; preserving runtime file and not starting a local server",
-                runtime.base_url
-            );
-        }
+    if validate_runtime_process_identity(runtime).is_err() {
         let _ = fs::remove_file(&paths.server_json);
         return Ok(());
     }
-    if runtime.pid != 0
-        && runtime_identity_matches_pid(runtime)?
-        && pid_matches_current_exe(runtime.pid)?
-    {
-        return terminate_runtime(paths, runtime);
+    if !pid_matches_current_exe(runtime.pid)? {
+        anyhow::bail!(
+            "existing stateful server pid {} is not the current stateful executable",
+            runtime.pid
+        );
     }
-
-    anyhow::bail!(
-        "existing stateful server pid {} is reachable but does not support required runtime capabilities; stop it with the matching stateful binary and retry",
-        runtime.pid
-    )
+    terminate_runtime(paths, runtime)
 }
 
 fn terminate_runtime(paths: &GlobalPaths, runtime: &ServerRuntime) -> anyhow::Result<()> {
+    if validate_runtime_process_identity(runtime).is_err() || !pid_matches_current_exe(runtime.pid)?
+    {
+        anyhow::bail!(
+            "refusing to terminate unverified stateful server pid {}",
+            runtime.pid
+        );
+    }
     let status = Command::new("kill").arg(runtime.pid.to_string()).status()?;
     if !status.success() {
         anyhow::bail!("failed to stop stateful server pid {}", runtime.pid);
     }
     for _ in 0..20 {
-        if !runtime_is_basic_healthy(runtime) {
+        if !runtime_is_healthy(runtime) {
             break;
         }
         thread::sleep(Duration::from_millis(50));
     }
-    if runtime_is_basic_healthy(runtime) {
+    if runtime_is_healthy(runtime) {
         anyhow::bail!("stateful server pid {} did not stop", runtime.pid);
     }
     let _ = fs::remove_file(&paths.server_json);
@@ -318,10 +305,17 @@ fn start_detached_server(
     let mut child = command
         .args(detached_server_args(options))
         .env("STATEFUL_HOME", &paths.home)
-        .stdin(Stdio::null())
+        .stdin(if options.token.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))
         .spawn()?;
+    if let Some(token) = &options.token {
+        write_detached_token(&mut child, token)?;
+    }
 
     wait_for_detached_server_health(paths, &mut child, log_start, STARTUP_HEALTH_TIMEOUT)
 }
@@ -336,7 +330,10 @@ fn wait_for_detached_server_health(
     while started_at.elapsed() < timeout {
         thread::sleep(STARTUP_HEALTH_RETRY_DELAY);
         if let Some(runtime) = read_runtime_file(paths)? {
-            if runtime.pid == child.id() && runtime_is_healthy(&runtime) {
+            if runtime.pid == child.id()
+                && validate_runtime_process_identity(&runtime).is_ok()
+                && runtime_is_healthy(&runtime)
+            {
                 return Ok(runtime);
             }
         }
@@ -395,15 +392,30 @@ pub fn detached_server_args(options: &ServerStartOptions) -> Vec<String> {
         options.port.to_string(),
     ];
 
-    if let Some(token) = &options.token {
-        args.push("--token".to_string());
-        args.push(token.clone());
+    if options.token.is_some() {
+        args.push("--token-stdin".to_string());
     }
 
     args.extend(["--workspace-id".to_string(), options.workspace_id.clone()]);
     args
 }
 
+fn write_detached_token(child: &mut Child, token: &str) -> anyhow::Result<()> {
+    let Some(mut stdin) = child.stdin.take() else {
+        anyhow::bail!("detached stateful server stdin is unavailable");
+    };
+    let result = stdin
+        .write_all(token.as_bytes())
+        .and_then(|_| stdin.flush());
+    drop(stdin);
+    if let Err(error) = result
+        && error.kind() != std::io::ErrorKind::BrokenPipe
+        && child.try_wait()?.is_none()
+    {
+        return Err(error.into());
+    }
+    Ok(())
+}
 #[cfg(unix)]
 fn configure_detached_command(command: &mut Command) {
     use std::os::unix::process::CommandExt;
@@ -438,6 +450,14 @@ fn ensure_runtime_matches_options(
         expected_base_url,
         options.workspace_id
     )
+}
+
+fn validate_server_start_options(options: &ServerStartOptions) -> anyhow::Result<()> {
+    let base_url = format!("http://{}:{}", options.host, options.port);
+    if !runtime_base_url_is_loopback(&base_url) {
+        anyhow::bail!("stateful server may only bind a loopback host");
+    }
+    Ok(())
 }
 
 fn acquire_start_lock(paths: &GlobalPaths) -> anyhow::Result<StartLock> {
@@ -476,12 +496,20 @@ fn acquire_start_lock(paths: &GlobalPaths) -> anyhow::Result<StartLock> {
 fn read_runtime_file(paths: &GlobalPaths) -> anyhow::Result<Option<ServerRuntime>> {
     match fs::read_to_string(&paths.server_json) {
         Ok(contents) => match serde_json::from_str(&contents) {
-            Ok(runtime) => Ok(Some(runtime)),
-            Err(_) => Ok(None),
+            Ok(runtime) if runtime_file_is_local_and_complete(&runtime) => Ok(Some(runtime)),
+            Ok(_) | Err(_) => Ok(None),
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+fn runtime_file_is_local_and_complete(runtime: &ServerRuntime) -> bool {
+    runtime_base_url_is_loopback(&runtime.base_url)
+        && !runtime.token.is_empty()
+        && !runtime.workspace_id.is_empty()
+        && runtime.pid != 0
+        && !runtime.process_start_identity.trim().is_empty()
 }
 
 fn remove_stale_lock(path: &Path) -> anyhow::Result<bool> {
@@ -539,7 +567,7 @@ impl Drop for StartLock {
 mod tests {
     use super::*;
     use std::{
-        io::Write,
+        io::{Read, Write},
         net::{TcpListener, TcpStream},
     };
 
@@ -555,6 +583,7 @@ mod tests {
             "token",
             options.workspace_id.clone(),
             123,
+            "process-start-123",
         );
 
         let error = register_foreground_runtime_with_health(&paths, &runtime, &options, |_| false)
@@ -576,7 +605,14 @@ mod tests {
     fn foreground_registration_rejects_conflicting_healthy_runtime() {
         let home = temp_home("stateful-foreground-runtime-conflict");
         let paths = GlobalPaths::new(&home);
-        let existing = ServerRuntime::new("http://127.0.0.1:43874", "token", "local", 456);
+        let pid = std::process::id();
+        let existing = ServerRuntime::new(
+            "http://127.0.0.1:43874",
+            "token",
+            "local",
+            pid,
+            process_start_identity_for_pid(pid).expect("current process should have an identity"),
+        );
         write_global_runtime_file(&paths, &existing).expect("existing runtime should write");
         let options = ServerStartOptions::default();
         let runtime = ServerRuntime::new(
@@ -584,6 +620,7 @@ mod tests {
             "token",
             options.workspace_id.clone(),
             123,
+            "process-start-123",
         );
 
         let error = register_foreground_runtime_with_health(&paths, &runtime, &options, |_| true)
@@ -604,7 +641,27 @@ mod tests {
     }
 
     #[test]
-    fn detached_start_waits_for_runtime_that_becomes_healthy_after_one_second() {
+    fn runtime_process_identity_requires_matching_start_identity() {
+        let pid = std::process::id();
+        let identity =
+            process_start_identity_for_pid(pid).expect("current process should have an identity");
+        let mut runtime =
+            ServerRuntime::new("http://127.0.0.1:43873", "token", "w1", pid, identity);
+
+        assert!(validate_runtime_process_identity(&runtime).is_ok());
+        runtime.process_start_identity = "different-start-identity".to_string();
+        assert!(validate_runtime_process_identity(&runtime).is_err());
+    }
+
+    fn temp_home(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("temp home should be creatable");
+        root
+    }
+
+    #[test]
+    fn detached_start_waits_for_matching_process_identity_and_v2_health() {
         let home = temp_home("stateful-detached-slow-health");
         let paths = GlobalPaths::new(&home);
         fs::create_dir_all(&paths.runtime_dir).expect("runtime dir should be creatable");
@@ -615,16 +672,19 @@ mod tests {
             .expect("sleep child should spawn");
         let fake = FakeHttpServer::start(vec![
             fake_response(200, "ok"),
-            fake_response(200, r#"{"status":"ok","current":{}}"#),
             fake_response(
                 200,
-                format!(
-                    r#"{{"status":"ok","pid":{},"protocol_version":"stateful.v1","capabilities":["authorize.write_directory"]}}"#,
-                    child.id()
-                ),
+                r#"{"protocol_version":"stateful.v2","contract_revision":"lease-1","request_id":null,"payload":{"active_tasks":0,"draining_tasks":0,"active_leases":0,"draining_leases":0,"queued_requests":0,"offered_requests":0,"executing_writes":0,"uncertain_writes":0}}"#,
             ),
         ]);
-        let delayed_runtime = ServerRuntime::new(fake.base_url(), "token", "w1", child.id());
+        let delayed_runtime = ServerRuntime::new(
+            fake.base_url(),
+            "token",
+            "w1",
+            child.id(),
+            process_start_identity_for_pid(child.id())
+                .expect("child process should have a start identity"),
+        );
         let delayed_paths = paths.clone();
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(1200));
@@ -641,24 +701,10 @@ mod tests {
         let _ = fs::remove_dir_all(home);
     }
 
-    fn temp_home(name: &str) -> std::path::PathBuf {
-        let root = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).expect("temp home should be creatable");
-        root
-    }
-
     fn fake_response(status: u16, body: impl AsRef<str>) -> String {
         let body = body.as_ref();
-        let reason = match status {
-            200 => "OK",
-            401 => "Unauthorized",
-            404 => "Not Found",
-            503 => "Service Unavailable",
-            _ => "OK",
-        };
         format!(
-            "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "HTTP/1.1 {status} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         )
     }
@@ -675,7 +721,7 @@ mod tests {
                 .expect("fake server addr should be known");
             thread::spawn(move || {
                 for response in responses {
-                    if let Ok((mut stream, _addr)) = listener.accept() {
+                    if let Ok((mut stream, _)) = listener.accept() {
                         read_request(&mut stream);
                         let _ = stream.write_all(response.as_bytes());
                     }

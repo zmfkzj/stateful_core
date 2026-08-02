@@ -11,13 +11,21 @@ pub enum ActorType {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProtocolVersion {
-    #[serde(rename = "stateful.v1")]
-    V1,
+    #[serde(rename = "stateful.v2")]
+    V2,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContractRevision {
+    #[serde(rename = "lease-1")]
+    Lease1,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestEnvelope {
     pub protocol_version: ProtocolVersion,
+    pub contract_revision: ContractRevision,
+    pub task_id: String,
     pub request_id: String,
     pub observed_at: String,
     pub agent: AgentIdentity,
@@ -54,9 +62,6 @@ pub struct WorkspaceIdentity {
 pub enum SourceKind {
     Hook,
     Cli,
-    Watcher,
-    Ide,
-    Server,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,38 +80,6 @@ pub enum DecisionKind {
     Warn,
     Deny,
     Error,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Decision {
-    pub decision: DecisionKind,
-    pub reason_code: String,
-    pub message: String,
-    pub required_next_action: Option<String>,
-}
-
-impl Decision {
-    pub fn allow(reason_code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            decision: DecisionKind::Allow,
-            reason_code: reason_code.into(),
-            message: message.into(),
-            required_next_action: None,
-        }
-    }
-
-    pub fn deny(
-        reason_code: impl Into<String>,
-        message: impl Into<String>,
-        required_next_action: impl Into<String>,
-    ) -> Self {
-        Self {
-            decision: DecisionKind::Deny,
-            reason_code: reason_code.into(),
-            message: message.into(),
-            required_next_action: Some(required_next_action.into()),
-        }
-    }
 }
 
 #[cfg(test)]

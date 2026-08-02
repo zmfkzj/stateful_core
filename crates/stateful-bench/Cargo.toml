@@ -1,7 +1,7 @@
 [package]
 name = "stateful-bench"
 version = "0.1.0"
-description = "Benchmark tooling for evaluating stateful_core coordination behavior."
+description = "V2 stateful-store lease regression smoke."
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -15,11 +15,12 @@ name = "stateful-bench"
 path = "src/main.rs"
 
 [dependencies]
+stateful-core = { path = "../stateful-core" }
+stateful-store = { path = "../stateful-store" }
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-ureq.workspace = true
 uuid.workspace = true
 
 [lints]

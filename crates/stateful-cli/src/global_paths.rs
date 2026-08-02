@@ -10,7 +10,6 @@ pub struct GlobalPaths {
     pub server_lock: PathBuf,
     pub server_log: PathBuf,
     pub repos_dir: PathBuf,
-    pub outbox_dir: PathBuf,
 }
 
 impl GlobalPaths {
@@ -25,7 +24,6 @@ impl GlobalPaths {
             server_log: runtime_dir.join("server.log"),
             runtime_dir,
             repos_dir: home.join("repos"),
-            outbox_dir: home.join("outbox"),
             home,
         }
     }

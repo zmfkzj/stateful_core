@@ -6,7 +6,7 @@ sandbox, access-control system, or hard file-locking boundary.
 
 ## Supported Scope
 
-Security fixes are handled for the current `main` branch until a stable release
+Security fixes are handled for the current `v0_main` branch until a stable release
 policy exists. The current platform support posture is macOS first. Linux
 bubblewrap support is implemented but experimental until release verification is
 in place.
@@ -21,7 +21,7 @@ exploit details, affected paths, tokens, logs, or reproduction steps there.
 
 Useful reports include:
 
-- affected command, hook, MCP tool, or HTTP endpoint
+- affected command, hook, or HTTP endpoint
 - reproduction steps
 - expected and actual behavior
 - whether the issue requires local shell access
@@ -29,13 +29,15 @@ Useful reports include:
 
 ## Local Trust Model
 
-The state server binds to `127.0.0.1` by default. Non-health HTTP endpoints use
-a bearer token stored in local runtime discovery files.
+The state server listens only on loopback addresses and rejects non-loopback
+listener requests. Non-health HTTP endpoints use a bearer token stored in local
+runtime discovery files.
 
-That token is a local trust guard, not a hard security boundary. It helps avoid
-accidental cross-process calls from cooperating local tools, but it does not
-protect against a malicious local user, a compromised shell, or a process that
-can read the repository working tree.
+The bearer token establishes a trusted-local coordination domain, not a hard
+security boundary. Any token holder can assert task and agent identity; those
+identities are not cryptographically separated per task or agent. The token
+does not protect against a malicious local user, a compromised shell, or a
+process that can read the repository working tree.
 
 ## Generated Local Files
 

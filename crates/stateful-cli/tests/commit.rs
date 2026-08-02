@@ -1,1075 +1,424 @@
+use stateful_cli::{
+    CommandIdentity, CommitRequest, ServerRuntime, post_command, process_start_identity_for_pid,
+    run_structured_commit, write_runtime_file,
+};
+use stateful_core::{
+    ActorType, AgentIdentity, CoordinationSettings, SourceKind, SourceRef, WorkspaceIdentity,
+};
 use std::{
     fs,
+    net::{TcpListener, TcpStream},
+    path::Path,
     process::Command,
-    sync::{Arc, Mutex},
+    sync::{Arc, Barrier},
+    thread,
+    time::Duration,
 };
-
-use stateful_cli::{CommitRequest, run_structured_commit};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
-fn structured_commit_rejects_empty_message() {
-    let root = git_repo("stateful-commit-empty-message");
-    let result = run_structured_commit(CommitRequest {
-        repo_root: root.path().to_path_buf(),
-        message: " ".to_string(),
-        paths: vec!["docs/plan.md".to_string()],
-        agent_id: Some("s1".to_string()),
-        workspace_id: Some("w1".to_string()),
-        authorize: None,
-    });
+fn structured_commit_preserves_unrelated_staged_state() {
+    let root = git_repo("stateful-commit-index-preservation");
+    seed(&root, &["docs/plan.md", "docs/other.md"]);
+    fs::write(root.path().join("docs/plan.md"), "plan v2\n")
+        .expect("test operation should succeed");
+    fs::write(root.path().join("docs/other.md"), "caller staged\n")
+        .expect("test operation should succeed");
+    git(root.path(), &["add", "docs/other.md"]);
 
-    assert!(
-        result
-            .expect_err("empty commit message should be rejected")
-            .to_string()
-            .contains("commit message is required")
+    let server = TestServer::start();
+    let identity = start_task(&server, root.path(), "task-index", "agent-index");
+    install_runtime(root.path(), &server.runtime);
+    run_structured_commit(request(root.path(), identity, &["docs/plan.md"]))
+        .expect("explicit target should commit around caller-owned index state");
+
+    assert_eq!(
+        git_output(root.path(), &["show", "HEAD:docs/plan.md"]),
+        "plan v2\n"
     );
+    assert_eq!(
+        git_output(root.path(), &["diff", "--cached", "--name-only"]),
+        "docs/other.md\n"
+    );
+    assert_eq!(
+        git_output(root.path(), &["show", ":docs/other.md"]),
+        "caller staged\n"
+    );
+}
+
+#[test]
+fn structured_commits_serialize_on_git_metadata() {
+    let root = git_repo("stateful-commit-serialization");
+    seed(&root, &["docs/one.md", "docs/two.md"]);
+    fs::write(root.path().join("docs/one.md"), "one v2\n").expect("test operation should succeed");
+    fs::write(root.path().join("docs/two.md"), "two v2\n").expect("test operation should succeed");
+
+    let server = Arc::new(TestServer::start());
+    install_runtime(root.path(), &server.runtime);
+    let first = start_task(&server, root.path(), "task-one", "agent-one");
+    let second = start_task(&server, root.path(), "task-two", "agent-two");
+    let barrier = Arc::new(Barrier::new(2));
+    let run = |identity: CommandIdentity,
+               path: &'static str,
+               barrier: Arc<Barrier>,
+               server: Arc<TestServer>| {
+        let root = root.path().to_path_buf();
+        thread::spawn(move || {
+            barrier.wait();
+            let result = run_structured_commit(request(&root, identity.clone(), &[path]));
+            finish_task(&server, identity);
+            result
+        })
+    };
+    let one = run(
+        first,
+        "docs/one.md",
+        Arc::clone(&barrier),
+        Arc::clone(&server),
+    );
+    let two = run(second, "docs/two.md", barrier, server);
+    one.join()
+        .expect("test operation should succeed")
+        .expect("first commit should succeed");
+    two.join()
+        .expect("test operation should succeed")
+        .expect("queued commit should activate and succeed");
+    assert_eq!(
+        git_output(root.path(), &["rev-list", "--count", "HEAD"]),
+        "3\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn structured_commit_head_cas_rejects_hook_ref_update() {
+    let root = git_repo("stateful-commit-head-cas");
+    seed(&root, &["docs/plan.md"]);
+    fs::write(root.path().join("docs/plan.md"), "plan v2\n")
+        .expect("test operation should succeed");
+    git(
+        root.path(),
+        &["commit", "--allow-empty", "-m", "second seed"],
+    );
+    write_hook(
+        root.path(),
+        "pre-commit",
+        "#!/bin/sh\ngit update-ref HEAD HEAD^\n",
+    );
+    let server = TestServer::start();
+    let identity = start_task(&server, root.path(), "task-head", "agent-head");
+    install_runtime(root.path(), &server.runtime);
+    let head_before = git_output(root.path(), &["rev-parse", "HEAD"]);
+    let error = run_structured_commit(request(root.path(), identity, &["docs/plan.md"]))
+        .expect_err("ref mutation must block the pending HEAD CAS");
+    assert!(error.to_string().contains("pre-commit hook"));
+    assert_eq!(git_output(root.path(), &["rev-parse", "HEAD"]), head_before);
+}
+
+#[cfg(unix)]
+#[test]
+fn only_pre_commit_and_commit_msg_run_in_private_exact_staging() {
+    let root = git_repo("stateful-commit-hooks");
+    seed(&root, &["docs/plan.md"]);
+    fs::write(root.path().join("docs/plan.md"), "plan v2\n")
+        .expect("test operation should succeed");
+    write_hook(
+        root.path(),
+        "pre-commit",
+        "#!/bin/sh\nprintf pre >> docs/plan.md\n",
+    );
+    write_hook(
+        root.path(),
+        "commit-msg",
+        "#!/bin/sh\nprintf msg >> docs/plan.md\n",
+    );
+    let prepare_marker = root.path().join(".prepare-ran");
+    let post_marker = root.path().join(".post-ran");
+    write_hook(
+        root.path(),
+        "prepare-commit-msg",
+        &format!("#!/bin/sh\nprintf bad > {}\n", prepare_marker.display()),
+    );
+    write_hook(
+        root.path(),
+        "post-commit",
+        &format!("#!/bin/sh\nprintf bad > {}\n", post_marker.display()),
+    );
+
+    let server = TestServer::start();
+    let identity = start_task(&server, root.path(), "task-hooks", "agent-hooks");
+    install_runtime(root.path(), &server.runtime);
+    run_structured_commit(request(root.path(), identity, &["docs/plan.md"]))
+        .expect("allowed hooks should run under private exact staging");
+
+    assert_eq!(
+        git_output(root.path(), &["show", "HEAD:docs/plan.md"]),
+        "plan v2\npremsg"
+    );
+    assert!(!prepare_marker.exists());
+    assert!(!post_marker.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn undeclared_hook_workspace_write_blocks_commit_before_ref_update() {
+    let root = git_repo("stateful-commit-hook-escape");
+    seed(&root, &["docs/plan.md"]);
+    fs::write(root.path().join("docs/plan.md"), "plan v2\n")
+        .expect("test operation should succeed");
+    let generated = root.path().join("generated.txt");
+    write_hook(
+        root.path(),
+        "pre-commit",
+        &format!("#!/bin/sh\nprintf generated > {}\n", generated.display()),
+    );
+    let server = TestServer::start();
+    let identity = start_task(
+        &server,
+        root.path(),
+        "task-hook-escape",
+        "agent-hook-escape",
+    );
+    install_runtime(root.path(), &server.runtime);
+    let error = run_structured_commit(request(root.path(), identity, &["docs/plan.md"]))
+        .expect_err("undeclared hook write must fail before commit");
+    assert!(error.to_string().contains("pre-commit hook"));
+    assert!(
+        !generated.exists(),
+        "sandbox must block the write before creation"
+    );
+    assert_eq!(
+        git_output(root.path(), &["rev-list", "--count", "HEAD"]),
+        "1\n"
+    );
+}
+
+#[test]
+fn structured_commit_reports_primary_index_sync_failure_after_head_update() {
+    let root = git_repo("stateful-commit-sync-warning");
+    seed(&root, &["docs/plan.md"]);
+    fs::write(root.path().join("docs/plan.md"), "plan v2\n")
+        .expect("test operation should succeed");
+    fs::write(root.path().join(".git/index.lock"), "").expect("test operation should succeed");
+
+    let server = TestServer::start();
+    let identity = start_task(
+        &server,
+        root.path(),
+        "task-sync-warning",
+        "agent-sync-warning",
+    );
+    install_runtime(root.path(), &server.runtime);
+    let result = run_structured_commit(request(root.path(), identity, &["docs/plan.md"]))
+        .expect("HEAD CAS makes a primary-index synchronization failure non-terminal");
+
+    assert_eq!(
+        result.commit_sha,
+        git_output(root.path(), &["rev-parse", "HEAD"]).trim()
+    );
+    assert_eq!(
+        git_output(root.path(), &["rev-list", "--count", "HEAD"]),
+        "2\n"
+    );
+    assert!(result.warnings.iter().any(|warning| {
+        warning.contains("primary index synchronization after HEAD update failed")
+    }));
 }
 
 #[test]
 fn structured_commit_rejects_broad_pathspecs() {
     let root = git_repo("stateful-commit-broad-path");
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/plan.md"), "plan\n").expect("plan should write");
-    fs::write(root.path().join("docs/other.md"), "other\n").expect("other should write");
+    seed(&root, &["docs/plan.md"]);
+    let server = TestServer::start();
+    let identity = start_task(&server, root.path(), "task-broad", "agent-broad");
+    install_runtime(root.path(), &server.runtime);
 
-    let absolute_plan = root
-        .path()
-        .join("docs/plan.md")
-        .to_string_lossy()
-        .to_string();
-    let rejected_path_lists = vec![
-        Vec::<String>::new(),
-        vec![".".to_string()],
-        vec!["*".to_string()],
-        vec![":/".to_string()],
-        vec!["-n".to_string()],
-        vec!["docs/../plan.md".to_string()],
-        vec!["docs/*.md".to_string()],
-        vec![":(glob)docs/*.md".to_string()],
-        vec!["docs//plan.md".to_string()],
-        vec![absolute_plan],
-        vec!["docs".to_string()],
-        vec!["docs/".to_string()],
-    ];
+    let error = run_structured_commit(request(root.path(), identity, &["docs"]))
+        .expect_err("directory pathspec must be rejected");
+    assert!(
+        error.to_string().contains("explicit file paths"),
+        "{error:#}"
+    );
+}
 
-    for paths in rejected_path_lists {
-        let result = run_structured_commit(CommitRequest {
-            repo_root: root.path().to_path_buf(),
-            message: "docs: add plan".to_string(),
-            paths,
-            agent_id: Some("s1".to_string()),
-            workspace_id: Some("w1".to_string()),
-            authorize: Some(Box::new(|_action, path| {
-                panic!("broad pathspec `{path}` should be rejected before authorization")
-            })),
-        });
+#[test]
+fn structured_commit_commits_deleted_tracked_target() {
+    let root = git_repo("stateful-commit-deleted-target");
+    seed(&root, &["docs/plan.md"]);
+    fs::remove_file(root.path().join("docs/plan.md")).expect("test operation should succeed");
+    let server = TestServer::start();
+    let identity = start_task(&server, root.path(), "task-delete", "agent-delete");
+    install_runtime(root.path(), &server.runtime);
 
-        assert!(
-            result
-                .expect_err("broad pathspec should be rejected")
-                .to_string()
-                .contains("explicit file paths are required")
-        );
-        let staged = git_output(root.path(), &["diff", "--cached", "--name-only"]);
-        assert!(staged.is_empty(), "broad pathspec should not mutate index");
+    run_structured_commit(request(root.path(), identity, &["docs/plan.md"]))
+        .expect("deleted tracked target should commit");
+    let output = Command::new("git")
+        .args(["cat-file", "-e", "HEAD:docs/plan.md"])
+        .current_dir(root.path())
+        .output()
+        .expect("test operation should succeed");
+    assert!(!output.status.success());
+}
+
+#[test]
+fn structured_commit_commits_new_explicit_file() {
+    let root = git_repo("stateful-commit-new-target");
+    seed(&root, &["README.md"]);
+    fs::create_dir_all(root.path().join("docs")).expect("test operation should succeed");
+    fs::write(root.path().join("docs/plan.md"), "new plan\n")
+        .expect("test operation should succeed");
+    let server = TestServer::start();
+    let identity = start_task(&server, root.path(), "task-new", "agent-new");
+    install_runtime(root.path(), &server.runtime);
+
+    run_structured_commit(request(root.path(), identity, &["docs/plan.md"]))
+        .expect("new explicit file should commit");
+    assert_eq!(
+        git_output(root.path(), &["show", "HEAD:docs/plan.md"]),
+        "new plan\n"
+    );
+}
+
+fn request(root: &Path, identity: CommandIdentity, paths: &[&str]) -> CommitRequest {
+    CommitRequest {
+        repo_root: root.to_path_buf(),
+        message: "docs: update plan".to_string(),
+        paths: paths.iter().map(|path| (*path).to_string()).collect(),
+        identity,
     }
 }
 
-#[test]
-fn structured_commit_normalizes_current_dir_file_paths() {
-    let root = git_repo("stateful-commit-dot-slash-path");
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/plan.md"), "plan\n").expect("plan should write");
-
-    let result = run_structured_commit(CommitRequest {
-        repo_root: root.path().to_path_buf(),
-        message: "docs: add plan".to_string(),
-        paths: vec!["./docs/./plan.md".to_string()],
-        agent_id: Some("s1".to_string()),
-        workspace_id: Some("w1".to_string()),
-        authorize: Some(Box::new(|action, path| {
-            assert_eq!(action, "write_file");
-            assert_eq!(path, "docs/plan.md");
-            Ok(())
-        })),
-    })
-    .expect("dot-slash explicit file path should commit");
-
-    assert_eq!(result.committed_paths, vec!["docs/plan.md"]);
+struct TestServer {
+    runtime: ServerRuntime,
 }
 
-#[test]
-fn structured_commit_preserves_whitespace_in_explicit_file_paths() {
-    let root = git_repo("stateful-commit-whitespace-path");
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/report.md"), "normal\n").expect("normal report should write");
-    fs::write(root.path().join("docs/report.md "), "spaced\n").expect("spaced report should write");
-
-    let result = run_structured_commit(CommitRequest {
-        repo_root: root.path().to_path_buf(),
-        message: "docs: add spaced report".to_string(),
-        paths: vec!["docs/report.md ".to_string()],
-        agent_id: Some("s1".to_string()),
-        workspace_id: Some("w1".to_string()),
-        authorize: Some(Box::new(|action, path| {
-            assert_eq!(action, "write_file");
-            assert_eq!(path, "docs/report.md ");
-            Ok(())
-        })),
-    })
-    .expect("spaced explicit file path should commit");
-
-    assert_eq!(result.committed_paths, vec!["docs/report.md "]);
-    let tree = git_output(root.path(), &["ls-tree", "-rz", "--name-only", "HEAD"]);
-    assert!(tree.split('\0').any(|line| line == "docs/report.md "));
-    assert!(!tree.split('\0').any(|line| line == "docs/report.md"));
-    assert_eq!(
-        git_output(root.path(), &["show", "HEAD:docs/report.md "]),
-        "spaced\n"
-    );
-}
-
-#[test]
-fn structured_commit_allows_explicit_tracked_file_under_ignored_directory() {
-    let root = git_repo("stateful-commit-tracked-ignored-file");
-    fs::create_dir_all(root.path().join("docs/superpowers/plans"))
-        .expect("ignored docs dir should write");
-    fs::write(
-        root.path().join("docs/superpowers/plans/implementation.md"),
-        "base\n",
-    )
-    .expect("tracked ignored file should write");
-    git(
-        root.path(),
-        &["add", "docs/superpowers/plans/implementation.md"],
-    );
-    git(root.path(), &["commit", "-m", "docs: seed ignored plan"]);
-    fs::write(root.path().join(".gitignore"), "docs/superpowers/\n")
-        .expect("gitignore should write");
-    fs::write(
-        root.path().join("docs/superpowers/plans/implementation.md"),
-        "updated\n",
-    )
-    .expect("tracked ignored file should update");
-
-    let result = run_structured_commit(CommitRequest {
-        repo_root: root.path().to_path_buf(),
-        message: "docs: update ignored plan".to_string(),
-        paths: vec!["docs/superpowers/plans/implementation.md".to_string()],
-        agent_id: Some("s1".to_string()),
-        workspace_id: Some("w1".to_string()),
-        authorize: Some(Box::new(|action, path| {
-            assert_eq!(action, "write_file");
-            assert_eq!(path, "docs/superpowers/plans/implementation.md");
-            Ok(())
-        })),
-    })
-    .expect("explicit tracked file under ignored directory should commit");
-
-    assert_eq!(
-        result.committed_paths,
-        vec!["docs/superpowers/plans/implementation.md"]
-    );
-    assert_eq!(
-        git_output(
-            root.path(),
-            &["show", "HEAD:docs/superpowers/plans/implementation.md"]
-        ),
-        "updated\n"
-    );
-}
-
-#[test]
-fn structured_commit_rejects_deleted_tracked_directory_before_staging() {
-    let root = git_repo("stateful-commit-deleted-directory");
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/plan.md"), "plan\n").expect("plan should write");
-    fs::write(root.path().join("docs/other.md"), "other\n").expect("other should write");
-    git(root.path(), &["add", "docs"]);
-    git(root.path(), &["commit", "-m", "docs: seed"]);
-    fs::remove_dir_all(root.path().join("docs")).expect("docs dir should be removable");
-
-    let result = run_structured_commit(CommitRequest {
-        repo_root: root.path().to_path_buf(),
-        message: "docs: remove plan".to_string(),
-        paths: vec!["docs".to_string()],
-        agent_id: Some("s1".to_string()),
-        workspace_id: Some("w1".to_string()),
-        authorize: Some(Box::new(|_action, path| {
-            panic!("directory pathspec `{path}` should be rejected before authorization")
-        })),
-    });
-
-    assert!(
-        result
-            .expect_err("deleted directory path should be rejected")
-            .to_string()
-            .contains("explicit file paths are required")
-    );
-    let staged = git_output(root.path(), &["diff", "--cached", "--name-only"]);
-    assert!(
-        staged.is_empty(),
-        "deleted tracked directory should not mutate index"
-    );
-}
-
-#[test]
-fn structured_commit_rejects_unrelated_staged_changes() {
-    let root = git_repo("stateful-commit-unrelated-staged");
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/plan.md"), "plan\n").expect("plan should write");
-    fs::write(root.path().join("docs/other.md"), "other\n").expect("other should write");
-    git(root.path(), &["add", "docs/other.md"]);
-
-    let result = run_structured_commit(CommitRequest {
-        repo_root: root.path().to_path_buf(),
-        message: "docs: add plan".to_string(),
-        paths: vec!["docs/plan.md".to_string()],
-        agent_id: Some("s1".to_string()),
-        workspace_id: Some("w1".to_string()),
-        authorize: None,
-    });
-
-    assert!(
-        result
-            .expect_err("unrelated staged changes should be rejected")
-            .to_string()
-            .contains("unrelated staged changes")
-    );
-}
-
-#[test]
-fn structured_commit_authorizes_deleted_files_as_delete_file() {
-    let root = git_repo("stateful-commit-delete-action");
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/plan.md"), "plan\n").expect("plan should write");
-    git(root.path(), &["add", "docs/plan.md"]);
-    git(root.path(), &["commit", "-m", "docs: seed"]);
-    fs::remove_file(root.path().join("docs/plan.md")).expect("plan should remove");
-    let authorized = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
-    let authorized_for_closure = Arc::clone(&authorized);
-
-    let result = run_structured_commit(CommitRequest {
-        repo_root: root.path().to_path_buf(),
-        message: "docs: remove plan".to_string(),
-        paths: vec!["docs/plan.md".to_string()],
-        agent_id: Some("s1".to_string()),
-        workspace_id: Some("w1".to_string()),
-        authorize: Some(Box::new(move |action, path| {
-            authorized_for_closure
-                .lock()
-                .expect("authorization log should lock")
-                .push((action.to_string(), path.to_string()));
-            Ok(())
-        })),
-    })
-    .expect("commit should succeed");
-
-    assert_eq!(result.committed_paths, vec!["docs/plan.md"]);
-    assert_eq!(
-        *authorized.lock().expect("authorization log should lock"),
-        vec![("delete_file".to_string(), "docs/plan.md".to_string())]
-    );
-    let show = git_output(root.path(), &["show", "--name-status", "--format=", "HEAD"]);
-    assert!(show.lines().any(|line| line == "D\tdocs/plan.md"));
-}
-
-#[test]
-fn structured_commit_does_not_allow_deleted_file_under_write_authorization() {
-    let root = git_repo("stateful-commit-delete-policy");
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/plan.md"), "plan\n").expect("plan should write");
-    git(root.path(), &["add", "docs/plan.md"]);
-    git(root.path(), &["commit", "-m", "docs: seed"]);
-    fs::remove_file(root.path().join("docs/plan.md")).expect("plan should remove");
-
-    let result = run_structured_commit(CommitRequest {
-        repo_root: root.path().to_path_buf(),
-        message: "docs: remove plan".to_string(),
-        paths: vec!["docs/plan.md".to_string()],
-        agent_id: Some("s1".to_string()),
-        workspace_id: Some("w1".to_string()),
-        authorize: Some(Box::new(|action, path| {
-            assert_eq!(path, "docs/plan.md");
-            if action == "delete_file" {
-                anyhow::bail!("delete requires task reservation exact file scope");
+impl TestServer {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test operation should succeed");
+        listener
+            .set_nonblocking(true)
+            .expect("test operation should succeed");
+        let address = listener
+            .local_addr()
+            .expect("test operation should succeed");
+        let token = format!("token-{}", uuid::Uuid::new_v4());
+        let thread_token = token.clone();
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().expect("test operation should succeed");
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener)
+                    .expect("test operation should succeed");
+                stateful_server::serve_listener(
+                    listener,
+                    stateful_server::ServerConfig::new(thread_token),
+                )
+                .await
+                .expect("test operation should succeed");
+            });
+        });
+        for _ in 0..100 {
+            if TcpStream::connect(address).is_ok() {
+                return Self {
+                    runtime: ServerRuntime::new(
+                        format!("http://{address}"),
+                        token,
+                        "workspace-commit",
+                        std::process::id(),
+                        process_start_identity_for_pid(std::process::id())
+                            .expect("current process should have an identity"),
+                    ),
+                };
             }
-            Ok(())
-        })),
-    });
-
-    assert!(
-        result
-            .expect_err("denied delete authorization should fail")
-            .to_string()
-            .contains("delete requires task reservation exact file scope")
-    );
-    let staged = git_output(root.path(), &["diff", "--cached", "--name-only"]);
-    assert!(staged.is_empty(), "denied delete should not mutate index");
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("test server did not become ready");
+    }
 }
 
-#[test]
-fn structured_commit_rejects_write_to_delete_race_after_authorization() {
-    let root = git_repo("stateful-commit-write-delete-race");
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/plan.md"), "base\n").expect("plan should write");
-    git(root.path(), &["add", "docs/plan.md"]);
-    git(root.path(), &["commit", "-m", "docs: seed"]);
-    fs::write(root.path().join("docs/plan.md"), "updated\n").expect("plan should update");
-    let repo_path = root.path().to_path_buf();
-
-    let result = run_structured_commit(CommitRequest {
-        repo_root: root.path().to_path_buf(),
-        message: "docs: update plan".to_string(),
-        paths: vec!["docs/plan.md".to_string()],
-        agent_id: Some("s1".to_string()),
-        workspace_id: Some("w1".to_string()),
-        authorize: Some(Box::new(move |action, path| {
-            assert_eq!(action, "write_file");
-            assert_eq!(path, "docs/plan.md");
-            fs::remove_file(repo_path.join(path)).expect("plan should remove after authorization");
-            Ok(())
-        })),
-    });
-
-    let error = result.expect_err("write-to-delete race should fail");
-    assert!(
-        error
-            .to_string()
-            .contains("changed from write_file to delete_file")
-    );
-    let staged = git_output(root.path(), &["diff", "--cached", "--name-only"]);
-    assert!(
-        staged.is_empty(),
-        "failed race should not mutate repo index"
-    );
-    assert_eq!(
-        git_output(root.path(), &["rev-list", "--count", "HEAD"]),
-        "1\n"
-    );
+fn install_runtime(root: &Path, runtime: &ServerRuntime) {
+    write_runtime_file(root, runtime).expect("test operation should succeed");
 }
 
-#[test]
-fn structured_commit_rejects_delete_to_write_race_after_authorization() {
-    let root = git_repo("stateful-commit-delete-write-race");
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/plan.md"), "base\n").expect("plan should write");
-    git(root.path(), &["add", "docs/plan.md"]);
-    git(root.path(), &["commit", "-m", "docs: seed"]);
-    fs::remove_file(root.path().join("docs/plan.md")).expect("plan should remove");
-    let repo_path = root.path().to_path_buf();
-
-    let result = run_structured_commit(CommitRequest {
-        repo_root: root.path().to_path_buf(),
-        message: "docs: restore plan".to_string(),
-        paths: vec!["docs/plan.md".to_string()],
-        agent_id: Some("s1".to_string()),
-        workspace_id: Some("w1".to_string()),
-        authorize: Some(Box::new(move |action, path| {
-            assert_eq!(action, "delete_file");
-            assert_eq!(path, "docs/plan.md");
-            fs::write(repo_path.join(path), "restored\n")
-                .expect("plan should be restored after authorization");
-            Ok(())
-        })),
-    });
-
-    let error = result.expect_err("delete-to-write race should fail");
-    assert!(
-        error
-            .to_string()
-            .contains("changed from delete_file to write_file")
-    );
-    let staged = git_output(root.path(), &["diff", "--cached", "--name-only"]);
-    assert!(
-        staged.is_empty(),
-        "failed race should not mutate repo index"
-    );
-    assert_eq!(
-        git_output(root.path(), &["rev-list", "--count", "HEAD"]),
-        "1\n"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn structured_commit_rejects_pre_commit_hook_write_to_delete_action_change() {
-    let root = git_repo("stateful-commit-hook-write-delete-race");
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/plan.md"), "base\n").expect("plan should write");
-    git(root.path(), &["add", "docs/plan.md"]);
-    git(root.path(), &["commit", "-m", "docs: seed"]);
-    fs::write(root.path().join("docs/plan.md"), "updated\n").expect("plan should update");
-    let hook_path = root.path().join(".git/hooks/pre-commit");
-    fs::write(
-        &hook_path,
-        "#!/bin/sh\nrm docs/plan.md\ngit add docs/plan.md\nexit 0\n",
+fn start_task(server: &TestServer, root: &Path, task: &str, agent: &str) -> CommandIdentity {
+    let identity = identity(root, task, agent);
+    let _: stateful_store::TaskCommandResult = post_command(
+        &server.runtime,
+        "/v2/tasks/start",
+        &identity,
+        &stateful_store::TaskStartInput {
+            next_action: "commit".to_string(),
+            settings: CoordinationSettings {
+                inactivity_timeout_seconds: 90,
+                ..CoordinationSettings::default()
+            },
+            expires_at: future_timestamp(),
+            runtime_process: None,
+        },
     )
-    .expect("pre-commit hook should write");
-    let mut permissions = fs::metadata(&hook_path)
-        .expect("pre-commit metadata should load")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&hook_path, permissions).expect("pre-commit hook should be executable");
-
-    let result = run_structured_commit(CommitRequest {
-        repo_root: root.path().to_path_buf(),
-        message: "docs: update plan".to_string(),
-        paths: vec!["docs/plan.md".to_string()],
-        agent_id: Some("s1".to_string()),
-        workspace_id: Some("w1".to_string()),
-        authorize: Some(Box::new(|action, path| {
-            assert_eq!(action, "write_file");
-            assert_eq!(path, "docs/plan.md");
-            Ok(())
-        })),
-    });
-
-    let error = result.expect_err("hook write-to-delete action change should fail");
-    assert!(
-        error
-            .to_string()
-            .contains("changed from write_file to delete_file")
-    );
-    let staged = git_output(root.path(), &["diff", "--cached", "--name-only"]);
-    assert!(
-        staged.is_empty(),
-        "failed hook race should not mutate repo index"
-    );
-    assert_eq!(
-        git_output(root.path(), &["rev-list", "--count", "HEAD"]),
-        "1\n"
-    );
+    .expect("test operation should succeed");
+    identity
 }
 
-#[cfg(unix)]
-#[test]
-fn structured_commit_rejects_pre_commit_hook_delete_to_write_action_change() {
-    let root = git_repo("stateful-commit-hook-delete-write-race");
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/plan.md"), "base\n").expect("plan should write");
-    git(root.path(), &["add", "docs/plan.md"]);
-    git(root.path(), &["commit", "-m", "docs: seed"]);
-    fs::remove_file(root.path().join("docs/plan.md")).expect("plan should remove");
-    let hook_path = root.path().join(".git/hooks/pre-commit");
-    fs::write(
-        &hook_path,
-        "#!/bin/sh\nprintf 'restored\\n' > docs/plan.md\ngit add docs/plan.md\nexit 0\n",
+fn finish_task(server: &TestServer, identity: CommandIdentity) {
+    let identity = CommandIdentity::new_now(
+        identity.task_id,
+        uuid::Uuid::new_v4().to_string(),
+        identity.agent,
+        identity.workspace,
+        identity.source,
+    );
+    let _: stateful_store::TaskCommandResult = post_command(
+        &server.runtime,
+        "/v2/tasks/finalize",
+        &identity,
+        &stateful_store::TaskEndInput { handoff: None },
     )
-    .expect("pre-commit hook should write");
-    let mut permissions = fs::metadata(&hook_path)
-        .expect("pre-commit metadata should load")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&hook_path, permissions).expect("pre-commit hook should be executable");
-
-    let result = run_structured_commit(CommitRequest {
-        repo_root: root.path().to_path_buf(),
-        message: "docs: restore plan".to_string(),
-        paths: vec!["docs/plan.md".to_string()],
-        agent_id: Some("s1".to_string()),
-        workspace_id: Some("w1".to_string()),
-        authorize: Some(Box::new(|action, path| {
-            assert_eq!(action, "delete_file");
-            assert_eq!(path, "docs/plan.md");
-            Ok(())
-        })),
-    });
-
-    let error = result.expect_err("hook delete-to-write action change should fail");
-    assert!(
-        error
-            .to_string()
-            .contains("changed from delete_file to write_file")
-    );
-    let staged = git_output(root.path(), &["diff", "--cached", "--name-only"]);
-    assert!(
-        staged.is_empty(),
-        "failed hook race should not mutate repo index"
-    );
-    assert_eq!(
-        git_output(root.path(), &["rev-list", "--count", "HEAD"]),
-        "1\n"
-    );
+    .expect("test operation should succeed");
 }
 
-#[cfg(unix)]
-#[test]
-fn structured_commit_uses_validated_index_when_hook_changes_worktree_without_staging() {
-    let root = git_repo("stateful-commit-hook-worktree-delete");
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/plan.md"), "base\n").expect("plan should write");
-    git(root.path(), &["add", "docs/plan.md"]);
-    git(root.path(), &["commit", "-m", "docs: seed"]);
-    fs::write(root.path().join("docs/plan.md"), "updated\n").expect("plan should update");
-    let hook_path = root.path().join(".git/hooks/pre-commit");
-    fs::write(&hook_path, "#!/bin/sh\nrm docs/plan.md\nexit 0\n")
-        .expect("pre-commit hook should write");
-    let mut permissions = fs::metadata(&hook_path)
-        .expect("pre-commit metadata should load")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&hook_path, permissions).expect("pre-commit hook should be executable");
-
-    let result = run_structured_commit(CommitRequest {
-        repo_root: root.path().to_path_buf(),
-        message: "docs: update plan".to_string(),
-        paths: vec!["docs/plan.md".to_string()],
-        agent_id: Some("s1".to_string()),
-        workspace_id: Some("w1".to_string()),
-        authorize: Some(Box::new(|action, path| {
-            assert_eq!(action, "write_file");
-            assert_eq!(path, "docs/plan.md");
-            Ok(())
-        })),
-    })
-    .expect("commit should use validated temporary index");
-
-    assert_eq!(result.committed_paths, vec!["docs/plan.md"]);
-    assert_eq!(
-        git_output(root.path(), &["show", "HEAD:docs/plan.md"]),
-        "updated\n"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn structured_commit_provides_git_locator_env_to_hooks() {
-    let root = git_repo("stateful-commit-hook-git-env");
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/plan.md"), "plan\n").expect("plan should write");
-    let hook_path = root.path().join(".git/hooks/pre-commit");
-    fs::write(
-        &hook_path,
-        "#!/bin/sh\ntest -n \"$GIT_DIR\" || { echo missing GIT_DIR >&2; exit 1; }\ntest -n \"$GIT_WORK_TREE\" || { echo missing GIT_WORK_TREE >&2; exit 1; }\ngit --git-dir=\"$GIT_DIR\" rev-parse --git-dir >/dev/null\n",
+fn identity(root: &Path, task: &str, agent: &str) -> CommandIdentity {
+    CommandIdentity::new_now(
+        task,
+        uuid::Uuid::new_v4().to_string(),
+        AgentIdentity {
+            agent_id: agent.to_string(),
+            turn_id: None,
+            actor_id: agent.to_string(),
+            actor_type: ActorType::Agent,
+            owner_id: None,
+            parent_agent_id: None,
+            parent_actor_id: None,
+        },
+        WorkspaceIdentity {
+            root: root.to_string_lossy().to_string(),
+            workspace_id: "workspace-commit".to_string(),
+            repo_id: "repo-commit".to_string(),
+            worktree_id: "worktree-commit".to_string(),
+            branch: "main".to_string(),
+        },
+        SourceRef {
+            kind: SourceKind::Cli,
+            event: "commit_test".to_string(),
+            tool_name: None,
+            source_ref: "test".to_string(),
+        },
     )
-    .expect("pre-commit hook should write");
-    let mut permissions = fs::metadata(&hook_path)
-        .expect("pre-commit metadata should load")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&hook_path, permissions).expect("pre-commit hook should be executable");
-
-    run_structured_commit(CommitRequest {
-        repo_root: root.path().to_path_buf(),
-        message: "docs: add plan".to_string(),
-        paths: vec!["docs/plan.md".to_string()],
-        agent_id: Some("s1".to_string()),
-        workspace_id: Some("w1".to_string()),
-        authorize: Some(Box::new(|action, path| {
-            assert_eq!(action, "write_file");
-            assert_eq!(path, "docs/plan.md");
-            Ok(())
-        })),
-    })
-    .expect("commit should provide Git hook locator env");
 }
 
-#[cfg(unix)]
-#[test]
-fn structured_commit_rejects_prepare_commit_msg_hook_action_change() {
-    let root = git_repo("stateful-commit-prepare-hook-action-race");
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/plan.md"), "base\n").expect("plan should write");
-    git(root.path(), &["add", "docs/plan.md"]);
-    git(root.path(), &["commit", "-m", "docs: seed"]);
-    fs::write(root.path().join("docs/plan.md"), "updated\n").expect("plan should update");
-    let hook_path = root.path().join(".git/hooks/prepare-commit-msg");
-    fs::write(
-        &hook_path,
-        "#!/bin/sh\nrm docs/plan.md\ngit add docs/plan.md\nexit 0\n",
-    )
-    .expect("prepare-commit-msg hook should write");
-    let mut permissions = fs::metadata(&hook_path)
-        .expect("prepare-commit-msg metadata should load")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&hook_path, permissions).expect("prepare-commit-msg should be executable");
-
-    let result = run_structured_commit(CommitRequest {
-        repo_root: root.path().to_path_buf(),
-        message: "docs: update plan".to_string(),
-        paths: vec!["docs/plan.md".to_string()],
-        agent_id: Some("s1".to_string()),
-        workspace_id: Some("w1".to_string()),
-        authorize: Some(Box::new(|action, path| {
-            assert_eq!(action, "write_file");
-            assert_eq!(path, "docs/plan.md");
-            Ok(())
-        })),
-    });
-
-    let error = result.expect_err("prepare hook action change should fail");
-    assert!(
-        error
-            .to_string()
-            .contains("changed from write_file to delete_file")
-    );
-    let staged = git_output(root.path(), &["diff", "--cached", "--name-only"]);
-    assert!(
-        staged.is_empty(),
-        "failed prepare hook race should not mutate repo index"
-    );
-    assert_eq!(
-        git_output(root.path(), &["rev-list", "--count", "HEAD"]),
-        "1\n"
-    );
+fn future_timestamp() -> String {
+    use time::{Duration as TimeDuration, OffsetDateTime, format_description::well_known::Rfc3339};
+    (OffsetDateTime::now_utc() + TimeDuration::seconds(30))
+        .format(&Rfc3339)
+        .expect("test operation should succeed")
 }
 
-#[cfg(unix)]
-#[test]
-fn structured_commit_runs_commit_msg_hook_before_committing() {
-    let root = git_repo("stateful-commit-msg-hook-policy");
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("README.md"), "seed\n").expect("readme should write");
-    git(root.path(), &["add", "README.md"]);
-    git(root.path(), &["commit", "-m", "docs: seed"]);
-    fs::write(root.path().join("docs/plan.md"), "plan\n").expect("plan should write");
-    let hook_path = root.path().join(".git/hooks/commit-msg");
-    fs::write(&hook_path, "#!/bin/sh\ngrep -q '^JIRA-' \"$1\" || exit 1\n")
-        .expect("commit-msg hook should write");
-    let mut permissions = fs::metadata(&hook_path)
-        .expect("commit-msg metadata should load")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&hook_path, permissions).expect("commit-msg hook should be executable");
-
-    let result = run_structured_commit(CommitRequest {
-        repo_root: root.path().to_path_buf(),
-        message: "docs: add plan".to_string(),
-        paths: vec!["docs/plan.md".to_string()],
-        agent_id: Some("s1".to_string()),
-        workspace_id: Some("w1".to_string()),
-        authorize: Some(Box::new(|action, path| {
-            assert_eq!(action, "write_file");
-            assert_eq!(path, "docs/plan.md");
-            Ok(())
-        })),
-    });
-
-    assert!(
-        result
-            .expect_err("commit-msg hook should reject message")
-            .to_string()
-            .contains("commit-msg hook failed")
-    );
-    assert_eq!(
-        git_output(root.path(), &["rev-list", "--count", "HEAD"]),
-        "1\n"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn structured_commit_runs_post_commit_hook_after_successful_commit() {
-    let root = git_repo("stateful-post-commit-hook");
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/plan.md"), "plan\n").expect("plan should write");
-    let hook_path = root.path().join(".git/hooks/post-commit");
-    fs::write(&hook_path, "#!/bin/sh\nprintf ran > .post-commit-ran\n")
-        .expect("post-commit hook should write");
-    let mut permissions = fs::metadata(&hook_path)
-        .expect("post-commit metadata should load")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&hook_path, permissions).expect("post-commit hook should be executable");
-
-    run_structured_commit(CommitRequest {
-        repo_root: root.path().to_path_buf(),
-        message: "docs: add plan".to_string(),
-        paths: vec!["docs/plan.md".to_string()],
-        agent_id: Some("s1".to_string()),
-        workspace_id: Some("w1".to_string()),
-        authorize: Some(Box::new(|action, path| {
-            assert_eq!(action, "write_file");
-            assert_eq!(path, "docs/plan.md");
-            Ok(())
-        })),
-    })
-    .expect("commit should succeed");
-
-    assert_eq!(
-        fs::read_to_string(root.path().join(".post-commit-ran"))
-            .expect("post-commit marker should read"),
-        "ran"
-    );
-}
-
-#[test]
-fn structured_commit_rejects_unstaged_rename_across_explicit_paths() {
-    let root = git_repo("stateful-commit-unstaged-rename");
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/old.md"), "plan\n").expect("old file should write");
-    git(root.path(), &["add", "docs/old.md"]);
-    git(root.path(), &["commit", "-m", "docs: seed"]);
-    fs::rename(
-        root.path().join("docs/old.md"),
-        root.path().join("docs/new.md"),
-    )
-    .expect("file should rename");
-
-    let result = run_structured_commit(CommitRequest {
-        repo_root: root.path().to_path_buf(),
-        message: "docs: rename plan".to_string(),
-        paths: vec!["docs/old.md".to_string(), "docs/new.md".to_string()],
-        agent_id: Some("s1".to_string()),
-        workspace_id: Some("w1".to_string()),
-        authorize: Some(Box::new(|_action, _path| Ok(()))),
-    });
-
-    assert!(
-        result
-            .expect_err("unstaged rename should be rejected")
-            .to_string()
-            .contains("rename path status")
-    );
-    let staged = git_output(root.path(), &["diff", "--cached", "--name-only"]);
-    assert!(staged.is_empty(), "rejected rename should not mutate index");
-}
-
-#[test]
-fn structured_commit_rejects_staged_git_mv_across_explicit_paths() {
-    let root = git_repo("stateful-commit-staged-rename");
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/old.md"), "plan\n").expect("old file should write");
-    git(root.path(), &["add", "docs/old.md"]);
-    git(root.path(), &["commit", "-m", "docs: seed"]);
-    git(root.path(), &["mv", "docs/old.md", "docs/new.md"]);
-
-    let result = run_structured_commit(CommitRequest {
-        repo_root: root.path().to_path_buf(),
-        message: "docs: rename plan".to_string(),
-        paths: vec!["docs/old.md".to_string(), "docs/new.md".to_string()],
-        agent_id: Some("s1".to_string()),
-        workspace_id: Some("w1".to_string()),
-        authorize: Some(Box::new(|_action, _path| Ok(()))),
-    });
-
-    assert!(
-        result
-            .expect_err("staged rename should be rejected")
-            .to_string()
-            .contains("rename path status")
-    );
-}
-
-#[test]
-fn structured_commit_allows_copied_file_status_as_new_file() {
-    let root = git_repo("stateful-commit-copy-status");
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/template.md"), "copied content\n")
-        .expect("template should write");
-    git(root.path(), &["add", "docs/template.md"]);
-    git(root.path(), &["commit", "-m", "docs: seed"]);
-    fs::copy(
-        root.path().join("docs/template.md"),
-        root.path().join("docs/copy.md"),
-    )
-    .expect("file should copy");
-
-    let authorized = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
-    let authorized_for_commit = Arc::clone(&authorized);
-    let result = run_structured_commit(CommitRequest {
-        repo_root: root.path().to_path_buf(),
-        message: "docs: copy template".to_string(),
-        paths: vec!["docs/copy.md".to_string()],
-        agent_id: Some("s1".to_string()),
-        workspace_id: Some("w1".to_string()),
-        authorize: Some(Box::new(move |action, path| {
-            authorized_for_commit
-                .lock()
-                .expect("authorized actions should lock")
-                .push((action.to_string(), path.to_string()));
-            Ok(())
-        })),
-    })
-    .expect("copied file should commit as a new file");
-
-    assert_eq!(result.committed_paths, vec!["docs/copy.md"]);
-    assert_eq!(
-        *authorized.lock().expect("authorized actions should lock"),
-        vec![("write_file".to_string(), "docs/copy.md".to_string())]
-    );
-    let last_commit = git_output(root.path(), &["show", "--name-only", "--format=", "HEAD"]);
-    assert!(last_commit.lines().any(|line| line == "docs/copy.md"));
-}
-
-#[test]
-fn structured_commit_allows_independent_delete_and_add_across_explicit_paths() {
-    let root = git_repo("stateful-commit-delete-and-add");
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/old.md"), "short old file\n").expect("old file should write");
-    git(root.path(), &["add", "docs/old.md"]);
-    git(root.path(), &["commit", "-m", "docs: seed"]);
-    fs::remove_file(root.path().join("docs/old.md")).expect("old file should remove");
-    fs::write(
-        root.path().join("docs/new.md"),
-        "new file with unrelated content\nand another line\n",
-    )
-    .expect("new file should write");
-    let authorized = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
-    let authorized_for_closure = Arc::clone(&authorized);
-
-    let result = run_structured_commit(CommitRequest {
-        repo_root: root.path().to_path_buf(),
-        message: "docs: replace plan files".to_string(),
-        paths: vec!["docs/old.md".to_string(), "docs/new.md".to_string()],
-        agent_id: Some("s1".to_string()),
-        workspace_id: Some("w1".to_string()),
-        authorize: Some(Box::new(move |action, path| {
-            authorized_for_closure
-                .lock()
-                .expect("authorization log should lock")
-                .push((action.to_string(), path.to_string()));
-            Ok(())
-        })),
-    })
-    .expect("independent delete and add should commit");
-
-    assert_eq!(
-        result.committed_paths,
-        vec!["docs/new.md".to_string(), "docs/old.md".to_string()]
-    );
-    assert_eq!(
-        *authorized.lock().expect("authorization log should lock"),
-        vec![
-            ("write_file".to_string(), "docs/new.md".to_string()),
-            ("delete_file".to_string(), "docs/old.md".to_string())
-        ]
-    );
-    let show = git_output(root.path(), &["show", "--name-status", "--format=", "HEAD"]);
-    assert!(show.lines().any(|line| line == "A\tdocs/new.md"));
-    assert!(show.lines().any(|line| line == "D\tdocs/old.md"));
-}
-
-#[test]
-fn structured_commit_stages_only_explicit_paths_and_commits() {
-    let root = git_repo("stateful-commit-success");
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/plan.md"), "plan\n").expect("plan should write");
-    fs::write(root.path().join("docs/untracked.md"), "untracked\n")
-        .expect("untracked should write");
-
-    let result = run_structured_commit(CommitRequest {
-        repo_root: root.path().to_path_buf(),
-        message: "docs: add plan".to_string(),
-        paths: vec!["docs/plan.md".to_string()],
-        agent_id: Some("s1".to_string()),
-        workspace_id: Some("w1".to_string()),
-        authorize: Some(Box::new(|action, path| {
-            assert_eq!(action, "write_file");
-            assert_eq!(path, "docs/plan.md");
-            Ok(())
-        })),
-    })
-    .expect("commit should succeed");
-
-    assert_eq!(result.committed_paths, vec!["docs/plan.md"]);
-    let head = git_output(root.path(), &["rev-parse", "HEAD"]);
-    assert_eq!(result.commit_sha, head.trim());
-    let show = git_output(root.path(), &["show", "--name-only", "--format=", "HEAD"]);
-    assert!(show.lines().any(|line| line == "docs/plan.md"));
-    assert!(!show.lines().any(|line| line == "docs/untracked.md"));
-}
-
-#[cfg(unix)]
-#[test]
-fn structured_commit_restores_original_index_after_commit_hook_failure() {
-    let root = git_repo("stateful-commit-hook-failure");
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/plan.md"), "base\n").expect("plan should write");
-    git(root.path(), &["add", "docs/plan.md"]);
-    git(root.path(), &["commit", "-m", "docs: seed"]);
-    fs::write(root.path().join("docs/plan.md"), "staged\n").expect("staged plan should write");
-    git(root.path(), &["add", "docs/plan.md"]);
-    fs::write(root.path().join("docs/plan.md"), "worktree\n").expect("worktree plan should write");
-    let hook_path = root.path().join(".git/hooks/pre-commit");
-    fs::write(&hook_path, "#!/bin/sh\nexit 1\n").expect("pre-commit hook should write");
-    let mut permissions = fs::metadata(&hook_path)
-        .expect("pre-commit metadata should load")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&hook_path, permissions).expect("pre-commit hook should be executable");
-
-    let result = run_structured_commit(CommitRequest {
-        repo_root: root.path().to_path_buf(),
-        message: "docs: update plan".to_string(),
-        paths: vec!["docs/plan.md".to_string()],
-        agent_id: Some("s1".to_string()),
-        workspace_id: Some("w1".to_string()),
-        authorize: Some(Box::new(|action, path| {
-            assert_eq!(action, "write_file");
-            assert_eq!(path, "docs/plan.md");
-            Ok(())
-        })),
-    });
-
-    assert!(
-        result
-            .expect_err("failing pre-commit hook should fail commit")
-            .to_string()
-            .contains("pre-commit hook failed")
-    );
-    let staged = git_output(root.path(), &["diff", "--cached", "--", "docs/plan.md"]);
-    assert!(staged.contains("+staged"));
-    assert!(!staged.contains("+worktree"));
-    let worktree = fs::read_to_string(root.path().join("docs/plan.md")).expect("plan should read");
-    assert_eq!(worktree, "worktree\n");
-}
-
-#[cfg(unix)]
-#[test]
-fn structured_commit_clears_index_after_initial_commit_hook_failure() {
-    let root = git_repo("stateful-commit-initial-hook-failure");
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/plan.md"), "plan\n").expect("plan should write");
-    let hook_path = root.path().join(".git/hooks/pre-commit");
-    fs::write(&hook_path, "#!/bin/sh\nexit 1\n").expect("pre-commit hook should write");
-    let mut permissions = fs::metadata(&hook_path)
-        .expect("pre-commit metadata should load")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&hook_path, permissions).expect("pre-commit hook should be executable");
-
-    let result = run_structured_commit(CommitRequest {
-        repo_root: root.path().to_path_buf(),
-        message: "docs: initial plan".to_string(),
-        paths: vec!["docs/plan.md".to_string()],
-        agent_id: Some("s1".to_string()),
-        workspace_id: Some("w1".to_string()),
-        authorize: Some(Box::new(|action, path| {
-            assert_eq!(action, "write_file");
-            assert_eq!(path, "docs/plan.md");
-            Ok(())
-        })),
-    });
-
-    assert!(
-        result
-            .expect_err("failing pre-commit hook should fail initial commit")
-            .to_string()
-            .contains("pre-commit hook failed")
-    );
-    let staged = git_output(root.path(), &["diff", "--cached", "--name-only"]);
-    assert!(
-        staged.is_empty(),
-        "failed initial commit should not leave index entries"
-    );
-    let worktree = fs::read_to_string(root.path().join("docs/plan.md")).expect("plan should read");
-    assert_eq!(worktree, "plan\n");
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn structured_commit_rejects_unrelated_index_entries_added_by_successful_hook() {
-    let root = git_repo("stateful-commit-hook-success-adds-unrelated");
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/plan.md"), "base\n").expect("plan should write");
-    git(root.path(), &["add", "docs/plan.md"]);
-    git(root.path(), &["commit", "-m", "docs: seed"]);
-    fs::write(root.path().join("docs/plan.md"), "worktree\n").expect("plan should write");
-    let hook_path = root.path().join(".git/hooks/pre-commit");
-    fs::write(
-        &hook_path,
-        "#!/bin/sh\nprintf 'generated\\n' > generated.txt\ngit add generated.txt\nexit 0\n",
-    )
-    .expect("pre-commit hook should write");
-    let mut permissions = fs::metadata(&hook_path)
-        .expect("pre-commit metadata should load")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&hook_path, permissions).expect("pre-commit hook should be executable");
-
-    let result = run_structured_commit(CommitRequest {
-        repo_root: root.path().to_path_buf(),
-        message: "docs: update plan".to_string(),
-        paths: vec!["docs/plan.md".to_string()],
-        agent_id: Some("s1".to_string()),
-        workspace_id: Some("w1".to_string()),
-        authorize: Some(Box::new(|action, path| {
-            assert_eq!(action, "write_file");
-            assert_eq!(path, "docs/plan.md");
-            Ok(())
-        })),
-    });
-
-    let error = result
-        .expect_err("hook worktree mutation should fail commit")
-        .to_string();
-    assert!(
-        error.contains("pre-commit hook failed") || error.contains("modified the worktree"),
-        "unexpected error: {error}"
-    );
-    assert_eq!(
-        git_output(root.path(), &["rev-list", "--count", "HEAD"]),
-        "1\n"
-    );
-
-    let staged = git_output(root.path(), &["diff", "--cached", "--name-only"]);
-    assert!(
-        staged.is_empty(),
-        "rejected hook should not leave unrelated staged files"
-    );
-    assert!(
-        !root.path().join("generated.txt").exists(),
-        "read-only hook execution should not leave generated worktree files"
-    );
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn structured_commit_restores_unrelated_index_entries_added_by_failed_hook() {
-    let root = git_repo("stateful-commit-hook-adds-unrelated");
-    fs::create_dir_all(root.path().join("docs")).expect("docs dir should write");
-    fs::write(root.path().join("docs/plan.md"), "base\n").expect("plan should write");
-    git(root.path(), &["add", "docs/plan.md"]);
-    git(root.path(), &["commit", "-m", "docs: seed"]);
-    fs::write(root.path().join("docs/plan.md"), "worktree\n").expect("plan should write");
-    let hook_path = root.path().join(".git/hooks/pre-commit");
-    fs::write(
-        &hook_path,
-        "#!/bin/sh\nprintf 'generated\\n' > generated.txt\ngit add generated.txt\nexit 1\n",
-    )
-    .expect("pre-commit hook should write");
-    let mut permissions = fs::metadata(&hook_path)
-        .expect("pre-commit metadata should load")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&hook_path, permissions).expect("pre-commit hook should be executable");
-
-    let result = run_structured_commit(CommitRequest {
-        repo_root: root.path().to_path_buf(),
-        message: "docs: update plan".to_string(),
-        paths: vec!["docs/plan.md".to_string()],
-        agent_id: Some("s1".to_string()),
-        workspace_id: Some("w1".to_string()),
-        authorize: Some(Box::new(|action, path| {
-            assert_eq!(action, "write_file");
-            assert_eq!(path, "docs/plan.md");
-            Ok(())
-        })),
-    });
-
-    assert!(
-        result
-            .expect_err("failing pre-commit hook should fail commit")
-            .to_string()
-            .contains("pre-commit hook failed")
-    );
-    let staged = git_output(root.path(), &["diff", "--cached", "--name-only"]);
-    assert!(
-        staged.is_empty(),
-        "failed hook should not leave unrelated staged files"
-    );
-    assert!(!root.path().join("generated.txt").exists());
-}
-
-fn git_repo(name: &str) -> tempfile_root::TempRoot {
-    let root = tempfile_root::TempRoot::new(name);
+fn git_repo(name: &str) -> tempfile::TempDir {
+    let root = tempfile::Builder::new()
+        .prefix(name)
+        .tempdir()
+        .expect("test operation should succeed");
     git(root.path(), &["init"]);
     git(root.path(), &["config", "user.name", "stateful test"]);
     git(
@@ -1079,43 +428,51 @@ fn git_repo(name: &str) -> tempfile_root::TempRoot {
     root
 }
 
-fn git(root: &std::path::Path, args: &[&str]) {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .status()
-        .expect("git should run");
-    assert!(status.success(), "git {args:?} should succeed");
+fn seed(root: &tempfile::TempDir, paths: &[&str]) {
+    for path in paths {
+        let path = root.path().join(path);
+        fs::create_dir_all(path.parent().expect("seed path should have a parent"))
+            .expect("test operation should succeed");
+        fs::write(path, "base\n").expect("test operation should succeed");
+    }
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "seed"]);
 }
 
-fn git_output(root: &std::path::Path, args: &[&str]) -> String {
+#[cfg(unix)]
+fn write_hook(root: &Path, name: &str, script: &str) {
+    let path = root.join(".git/hooks").join(name);
+    fs::write(&path, script).expect("test operation should succeed");
+    let mut permissions = fs::metadata(&path)
+        .expect("test operation should succeed")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).expect("test operation should succeed");
+}
+
+fn git(root: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)
         .current_dir(root)
         .output()
-        .expect("git should run");
-    assert!(output.status.success(), "git {args:?} should succeed");
-    String::from_utf8(output.stdout).expect("git output should be utf8")
+        .expect("test operation should succeed");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
-mod tempfile_root {
-    use std::path::Path;
-
-    pub struct TempRoot {
-        root: tempfile::TempDir,
-    }
-
-    impl TempRoot {
-        pub fn new(name: &str) -> Self {
-            let root = tempfile::Builder::new()
-                .prefix(&format!("{name}-"))
-                .tempdir()
-                .expect("temp dir should create");
-            Self { root }
-        }
-
-        pub fn path(&self) -> &Path {
-            self.root.path()
-        }
-    }
+fn git_output(root: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .expect("test operation should succeed");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("test operation should succeed")
 }

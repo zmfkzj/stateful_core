@@ -1,66 +1,47 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::{
-    io::Write,
+    io::{Read, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
 };
 
-mod codex_benchmark;
 mod codex_wrapper;
 mod commit;
 mod global_paths;
 mod hook;
 mod install;
-mod lan;
-mod outbox;
 mod push;
 mod repo_registry;
 mod runtime;
+pub mod runtime_contract;
 mod sandbox;
 mod server_lifecycle;
-mod shadow_guard;
 mod shell_command;
 
-pub use codex_wrapper::{
-    CodexInvocation, CodexSandboxMode, CodexWrapperOptions, build_codex_invocation, run_codex,
-};
+pub use codex_wrapper::{CodexInvocation, CodexWrapperOptions, build_codex_invocation, run_codex};
 pub use commit::{CommitRequest, CommitResult, run_structured_commit};
 pub use global_paths::GlobalPaths;
 pub use hook::{
     HookOutcome, OmpHookOutcome, handle_omp_post_tool_use_with_runtime,
     handle_omp_pre_tool_use_with_runtime, handle_omp_session_start_with_runtime,
-    handle_post_tool_use_in_repo, handle_pre_tool_use, handle_pre_tool_use_in_repo,
-    handle_session_start_in_repo, handle_stop_in_repo, handle_user_prompt_submit_in_repo,
+    handle_pre_tool_use, handle_pre_tool_use_in_repo, handle_stop_in_repo,
+    handle_user_prompt_submit_in_repo,
 };
 pub use install::{
     CodexInstallOptions, InstallOptions, InstallPlan, OmpInstallOptions, apply_codex_install,
     apply_global_install, apply_omp_install, current_stateful_binary_path,
     default_codex_config_path, plan_codex_install, plan_global_install, plan_omp_install,
 };
-pub use lan::{
-    ServerJoinOptions, ServerJoinResult, ServerStartRuntimeOptions, ServerStartRuntimeResult,
-    join_server_runtime, print_server_start_result, server_join_commands,
-    server_start_runtime_result, start_server_runtime,
-};
-pub use outbox::{sync_outbox_in_repo, sync_outbox_in_repo_with_runtime, sync_outbox_with_runtime};
 pub use push::{PushRequest, PushResult, run_structured_push};
 pub use repo_registry::{
-    RepoEntry, RepoGate, RepoIdentity, RepoRegistry, RepoToolList, allow_tool_for_repo,
-    allowed_tools_for_repo, deny_tool_for_repo, detect_git_root, disable_repo,
-    effective_workspace_id_for_repo, enable_repo, record_unclassified_tool_for_repo, repo_gate,
-    repo_identity_for_enabled_repo, tool_allowed_for_enabled_repo, tool_list_for_repo,
-    workspace_id_for_enabled_repo, workspace_id_for_repo_identity,
+    RepoEntry, RepoGate, RepoIdentity, RepoRegistry, detect_git_root, disable_repo, enable_repo,
+    repo_gate, repo_identity_for_enabled_repo, workspace_id_for_enabled_repo,
 };
 pub use runtime::{
-    AgentContext, HttpResponse, ProtocolEnvelopeArgs, ReservationCancelArgs, ReservationClaimArgs,
-    ReservationDeclareArgs, ReservationRequestArgs, ServerRuntime, cancel_reservation_via_http,
-    claim_reservation_via_http, declare_reservation_via_http, discover_runtime,
-    discover_runtime_with_global, discover_runtime_with_optional_global, get_json,
-    global_state_db_path, post_json, protocol_envelope, request_reservation_via_http,
-    reservation_cancel_protocol_body, reservation_claim_protocol_body,
-    reservation_declare_protocol_body, reservation_request_protocol_body,
-    runtime_env_override_is_configured, runtime_from_remote, runtime_has_required_identity,
-    runtime_identity_matches_pid, validate_agent_id, write_global_runtime_file, write_runtime_file,
+    CommandError, CommandIdentity, ServerRuntime, discover_runtime, discover_runtime_with_global,
+    discover_runtime_with_optional_global, get_payload, global_state_db_path, now_rfc3339,
+    post_command, process_parent_pid, process_start_identity_for_pid, validate_agent_id,
+    validate_runtime_process_identity, write_global_runtime_file, write_runtime_file,
 };
 pub use sandbox::{SandboxFsProfile, SandboxNetworkPolicy};
 pub use server_lifecycle::{
@@ -71,7 +52,7 @@ pub use server_lifecycle::{
 
 #[derive(Debug, Parser)]
 #[command(name = "stateful")]
-#[command(about = "Current-state coordination for coding agents")]
+#[command(about = "Collision prevention for coding agents")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -98,22 +79,26 @@ pub enum Command {
         host: String,
         #[arg(long, default_value_t = 43873)]
         port: u16,
-        #[arg(long)]
-        token: Option<String>,
         #[arg(long, default_value = "local")]
         workspace_id: String,
     },
     Status,
-    Current,
-    Events,
+    Commit {
+        #[arg(short = 'm', long)]
+        message: String,
+        #[arg(long = "task-id")]
+        task_id: String,
+        #[arg(long = "agent-id")]
+        agent_id: String,
+        #[arg(required = true)]
+        paths: Vec<String>,
+    },
+    #[command(subcommand)]
+    Lease(LeaseCommand),
     Doctor,
     Codex {
         #[arg(long, default_value = "codex")]
         codex_bin: String,
-        #[arg(long, value_enum, default_value = "passthrough")]
-        sandbox: CodexSandboxMode,
-        #[arg(long)]
-        no_stateful: bool,
         #[arg(num_args = 0.., allow_hyphen_values = true, trailing_var_arg = true)]
         args: Vec<String>,
     },
@@ -129,15 +114,6 @@ pub enum Command {
     },
     #[command(subcommand)]
     Repos(ReposCommand),
-    #[command(subcommand)]
-    Tools(ToolsCommand),
-    #[command(subcommand)]
-    Notifications(NotificationsCommand),
-    #[command(subcommand)]
-    Resume(ResumeCommand),
-    #[command(subcommand)]
-    Reservation(ReservationCommand),
-    SyncOutbox,
     #[command(subcommand)]
     Hook(HookRuntime),
 }
@@ -169,27 +145,12 @@ pub enum ServerCommand {
         host: String,
         #[arg(long, default_value_t = 43873)]
         port: u16,
-        #[arg(long)]
-        token: Option<String>,
+        #[arg(long, hide = true)]
+        token_stdin: bool,
         #[arg(long, default_value = "local")]
         workspace_id: String,
     },
     Restart,
-    Join {
-        base_url: String,
-        #[arg(long)]
-        token: String,
-        #[arg(long, default_value = "shared")]
-        workspace_id: String,
-        #[arg(long)]
-        allow_plain_http: bool,
-        #[arg(long)]
-        enable_repo: bool,
-        #[arg(long)]
-        binary: Option<String>,
-        #[arg(long)]
-        codex_config: Option<PathBuf>,
-    },
     Stop,
     Status,
 }
@@ -203,22 +164,15 @@ pub enum SandboxCommand {
         network: SandboxNetworkPolicy,
         #[arg(long)]
         purpose: Option<String>,
-        #[arg(long)]
-        reservation_id: Option<String>,
+        #[arg(long = "task-id")]
+        task_id: Option<String>,
         #[arg(long = "agent-id")]
         agent_id: Option<String>,
         #[arg(long = "workspace-id")]
         workspace_id: Option<String>,
-        #[arg(long = "write-target")]
-        write_targets: Vec<String>,
-        #[arg(long = "create-target")]
-        create_targets: Vec<String>,
-        #[arg(long = "write-dir")]
-        write_dirs: Vec<String>,
-        #[arg(long = "connect-socket")]
-        connect_sockets: Vec<String>,
-        #[arg(long)]
-        allow_signal: bool,
+        /// One JSON-serialized stateful_core::MutationOperation.
+        #[arg(long = "operation")]
+        operations: Vec<String>,
         #[arg(long)]
         json: bool,
         #[arg(long)]
@@ -235,24 +189,6 @@ pub enum SandboxCommand {
     Process {
         #[command(subcommand)]
         command: SandboxProcessCommand,
-    },
-    RunNestedCodexBenchmark {
-        #[arg(long)]
-        purpose: String,
-        #[arg(long = "agent-id")]
-        agent_id: String,
-        #[arg(long = "workspace-id")]
-        workspace_id: Option<String>,
-        #[arg(long = "write-dir")]
-        write_dir: String,
-        #[arg(long = "codex-home-root")]
-        codex_home_root: String,
-        #[arg(long = "docker-socket")]
-        docker_socket: Option<PathBuf>,
-        #[arg(long)]
-        command: String,
-        #[arg(long)]
-        timeout_seconds: Option<u64>,
     },
 }
 
@@ -277,93 +213,18 @@ pub enum SandboxProcessCommand {
 }
 
 #[derive(Debug, Subcommand)]
-pub enum ReservationCommand {
-    Declare {
-        #[arg(long = "agent-id")]
-        agent_id: Option<String>,
-        #[arg(long = "workspace-id")]
-        workspace_id: Option<String>,
-        #[arg(long)]
-        purpose: String,
-        #[arg(required = true, num_args = 1..)]
-        files_planned: Vec<String>,
-    },
-    Request {
-        #[arg(long = "agent-id")]
-        agent_id: Option<String>,
-        #[arg(long = "workspace-id")]
-        workspace_id: Option<String>,
-        #[arg(long)]
-        request_id: String,
-        #[arg(long)]
-        reservation_id: Option<String>,
-        #[arg(long)]
-        action: String,
-        #[arg(long)]
-        path: String,
-        #[arg(long)]
-        purpose: String,
-    },
-    Claim {
-        #[arg(long = "agent-id")]
-        agent_id: Option<String>,
-        #[arg(long = "workspace-id")]
-        workspace_id: Option<String>,
-        #[arg(long)]
-        reservation_id: Option<String>,
-        #[arg(long)]
-        wait_id: String,
-    },
-    Cancel {
-        #[arg(long = "agent-id")]
-        agent_id: Option<String>,
-        #[arg(long = "workspace-id")]
-        workspace_id: Option<String>,
-        #[arg(long)]
-        request_id: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
 pub enum ReposCommand {
     List,
 }
 
 #[derive(Debug, Subcommand)]
-pub enum ToolsCommand {
-    Allow {
-        tool_name: String,
-        #[arg(long)]
-        repo: Option<PathBuf>,
-    },
-    Deny {
-        tool_name: String,
-        #[arg(long)]
-        repo: Option<PathBuf>,
-    },
-    List {
-        #[arg(long)]
-        repo: Option<PathBuf>,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum NotificationsCommand {
-    Poll {
+pub enum LeaseCommand {
+    Release {
+        batch_id: String,
+        #[arg(long = "task-id")]
+        task_id: String,
         #[arg(long = "agent-id")]
-        agent_id: Option<String>,
-        #[arg(long)]
-        workspace_id: Option<String>,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum ResumeCommand {
-    Next {
-        #[arg(long = "agent-id")]
-        agent_id: Option<String>,
-        #[arg(long)]
-        workspace_id: Option<String>,
+        agent_id: String,
     },
 }
 
@@ -374,6 +235,8 @@ pub enum HookCommand {
     PreToolUse,
     PostToolUse,
     Stop,
+    #[command(hide = true)]
+    Heartbeat,
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -444,91 +307,44 @@ pub fn run() -> anyhow::Result<()> {
             command,
             host: legacy_host,
             port: legacy_port,
-            token: legacy_token,
             workspace_id: legacy_workspace_id,
         } => match command.unwrap_or(ServerCommand::Start {
             foreground: true,
             host: legacy_host,
             port: legacy_port,
-            token: legacy_token,
             workspace_id: legacy_workspace_id,
+            token_stdin: false,
         }) {
             ServerCommand::Start {
                 foreground,
                 host,
                 port,
-                token,
                 workspace_id,
+                token_stdin,
             } => {
                 if foreground {
-                    run_server(host, port, token, workspace_id)?;
+                    run_server(host, port, workspace_id, token_stdin)?;
                 } else {
+                    if token_stdin {
+                        anyhow::bail!("--token-stdin is reserved for detached server startup");
+                    }
                     let paths = GlobalPaths::from_env()?;
-                    let result = start_server_runtime(ServerStartRuntimeOptions {
-                        paths,
-                        host,
-                        port,
-                        token,
-                        workspace_id,
-                    })?;
-                    print_server_start_result(&result)?;
+                    let runtime = ensure_server_with_options(
+                        &paths,
+                        ServerStartOptions {
+                            host,
+                            port,
+                            token: None,
+                            workspace_id,
+                        },
+                    )?;
+                    print_server_runtime(&runtime)?;
                 }
             }
             ServerCommand::Restart => {
                 let paths = GlobalPaths::from_env()?;
                 let runtime = restart_server(&paths)?;
-                let options = server_start_options_from_runtime(&runtime)?;
-                let result = start_server_runtime(ServerStartRuntimeOptions {
-                    paths,
-                    host: options.host,
-                    port: options.port,
-                    token: Some(runtime.token),
-                    workspace_id: options.workspace_id,
-                })?;
-                print_server_start_result(&result)?;
-            }
-            ServerCommand::Join {
-                base_url,
-                token,
-                workspace_id,
-                allow_plain_http,
-                enable_repo,
-                binary,
-                codex_config,
-            } => {
-                let paths = GlobalPaths::from_env()?;
-                let binary_path = match binary {
-                    Some(binary) => binary,
-                    None => current_stateful_binary_path()?,
-                };
-                let codex_config_path = match codex_config {
-                    Some(path) => path,
-                    None => default_codex_config_path()?,
-                };
-                let enable_repo_root = if enable_repo {
-                    Some(current_repo_root_or_current_dir()?)
-                } else {
-                    None
-                };
-                let result = join_server_runtime(ServerJoinOptions {
-                    paths,
-                    codex_config_path,
-                    binary_path,
-                    base_url,
-                    token,
-                    workspace_id,
-                    allow_plain_http,
-                    enable_repo_root,
-                })?;
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "status": result.status,
-                        "base_url": result.runtime.base_url,
-                        "workspace_id": result.runtime.workspace_id,
-                        "repo_enabled": result.repo_enabled,
-                    }))?
-                );
+                print_server_runtime(&runtime)?;
             }
             ServerCommand::Status => {
                 let paths = GlobalPaths::from_env()?;
@@ -551,53 +367,57 @@ pub fn run() -> anyhow::Result<()> {
             }
         },
         Command::Status => {
-            let report = doctor_report(current_repo_root_or_current_dir()?);
-            println!("{}", serde_json::to_string_pretty(&report)?);
-        }
-        Command::Current => {
             let (_repo_root, runtime) = discover_runtime_for_current_dir()?;
-            let response = get_json(&runtime, "/v1/current")?;
-            print_http_response(response)?;
+            let payload: serde_json::Value = get_payload(&runtime, "/v2/status")?;
+            println!("{}", serde_json::to_string_pretty(&payload)?);
         }
-        Command::Events => {
-            let (_repo_root, runtime) = discover_runtime_for_current_dir()?;
-            let response = get_json(&runtime, "/v1/events")?;
-            print_http_response(response)?;
+        Command::Commit {
+            message,
+            task_id,
+            agent_id,
+            paths,
+        } => {
+            let (repo_root, runtime) = discover_runtime_for_current_dir()?;
+            let result = run_structured_commit(CommitRequest {
+                identity: cli_identity(&repo_root, &runtime, &task_id, &agent_id, "commit")?,
+                repo_root,
+                message,
+                paths,
+            })?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
         }
-        Command::SyncOutbox => {
-            let synced = sync_outbox_in_repo(current_repo_root_or_current_dir()?)?;
-            println!("{}", serde_json::json!({ "synced": synced }));
+        Command::Lease(LeaseCommand::Release {
+            batch_id,
+            task_id,
+            agent_id,
+        }) => {
+            let (repo_root, runtime) = discover_runtime_for_current_dir()?;
+            let identity =
+                cli_identity(&repo_root, &runtime, &task_id, &agent_id, "lease.release")?;
+            let result: stateful_store::LeaseReleaseResult = post_command(
+                &runtime,
+                "/v2/leases/release",
+                &identity,
+                &stateful_store::LeaseReleaseInput { batch_id },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Command::Doctor => {
             let report = doctor_report(current_repo_root_or_current_dir()?);
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
-        Command::Codex {
-            codex_bin,
-            sandbox,
-            no_stateful,
-            args,
-        } => {
-            let code = run_codex(CodexWrapperOptions {
-                codex_bin,
-                sandbox,
-                no_stateful,
-                args,
-            })?;
+        Command::Codex { codex_bin, args } => {
+            let code = run_codex(CodexWrapperOptions { codex_bin, args })?;
             std::process::exit(code);
         }
         Command::Sandbox(SandboxCommand::Run {
             fs,
             network,
             purpose,
-            reservation_id,
+            task_id,
             agent_id,
             workspace_id,
-            write_targets,
-            create_targets,
-            write_dirs,
-            connect_sockets,
-            allow_signal,
+            operations,
             json,
             command,
             sequences,
@@ -609,82 +429,25 @@ pub fn run() -> anyhow::Result<()> {
                 .map_err(anyhow::Error::msg)?;
             let paths = GlobalPaths::from_env()?;
             let repo_root = current_repo_root_or_current_dir()?;
-            let output = match sandbox::run_sandbox_in_repo(
+            let output = sandbox::run_sandbox_in_repo(
                 &repo_root,
                 &paths,
                 sandbox::SandboxRunRequest {
                     fs,
                     network,
                     purpose,
-                    reservation_id,
+                    task_id,
                     agent_id,
                     workspace_id,
-                    write_targets,
-                    create_targets,
-                    write_dirs,
-                    connect_sockets,
-                    allow_signal,
+                    operations,
                     command,
                     timeout_seconds,
                     stream_events,
                 },
-            ) {
-                Ok(output) => output,
-                Err(error) => {
-                    if let Some(denied) =
-                        error.downcast_ref::<sandbox::SandboxAuthorizationDenied>()
-                    {
-                        println!("{}", denied.body());
-                        std::process::exit(1);
-                    }
-                    return Err(error);
-                }
-            };
+            )?;
             let rendered = render_sandbox_run_cli_output(&output, json)?;
             std::io::stdout().write_all(&rendered.stdout)?;
             std::io::stderr().write_all(&rendered.stderr)?;
-            if let Some(exit_code) = sandbox::sandbox_run_cli_exit_code(&output) {
-                std::process::exit(exit_code);
-            }
-        }
-        Command::Sandbox(SandboxCommand::RunNestedCodexBenchmark {
-            purpose,
-            agent_id,
-            workspace_id,
-            write_dir,
-            codex_home_root,
-            docker_socket,
-            command,
-            timeout_seconds,
-        }) => {
-            let paths = GlobalPaths::from_env()?;
-            let repo_root = current_repo_root_or_current_dir()?;
-            let output = match codex_benchmark::run_nested_codex_benchmark_sandbox_in_repo(
-                &repo_root,
-                &paths,
-                codex_benchmark::NestedCodexBenchmarkSandboxRequest {
-                    purpose,
-                    agent_id,
-                    workspace_id,
-                    write_dir,
-                    codex_home_root,
-                    docker_socket,
-                    command,
-                    timeout_seconds,
-                },
-            ) {
-                Ok(output) => output,
-                Err(error) => {
-                    if let Some(denied) =
-                        error.downcast_ref::<sandbox::SandboxAuthorizationDenied>()
-                    {
-                        println!("{}", denied.body());
-                        std::process::exit(1);
-                    }
-                    return Err(error);
-                }
-            };
-            println!("{}", serde_json::to_string(&output)?);
             if let Some(exit_code) = sandbox::sandbox_run_cli_exit_code(&output) {
                 std::process::exit(exit_code);
             }
@@ -730,174 +493,6 @@ pub fn run() -> anyhow::Result<()> {
             let registry = RepoRegistry::load(&paths)?;
             println!("{}", serde_json::to_string_pretty(&registry)?);
         }
-        Command::Tools(ToolsCommand::Allow { tool_name, repo }) => {
-            let paths = GlobalPaths::from_env()?;
-            let repo = repo.unwrap_or(std::env::current_dir()?);
-            let entry = allow_tool_for_repo(&paths, repo, &tool_name)?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "repo": entry.root,
-                    "allowed_tools": entry.allowed_tools,
-                }))?
-            );
-        }
-        Command::Tools(ToolsCommand::Deny { tool_name, repo }) => {
-            let paths = GlobalPaths::from_env()?;
-            let repo = repo.unwrap_or(std::env::current_dir()?);
-            let entry = deny_tool_for_repo(&paths, repo, &tool_name)?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "repo": entry.root,
-                    "allowed_tools": entry.allowed_tools,
-                }))?
-            );
-        }
-        Command::Tools(ToolsCommand::List { repo }) => {
-            let paths = GlobalPaths::from_env()?;
-            let repo = repo.unwrap_or(std::env::current_dir()?);
-            let root = detect_git_root(&repo)?;
-            let tools = tool_list_for_repo(&paths, &root)?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "repo": root,
-                    "allowed_tools": tools.allowed_tools,
-                    "unclassified_tools": tools.unclassified_tools,
-                }))?
-            );
-        }
-        Command::Notifications(NotificationsCommand::Poll {
-            agent_id,
-            workspace_id,
-        }) => {
-            let (repo_root, runtime) = discover_runtime_for_current_dir()?;
-            let (agent_id, workspace_id) =
-                resolve_agent_workspace(repo_root.as_path(), &runtime, agent_id, workspace_id)?;
-            let response = post_json(
-                &runtime,
-                "/v1/notifications/poll",
-                &serde_json::json!({
-                    "agent_id": agent_id,
-                    "workspace_id": workspace_id,
-                }),
-            )?;
-            print_http_response(response)?;
-        }
-        Command::Resume(ResumeCommand::Next {
-            agent_id,
-            workspace_id,
-        }) => {
-            let (repo_root, runtime) = discover_runtime_for_current_dir()?;
-            let (agent_id, workspace_id) =
-                resolve_agent_workspace(repo_root.as_path(), &runtime, agent_id, workspace_id)?;
-            let response = post_json(
-                &runtime,
-                "/v1/resume/next",
-                &serde_json::json!({
-                    "agent_id": agent_id,
-                    "workspace_id": workspace_id,
-                }),
-            )?;
-            print_http_response(response)?;
-        }
-        Command::Reservation(ReservationCommand::Declare {
-            agent_id,
-            workspace_id,
-            purpose,
-            files_planned,
-        }) => {
-            let (repo_root, runtime) = discover_runtime_for_current_dir()?;
-            let (agent_id, workspace_id) =
-                resolve_agent_workspace(repo_root.as_path(), &runtime, agent_id, workspace_id)?;
-            let response = declare_reservation_via_http(
-                &runtime,
-                ReservationDeclareArgs {
-                    agent_id,
-                    workspace_id,
-                    purpose,
-                    files_planned,
-                    identity: GlobalPaths::from_env()
-                        .ok()
-                        .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok()),
-                },
-            )?;
-            print_http_response(response)?;
-        }
-        Command::Reservation(ReservationCommand::Request {
-            agent_id,
-            workspace_id,
-            request_id,
-            reservation_id,
-            action,
-            path,
-            purpose,
-        }) => {
-            let (repo_root, runtime) = discover_runtime_for_current_dir()?;
-            let (agent_id, workspace_id) =
-                resolve_agent_workspace(repo_root.as_path(), &runtime, agent_id, workspace_id)?;
-            let response = request_reservation_via_http(
-                &runtime,
-                ReservationRequestArgs {
-                    agent_id,
-                    workspace_id,
-                    request_id,
-                    reservation_id,
-                    action,
-                    path,
-                    purpose,
-                    identity: GlobalPaths::from_env()
-                        .ok()
-                        .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok()),
-                },
-            )?;
-            print_http_response(response)?;
-        }
-        Command::Reservation(ReservationCommand::Claim {
-            agent_id,
-            workspace_id,
-            wait_id,
-            reservation_id,
-        }) => {
-            let (repo_root, runtime) = discover_runtime_for_current_dir()?;
-            let (agent_id, workspace_id) =
-                resolve_agent_workspace(repo_root.as_path(), &runtime, agent_id, workspace_id)?;
-            claim_reservation_via_http(
-                &runtime,
-                ReservationClaimArgs {
-                    agent_id,
-                    workspace_id,
-                    wait_id,
-                    reservation_id,
-                    identity: GlobalPaths::from_env()
-                        .ok()
-                        .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok()),
-                },
-            )?;
-            println!("claimed stateful reservation");
-        }
-        Command::Reservation(ReservationCommand::Cancel {
-            agent_id,
-            workspace_id,
-            request_id,
-        }) => {
-            let (repo_root, runtime) = discover_runtime_for_current_dir()?;
-            let (agent_id, workspace_id) =
-                resolve_agent_workspace(repo_root.as_path(), &runtime, agent_id, workspace_id)?;
-            cancel_reservation_via_http(
-                &runtime,
-                ReservationCancelArgs {
-                    agent_id,
-                    workspace_id,
-                    request_id,
-                    identity: GlobalPaths::from_env()
-                        .ok()
-                        .and_then(|paths| repo_identity_for_enabled_repo(&paths, &repo_root).ok()),
-                },
-            )?;
-            println!("canceled stateful reservation");
-        }
         Command::Hook(hook) => hook::run_hook(hook)?,
     }
     Ok(())
@@ -915,42 +510,71 @@ fn current_repo_root_or_current_dir() -> anyhow::Result<PathBuf> {
     Ok(detect_git_root(&cwd).unwrap_or(cwd))
 }
 
-fn resolve_agent_workspace(
+fn print_server_runtime(runtime: &ServerRuntime) -> anyhow::Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "status": "ok",
+            "base_url": runtime.base_url,
+            "workspace_id": runtime.workspace_id,
+            "pid": runtime.pid,
+
+        }))?
+    );
+    Ok(())
+}
+fn cli_identity(
     repo_root: &Path,
     runtime: &ServerRuntime,
-    agent_id: Option<String>,
-    workspace_id: Option<String>,
-) -> anyhow::Result<(String, String)> {
-    let agent_id =
-        agent_id.ok_or_else(|| anyhow::anyhow!("agent id not provided; pass --agent-id"))?;
-    validate_agent_id(&agent_id, "agent_id")?;
-    let workspace_id = workspace_id.unwrap_or_else(|| {
-        GlobalPaths::from_env()
-            .ok()
-            .and_then(|paths| repo_identity_for_enabled_repo(&paths, repo_root).ok())
-            .map(|identity| effective_workspace_id_for_repo(&runtime.workspace_id, Some(&identity)))
-            .unwrap_or_else(|| runtime.workspace_id.clone())
-    });
-
-    Ok((agent_id, workspace_id))
-}
-
-fn print_http_response(response: HttpResponse) -> anyhow::Result<()> {
-    println!("{}", response.body);
-    if !(200..300).contains(&response.status_code) {
-        anyhow::bail!("state server returned HTTP {}", response.status_code);
+    task_id: &str,
+    agent_id: &str,
+    event: &str,
+) -> anyhow::Result<CommandIdentity> {
+    if task_id.trim().is_empty() {
+        anyhow::bail!("task id must not be empty");
     }
-
-    Ok(())
+    validate_agent_id(agent_id, "agent id")?;
+    let paths = GlobalPaths::from_env()?;
+    let repo = repo_identity_for_enabled_repo(&paths, repo_root)?;
+    Ok(CommandIdentity::new_now(
+        task_id,
+        uuid::Uuid::new_v4().to_string(),
+        stateful_core::AgentIdentity {
+            agent_id: agent_id.to_string(),
+            turn_id: None,
+            actor_id: agent_id.to_string(),
+            actor_type: stateful_core::ActorType::Agent,
+            owner_id: None,
+            parent_agent_id: None,
+            parent_actor_id: None,
+        },
+        stateful_core::WorkspaceIdentity {
+            root: repo.root,
+            workspace_id: runtime.workspace_id.clone(),
+            repo_id: repo.repo_id,
+            worktree_id: repo.worktree_id,
+            branch: repo.branch,
+        },
+        stateful_core::SourceRef {
+            kind: stateful_core::SourceKind::Cli,
+            event: event.to_string(),
+            tool_name: None,
+            source_ref: "stateful-cli".to_string(),
+        },
+    ))
 }
 
 fn run_server(
     host: String,
     port: u16,
-    token: Option<String>,
     workspace_id: String,
+    token_stdin: bool,
 ) -> anyhow::Result<()> {
-    let token = token.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let token = if token_stdin {
+        read_server_token_from_stdin()?
+    } else {
+        uuid::Uuid::new_v4().to_string()
+    };
     let base_url = format!("http://{host}:{port}");
     let paths = GlobalPaths::from_env()?;
     let options = ServerStartOptions {
@@ -959,7 +583,14 @@ fn run_server(
         token: Some(token.clone()),
         workspace_id: workspace_id.clone(),
     };
-    let runtime = ServerRuntime::new(&base_url, &token, workspace_id, std::process::id());
+    let pid = std::process::id();
+    let runtime = ServerRuntime::new(
+        &base_url,
+        &token,
+        workspace_id,
+        pid,
+        process_start_identity_for_pid(pid)?,
+    );
     let store = stateful_store::Store::open(global_state_db_path(&paths))?;
 
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
@@ -967,14 +598,22 @@ fn run_server(
     tokio_runtime.block_on(async move {
         let listener = tokio::net::TcpListener::bind(addr).await?;
         server_lifecycle::register_foreground_runtime(&paths, &runtime, &options)?;
-        let result = server_start_runtime_result(runtime.clone(), &host, port);
-        print_server_start_result(&result)?;
+        print_server_runtime(&runtime)?;
         stateful_server::serve_listener(
             listener,
             stateful_server::ServerConfig::with_store(token, store),
         )
         .await
     })
+}
+
+fn read_server_token_from_stdin() -> anyhow::Result<String> {
+    let mut token = String::new();
+    std::io::stdin().lock().read_to_string(&mut token)?;
+    if token.is_empty() {
+        anyhow::bail!("stateful server token stdin was empty");
+    }
+    Ok(token)
 }
 
 pub fn state_db_path(repo_root: impl AsRef<Path>) -> std::path::PathBuf {
@@ -1089,19 +728,11 @@ fn render_sandbox_process_find_cli_output(
 }
 
 fn default_config_yml() -> &'static str {
-    r#"# stateful-core repo policy config
-# These are informational target defaults for this repository.
-# Runtime loading of these keys is not yet shipped.
-protocol_version: stateful.v1
-intent_ttl_seconds: 900
-intent_max_seconds: 3600
-claim_ttl_seconds: 300
-reservation_ttl_seconds: 120
-directory_scope_depth: 2
-delete_requires_exact_file_scope: true
-rename_requires_exact_file_scope: true
-default_write_policy: deny
-event_retention_days: 14
+    r#"protocol_version: stateful.v2
+heartbeat_interval_seconds: 1
+inactivity_timeout_seconds: 5
+lease_expiry_seconds: 60
+offer_ttl_seconds: 120
     "#
 }
 
@@ -1115,8 +746,6 @@ mod tests {
             exit_code,
             stdout: "child-out".to_string(),
             stderr: "child-err".to_string(),
-            allowed_write_targets: Vec::new(),
-            denied_write_targets: Vec::new(),
         }
     }
 

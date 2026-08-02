@@ -28,7 +28,6 @@ fn global_paths_are_rooted_under_stateful_home() {
         paths.home.join("runtime").join("server.log")
     );
     assert_eq!(paths.repos_dir, paths.home.join("repos"));
-    assert_eq!(paths.outbox_dir, paths.home.join("outbox"));
 }
 
 #[test]

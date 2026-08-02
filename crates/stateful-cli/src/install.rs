@@ -135,18 +135,6 @@ pub fn plan_codex_install(options: &CodexInstallOptions) -> anyhow::Result<Insta
         options.codex_config_path.display()
     );
     plan.files.push(options.codex_config_path.clone());
-    plan.files
-        .push(global_command_policy_skill_path(&options.codex_config_path));
-    plan.files.extend(global_command_policy_support_file_paths(
-        &options.codex_config_path,
-    ));
-    plan.files
-        .push(global_dispatching_parallel_agents_skill_path(
-            &options.codex_config_path,
-        ));
-    plan.files.push(global_external_sandbox_rules_path(
-        &options.codex_config_path,
-    ));
     Ok(plan)
 }
 
@@ -162,10 +150,6 @@ pub fn apply_codex_install(options: CodexInstallOptions) -> anyhow::Result<Insta
         paths: options.paths.clone(),
     })?;
     write_codex_config_update(&options.codex_config_path, codex_update)?;
-    write_global_command_policy_skill(&options.codex_config_path)?;
-    write_global_command_policy_support_files(&options.codex_config_path)?;
-    write_global_dispatching_parallel_agents_skill(&options.codex_config_path)?;
-    write_global_external_sandbox_rules(&options.codex_config_path, &options.binary_path)?;
     plan.summary = format!(
         "apply: installed stateful global files under {} and merged Codex config {}",
         options.paths.home.display(),
@@ -189,8 +173,6 @@ pub fn plan_omp_install(options: &OmpInstallOptions) -> anyhow::Result<InstallPl
     let extension_path = agent_dir
         .join("extensions")
         .join("stateful-omp-extension.js");
-    let command_policy_skill_path = omp_command_policy_skill_path(&agent_dir);
-    let rule_path = omp_required_rule_path(&agent_dir);
     plan.summary = format!(
         "{mode}: install stateful files under {} and configure the OMP stateful profile under {}",
         options.paths.home.display(),
@@ -198,10 +180,6 @@ pub fn plan_omp_install(options: &OmpInstallOptions) -> anyhow::Result<InstallPl
     );
     plan.files.push(config_path);
     plan.files.push(extension_path);
-    plan.files.push(command_policy_skill_path);
-    plan.files
-        .extend(omp_command_policy_support_file_paths(&agent_dir));
-    plan.files.push(rule_path);
     Ok(plan)
 }
 
@@ -234,9 +212,6 @@ pub fn apply_omp_install(options: OmpInstallOptions) -> anyhow::Result<InstallPl
     }
     write_omp_config(&config_path, &extension_path, options.update)?;
     write_omp_extension(&extension_path, &options.binary_path)?;
-    write_omp_command_policy_skill(&agent_dir)?;
-    write_omp_command_policy_support_files(&agent_dir)?;
-    write_omp_required_rule(&agent_dir)?;
     plan.summary = format!(
         "apply: installed stateful files under {} and configured the OMP stateful profile under {}",
         options.paths.home.display(),
@@ -338,145 +313,6 @@ fn write_codex_config_update(config_path: &Path, update: CodexConfigUpdate) -> a
     })?;
 
     Ok(())
-}
-
-fn write_global_command_policy_skill(codex_config_path: &Path) -> anyhow::Result<()> {
-    let path = global_command_policy_skill_path(codex_config_path);
-    let parent = containing_dir(&path);
-    fs::create_dir_all(parent).with_context(|| {
-        format!(
-            "failed to create Codex skills directory {}",
-            parent.display()
-        )
-    })?;
-    fs::write(&path, stateful_command_policy_skill())
-        .with_context(|| format!("failed to write {}", path.display()))
-}
-
-fn global_command_policy_skill_path(codex_config_path: &Path) -> PathBuf {
-    containing_dir(codex_config_path)
-        .join("skills")
-        .join("stateful-command-policy")
-        .join("SKILL.md")
-}
-
-fn global_command_policy_skill_dir(codex_config_path: &Path) -> PathBuf {
-    containing_dir(codex_config_path)
-        .join("skills")
-        .join("stateful-command-policy")
-}
-
-fn global_command_policy_support_file_paths(codex_config_path: &Path) -> Vec<PathBuf> {
-    command_policy_support_file_paths(&global_command_policy_skill_dir(codex_config_path))
-}
-
-fn write_global_command_policy_support_files(codex_config_path: &Path) -> anyhow::Result<()> {
-    write_command_policy_support_files(&global_command_policy_skill_dir(codex_config_path))
-}
-
-fn write_omp_command_policy_skill(agent_dir: &Path) -> anyhow::Result<()> {
-    let path = omp_command_policy_skill_path(agent_dir);
-    let parent = containing_dir(&path);
-    fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create OMP skills directory {}", parent.display()))?;
-    fs::write(&path, stateful_command_policy_skill())
-        .with_context(|| format!("failed to write {}", path.display()))
-}
-
-fn omp_command_policy_skill_path(agent_dir: &Path) -> PathBuf {
-    agent_dir
-        .join("skills")
-        .join("stateful-command-policy")
-        .join("SKILL.md")
-}
-
-fn omp_command_policy_support_file_paths(agent_dir: &Path) -> Vec<PathBuf> {
-    command_policy_support_file_paths(&omp_command_policy_skill_dir(agent_dir))
-}
-
-fn write_omp_command_policy_support_files(agent_dir: &Path) -> anyhow::Result<()> {
-    write_command_policy_support_files(&omp_command_policy_skill_dir(agent_dir))
-}
-
-fn omp_command_policy_skill_dir(agent_dir: &Path) -> PathBuf {
-    agent_dir.join("skills").join("stateful-command-policy")
-}
-
-fn command_policy_support_file_paths(skill_dir: &Path) -> Vec<PathBuf> {
-    stateful_command_policy_support_files()
-        .iter()
-        .map(|(name, _)| skill_dir.join(name))
-        .collect()
-}
-
-fn write_command_policy_support_files(skill_dir: &Path) -> anyhow::Result<()> {
-    fs::create_dir_all(skill_dir).with_context(|| {
-        format!(
-            "failed to create Stateful command policy skill directory {}",
-            skill_dir.display()
-        )
-    })?;
-    for (name, contents) in stateful_command_policy_support_files() {
-        let path = skill_dir.join(name);
-        fs::write(&path, contents)
-            .with_context(|| format!("failed to write {}", path.display()))?;
-    }
-    Ok(())
-}
-
-fn write_global_dispatching_parallel_agents_skill(codex_config_path: &Path) -> anyhow::Result<()> {
-    let path = global_dispatching_parallel_agents_skill_path(codex_config_path);
-    let parent = containing_dir(&path);
-    fs::create_dir_all(parent).with_context(|| {
-        format!(
-            "failed to create Codex dispatching skill directory {}",
-            parent.display()
-        )
-    })?;
-    fs::write(&path, dispatching_parallel_agents_skill())
-        .with_context(|| format!("failed to write {}", path.display()))
-}
-
-fn global_dispatching_parallel_agents_skill_path(codex_config_path: &Path) -> PathBuf {
-    containing_dir(codex_config_path)
-        .join("skills")
-        .join("dispatching-parallel-agents")
-        .join("SKILL.md")
-}
-
-fn write_omp_required_rule(agent_dir: &Path) -> anyhow::Result<()> {
-    let path = omp_required_rule_path(agent_dir);
-    let parent = containing_dir(&path);
-    fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create OMP rules directory {}", parent.display()))?;
-    fs::write(&path, omp_stateful_required_rule())
-        .with_context(|| format!("failed to write {}", path.display()))
-}
-
-fn omp_required_rule_path(agent_dir: &Path) -> PathBuf {
-    agent_dir.join("rules").join("stateful-required.md")
-}
-
-fn write_global_external_sandbox_rules(
-    codex_config_path: &Path,
-    binary_path: &str,
-) -> anyhow::Result<()> {
-    let path = global_external_sandbox_rules_path(codex_config_path);
-    let parent = containing_dir(&path);
-    fs::create_dir_all(parent).with_context(|| {
-        format!(
-            "failed to create Codex rules directory {}",
-            parent.display()
-        )
-    })?;
-    fs::write(&path, sandbox_external_prompt_rules(binary_path)?)
-        .with_context(|| format!("failed to write {}", path.display()))
-}
-
-fn global_external_sandbox_rules_path(codex_config_path: &Path) -> PathBuf {
-    containing_dir(codex_config_path)
-        .join("rules")
-        .join("stateful.rules")
 }
 
 fn merge_codex_config_contents(existing: &str, binary_path: &str) -> anyhow::Result<String> {
@@ -1075,7 +911,7 @@ fn global_codex_config_block(
     include_features_section: bool,
 ) -> anyhow::Result<String> {
     let quoted_binary = shell_quote_posix(binary_path)?;
-    let hook_prefix = format!("{quoted_binary} hook codex");
+    let hook_prefix = format!("exec {quoted_binary} hook codex");
     let features_section = if include_features_section {
         "[features]\nhooks = true\n\n"
     } else {
@@ -1092,14 +928,14 @@ matcher = "startup|resume|clear|compact"
 [[hooks.SessionStart.hooks]]
 type = "command"
 command = {}
-statusMessage = "Loading stateful current state"
+statusMessage = "Loading stateful lifecycle"
 
 [[hooks.UserPromptSubmit]]
 
 [[hooks.UserPromptSubmit.hooks]]
 type = "command"
 command = {}
-statusMessage = "Checking stateful reservation context"
+statusMessage = "Starting stateful V2 lifecycle"
 
 [[hooks.PreToolUse]]
 matcher = ".*"
@@ -1130,27 +966,6 @@ statusMessage = "Finalizing stateful activity"
         toml_string(&format!("{hook_prefix} pre-tool-use")),
         toml_string(&format!("{hook_prefix} post-tool-use")),
         toml_string(&format!("{hook_prefix} stop"))
-    ))
-}
-
-fn sandbox_external_prompt_rules(binary_path: &str) -> anyhow::Result<String> {
-    validate_no_control_chars(binary_path)?;
-    let binary = toml_string(binary_path);
-    let request_match = toml_string(&format!(
-        "{binary_path} sandbox run --fs external --purpose 'install rebuilt binaries' --write-dir /opt/stateful/bin --command 'install -m 755 target/release/stateful /opt/stateful/bin/stateful'"
-    ));
-    Ok(format!(
-        r#"{GLOBAL_CODEX_BLOCK_START}
-prefix_rule(
-    pattern = [{binary}, "sandbox", "run", "--fs", "external"],
-    decision = "prompt",
-    justification = "Require explicit approval before running stateful sandbox run --fs external.",
-    match = [
-        {request_match},
-    ],
-)
-{GLOBAL_CODEX_BLOCK_END}
-"#
     ))
 }
 
@@ -1447,39 +1262,6 @@ fn validate_no_control_chars(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn stateful_command_policy_skill() -> &'static str {
-    include_str!("../assets/stateful-command-policy/SKILL.md")
-}
-
-fn stateful_command_policy_support_files() -> &'static [(&'static str, &'static str)] {
-    &[
-        (
-            "omp-tools.md",
-            include_str!("../assets/stateful-command-policy/omp-tools.md"),
-        ),
-        (
-            "sandbox-tools.md",
-            include_str!("../assets/stateful-command-policy/sandbox-tools.md"),
-        ),
-        (
-            "denial-recovery.md",
-            include_str!("../assets/stateful-command-policy/denial-recovery.md"),
-        ),
-        (
-            "subagent-write-recovery.md",
-            include_str!("../assets/stateful-command-policy/subagent-write-recovery.md"),
-        ),
-    ]
-}
-
-fn dispatching_parallel_agents_skill() -> &'static str {
-    include_str!("../assets/dispatching-parallel-agents/SKILL.md")
-}
-
-fn omp_stateful_required_rule() -> &'static str {
-    include_str!("../assets/omp-stateful-required-rule.md")
-}
-
 fn toml_string(value: &str) -> String {
     let mut escaped = String::from("\"");
     for character in value.chars() {
@@ -1506,7 +1288,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_omp_agent_dir_uses_user_omp_profile() {
+    fn default_omp_agent_dir_uses_user_profile() {
         assert_eq!(
             default_omp_agent_dir_from_home("home"),
             PathBuf::from("home/.omp/profiles/stateful/agent")
@@ -1514,230 +1296,59 @@ mod tests {
     }
 
     #[test]
-    fn omp_install_places_stateful_rule_in_agent_rules_dir() {
-        assert_eq!(
-            omp_required_rule_path(Path::new("home/.omp/profiles/stateful/agent")),
-            PathBuf::from("home/.omp/profiles/stateful/agent/rules/stateful-required.md")
-        );
+    fn omp_extension_embeds_binary_path() {
+        let temp = tempfile::tempdir().expect("temp directory should create");
+        let extension = temp.path().join("stateful-omp-extension.js");
+
+        write_omp_extension(&extension, "/opt/stateful/bin/stateful")
+            .expect("extension should write");
+
+        let contents = fs::read_to_string(extension).expect("extension should read");
+        assert!(contents.contains("/opt/stateful/bin/stateful"));
     }
 
     #[test]
-    fn command_policy_support_files_are_installed_with_skill() {
-        assert_eq!(
-            global_command_policy_support_file_paths(Path::new("home/.codex/config.toml")),
-            vec![
-                PathBuf::from("home/.codex/skills/stateful-command-policy/omp-tools.md"),
-                PathBuf::from("home/.codex/skills/stateful-command-policy/sandbox-tools.md"),
-                PathBuf::from("home/.codex/skills/stateful-command-policy/denial-recovery.md"),
-                PathBuf::from(
-                    "home/.codex/skills/stateful-command-policy/subagent-write-recovery.md"
-                ),
-            ]
-        );
-        assert_eq!(
-            omp_command_policy_support_file_paths(Path::new("home/.omp/profiles/stateful/agent")),
-            vec![
-                PathBuf::from(
-                    "home/.omp/profiles/stateful/agent/skills/stateful-command-policy/omp-tools.md"
-                ),
-                PathBuf::from(
-                    "home/.omp/profiles/stateful/agent/skills/stateful-command-policy/sandbox-tools.md"
-                ),
-                PathBuf::from(
-                    "home/.omp/profiles/stateful/agent/skills/stateful-command-policy/denial-recovery.md"
-                ),
-                PathBuf::from(
-                    "home/.omp/profiles/stateful/agent/skills/stateful-command-policy/subagent-write-recovery.md"
-                ),
-            ]
-        );
+    fn omp_extension_durably_replays_terminal_payloads() {
+        use std::process::Command;
 
-        let support_files = stateful_command_policy_support_files();
-        assert_eq!(support_files.len(), 4);
-        assert!(stateful_command_policy_skill().contains("Support Files"));
-    }
+        let temp = tempfile::tempdir().expect("temp directory should create");
+        let extension = temp.path().join("stateful-omp-extension.js");
+        let fake_stateful = temp.path().join("fake-stateful.mjs");
+        fs::write(temp.path().join("package.json"), r#"{"type":"module"}"#)
+            .expect("test package metadata should write");
+        fs::write(
+            &fake_stateful,
+            r#"#!/usr/bin/env node
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+const state = existsSync(process.env.STATEFUL_OMP_STATE) ? JSON.parse(readFileSync(process.env.STATEFUL_OMP_STATE, "utf8")) : { index: 0 };
+const payload = JSON.parse(readFileSync(0, "utf8"));
+appendFileSync(process.env.STATEFUL_OMP_LOG, JSON.stringify({ event: process.argv.at(-1), payload }) + "\n", { mode: 0o600 });
+const responses = JSON.parse(readFileSync(process.env.STATEFUL_OMP_RESPONSES, "utf8"));
+writeFileSync(process.env.STATEFUL_OMP_STATE, JSON.stringify({ index: state.index + 1 }), { mode: 0o600 });
+process.stdout.write(JSON.stringify(responses[state.index] ?? { decision: "allow" }));
+"#,
+        )
+        .expect("fake stateful binary should write");
+        #[cfg(unix)]
+        fs::set_permissions(&fake_stateful, fs::Permissions::from_mode(0o700))
+            .expect("fake stateful binary should be executable");
+        write_omp_extension(&extension, &fake_stateful.to_string_lossy())
+            .expect("extension should write");
 
-    #[test]
-    fn omp_extension_compacts_empty_tool_output() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "stateful-omp-extension-empty-output-test-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&temp_dir);
-        fs::create_dir_all(&temp_dir).expect("temp dir should be creatable");
-        let extension_path = temp_dir.join("stateful.js");
-
-        write_omp_extension(&extension_path, "/usr/local/bin/stateful")
-            .expect("extension should be written");
-        let contents = fs::read_to_string(&extension_path).expect("extension should be readable");
-
-        let helper_start = contents
-            .find("function emptyToolOutputText")
-            .expect("empty output helper should be generated");
-        let helper_end = contents[helper_start..]
-            .find("\n\nfunction lazyToolResult")
-            .map(|offset| helper_start + offset)
-            .expect("empty output helper should end before lazyToolResult");
-        let script = format!(
-            "{}\nconsole.log(JSON.stringify([emptyToolOutputText(''), emptyToolOutputText('  '), emptyToolOutputText('kept')]))",
-            &contents[helper_start..helper_end]
-        );
-        let output = std::process::Command::new("node")
-            .arg("-e")
-            .arg(script)
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("omp-terminal-retry.mjs");
+        let output = Command::new("node")
+            .arg(fixture)
+            .arg("verify")
+            .arg(&extension)
             .output()
-            .expect("node should execute generated extension helper");
-
+            .expect("Node should run the OMP extension fixture");
         assert!(
             output.status.success(),
-            "node failed: {}",
+            "OMP extension fixture failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(
-            String::from_utf8(output.stdout).expect("stdout should be utf8"),
-            "[\"No output.\",\"No output.\",\"kept\"]\n"
-        );
-
-        fs::remove_dir_all(&temp_dir).expect("temp dir should be removable");
-    }
-
-    #[test]
-    fn omp_extension_derives_agent_id_from_session_manager_only() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "stateful-omp-extension-agent-id-test-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&temp_dir);
-        fs::create_dir_all(&temp_dir).expect("temp dir should be creatable");
-        let extension_path = temp_dir.join("stateful.js");
-
-        write_omp_extension(&extension_path, "/usr/local/bin/stateful")
-            .expect("extension should be written");
-        let contents = fs::read_to_string(&extension_path).expect("extension should be readable");
-
-        let helper_start = contents
-            .find("function firstString")
-            .expect("identity helpers should be generated");
-        let helper_end = contents[helper_start..]
-            .find("\n\nfunction reservationIdFromValue")
-            .map(|offset| helper_start + offset)
-            .expect("identity helpers should end before reservationIdFromValue");
-        let script = format!(
-            "{}\nlet missing;\ntry {{ agentId({{ agent_id: 'adapter-agent', session: {{ id: 'legacy-session' }} }}, {{}}); }} catch (error) {{ missing = error.message; }}\nconst branchCtx = {{ sessionManager: {{ getSessionId: () => '019f1a33-e3c1-7000-b2a6-d16cc4f05a52', getLeafId: () => 'leaf_42' }} }};\nconst sessionCtx = {{ sessionManager: {{ getSessionId: () => '019f1a33-e3c1-7000-b2a6-d16cc4f05a53', getLeafId: () => undefined }} }};\nconst values = [agentId({{ agent_id: 'ignored-adapter' }}, branchCtx), agentId({{ session: {{ id: 'ignored-session' }} }}, sessionCtx), missing];\nconsole.log(JSON.stringify(values));",
-            &contents[helper_start..helper_end]
-        );
-        let output = std::process::Command::new("node")
-            .arg("-e")
-            .arg(script)
-            .output()
-            .expect("node should execute generated extension helper");
-
-        assert!(
-            output.status.success(),
-            "node failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            String::from_utf8(output.stdout).expect("stdout should be utf8"),
-            "[\"omp-019f1a33-e3c1-7000-b2a6-d16cc4f05a52-leaf_42\",\"omp-019f1a33-e3c1-7000-b2a6-d16cc4f05a53\",\"Stateful requires OMP ctx.sessionManager.getSessionId() to derive the active agent_id; no session id was available, so Stateful actions are disabled for this agent.\"]\n"
-        );
-
-        fs::remove_dir_all(&temp_dir).expect("temp dir should be removable");
-    }
-
-    #[test]
-    fn omp_extension_allows_sandbox_run_sequence_preflight() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "stateful-omp-extension-sequence-test-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&temp_dir);
-        fs::create_dir_all(&temp_dir).expect("temp dir should be creatable");
-        let extension_path = temp_dir.join("stateful.js");
-
-        write_omp_extension(&extension_path, "/usr/local/bin/stateful")
-            .expect("extension should be written");
-        let contents = fs::read_to_string(&extension_path).expect("extension should be readable");
-
-        let helper_start = contents
-            .find("function quoteStatefulCommandWord")
-            .expect("sandbox parser helpers should be generated");
-        let helper_end = contents[helper_start..]
-            .find("\n\nexport default function statefulOmpExtension")
-            .map(|offset| helper_start + offset)
-            .expect("sandbox parser helpers should end before extension export");
-        let helpers = &contents[helper_start..helper_end];
-        let script = format!(
-            "function isTrustedStatefulCommand() {{ return true; }}\n{}\nconst decision = statefulBashPassthroughDecision(\"stateful sandbox run --fs read-only --network disabled --sequence 'printf ok'\", \"/repo\");\nconsole.log(JSON.stringify([decision.allow, decision.reason || '', decision.words.includes('--sequence')]));",
-            helpers
-        );
-        let output = std::process::Command::new("node")
-            .arg("-e")
-            .arg(script)
-            .output()
-            .expect("node should execute generated extension helper");
-
-        assert!(
-            output.status.success(),
-            "node failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            String::from_utf8(output.stdout).expect("stdout should be utf8"),
-            "[true,\"\",true]\n"
-        );
-
-        fs::remove_dir_all(&temp_dir).expect("temp dir should be removable");
-    }
-
-    #[test]
-    fn omp_extension_denies_git_profiles_with_sequence_preflight() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "stateful-omp-extension-git-sequence-test-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&temp_dir);
-        fs::create_dir_all(&temp_dir).expect("temp dir should be creatable");
-        let extension_path = temp_dir.join("stateful.js");
-
-        write_omp_extension(&extension_path, "/usr/local/bin/stateful")
-            .expect("extension should be written");
-        let contents = fs::read_to_string(&extension_path).expect("extension should be readable");
-
-        let helper_start = contents
-            .find("function quoteStatefulCommandWord")
-            .expect("sandbox parser helpers should be generated");
-        let helper_end = contents[helper_start..]
-            .find("\n\nexport default function statefulOmpExtension")
-            .map(|offset| helper_start + offset)
-            .expect("sandbox parser helpers should end before extension export");
-        let helpers = &contents[helper_start..helper_end];
-        let script = format!(
-            "function isTrustedStatefulCommand() {{ return true; }}\n{}\nconst git = statefulBashPassthroughDecision(\"stateful sandbox run --fs git --network disabled --sequence 'git status'\", \"/repo\");\nconst pr = statefulBashPassthroughDecision(\"stateful sandbox run --fs github-pr --network enabled --sequence 'gh pr status'\", \"/repo\");\nconsole.log(JSON.stringify([[git.allow, git.reason || ''], [pr.allow, pr.reason || '']]));",
-            helpers
-        );
-        let output = std::process::Command::new("node")
-            .arg("-e")
-            .arg(script)
-            .output()
-            .expect("node should execute generated extension helper");
-
-        assert!(
-            output.status.success(),
-            "node failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            String::from_utf8(output.stdout).expect("stdout should be utf8"),
-            "[[false,\"git profile requires a single git command\"],[false,\"github-pr profile requires a single gh pr command\"]]\n"
-        );
-
-        fs::remove_dir_all(&temp_dir).expect("temp dir should be removable");
-    }
-    #[test]
-    fn omp_stateful_required_rule_is_always_apply() {
-        let rule = omp_stateful_required_rule();
-        assert!(rule.contains("alwaysApply: true"));
-        assert!(rule.contains("skill://stateful-command-policy"));
     }
 }

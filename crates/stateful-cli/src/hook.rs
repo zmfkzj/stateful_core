@@ -1,32 +1,39 @@
 use std::{
-    collections::BTreeSet,
-    ffi::OsStr,
+    collections::BTreeMap,
     fs,
-    io::{self, Read},
-    path::{Component, Path, PathBuf},
+    io::{self, Read, Write},
+    path::{Path, PathBuf},
+    process::{Command as ProcessCommand, Stdio},
+    thread,
+    time::Duration,
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+use clap::Parser;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use stateful_core::normalize_relative_path;
+use serde_json::{Value, json};
+use stateful_core::{
+    ActorType, AgentIdentity, CoordinationSettings, EntryState, MutationOperation,
+    ResourceObservation, ResourceResolver, SourceKind, SourceRef, WorkspaceIdentity, digest_bytes,
+};
+use stateful_store::{
+    LeaseActivateInput, LeaseRequestState, LeaseRequestStatus, ReadCommandResult,
+    ReadCompleteInput, ReadStartInput, RuntimeProcessInput, TaskCommandResult, TaskEndInput,
+    TaskHeartbeatInput, TaskStartInput, WriteCompleteInput, WriteCompleteResult, WritePrepareInput,
+    WritePrepareResult, WriteTerminal,
+};
+use time::{Duration as TimeDuration, OffsetDateTime, format_description::well_known::Rfc3339};
 
-use crate::outbox::queue_session_heartbeat_outbox;
-use crate::sandbox::{
-    SandboxFsProfile, parse_sandbox_process_find_bash_invocation,
-    parse_sandbox_run_bash_invocation, validate_process_find_request,
-    validate_sandbox_run_request_shape,
-};
-use crate::shadow_guard;
-use crate::shell_command::{
-    first_word_is_env_assignment, reject_outer_shell_syntax, split_simple_command_words,
-};
 use crate::{
-    GlobalPaths, HookCommand, HookRuntime, ProtocolEnvelopeArgs, RepoGate, RepoIdentity,
-    ServerRuntime, discover_runtime_with_global, effective_workspace_id_for_repo, ensure_server,
-    get_json, post_json, protocol_envelope, record_unclassified_tool_for_repo, repo_gate,
-    repo_identity_for_enabled_repo, runtime_env_override_is_configured,
-    tool_allowed_for_enabled_repo,
+    Cli, Command as CliCommand, CommandError, CommandIdentity, GlobalPaths, HookCommand,
+    HookRuntime, LeaseCommand, ReposCommand, SandboxCommand, SandboxFsProfile, ServerRuntime,
+    discover_runtime_with_optional_global, get_payload, now_rfc3339, post_command,
+    process_parent_pid, process_start_identity_for_pid, repo_gate, runtime::sync_parent_dir,
 };
+
+const OFFER_POLL_MILLIS: u64 = 250;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookOutcome {
@@ -35,3551 +42,1533 @@ pub enum HookOutcome {
     Deny { reason: String },
 }
 
+impl HookOutcome {
+    pub fn to_stdout_json(&self) -> serde_json::Result<Value> {
+        Ok(match self {
+            Self::Allow => json!({}),
+            Self::AllowWithContext { message } => {
+                json!({ "hookSpecificOutput": { "hookEventName": "PreToolUse", "additionalContext": message } })
+            }
+            Self::Deny { reason } => {
+                json!({ "hookSpecificOutput": { "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason } })
+            }
+        })
+    }
+    fn emits_stdout(&self) -> bool {
+        !matches!(self, Self::Allow)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OmpHookOutcome {
     Allow,
-    Block { reason: String },
-    Prompt { title: String, message: String },
+    AllowWithWriteAttempt {
+        attempt_id: String,
+        permit_id: String,
+    },
+    Block {
+        reason: String,
+    },
 }
 
 impl OmpHookOutcome {
-    fn to_stdout_json(&self) -> serde_json::Value {
+    fn json(&self) -> Value {
         match self {
             Self::Allow => json!({ "decision": "allow" }),
-            Self::Block { reason } => json!({
-                "decision": "block",
-                "reason": reason,
-            }),
-            Self::Prompt { title, message } => json!({
-                "decision": "prompt",
-                "title": title,
-                "message": message,
-            }),
+            Self::AllowWithWriteAttempt {
+                attempt_id,
+                permit_id,
+            } => {
+                json!({ "decision": "allow", "stateful": { "write_attempt": { "attempt_id": attempt_id, "permit_id": permit_id } } })
+            }
+            Self::Block { reason } => json!({ "decision": "block", "reason": reason }),
         }
-    }
-}
-
-#[cfg(feature = "codex-benchmark")]
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct NestedCodexBenchmarkSandboxInvocation {
-    executable: String,
-    purpose: String,
-    write_dir: String,
-    codex_home_root: String,
-    docker_socket: Option<String>,
-    command: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StatefulControlInvocation {
-    executable: String,
-}
-
-impl HookOutcome {
-    pub fn to_stdout_json(&self) -> serde_json::Result<serde_json::Value> {
-        match self {
-            Self::Allow => Ok(json!({})),
-            Self::AllowWithContext { message } => Ok(json!({
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "additionalContext": message,
-                }
-            })),
-            Self::Deny { reason } => Ok(json!({
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": reason,
-                }
-            })),
-        }
-    }
-
-    fn emits_stdout(&self) -> bool {
-        !matches!(self, Self::Allow)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct OmpSessionStartOutput {
     pub decision: &'static str,
+    pub task_id: String,
     pub agent_id: String,
     pub workspace_id: String,
-    pub notifications_stream: OmpNotificationsStream,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct OmpNotificationsStream {
-    pub base_url: String,
-    pub authorization: String,
-    pub agent_id: String,
-    pub workspace_id: String,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct OwnedTaskOwner {
+    pub(crate) task_id: String,
+    pub(crate) agent_id: String,
+    pub(crate) workspace_id: String,
+    pub(crate) session_id: String,
+    pub(crate) turn_id: String,
+    pub(crate) pid: u32,
+    pub(crate) process_start_identity: String,
+    #[serde(default = "heartbeat_enabled")]
+    pub(crate) heartbeat_enabled: bool,
+    pub(crate) task_start_observed_at: String,
+    pub(crate) task_start_input: TaskStartInput,
+}
+
+fn heartbeat_enabled() -> bool {
+    true
+}
+
+#[derive(Serialize, Deserialize)]
+struct CodexHeartbeatInput {
+    repo_root: PathBuf,
+    owner: OwnedTaskOwner,
+}
+
+#[derive(Clone)]
+struct TaskContext {
+    task_id: String,
+    agent_id: String,
+    turn_id: Option<String>,
+    actor_id: String,
+    owner_id: String,
+    workspace: WorkspaceIdentity,
+}
+
+#[derive(Deserialize)]
+struct CodexInput {
+    session_id: String,
+    turn_id: String,
+    #[serde(default)]
+    tool_name: Option<String>,
+    #[serde(default)]
+    tool_input: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OmpInput {
+    #[serde(rename = "type", alias = "event_type")]
+    event_type: String,
+    runtime: String,
+    version: String,
+    #[serde(default)]
+    cwd: Option<PathBuf>,
+    session_id: String,
+    leaf_agent_id: String,
+    #[serde(default, alias = "task_id")]
+    task_id: Option<String>,
+    #[serde(default, alias = "tool_name")]
+    tool_name: Option<String>,
+    #[serde(default, alias = "tool_call_id")]
+    tool_call_id: Option<String>,
+    #[serde(default)]
+    input: Value,
+    #[serde(default, alias = "is_error")]
+    is_error: bool,
+    #[serde(default)]
+    content: Value,
+    #[serde(default)]
+    details: Value,
+    #[serde(default, alias = "attempt_id")]
+    attempt_id: Option<String>,
+    #[serde(default, alias = "permit_id")]
+    permit_id: Option<String>,
+    #[serde(default, alias = "will_continue")]
+    will_continue: Option<bool>,
+}
+
+#[derive(Default, Deserialize)]
+struct SettingsFile {
+    heartbeat_interval_seconds: Option<u64>,
+    inactivity_timeout_seconds: Option<u64>,
+    lease_expiry_seconds: Option<u64>,
+    offer_ttl_seconds: Option<u64>,
 }
 
 pub fn run_hook(runtime: HookRuntime) -> anyhow::Result<()> {
     match runtime {
-        HookRuntime::Codex { command } => run_codex_hook(command),
-        HookRuntime::Omp { command } => run_omp_hook(command),
+        HookRuntime::Codex { command } => run_codex(command),
+        HookRuntime::Omp { command } => run_omp(command),
     }
 }
 
-fn run_omp_hook(command: HookCommand) -> anyhow::Result<()> {
-    let mut input = String::new();
-    io::stdin().read_to_string(&mut input)?;
-    let start = hook_start_dir(&input)?;
-    let paths = GlobalPaths::from_env()?;
-    let repo_root = match repo_gate(&paths, &start)? {
-        RepoGate::Enabled { repo_root } => repo_root,
-        RepoGate::Disabled | RepoGate::OutsideGitRepo => {
-            if matches!(command, HookCommand::PreToolUse) {
-                println!("{}", json!({ "decision": "allow" }));
-            }
-            return Ok(());
-        }
+fn run_codex(command: HookCommand) -> anyhow::Result<()> {
+    let input = stdin()?;
+    if let HookCommand::Heartbeat = &command {
+        return run_codex_heartbeat(&input);
+    }
+    let Some(repo) = enabled_repo(&hook_cwd(&input)?)? else {
+        return Ok(());
     };
-    if !runtime_env_override_is_configured() {
-        ensure_server(&paths)?;
-    }
-    let runtime = discover_runtime_with_global(&repo_root, &paths)?;
-    let identity = repo_identity_for_enabled_repo(&paths, &repo_root).ok();
-
     match command {
         HookCommand::PreToolUse => {
-            let outcome = handle_omp_pre_tool_use_with_identity(
-                &input,
-                Some(&runtime),
-                Some(&repo_root),
-                Some(start.as_path()),
-                identity.as_ref(),
-            )?;
-            println!("{}", outcome.to_stdout_json());
-        }
-        HookCommand::SessionStart => {
-            match handle_omp_session_start_with_identity(&input, &runtime, identity.as_ref()) {
-                Ok(output) => println!("{}", serde_json::to_string(&output)?),
-                Err(error) => eprintln!("stateful omp session-start warning: {error}"),
-            }
-        }
-        HookCommand::PostToolUse => {
-            if let Err(error) = handle_omp_post_tool_use_with_identity(
-                &input,
-                &runtime,
-                Some(&repo_root),
-                identity.as_ref(),
-            ) {
-                eprintln!("stateful omp post-tool-use warning: {error}");
-            }
-        }
-        HookCommand::Stop => {
-            let input: OmpSessionEventInput = serde_json::from_str(&input)?;
-            input.validate()?;
-            post_omp_session_event(
-                &runtime,
-                "/v1/activity/finalize",
-                "omp_stop",
-                &input,
-                identity.as_ref(),
-            )?;
-        }
-        HookCommand::UserPromptSubmit => {
-            anyhow::bail!("OMP hook user-prompt-submit is not supported");
-        }
-    }
-    Ok(())
-}
-
-fn run_codex_hook(command: HookCommand) -> anyhow::Result<()> {
-    match command {
-        HookCommand::SessionStart => {
-            let mut input = String::new();
-            io::stdin().read_to_string(&mut input)?;
-            if let Err(error) = handle_session_start_in_repo(&input, hook_start_dir(&input)?) {
-                eprintln!("stateful session-start warning: {error}");
-            }
-        }
-        HookCommand::PostToolUse => {
-            let mut input = String::new();
-            io::stdin().read_to_string(&mut input)?;
-            if let Err(error) = handle_post_tool_use_in_repo(&input, hook_start_dir(&input)?) {
-                eprintln!("stateful post-tool-use warning: {error}");
-            }
-        }
-        HookCommand::UserPromptSubmit => {
-            let mut input = String::new();
-            io::stdin().read_to_string(&mut input)?;
-            match handle_user_prompt_submit_in_repo(&input, hook_start_dir(&input)?) {
-                Ok(prompt_text) if !prompt_text.is_empty() => println!("{prompt_text}"),
-                Ok(_) => {}
-                Err(error) => eprintln!("stateful user-prompt-submit warning: {error}"),
-            }
-        }
-        HookCommand::Stop => {
-            let mut input = String::new();
-            io::stdin().read_to_string(&mut input)?;
-            if let Err(error) = handle_stop_in_repo(&input, hook_start_dir(&input)?) {
-                eprintln!("stateful stop warning: {error}");
-            }
-        }
-        HookCommand::PreToolUse => {
-            let mut input = String::new();
-            io::stdin().read_to_string(&mut input)?;
-            let outcome = handle_pre_tool_use_in_repo(&input, hook_start_dir(&input)?)?;
+            let outcome = handle_pre_tool_use_in_repo(&input, &repo)?;
             if outcome.emits_stdout() {
                 println!("{}", serde_json::to_string(&outcome.to_stdout_json()?)?);
             }
         }
+        HookCommand::UserPromptSubmit => match handle_user_prompt_submit_in_repo(&input, &repo) {
+            Ok(message) => println!(
+                "{}",
+                json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "UserPromptSubmit",
+                        "additionalContext": message,
+                    }
+                })
+            ),
+            Err(error) => eprintln!("stateful Codex task start denied: {error}"),
+        },
+        HookCommand::Stop => {
+            if let Err(error) = handle_stop_in_repo(&input, &repo) {
+                eprintln!("stateful Codex task finalize denied: {error}");
+            }
+        }
+        HookCommand::SessionStart | HookCommand::PostToolUse => {}
+        HookCommand::Heartbeat => unreachable!("heartbeat is handled before Codex input parsing"),
     }
+    Ok(())
+}
 
+fn run_omp(command: HookCommand) -> anyhow::Result<()> {
+    let input = stdin()?;
+    let Some(repo) = enabled_repo(&hook_cwd(&input)?)? else {
+        if matches!(command, HookCommand::PreToolUse) {
+            println!("{}", json!({ "decision": "allow" }));
+        }
+        return Ok(());
+    };
+    let runtime = discover_runtime_with_optional_global(&repo)?;
+    match command {
+        HookCommand::SessionStart => println!(
+            "{}",
+            serde_json::to_string(&omp_start(&input, &runtime, &repo)?)?
+        ),
+        HookCommand::PreToolUse => println!("{}", omp_pre(&input, &runtime, &repo)?.json()),
+        HookCommand::PostToolUse => omp_post(&input, &runtime, &repo)?,
+        HookCommand::Stop => omp_stop(&input, &runtime, &repo)?,
+        HookCommand::UserPromptSubmit => anyhow::bail!("OMP does not use UserPromptSubmit"),
+        HookCommand::Heartbeat => anyhow::bail!("OMP does not use the Codex heartbeat helper"),
+    }
     Ok(())
 }
 
 pub fn handle_pre_tool_use(input: &str) -> anyhow::Result<HookOutcome> {
-    handle_pre_tool_use_with_runtime(input, None, None, None)
+    let input: CodexInput = serde_json::from_str(input)?;
+    let reason = match input.tool_name.as_deref().unwrap_or("unknown") {
+        "read" | "Read" => {
+            "Codex native reads are wrapper_required: complete typed terminal payload is unavailable"
+        }
+        "apply_patch" | "write" | "edit" | "Write" | "Edit" => {
+            "Codex native writes are wrapper_required: use the owned Stateful wrapper"
+        }
+        _ => "unknown_writer: only owned Stateful wrappers may mutate an enabled workspace",
+    };
+    Ok(HookOutcome::Deny {
+        reason: reason.to_string(),
+    })
 }
 
 pub fn handle_pre_tool_use_in_repo(
     input: &str,
-    repo_root: impl AsRef<Path>,
+    _repo_root: impl AsRef<Path>,
 ) -> anyhow::Result<HookOutcome> {
-    let start = hook_start_dir_or(input, repo_root.as_ref());
-    let paths = GlobalPaths::from_env()?;
-    let repo_root = match repo_gate(&paths, &start)? {
-        RepoGate::Enabled { repo_root } => repo_root,
-        RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(HookOutcome::Allow),
-    };
-    let runtime = prepare_pre_tool_use_runtime(&repo_root, &paths, input).ok();
-    handle_pre_tool_use_with_runtime(
-        input,
-        runtime.as_ref(),
-        Some(&repo_root),
-        Some(start.as_path()),
-    )
+    let input: CodexInput = serde_json::from_str(input)?;
+    if input
+        .tool_name
+        .as_deref()
+        .is_some_and(|name| name.eq_ignore_ascii_case("bash"))
+    {
+        return Ok(match validate_codex_wrapper_command(&input) {
+            Ok(()) => HookOutcome::Allow,
+            Err(error) => HookOutcome::Deny {
+                reason: format!("Codex Bash is wrapper_required: {error}"),
+            },
+        });
+    }
+    handle_pre_tool_use(&serde_json::to_string(&json!({
+        "session_id": input.session_id,
+        "turn_id": input.turn_id,
+        "tool_name": input.tool_name,
+    }))?)
+}
+
+fn validate_codex_wrapper_command(input: &CodexInput) -> anyhow::Result<()> {
+    let command = input
+        .tool_input
+        .get("command")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("Bash payload lacks a command"))?;
+    let words =
+        crate::shell_command::split_simple_command_words(command).map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(!words.is_empty(), "Bash command is empty");
+    let requested = Path::new(&words[0]).canonicalize()?;
+    let installed = std::env::current_exe()?.canonicalize()?;
+    anyhow::ensure!(
+        requested == installed,
+        "use the exact installed Stateful binary `{}`",
+        installed.display()
+    );
+    let cli = Cli::try_parse_from(words)
+        .map_err(|error| anyhow::anyhow!("invalid Stateful wrapper command: {error}"))?;
+    let task_id = id("codex-task", &[&input.session_id, &input.turn_id]);
+    let agent_id = format!("codex:{}", input.session_id);
+    match cli.command {
+        CliCommand::Sandbox(SandboxCommand::Run {
+            fs: SandboxFsProfile::Mutation,
+            task_id: Some(command_task),
+            agent_id: Some(command_agent),
+            ..
+        }) if command_task == task_id && command_agent == agent_id => Ok(()),
+        CliCommand::Sandbox(SandboxCommand::Run {
+            fs: SandboxFsProfile::ReadOnly | SandboxFsProfile::Git,
+            ..
+        })
+        | CliCommand::Sandbox(SandboxCommand::Process { .. })
+        | CliCommand::Status
+        | CliCommand::Doctor
+        | CliCommand::Repos(ReposCommand::List) => Ok(()),
+        CliCommand::Commit {
+            task_id: command_task,
+            agent_id: command_agent,
+            ..
+        }
+        | CliCommand::Lease(LeaseCommand::Release {
+            task_id: command_task,
+            agent_id: command_agent,
+            ..
+        }) if command_task == task_id && command_agent == agent_id => Ok(()),
+        _ => anyhow::bail!(
+            "only read-only sandbox commands and mutation, commit, or lease-release wrappers bound to this task are allowed"
+        ),
+    }
 }
 
 pub fn handle_omp_pre_tool_use_with_runtime(
     input: &str,
     runtime: Option<&ServerRuntime>,
     repo_root: Option<&Path>,
-    cwd: Option<&Path>,
+    _cwd: Option<&Path>,
 ) -> anyhow::Result<OmpHookOutcome> {
-    handle_omp_pre_tool_use_with_identity(input, runtime, repo_root, cwd, None)
+    omp_pre(
+        input,
+        runtime.ok_or_else(|| anyhow::anyhow!("local Stateful runtime is unavailable"))?,
+        repo_root.ok_or_else(|| anyhow::anyhow!("enabled workspace is unavailable"))?,
+    )
 }
 
-fn handle_omp_pre_tool_use_with_identity(
-    input: &str,
-    runtime: Option<&ServerRuntime>,
-    repo_root: Option<&Path>,
-    cwd: Option<&Path>,
-    identity: Option<&RepoIdentity>,
-) -> anyhow::Result<OmpHookOutcome> {
-    let input: OmpPreToolUseInput = serde_json::from_str(input)?;
-    input.validate()?;
-    let global_paths = GlobalPaths::from_env().ok();
-    match omp_pre_tool_action(&input, repo_root, cwd, global_paths.as_ref())? {
-        OmpPreToolAction::Allow => Ok(OmpHookOutcome::Allow),
-        OmpPreToolAction::Block { reason } => Ok(OmpHookOutcome::Block { reason }),
-        OmpPreToolAction::Targets(targets) => {
-            authorize_omp_targets(&input, runtime, repo_root, cwd, identity, targets)
+fn omp_pre(input: &str, runtime: &ServerRuntime, repo: &Path) -> anyhow::Result<OmpHookOutcome> {
+    let input: OmpInput = serde_json::from_str(input)?;
+    let task = omp_task(&input, runtime, repo)?;
+    if input.event_type != "tool_call" {
+        return Ok(OmpHookOutcome::Block {
+            reason: "OMP pre-tool payload must be tool_call".to_string(),
+        });
+    }
+    match input.tool_name.as_deref().unwrap_or_default() {
+        "read" => {
+            let invocation = invocation(&input)?;
+            let resolver = ResourceResolver::new(&task.workspace.workspace_id, repo)?;
+            post_command::<_, ReadCommandResult>(
+                runtime,
+                "/v2/reads/start",
+                &identity(&task, "read.start", &invocation, Some("read")),
+                &ReadStartInput {
+                    read_id: id("read", &[&task.task_id, &invocation]),
+                    invocation_id: invocation,
+                    resources: read_observation(&resolver, &raw_path(&input.input)?)?,
+                },
+            )
+            .map_err(command_error)?;
+            Ok(OmpHookOutcome::Allow)
         }
+        "write" => prepare_write(&input, runtime, repo, &task),
+        tool => Ok(OmpHookOutcome::Block {
+            reason: format!("unknown_writer: unsupported OMP tool `{tool}`"),
+        }),
     }
 }
 
-enum OmpPreToolAction {
-    Targets(Vec<PatchTarget>),
-    Allow,
-    Block { reason: String },
+fn prepare_write(
+    input: &OmpInput,
+    runtime: &ServerRuntime,
+    repo: &Path,
+    task: &TaskContext,
+) -> anyhow::Result<OmpHookOutcome> {
+    let invocation = invocation(input)?;
+    let operation = write_operation(&input.input, repo)?;
+    let settings = settings(repo)?;
+    let resolver = ResourceResolver::new(&task.workspace.workspace_id, repo)?;
+    let command = identity(task, "write.prepare", &invocation, Some("write"));
+    let payload = WritePrepareInput {
+        invocation_id: invocation,
+        operation: operation.clone(),
+        current: resolver.observe_operation(&operation)?,
+        request_expires_at: after(&command.observed_at, settings.offer_ttl_seconds)?,
+        lease_expires_at: after(&command.observed_at, settings.lease_expiry_seconds)?,
+        attempt_deadline: after(&command.observed_at, settings.lease_expiry_seconds)?,
+    };
+    match post_command::<_, WritePrepareResult>(runtime, "/v2/writes/prepare", &command, &payload)
+        .map_err(command_error)?
+    {
+        WritePrepareResult::Ready {
+            attempt_id,
+            permit_id,
+            ..
+        } => Ok(OmpHookOutcome::AllowWithWriteAttempt {
+            attempt_id,
+            permit_id,
+        }),
+        WritePrepareResult::Queued { batch_id } => wait_offer(runtime, task, &settings, &batch_id),
+        WritePrepareResult::RereadRequired { .. } => Ok(OmpHookOutcome::Block {
+            reason: "reread_required: full native reread is required before mutation".to_string(),
+        }),
+        WritePrepareResult::Denied { reason_code } => Ok(OmpHookOutcome::Block {
+            reason: format!("write denied: {reason_code}"),
+        }),
+    }
 }
 
-fn omp_pre_tool_action(
-    input: &OmpPreToolUseInput,
-    repo_root: Option<&Path>,
-    _cwd: Option<&Path>,
-    global_paths: Option<&GlobalPaths>,
-) -> anyhow::Result<OmpPreToolAction> {
-    let tool_name = runtime_tool_name_leaf(&input.tool_name);
-    match tool_name {
-        tool_name if tool_name.eq_ignore_ascii_case("write") => {
-            let Some(path) = input
-                .tool_input
-                .get("path")
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|path| !path.is_empty())
-            else {
-                return Ok(OmpPreToolAction::Block {
-                    reason: "write requires a path target for stateful authorization".to_string(),
+fn wait_offer(
+    runtime: &ServerRuntime,
+    task: &TaskContext,
+    settings: &CoordinationSettings,
+    initial_batch: &str,
+) -> anyhow::Result<OmpHookOutcome> {
+    let deadline =
+        OffsetDateTime::now_utc() + TimeDuration::seconds(settings.offer_ttl_seconds as i64);
+    let mut batch = initial_batch.to_string();
+    while OffsetDateTime::now_utc() < deadline {
+        let status: LeaseRequestStatus = get_payload(
+            runtime,
+            &format!(
+                "/v2/lease-requests/{batch}?workspace_id={}&task_id={}&now={}",
+                url(&task.workspace.workspace_id),
+                url(&task.task_id),
+                url(&now_rfc3339())
+            ),
+        )
+        .map_err(command_error)?;
+        match status.state {
+            LeaseRequestState::Queued => thread::sleep(Duration::from_millis(OFFER_POLL_MILLIS)),
+            LeaseRequestState::Offered => {
+                let offer_id = status
+                    .offer_id
+                    .ok_or_else(|| anyhow::anyhow!("offered lease lacks offer_id"))?;
+                let command = identity(
+                    task,
+                    "lease.activate",
+                    &format!(
+                        "{batch}:{}:{offer_id}:{}",
+                        status.version,
+                        uuid::Uuid::new_v4()
+                    ),
+                    Some("write"),
+                );
+                let activated: stateful_store::LeaseActivateResult = post_command(
+                    runtime,
+                    "/v2/leases/activate",
+                    &command,
+                    &LeaseActivateInput {
+                        batch_id: batch.clone(),
+                        offer_id,
+                        version: status.version,
+                        lease_expires_at: after(
+                            &command.observed_at,
+                            settings.lease_expiry_seconds,
+                        )?,
+                    },
+                )
+                .map_err(command_error)?;
+                if !activated.active {
+                    return Ok(OmpHookOutcome::Block {
+                        reason: "reread_required: offered lease remains inactive; full native reread is required before a new prepare retries activation".to_string(),
+                    });
+                }
+                return Ok(OmpHookOutcome::Block {
+                    reason: "reread_required: lease activated; full native reread and a new prepare are required before mutation".to_string(),
                 });
-            };
-            Ok(OmpPreToolAction::Targets(vec![PatchTarget::write(path)]))
-        }
-        tool_name if tool_name.eq_ignore_ascii_case("edit") => {
-            let targets = extract_omp_edit_targets(&input.tool_input);
-            if targets.is_empty() {
-                return Ok(OmpPreToolAction::Block {
-                    reason: "edit requires hashline file targets for stateful authorization"
+            }
+            LeaseRequestState::Superseded => {
+                batch = status
+                    .superseded_by
+                    .ok_or_else(|| anyhow::anyhow!("superseded request lacks replacement"))?
+            }
+            LeaseRequestState::Activated => {
+                return Ok(OmpHookOutcome::Block {
+                    reason: "reread_required: activated leases cannot execute before a full reread"
                         .to_string(),
                 });
             }
-            Ok(OmpPreToolAction::Targets(targets))
-        }
-        tool_name if tool_name.eq_ignore_ascii_case("bash") => {
-            if let Some(action) = input.command().and_then(omp_sandbox_run_action) {
-                return Ok(action);
-            }
-            if let Some(action) = input.command().and_then(omp_process_find_action) {
-                return Ok(action);
-            }
-            Ok(OmpPreToolAction::Block {
-                reason: format!(
-                    "OMP raw {} is denied; only trusted stateful sandbox run or stateful sandbox process find commands are allowed through built-in Bash",
-                    input.tool_name
-                ),
-            })
-        }
-        tool_name if is_omp_eval_tool(tool_name) => Ok(OmpPreToolAction::Block {
-            reason: format!(
-                "OMP eval tool {} is denied; use built-in Bash with trusted stateful sandbox run or stateful sandbox process find commands",
-                input.tool_name
-            ),
-        }),
-        tool_name if is_omp_safe_without_repo_write_authorization(tool_name) => {
-            Ok(OmpPreToolAction::Allow)
-        }
-        _ if is_stateful_control_plane_tool(&input.tool_name) => Ok(OmpPreToolAction::Allow),
-        _ if is_user_allowed_tool(global_paths, repo_root, tool_name) => {
-            Ok(OmpPreToolAction::Allow)
-        }
-        _ => {
-            record_unclassified_tool(global_paths, repo_root, tool_name);
-            Ok(OmpPreToolAction::Block {
-                reason: format!(
-                    "unclassified OMP tool {} may write or execute and requires explicit stateful classification",
-                    input.tool_name
-                ),
-            })
-        }
-    }
-}
-
-fn is_omp_eval_tool(tool_name: &str) -> bool {
-    [
-        "eval",
-        "py",
-        "python",
-        "javascript",
-        "js",
-        "rb",
-        "ruby",
-        "jl",
-        "julia",
-    ]
-    .iter()
-    .any(|eval_tool| tool_name.eq_ignore_ascii_case(eval_tool))
-}
-
-fn is_omp_safe_without_repo_write_authorization(tool_name: &str) -> bool {
-    [
-        "ask",
-        "ast_grep",
-        "browser",
-        "find",
-        "generate_image",
-        "glob",
-        "grep",
-        "irc",
-        "lazy_edit_resume",
-        "lazy_write_resume",
-        "lazy_bash_resume",
-        "job",
-        "read",
-        "report_tool_issue",
-        "search",
-        "search_tool_bm25",
-        "task",
-        "yield",
-        "parallel_tool_calls",
-        "todo",
-        "web_search",
-    ]
-    .iter()
-    .any(|safe_tool| tool_name.eq_ignore_ascii_case(safe_tool))
-}
-
-fn omp_sandbox_run_action(command: &str) -> Option<OmpPreToolAction> {
-    let invocation = parse_sandbox_run_bash_invocation(command).ok()?;
-    if !is_trusted_stateful_executable(&invocation.executable) {
-        return Some(OmpPreToolAction::Block {
-            reason: "stateful sandbox run requires a trusted stateful binary".to_string(),
-        });
-    }
-    if let Err(error) = validate_sandbox_run_request_shape(&invocation.request) {
-        return Some(OmpPreToolAction::Block {
-            reason: error.to_string(),
-        });
-    }
-    if invocation.request.fs == SandboxFsProfile::WriteTargets {
-        let targets = invocation
-            .request
-            .write_targets
-            .iter()
-            .chain(invocation.request.create_targets.iter())
-            .map(|path| PatchTarget::write(path))
-            .chain(
-                invocation
-                    .request
-                    .write_dirs
-                    .iter()
-                    .map(|path| PatchTarget::write_directory(path)),
-            )
-            .collect();
-        return Some(OmpPreToolAction::Targets(targets));
-    }
-    if invocation.request.fs == SandboxFsProfile::External {
-        return Some(OmpPreToolAction::Allow);
-    }
-    Some(OmpPreToolAction::Allow)
-}
-
-fn omp_process_find_action(command: &str) -> Option<OmpPreToolAction> {
-    let invocation = parse_sandbox_process_find_bash_invocation(command).ok()?;
-    if !is_trusted_stateful_executable(&invocation.executable) {
-        return Some(OmpPreToolAction::Block {
-            reason: "stateful sandbox process find requires a trusted stateful binary".to_string(),
-        });
-    }
-    if let Err(error) = validate_process_find_request(&invocation.request) {
-        return Some(OmpPreToolAction::Block {
-            reason: error.to_string(),
-        });
-    }
-    Some(OmpPreToolAction::Allow)
-}
-
-fn omp_hook_authorize_purpose(
-    input: &OmpPreToolUseInput,
-    runtime: &ServerRuntime,
-    target: &PatchTarget,
-    workspace_id: &str,
-) -> Option<String> {
-    let response = get_json(runtime, "/v1/current").ok()?;
-    if !(200..300).contains(&response.status_code) {
-        return None;
-    }
-    let body: serde_json::Value = serde_json::from_str(&response.body).ok()?;
-    let items = body.get("items")?.as_array()?;
-    let mut fallback = None;
-    for item in items {
-        let matches_intent = item.get("kind").and_then(serde_json::Value::as_str)
-            == Some("reservation")
-            && item.get("freshness").and_then(serde_json::Value::as_str) == Some("live")
-            && item.get("agent_id").and_then(serde_json::Value::as_str)
-                == Some(input.agent_id.as_str())
-            && item.get("workspace_id").and_then(serde_json::Value::as_str) == Some(workspace_id);
-        if !matches_intent {
-            continue;
-        }
-        let Some(purpose) = item
-            .get("purpose")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|purpose| !purpose.is_empty())
-            .map(str::to_string)
-        else {
-            continue;
-        };
-        if item.get("resource").and_then(serde_json::Value::as_str) == Some(target.path.as_str()) {
-            return Some(purpose);
-        }
-        if fallback.is_none() {
-            fallback = Some(purpose);
-        }
-    }
-
-    fallback
-}
-
-fn authorize_omp_targets(
-    input: &OmpPreToolUseInput,
-    runtime: Option<&ServerRuntime>,
-    repo_root: Option<&Path>,
-    cwd: Option<&Path>,
-    identity: Option<&RepoIdentity>,
-    targets: Vec<PatchTarget>,
-) -> anyhow::Result<OmpHookOutcome> {
-    if let Some(outcome) = omp_external_native_write_prompt(input, &targets, repo_root, cwd)? {
-        return Ok(outcome);
-    }
-
-    let Some(targets) = normalize_targets(targets, repo_root, cwd)? else {
-        return Ok(OmpHookOutcome::Block {
-            reason: format!("{} target is outside the enabled repo", input.tool_name),
-        });
-    };
-
-    let Some(runtime) = runtime else {
-        let reason = format!(
-            "{} writes require a reachable stateful server, task reservation exact file scope, and a same-reservation file claim",
-            input.tool_name
-        );
-        return Ok(OmpHookOutcome::Block { reason });
-    };
-
-    let workspace_id = input
-        .workspace_id
-        .clone()
-        .unwrap_or_else(|| effective_workspace_id(runtime, identity));
-    let mut reservation_id = input.reservation_id().map(str::to_string);
-    let mut auto_declared = false;
-    let mut auto_claimed_paths = BTreeSet::new();
-
-    'authorize: loop {
-        for target in &targets {
-            let purpose = omp_hook_authorize_purpose(input, runtime, target, &workspace_id)
-                .unwrap_or_else(|| format!("Queue OMP {} for {}.", input.tool_name, target.path));
-            let decision = match post_omp_authorize_target(
-                input,
-                runtime,
-                repo_root,
-                identity,
-                target,
-                &workspace_id,
-                reservation_id.as_deref(),
-                &purpose,
-            ) {
-                Ok(decision) => decision,
-                Err(outcome) => {
-                    release_omp_auto_claims(runtime, input, &workspace_id, &auto_claimed_paths);
-                    return Ok(outcome);
-                }
-            };
-            if decision.decision != "allow" {
-                if !auto_declared
-                    && reservation_id.is_none()
-                    && should_auto_declare_omp_tool_reservation(input, &decision, &targets)
-                {
-                    reservation_id = Some(
-                        match declare_and_claim_omp_pre_tool_reservation(
-                            input,
-                            runtime,
-                            identity,
-                            &workspace_id,
-                            &targets,
-                            &purpose,
-                        ) {
-                            Ok(reservation_id) => reservation_id,
-                            Err(outcome) => return Ok(outcome),
-                        },
-                    );
-                    auto_claimed_paths = targets.iter().map(|target| target.path.clone()).collect();
-                    auto_declared = true;
-                    continue 'authorize;
-                }
-
-                let reason = if let Some(repo_root) = repo_root {
-                    if repeated_denial_seen(
-                        repo_root,
-                        &input.agent_id,
-                        &target.path,
-                        &decision.reason_code,
-                    ) {
-                        repeated_denial_reason(&target.path)
-                    } else {
-                        authorization_denial_reason(decision)
-                    }
-                } else {
-                    authorization_denial_reason(decision)
-                };
-                release_omp_auto_claims(runtime, input, &workspace_id, &auto_claimed_paths);
-                return Ok(OmpHookOutcome::Block { reason });
+            LeaseRequestState::Expired | LeaseRequestState::Cancelled => {
+                return Ok(OmpHookOutcome::Block {
+                    reason: "write queue request is no longer active".to_string(),
+                });
             }
         }
-
-        return Ok(OmpHookOutcome::Allow);
     }
-}
-
-fn omp_external_native_write_prompt(
-    input: &OmpPreToolUseInput,
-    targets: &[PatchTarget],
-    repo_root: Option<&Path>,
-    cwd: Option<&Path>,
-) -> anyhow::Result<Option<OmpHookOutcome>> {
-    let tool_name = runtime_tool_name_leaf(&input.tool_name);
-    if !(tool_name.eq_ignore_ascii_case("edit") || tool_name.eq_ignore_ascii_case("write")) {
-        return Ok(None);
-    }
-    let Some(repo_root) = repo_root else {
-        return Ok(None);
-    };
-    let mut external_targets = Vec::new();
-    let mut internal_targets = 0;
-    for target in targets {
-        match target.action {
-            "write_file" => {
-                if normalize_file_tool_target(&target.path, Some(repo_root), cwd)?.is_some() {
-                    internal_targets += 1;
-                } else {
-                    external_targets.push(omp_external_target_display(&target.path, cwd));
-                }
-            }
-            "move_file" => {
-                for path in [&target.path, target.new_path.as_deref().unwrap_or("")] {
-                    if path.is_empty() {
-                        continue;
-                    }
-                    if normalize_file_tool_target(path, Some(repo_root), cwd)?.is_some() {
-                        internal_targets += 1;
-                    } else {
-                        external_targets.push(omp_external_target_display(path, cwd));
-                    }
-                }
-            }
-            _ => return Ok(None),
-        }
-    }
-    if external_targets.is_empty() {
-        return Ok(None);
-    }
-    if internal_targets > 0 {
-        return Ok(Some(OmpHookOutcome::Block {
-            reason: format!(
-                "{} mixes repo-internal and repo-external targets; split the operation before retrying",
-                input.tool_name
-            ),
-        }));
-    }
-
-    let action = if tool_name.eq_ignore_ascii_case("edit") {
-        "edit"
-    } else {
-        "write"
-    };
-    Ok(Some(OmpHookOutcome::Prompt {
-        title: format!("Approve external {action}"),
-        message: format!(
-            "Stateful is requesting approval for a repo-external OMP {action}.\n\nTargets:\n{}\n\nSet stateful.autoApprove to true to skip this prompt.",
-            external_targets.join("\n")
-        ),
-    }))
-}
-
-fn omp_external_target_display(path: &str, cwd: Option<&Path>) -> String {
-    let path = Path::new(path.trim());
-    if path.is_absolute() {
-        return normalize_path(path.to_path_buf())
-            .to_string_lossy()
-            .to_string();
-    }
-    let base = cwd.unwrap_or_else(|| Path::new("."));
-    normalize_path(base.join(path))
-        .to_string_lossy()
-        .to_string()
-}
-
-fn release_omp_auto_claims(
-    runtime: &ServerRuntime,
-    input: &OmpPreToolUseInput,
-    workspace_id: &str,
-    paths: &BTreeSet<String>,
-) {
-    if !paths.is_empty() {
-        release_pre_tool_authorized_claims(runtime, &input.agent_id, workspace_id, paths);
-    }
-}
-
-fn authorization_payload_for_target(
-    target: &PatchTarget,
-    repo_root: Option<&Path>,
-    purpose: Option<&str>,
-    reservation_id: Option<&str>,
-    queue_on_conflict: bool,
-) -> serde_json::Value {
-    let mut payload = json!({
-        "action": target.action,
-        "path": target.path,
-    });
-    if let Some(observation) = base_observation_for_target(repo_root, &target.path) {
-        payload["base_observations"] = json!([observation]);
-    }
-    if queue_on_conflict {
-        payload["queue_on_conflict"] = json!(true);
-    }
-    if let Some(purpose) = purpose {
-        payload["purpose"] = json!(purpose);
-    }
-    if let Some(new_path) = &target.new_path {
-        payload["old_path"] = json!(target.path);
-        payload["new_path"] = json!(new_path);
-    }
-    if let Some(reservation_id) = reservation_id {
-        payload["reservation_id"] = json!(reservation_id);
-    }
-    payload
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "authorization envelope carries hook context"
-)]
-fn authorization_request_body(
-    runtime: &ServerRuntime,
-    agent_id: &str,
-    workspace_id: &str,
-    identity: Option<&RepoIdentity>,
-    event: &'static str,
-    source_ref: &'static str,
-    tool_name: &str,
-    payload: serde_json::Value,
-) -> serde_json::Value {
-    protocol_envelope(ProtocolEnvelopeArgs {
-        runtime,
-        request_id: uuid::Uuid::new_v4().to_string(),
-        agent_id: agent_id.to_string(),
-        workspace_id: workspace_id.to_string(),
-        identity: identity.cloned(),
-        source_kind: "hook",
-        event,
-        source_ref,
-        source_tool_name: Some(tool_name),
-        payload,
+    Ok(OmpHookOutcome::Block {
+        reason: "offer_timeout: queued write offer did not arrive in time".to_string(),
     })
-}
-
-fn post_authorize_decision(
-    runtime: &ServerRuntime,
-    body: &serde_json::Value,
-) -> Result<AuthorizeDecision, String> {
-    let response = post_json(runtime, "/v1/authorize", body)
-        .map_err(|error| authorization_unavailable_reason(&error))?;
-
-    if !(200..300).contains(&response.status_code) {
-        return Err(format!(
-            "stateful authorization failed with HTTP {}: {}",
-            response.status_code, response.body
-        ));
-    }
-
-    serde_json::from_str(&response.body).map_err(|error| authorization_unavailable_reason(&error))
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "OMP authorization payload needs request context"
-)]
-fn post_omp_authorize_target(
-    input: &OmpPreToolUseInput,
-    runtime: &ServerRuntime,
-    repo_root: Option<&Path>,
-    identity: Option<&RepoIdentity>,
-    target: &PatchTarget,
-    workspace_id: &str,
-    reservation_id: Option<&str>,
-    purpose: &str,
-) -> Result<AuthorizeDecision, OmpHookOutcome> {
-    let payload =
-        authorization_payload_for_target(target, repo_root, Some(purpose), reservation_id, true);
-    let mut body = authorization_request_body(
-        runtime,
-        &input.agent_id,
-        workspace_id,
-        identity,
-        "omp_pre_tool_use",
-        "hook:omp_pre_tool_use",
-        &input.tool_name,
-        payload,
-    );
-    body["metadata"] = input.audit_metadata();
-
-    post_authorize_decision(runtime, &body).map_err(|reason| OmpHookOutcome::Block { reason })
-}
-
-fn should_auto_declare_omp_tool_reservation(
-    input: &OmpPreToolUseInput,
-    decision: &AuthorizeDecision,
-    targets: &[PatchTarget],
-) -> bool {
-    matches!(
-        runtime_tool_name_leaf(&input.tool_name),
-        tool_name if tool_name.eq_ignore_ascii_case("edit")
-            || tool_name.eq_ignore_ascii_case("write")
-    ) && matches!(
-        decision.reason_code.as_str(),
-        "missing_reservation" | "scope_mismatch"
-    ) && targets.iter().all(|target| target.action == "write_file")
-}
-
-fn declare_and_claim_omp_pre_tool_reservation(
-    input: &OmpPreToolUseInput,
-    runtime: &ServerRuntime,
-    identity: Option<&RepoIdentity>,
-    workspace_id: &str,
-    targets: &[PatchTarget],
-    purpose: &str,
-) -> Result<String, OmpHookOutcome> {
-    let files_planned = targets
-        .iter()
-        .map(|target| target.path.clone())
-        .collect::<Vec<_>>();
-    let mut body = protocol_envelope(ProtocolEnvelopeArgs {
-        runtime,
-        request_id: uuid::Uuid::new_v4().to_string(),
-        agent_id: input.agent_id.clone(),
-        workspace_id: workspace_id.to_string(),
-        identity: identity.cloned(),
-        source_kind: "hook",
-        event: "reservation_declare",
-        source_ref: "hook:omp_pre_tool_use",
-        source_tool_name: Some(input.tool_name.as_str()),
-        payload: json!({
-            "purpose": purpose,
-            "files_planned": files_planned,
-        }),
-    });
-    body["metadata"] = input.audit_metadata();
-
-    let response = post_json(runtime, "/v1/reservation/declare", &body).map_err(|error| {
-        OmpHookOutcome::Block {
-            reason: authorization_unavailable_reason(&error),
-        }
-    })?;
-    if !(200..300).contains(&response.status_code) {
-        return Err(OmpHookOutcome::Block {
-            reason: format!(
-                "stateful reservation declaration failed with HTTP {}: {}",
-                response.status_code, response.body
-            ),
-        });
-    }
-
-    let body: serde_json::Value =
-        serde_json::from_str(&response.body).map_err(|error| OmpHookOutcome::Block {
-            reason: authorization_unavailable_reason(&error),
-        })?;
-    let reservation_id = body
-        .get("reservation_id")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
-        .filter(|reservation_id| !reservation_id.is_empty())
-        .ok_or_else(|| OmpHookOutcome::Block {
-            reason: "stateful reservation declaration response did not include reservation_id"
-                .to_string(),
-        })?;
-
-    let response = post_json(
-        runtime,
-        "/v1/claim/acquire",
-        &json!({
-            "agent_id": input.agent_id.clone(),
-            "workspace_id": workspace_id,
-            "reservation_id": reservation_id.clone(),
-            "paths": files_planned,
-            "root": identity.map(|identity| identity.root.as_str()).unwrap_or(""),
-        }),
-    )
-    .map_err(|error| OmpHookOutcome::Block {
-        reason: authorization_unavailable_reason(&error),
-    })?;
-    if !(200..300).contains(&response.status_code) {
-        return Err(OmpHookOutcome::Block {
-            reason: format!(
-                "stateful claim acquire failed with HTTP {}: {}",
-                response.status_code, response.body
-            ),
-        });
-    }
-
-    Ok(reservation_id)
-}
-
-fn extract_omp_edit_targets(input: &serde_json::Value) -> Vec<PatchTarget> {
-    let Some(edit_input) = input.get("input").and_then(serde_json::Value::as_str) else {
-        return Vec::new();
-    };
-    let mut targets = Vec::new();
-    let mut current_path: Option<String> = None;
-    let mut current_target_index: Option<usize> = None;
-    for line in edit_input.lines().map(str::trim) {
-        if let Some(header) = line
-            .strip_prefix('[')
-            .and_then(|line| line.strip_suffix(']'))
-        {
-            let Some((path, _)) = header.split_once('#') else {
-                continue;
-            };
-            let path = path.trim();
-            if path.is_empty() {
-                current_path = None;
-                current_target_index = None;
-                continue;
-            }
-            current_path = Some(path.to_string());
-            current_target_index = Some(targets.len());
-            targets.push(PatchTarget::write(path));
-            continue;
-        }
-
-        let Some(destination) = line
-            .strip_prefix("MV ")
-            .map(str::trim)
-            .filter(|destination| !destination.is_empty())
-        else {
-            continue;
-        };
-        let (Some(path), Some(index)) = (current_path.as_deref(), current_target_index) else {
-            continue;
-        };
-        targets[index] = PatchTarget::move_file(path, destination);
-    }
-    targets
 }
 
 pub fn handle_omp_session_start_with_runtime(
     input: &str,
     runtime: &ServerRuntime,
 ) -> anyhow::Result<OmpSessionStartOutput> {
-    let input: OmpSessionEventInput = serde_json::from_str(input)?;
-    input.validate()?;
-    let workspace_id = input
-        .workspace_id
-        .clone()
-        .unwrap_or_else(|| effective_workspace_id(runtime, None));
-    post_omp_session_event(
+    let parsed: OmpInput = serde_json::from_str(input)?;
+    omp_start_parsed(
+        &parsed,
         runtime,
-        "/v1/session/register",
-        "omp_session_start",
-        &input,
-        None,
-    )?;
-    Ok(omp_session_start_output(
-        runtime,
-        &input.agent_id,
-        workspace_id,
-    ))
+        parsed
+            .cwd
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("OMP agent_start lacks cwd"))?,
+    )
 }
 
-fn handle_omp_session_start_with_identity(
+fn omp_start(
     input: &str,
     runtime: &ServerRuntime,
-    identity: Option<&RepoIdentity>,
+    repo: &Path,
 ) -> anyhow::Result<OmpSessionStartOutput> {
-    let input: OmpSessionEventInput = serde_json::from_str(input)?;
-    input.validate()?;
-    let workspace_id = input
-        .workspace_id
-        .clone()
-        .unwrap_or_else(|| effective_workspace_id(runtime, identity));
-    post_omp_session_event(
-        runtime,
-        "/v1/session/register",
-        "omp_session_start",
-        &input,
-        identity,
-    )?;
-    Ok(omp_session_start_output(
-        runtime,
-        &input.agent_id,
-        workspace_id,
-    ))
+    omp_start_parsed(&serde_json::from_str(input)?, runtime, repo)
 }
 
-fn omp_session_start_output(
+fn omp_start_parsed(
+    input: &OmpInput,
     runtime: &ServerRuntime,
-    agent_id: &str,
-    workspace_id: String,
-) -> OmpSessionStartOutput {
-    OmpSessionStartOutput {
-        decision: "allow",
-        agent_id: agent_id.to_string(),
-        workspace_id: workspace_id.clone(),
-        notifications_stream: OmpNotificationsStream {
-            base_url: runtime.base_url.clone(),
-            authorization: format!("Bearer {}", runtime.token),
-            agent_id: agent_id.to_string(),
-            workspace_id,
+    repo: &Path,
+) -> anyhow::Result<OmpSessionStartOutput> {
+    anyhow::ensure!(
+        input.event_type == "agent_start",
+        "OMP task start requires agent_start"
+    );
+    let task = omp_task(input, runtime, repo)?;
+    let settings = settings(repo)?;
+    let command = identity(&task, "task.start", "agent_start", None);
+    let result: TaskCommandResult = post_command(
+        runtime,
+        "/v2/tasks/start",
+        &command,
+        &TaskStartInput {
+            next_action: "OMP leaf task active".to_string(),
+            settings,
+            expires_at: after(&command.observed_at, settings.inactivity_timeout_seconds)?,
+            runtime_process: Some(runtime_process()?),
         },
-    }
+    )
+    .map_err(command_error)?;
+    anyhow::ensure!(
+        result.task_id == task.task_id,
+        "task start returned a different task owner"
+    );
+    Ok(OmpSessionStartOutput {
+        decision: "allow",
+        task_id: task.task_id,
+        agent_id: task.agent_id,
+        workspace_id: task.workspace.workspace_id,
+    })
 }
 
 pub fn handle_omp_post_tool_use_with_runtime(
     input: &str,
     runtime: &ServerRuntime,
 ) -> anyhow::Result<()> {
-    let input: OmpSessionEventInput = serde_json::from_str(input)?;
-    input.validate()?;
-    post_omp_post_tool_use_event(runtime, &input, None, None)
-}
-
-fn handle_omp_post_tool_use_with_identity(
-    input: &str,
-    runtime: &ServerRuntime,
-    repo_root: Option<&Path>,
-    identity: Option<&RepoIdentity>,
-) -> anyhow::Result<()> {
-    let input: OmpSessionEventInput = serde_json::from_str(input)?;
-    input.validate()?;
-    post_omp_post_tool_use_event(runtime, &input, repo_root, identity)
-}
-
-fn post_omp_post_tool_use_event(
-    runtime: &ServerRuntime,
-    input: &OmpSessionEventInput,
-    repo_root: Option<&Path>,
-    identity: Option<&RepoIdentity>,
-) -> anyhow::Result<()> {
-    post_omp_session_event(
+    let parsed: OmpInput = serde_json::from_str(input)?;
+    omp_post_parsed(
+        &parsed,
         runtime,
-        "/v1/session/heartbeat",
-        "omp_post_tool_use",
-        input,
-        identity,
-    )?;
-    refresh_omp_post_tool_claim_observations(input, runtime, repo_root, identity);
-    release_omp_post_tool_claims(input, runtime, repo_root, identity);
-    Ok(())
+        parsed
+            .cwd
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("OMP post payload lacks cwd"))?,
+    )
 }
 
-fn refresh_omp_post_tool_claim_observations(
-    input: &OmpSessionEventInput,
-    runtime: &ServerRuntime,
-    repo_root: Option<&Path>,
-    identity: Option<&RepoIdentity>,
-) {
-    let Some(identity) = identity else {
-        return;
-    };
-    let Some(repo_root) = repo_root else {
-        return;
-    };
-    let Ok(targets) = omp_post_tool_refresh_targets(input, repo_root) else {
-        return;
-    };
-    let workspace_id = input
-        .workspace_id
-        .clone()
-        .unwrap_or_else(|| effective_workspace_id(runtime, Some(identity)));
-    let paths = target_paths(targets);
-
-    refresh_claim_observations_for_paths(
-        runtime,
-        &input.agent_id,
-        &workspace_id,
-        &identity.root,
-        &paths,
-    );
+fn omp_post(input: &str, runtime: &ServerRuntime, repo: &Path) -> anyhow::Result<()> {
+    omp_post_parsed(&serde_json::from_str(input)?, runtime, repo)
 }
 
-fn release_omp_post_tool_claims(
-    input: &OmpSessionEventInput,
-    runtime: &ServerRuntime,
-    repo_root: Option<&Path>,
-    identity: Option<&RepoIdentity>,
-) {
-    let Some(identity) = identity else {
-        return;
-    };
-    let Some(repo_root) = repo_root else {
-        return;
-    };
-    let Ok(targets) = omp_post_tool_refresh_targets(input, repo_root) else {
-        return;
-    };
-    let workspace_id = input
-        .workspace_id
-        .clone()
-        .unwrap_or_else(|| effective_workspace_id(runtime, Some(identity)));
-    let paths = target_paths(targets);
-
-    release_claims_for_paths(runtime, &input.agent_id, &workspace_id, &paths);
-}
-
-fn omp_post_tool_refresh_targets(
-    input: &OmpSessionEventInput,
-    repo_root: &Path,
-) -> anyhow::Result<Vec<PatchTarget>> {
-    let cwd = input.cwd.as_deref();
-    let tool_name = input.tool_name.as_deref().map(runtime_tool_name_leaf);
-    let targets = match tool_name {
-        Some(tool_name) if tool_name.eq_ignore_ascii_case("write") => {
-            let Some(path) = input
-                .tool_input
-                .get("path")
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|path| !path.is_empty())
-            else {
-                return Ok(Vec::new());
-            };
-            vec![PatchTarget::write(path)]
-        }
-        Some(tool_name) if tool_name.eq_ignore_ascii_case("edit") => {
-            extract_omp_edit_targets(&input.tool_input)
-        }
-        Some(tool_name)
-            if tool_name.eq_ignore_ascii_case("bash")
-                || tool_name.eq_ignore_ascii_case("python") =>
-        {
-            match input.command().and_then(omp_sandbox_run_action) {
-                Some(OmpPreToolAction::Targets(targets)) => targets,
-                _ => Vec::new(),
-            }
-        }
-        _ => Vec::new(),
-    };
-
-    normalize_targets(targets, Some(repo_root), cwd).map(|targets| targets.unwrap_or_default())
-}
-
-fn post_omp_session_event(
-    runtime: &ServerRuntime,
-    path: &str,
-    event: &str,
-    input: &OmpSessionEventInput,
-    identity: Option<&RepoIdentity>,
-) -> anyhow::Result<()> {
-    let workspace_id = input
-        .workspace_id
-        .clone()
-        .unwrap_or_else(|| effective_workspace_id(runtime, identity));
-    input.validate()?;
-    let mut body = json!({
-        "agent_id": &input.agent_id,
-        "workspace_id": workspace_id,
-        "source": {
-            "kind": "hook",
-            "event": event,
-            "ref": "hook:omp_session",
-            "tool_name": &input.tool_name,
+fn omp_post_parsed(input: &OmpInput, runtime: &ServerRuntime, repo: &Path) -> anyhow::Result<()> {
+    let task = omp_task(input, runtime, repo)?;
+    match input.event_type.as_str() {
+        "heartbeat" => heartbeat_task(&task, runtime, settings(repo)?, "OMP leaf task active")?,
+        "tool_result" => match input.tool_name.as_deref().unwrap_or_default() {
+            "read" => complete_read(input, runtime, repo, &task)?,
+            "write" => complete_write(input, runtime, repo, &task)?,
+            _ => {}
         },
-        "metadata": input.audit_metadata(),
-    });
-    if let Some(identity) = identity {
-        body["repo_id"] = json!(identity.repo_id);
-        body["worktree_id"] = json!(identity.worktree_id);
-        body["root"] = json!(identity.root);
-        body["branch"] = json!(identity.branch);
-    }
-
-    let response = post_json(runtime, path, &body)?;
-    if !(200..300).contains(&response.status_code) {
-        anyhow::bail!(
-            "OMP session event failed with HTTP {}: {}",
-            response.status_code,
-            response.body
-        );
+        _ => anyhow::bail!(
+            "OMP post payload has unsupported type `{}`",
+            input.event_type
+        ),
     }
     Ok(())
 }
 
-fn prepare_pre_tool_use_runtime(
-    repo_root: &Path,
-    paths: &GlobalPaths,
-    _input: &str,
-) -> anyhow::Result<ServerRuntime> {
-    if !runtime_env_override_is_configured() {
-        ensure_server(paths)?;
-    }
-    discover_runtime_with_global(repo_root, paths)
-}
-
-pub fn handle_session_start_in_repo(
-    input: &str,
-    repo_root: impl AsRef<Path>,
+fn complete_read(
+    input: &OmpInput,
+    runtime: &ServerRuntime,
+    repo: &Path,
+    task: &TaskContext,
 ) -> anyhow::Result<()> {
-    let start = hook_start_dir_or(input, repo_root.as_ref());
-    let paths = GlobalPaths::from_env()?;
-    let repo_root = match repo_gate(&paths, start)? {
-        RepoGate::Enabled { repo_root } => {
-            if !runtime_env_override_is_configured() {
-                ensure_server(&paths)?;
-            }
-            repo_root
-        }
-        RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(()),
-    };
-    let runtime = discover_runtime_with_global(&repo_root, &paths)?;
-    let identity = repo_identity(&paths, &repo_root)?;
-    handle_session_start_with_runtime(input, &runtime, Some(&identity))
-}
-
-pub fn handle_post_tool_use_in_repo(
-    input: &str,
-    repo_root: impl AsRef<Path>,
-) -> anyhow::Result<()> {
-    let start = hook_start_dir_or(input, repo_root.as_ref());
-    let paths = GlobalPaths::from_env()?;
-    let repo_root = match repo_gate(&paths, start)? {
-        RepoGate::Enabled { repo_root } => {
-            if !runtime_env_override_is_configured() {
-                ensure_server(&paths)?;
-            }
-            repo_root
-        }
-        RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(()),
-    };
-    let runtime = discover_runtime_with_global(&repo_root, &paths)?;
-    let identity = repo_identity(&paths, &repo_root)?;
-    if let Err(error) =
-        handle_post_tool_use_with_runtime(input, &runtime, Some(&repo_root), Some(&identity))
-    {
-        let input: SessionEventInput = serde_json::from_str(input)?;
-        let workspace_id = effective_workspace_id(&runtime, Some(&identity));
-        queue_session_heartbeat_outbox(
-            &paths,
-            &workspace_id,
-            input.stateful_agent_id(),
-            &error.to_string(),
-        )?;
-    }
-
+    let invocation = invocation(input)?;
+    let path = raw_path(&input.input)?;
+    let resolver = ResourceResolver::new(&task.workspace.workspace_id, repo)?;
+    let exact = exact_read(input, repo, &path);
+    post_command::<_, ReadCommandResult>(
+        runtime,
+        "/v2/reads/complete",
+        &identity(task, "read.complete", &invocation, Some("read")),
+        &ReadCompleteInput {
+            read_id: id("read", &[&task.task_id, &invocation]),
+            invocation_id: invocation,
+            resources: read_observation(&resolver, &path).unwrap_or_default(),
+            terminal_success: exact,
+            complete: exact,
+            stable: exact,
+            exact,
+        },
+    )
+    .map_err(command_error)?;
     Ok(())
+}
+
+fn complete_write(
+    input: &OmpInput,
+    runtime: &ServerRuntime,
+    repo: &Path,
+    task: &TaskContext,
+) -> anyhow::Result<()> {
+    let invocation = invocation(input)?;
+    let operation = write_operation(&input.input, repo)?;
+    let resolver = ResourceResolver::new(&task.workspace.workspace_id, repo)?;
+    let success = !input.is_error && write_target_matches(input, repo, &operation);
+    let post = if success {
+        observe_written(&resolver, &operation).unwrap_or_default()
+    } else {
+        resolver.observe_operation(&operation).unwrap_or_default()
+    };
+    let terminal = if success && !post.is_empty() {
+        WriteTerminal::Success
+    } else if input.is_error {
+        WriteTerminal::FailedKnown
+    } else {
+        WriteTerminal::Uncertain
+    };
+    post_command::<_, WriteCompleteResult>(
+        runtime,
+        "/v2/writes/complete",
+        &identity(task, "write.complete", &invocation, Some("write")),
+        &WriteCompleteInput {
+            attempt_id: required(
+                input.attempt_id.as_deref(),
+                "OMP write result lacks prepared attempt_id",
+            )?
+            .to_string(),
+            permit_id: required(
+                input.permit_id.as_deref(),
+                "OMP write result lacks prepared permit_id",
+            )?
+            .to_string(),
+            invocation_id: invocation,
+            terminal,
+            post_resources: post.clone(),
+            expected_post_resources: if success { post } else { Vec::new() },
+            error: input
+                .is_error
+                .then(|| "OMP reported tool failure".to_string()),
+        },
+    )
+    .map_err(command_error)?;
+    Ok(())
+}
+
+fn omp_stop(input: &str, runtime: &ServerRuntime, repo: &Path) -> anyhow::Result<()> {
+    let input: OmpInput = serde_json::from_str(input)?;
+    let task = omp_task(&input, runtime, repo)?;
+    match input.event_type.as_str() {
+        "agent_end" if input.will_continue == Some(true) => Ok(()),
+        "agent_end" => end_task(runtime, &task, "/v2/tasks/finalize", "task.finalize"),
+        "session_shutdown" => end_task(runtime, &task, "/v2/tasks/cancel", "task.cancel"),
+        _ => anyhow::bail!(
+            "OMP stop payload has unsupported type `{}`",
+            input.event_type
+        ),
+    }
 }
 
 pub fn handle_user_prompt_submit_in_repo(
     input: &str,
-    repo_root: impl AsRef<Path>,
+    repo: impl AsRef<Path>,
 ) -> anyhow::Result<String> {
-    let start = hook_start_dir_or(input, repo_root.as_ref());
-    let paths = GlobalPaths::from_env()?;
-    let repo_root = match repo_gate(&paths, start)? {
-        RepoGate::Enabled { repo_root } => {
-            if !runtime_env_override_is_configured() {
-                ensure_server(&paths)?;
-            }
-            repo_root
-        }
-        RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(String::new()),
+    let input: CodexInput = serde_json::from_str(input)?;
+    let repo = repo.as_ref();
+    let runtime = discover_runtime_with_optional_global(repo)?;
+    cleanup_missed_codex_owners(repo, &runtime, &input.session_id, &input.turn_id)?;
+    let task = codex_task(&input, &runtime, repo)?;
+    let settings = settings(repo)?;
+    let observed_at = now_rfc3339();
+    let task_start_input = TaskStartInput {
+        next_action: "Codex root turn active".to_string(),
+        settings,
+        expires_at: after(&observed_at, settings.inactivity_timeout_seconds)?,
+        runtime_process: Some(runtime_process()?),
     };
-    let runtime = discover_runtime_with_global(&repo_root, &paths)?;
-    let identity = repo_identity(&paths, &repo_root)?;
-    let input: UserPromptSubmitInput = serde_json::from_str(input)?;
-    if user_prompt_context_rendered(&repo_root, input.stateful_agent_id()) {
-        return Ok(String::new());
-    }
-    let prompt_text = handle_user_prompt_submit_with_runtime(&input, &runtime, Some(&identity))?;
-    mark_user_prompt_context_rendered(&repo_root, input.stateful_agent_id());
-    Ok(prompt_text)
-}
-
-pub fn handle_stop_in_repo(input: &str, repo_root: impl AsRef<Path>) -> anyhow::Result<()> {
-    let start = hook_start_dir_or(input, repo_root.as_ref());
-    let paths = GlobalPaths::from_env()?;
-    let repo_root = match repo_gate(&paths, start)? {
-        RepoGate::Enabled { repo_root } => {
-            if !runtime_env_override_is_configured() {
-                ensure_server(&paths)?;
-            }
-            repo_root
-        }
-        RepoGate::Disabled | RepoGate::OutsideGitRepo => return Ok(()),
-    };
-    let runtime = discover_runtime_with_global(&repo_root, &paths)?;
-    let identity = repo_identity(&paths, &repo_root)?;
-    handle_stop_with_runtime(input, &runtime, Some(&identity))
-}
-
-fn handle_session_start_with_runtime(
-    input: &str,
-    runtime: &ServerRuntime,
-    identity: Option<&RepoIdentity>,
-) -> anyhow::Result<()> {
-    let input: SessionStartInput = serde_json::from_str(input)?;
-    post_session_event(
-        runtime,
-        "/v1/session/register",
-        input.stateful_agent_id(),
-        identity,
-    )
-}
-
-fn handle_post_tool_use_with_runtime(
-    input: &str,
-    runtime: &ServerRuntime,
-    repo_root: Option<&Path>,
-    identity: Option<&RepoIdentity>,
-) -> anyhow::Result<()> {
-    let input: SessionEventInput = serde_json::from_str(input)?;
-    post_session_event(
-        runtime,
-        "/v1/session/heartbeat",
-        input.stateful_agent_id(),
-        identity,
-    )?;
-    refresh_post_tool_claim_observations(&input, runtime, repo_root, identity);
-    release_post_tool_claims(&input, runtime, repo_root, identity);
-    Ok(())
-}
-
-fn handle_user_prompt_submit_with_runtime(
-    input: &UserPromptSubmitInput,
-    runtime: &ServerRuntime,
-    identity: Option<&RepoIdentity>,
-) -> anyhow::Result<String> {
-    let prompt_text = render_context_prompt_text(runtime, input.stateful_agent_id(), identity)?;
-    Ok(with_stateful_command_policy_reminder(prompt_text))
-}
-
-fn render_context_prompt_text(
-    runtime: &ServerRuntime,
-    agent_id: &str,
-    identity: Option<&RepoIdentity>,
-) -> anyhow::Result<String> {
-    Ok(render_context_response(runtime, agent_id, identity, None)?.prompt_text)
-}
-
-fn context_render_request_body(
-    runtime: &ServerRuntime,
-    agent_id: &str,
-    identity: Option<&RepoIdentity>,
-    resource: Option<&str>,
-) -> serde_json::Value {
-    let workspace_id = effective_workspace_id(runtime, identity);
-    let mut body = json!({
-        "agent_id": agent_id,
-        "workspace_id": workspace_id,
-        "mode": "brief"
-    });
-    if let Some(resource) = resource
-        .map(str::trim)
-        .filter(|resource| !resource.is_empty())
-        && let Some(object) = body.as_object_mut()
-    {
-        object.insert("resource".to_string(), json!(resource));
-    }
-    if let Some(identity) = identity
-        && let Some(object) = body.as_object_mut()
-    {
-        object.insert("repo_id".to_string(), json!(&identity.repo_id));
-        object.insert("worktree_id".to_string(), json!(&identity.worktree_id));
-        object.insert("root".to_string(), json!(&identity.root));
-        object.insert("branch".to_string(), json!(&identity.branch));
-    }
-    body
-}
-
-fn render_context_response(
-    runtime: &ServerRuntime,
-    agent_id: &str,
-    identity: Option<&RepoIdentity>,
-    resource: Option<&str>,
-) -> anyhow::Result<ContextRenderResponse> {
-    let body = context_render_request_body(runtime, agent_id, identity, resource);
-    let response = post_json(runtime, "/v1/context/render", &body)?;
-
-    if !(200..300).contains(&response.status_code) {
-        anyhow::bail!(
-            "context render failed with HTTP {}: {}",
-            response.status_code,
-            response.body
-        );
-    }
-
-    let response: ContextRenderResponse = serde_json::from_str(&response.body)?;
-    Ok(response)
-}
-
-fn user_prompt_context_rendered(repo_root: &Path, agent_id: &str) -> bool {
-    user_prompt_context_marker_path(repo_root, agent_id).exists()
-}
-
-fn mark_user_prompt_context_rendered(repo_root: &Path, agent_id: &str) {
-    let path = user_prompt_context_marker_path(repo_root, agent_id);
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let _ = fs::write(path, b"rendered\n");
-}
-
-fn user_prompt_context_marker_path(repo_root: &Path, agent_id: &str) -> PathBuf {
-    repo_root
-        .join(".stateful_core")
-        .join("runtime")
-        .join("prompt_context")
-        .join(format!("{agent_id}.sent"))
-}
-
-fn repeated_denial_marker_path(
-    repo_root: &Path,
-    agent_id: &str,
-    path: &str,
-    reason_code: &str,
-) -> PathBuf {
-    let session_key = marker_component(agent_id);
-    let reason_key = marker_component(reason_code);
-    let path_key = marker_component(path);
-    repo_root
-        .join(".stateful_core")
-        .join("runtime")
-        .join("denials")
-        .join(session_key)
-        .join(format!("{reason_key}-{path_key}.seen"))
-}
-
-fn marker_component(value: &str) -> String {
-    if value.is_empty() {
-        return "_".to_owned();
-    }
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(value.len() * 2);
-    for byte in value.as_bytes() {
-        encoded.push(HEX[(byte >> 4) as usize] as char);
-        encoded.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    encoded
-}
-
-fn repeated_denial_seen(repo_root: &Path, agent_id: &str, path: &str, reason_code: &str) -> bool {
-    let marker = repeated_denial_marker_path(repo_root, agent_id, path, reason_code);
-    let seen = marker.exists();
-    if !seen {
-        if let Some(parent) = marker.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let _ = fs::write(marker, b"seen");
-    }
-    seen
-}
-
-fn repeated_denial_reason(path: &str) -> String {
-    format!(
-        "Repeated denial for {path}. Stop retrying this path. Use one writer: parent/main agent owns the edit; subagents report findings only."
-    )
-}
-
-fn with_stateful_command_policy_reminder(prompt_text: String) -> String {
-    let reminder = stateful_command_policy_reminder();
-    if prompt_text.trim().is_empty() {
-        reminder
-    } else {
-        format!("{reminder}\n\n{prompt_text}")
-    }
-}
-
-fn stateful_command_policy_reminder() -> String {
-    let binary = stateful_binary_for_guidance();
-    format!(
-        "Stateful command policy reminder:\n- Use `state_context_render` only for planning/manual inspection when active coordination may affect the plan; if you already inspected this turn for the same resource, reuse that result.\n- Before using Bash or eval tools, use the `stateful-command-policy` skill.\n- Use active Stateful native coordination tools only when they appear in the tool list, for example `state_reservation_declare` and `state_claim_acquire`; runtime-specific names must be copied exactly. If those tools are absent, use OMP native edit/write auto-declare, lazy resume helpers, or an existing `reservation_id` with trusted sandbox write-targets. Do not run `stateful reservation declare` through Bash.\n- Raw Bash is denied for Codex. OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied; use built-in Bash with trusted `{binary} sandbox run` or `{binary} sandbox process find` commands.\n- Use `{binary} sandbox run --fs read-only --network disabled ...` for read-only shell fallback, `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose> ...` for builds/tests, and `{binary} sandbox run --fs write-targets --write-target <file> ...` for command-shaped edits.\n- Use `{binary} sandbox run --fs git --network disabled ...` for local git, `{binary} sandbox run --fs git --network enabled ...` only for explicit remote git operations, and `{binary} sandbox run --fs github-pr --network enabled ...` for GitHub PR operations."
-    )
-}
-
-fn handle_stop_with_runtime(
-    input: &str,
-    runtime: &ServerRuntime,
-    identity: Option<&RepoIdentity>,
-) -> anyhow::Result<()> {
-    let input: SessionEventInput = serde_json::from_str(input)?;
-    post_session_event(
-        runtime,
-        "/v1/activity/finalize",
-        input.stateful_agent_id(),
-        identity,
-    )
-}
-
-fn post_session_event(
-    runtime: &ServerRuntime,
-    path: &str,
-    agent_id: &str,
-    identity: Option<&RepoIdentity>,
-) -> anyhow::Result<()> {
-    let workspace_id = effective_workspace_id(runtime, identity);
-    let mut body = json!({
-        "agent_id": agent_id,
-        "workspace_id": workspace_id,
-    });
-    if let Some(identity) = identity {
-        body["repo_id"] = json!(&identity.repo_id);
-        body["worktree_id"] = json!(&identity.worktree_id);
-        body["root"] = json!(&identity.root);
-        body["branch"] = json!(&identity.branch);
-    }
-
-    let response = post_json(runtime, path, &body)?;
-
-    if !(200..300).contains(&response.status_code) {
-        anyhow::bail!(
-            "session event failed with HTTP {}: {}",
-            response.status_code,
-            response.body
-        );
-    }
-
-    Ok(())
-}
-
-fn refresh_post_tool_claim_observations(
-    input: &SessionEventInput,
-    runtime: &ServerRuntime,
-    repo_root: Option<&Path>,
-    identity: Option<&RepoIdentity>,
-) {
-    let Some(identity) = identity else {
-        return;
-    };
-    let Some(repo_root) = repo_root else {
-        return;
-    };
-    let Ok(targets) = post_tool_refresh_targets(input, repo_root) else {
-        return;
-    };
-    let workspace_id = effective_workspace_id(runtime, Some(identity));
-    let paths = target_paths(targets);
-
-    refresh_claim_observations_for_paths(
-        runtime,
-        input.stateful_agent_id(),
-        &workspace_id,
-        &identity.root,
-        &paths,
+    let owner = record_owner(repo, &task, &input, observed_at, task_start_input)?;
+    let command = identity_at(
+        &task,
+        "task.start",
+        "user_prompt_submit",
+        None,
+        &owner.task_start_observed_at,
     );
-}
-
-fn release_post_tool_claims(
-    input: &SessionEventInput,
-    runtime: &ServerRuntime,
-    repo_root: Option<&Path>,
-    identity: Option<&RepoIdentity>,
-) {
-    let Some(identity) = identity else {
-        return;
-    };
-    let Some(repo_root) = repo_root else {
-        return;
-    };
-    let Ok(targets) = post_tool_refresh_targets(input, repo_root) else {
-        return;
-    };
-    let workspace_id = effective_workspace_id(runtime, Some(identity));
-    let paths = target_paths(targets);
-
-    release_claims_for_paths(runtime, input.stateful_agent_id(), &workspace_id, &paths);
-}
-
-fn post_tool_refresh_targets(
-    input: &SessionEventInput,
-    repo_root: &Path,
-) -> anyhow::Result<Vec<PatchTarget>> {
-    let cwd = input.cwd.as_deref();
-    let targets = match input.tool_name.as_deref() {
-        Some("apply_patch") => input
-            .patch_text()
-            .map(extract_apply_patch_write_targets)
-            .unwrap_or_default(),
-        Some("file_change") => extract_file_change_targets(&input.tool_input),
-        Some("Edit") | Some("Write") => {
-            let Some(path) = input
-                .tool_input
-                .get("file_path")
-                .or_else(|| input.tool_input.get("path"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|path| !path.is_empty())
-            else {
-                return Ok(Vec::new());
-            };
-            vec![PatchTarget::write(path)]
-        }
-        _ => Vec::new(),
-    };
-
-    normalize_targets(targets, Some(repo_root), cwd).map(|targets| targets.unwrap_or_default())
-}
-
-fn effective_workspace_id(runtime: &ServerRuntime, identity: Option<&RepoIdentity>) -> String {
-    effective_workspace_id_for_repo(&runtime.workspace_id, identity)
-}
-
-fn handle_pre_tool_use_with_runtime(
-    input: &str,
-    runtime: Option<&ServerRuntime>,
-    repo_root: Option<&Path>,
-    cwd: Option<&Path>,
-) -> anyhow::Result<HookOutcome> {
-    let input: PreToolUseInput = serde_json::from_str(input)?;
-    if let Err(error) = input.validate() {
-        return Ok(HookOutcome::Deny {
-            reason: format!("stateful hook rejected invalid input: {error}"),
-        });
-    }
-    let global_paths = GlobalPaths::from_env().ok();
-    let identity = repo_root.and_then(|repo_root| {
-        global_paths
-            .as_ref()
-            .and_then(|paths| repo_identity_for_enabled_repo(paths, repo_root).ok())
-    });
-
-    let tool_name = runtime_tool_name_leaf(&input.tool_name);
-    match tool_name {
-        tool_name if tool_name.eq_ignore_ascii_case("bash") => authorize_bash(&input),
-        tool_name if tool_name.eq_ignore_ascii_case("apply_patch") => {
-            authorize_apply_patch(&input, runtime, repo_root, cwd, identity.as_ref())
-        }
-        tool_name if tool_name.eq_ignore_ascii_case("file_change") => {
-            authorize_file_change_tool(&input, runtime, repo_root, cwd, identity.as_ref())
-        }
-        tool_name if tool_name.eq_ignore_ascii_case("edit") || tool_name.eq_ignore_ascii_case("write") => {
-            authorize_file_write_tool(&input, runtime, repo_root, cwd, identity.as_ref())
-        }
-        tool_name if tool_name.starts_with("mcp__filesystem__") => Ok(HookOutcome::Deny {
-            reason: "filesystem MCP writes require stateful authorization; read-only MCP calls are not yet classified".to_string(),
-        }),
-        tool_name if is_remote_repository_mutation_tool(tool_name) => Ok(HookOutcome::Deny {
-            reason: format!(
-                "remote repository mutation tool {tool_name} is not covered by local stateful repo authorization; use local git/stateful workflows or an explicit external approval path"
-            ),
-        }),
-        tool_name if is_safe_without_repo_write_authorization(tool_name) => Ok(HookOutcome::Allow),
-        _ if is_user_allowed_tool(global_paths.as_ref(), repo_root, &input.tool_name) => {
-            Ok(HookOutcome::Allow)
-        }
-        _ => {
-            record_unclassified_tool(global_paths.as_ref(), repo_root, &input.tool_name);
-            Ok(HookOutcome::Deny {
-                reason: format!(
-                    "unclassified tool {} may write or execute and requires explicit stateful classification before it can run in an enabled repository",
-                    input.tool_name
-                ),
-            })
-        }
-    }
-}
-
-fn runtime_tool_name_leaf(tool_name: &str) -> &str {
-    tool_name
-        .rsplit(['.', '/'])
-        .next()
-        .unwrap_or(tool_name)
-        .trim_start_matches('_')
-}
-
-fn is_user_allowed_tool(
-    paths: Option<&GlobalPaths>,
-    repo_root: Option<&Path>,
-    tool_name: &str,
-) -> bool {
-    let (Some(paths), Some(repo_root)) = (paths, repo_root) else {
-        return false;
-    };
-
-    tool_allowed_for_enabled_repo(paths, repo_root, tool_name).unwrap_or(false)
-}
-
-fn record_unclassified_tool(
-    paths: Option<&GlobalPaths>,
-    repo_root: Option<&Path>,
-    tool_name: &str,
-) {
-    let (Some(paths), Some(repo_root)) = (paths, repo_root) else {
-        return;
-    };
-
-    let _ = record_unclassified_tool_for_repo(paths, repo_root, tool_name);
-}
-
-fn is_safe_without_repo_write_authorization(tool_name: &str) -> bool {
-    is_builtin_safe_tool(tool_name)
-        || is_stateful_control_plane_tool(tool_name)
-        || is_github_metadata_tool(tool_name)
-        || is_teams_connector_tool(tool_name)
-}
-
-fn is_builtin_safe_tool(tool_name: &str) -> bool {
-    [
-        "Read",
-        "Grep",
-        "Glob",
-        "LS",
-        "NotebookRead",
-        "WebFetch",
-        "WebSearch",
-        "TodoWrite",
-        "update_plan",
-        "tool_search",
-        "tool_search_tool",
-        "search_tool_bm25",
-        "get_goal",
-        "create_goal",
-        "update_goal",
-        "request_user_input",
-        "view_image",
-        "task",
-        "yield",
-        "parallel_tool_calls",
-        "spawn_agent",
-        "multi_agent_v1spawn_agent",
-        "wait_agent",
-        "multi_agent_v1wait_agent",
-        "send_input",
-        "multi_agent_v1send_input",
-        "close_agent",
-        "multi_agent_v1close_agent",
-        "resume_agent",
-        "multi_agent_v1resume_agent",
-    ]
-    .iter()
-    .any(|safe_tool| tool_name.eq_ignore_ascii_case(safe_tool))
-}
-
-fn is_stateful_control_plane_tool(tool_name: &str) -> bool {
-    tool_name.starts_with("mcp__stateful__")
-        || tool_name.starts_with("mcp__stateful_")
-        || is_canonical_stateful_mcp_tool(tool_name)
-}
-
-fn is_canonical_stateful_mcp_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "state_session_register"
-            | "state.session.register"
-            | "state_session_heartbeat"
-            | "state.session.heartbeat"
-            | "state_reservation_declare"
-            | "state.reservation.declare"
-            | "state_reservation_request"
-            | "state.reservation.request"
-            | "state_reservation_claim"
-            | "state.reservation.claim"
-            | "state_reservation_cancel"
-            | "state.reservation.cancel"
-            | "state_claim_acquire"
-            | "state.claim.acquire"
-            | "state_claim_release"
-            | "state.claim.release"
-            | "state_activity_finalize"
-            | "state.activity.finalize"
-            | "state_current_read"
-            | "state.current.read"
-            | "state_events_read"
-            | "state.events.read"
-            | "state_context_render"
-            | "state.context.render"
-            | "state_notifications_poll"
-            | "state.notifications.poll"
-            | "state_resume_next"
-            | "state.resume.next"
-    )
-}
-
-fn is_github_metadata_tool(tool_name: &str) -> bool {
-    if !tool_name.starts_with("mcp__codex_apps__github__") {
-        return false;
-    }
-    matches!(
-        tool_suffix(tool_name),
-        "update_pull_request"
-            | "create_pull_request"
-            | "add_comment_to_issue"
-            | "fetch_file"
-            | "search_branches"
-            | "search_repositories"
-    )
-}
-
-fn is_teams_connector_tool(tool_name: &str) -> bool {
-    if !tool_name.starts_with("mcp__codex_apps__microsoft_teams__") {
-        return false;
-    }
-    matches!(tool_suffix(tool_name), "resolve_channel" | "send_message")
-}
-
-fn tool_suffix(tool_name: &str) -> &str {
-    tool_name
-        .rsplit("__")
-        .next()
-        .unwrap_or(tool_name)
-        .trim_start_matches('_')
-}
-
-fn is_remote_repository_mutation_tool(tool_name: &str) -> bool {
-    if !tool_name.starts_with("mcp__codex_apps__github__") {
-        return false;
-    }
-    matches!(
-        tool_suffix(tool_name),
-        "create_file" | "update_file" | "create_branch" | "update_ref"
-    )
-}
-
-fn authorize_bash(input: &PreToolUseInput) -> anyhow::Result<HookOutcome> {
-    let command = input.command().unwrap_or_default();
-    if let Some(coordination) = deny_stateful_coordination_bash(command) {
-        return Ok(coordination);
-    }
-
-    let sandbox = authorize_sandbox_run_bash(command);
-    if sandbox == HookOutcome::Allow {
-        return Ok(sandbox);
-    }
-
-    #[cfg(feature = "codex-benchmark")]
-    if let Some(tmux) = authorize_tmux_nested_codex_benchmark_bash(command) {
-        return Ok(tmux);
-    }
-
-    let control = authorize_stateful_control_bash(command);
-    if control == HookOutcome::Allow || command_mentions_stateful_control(command) {
-        return Ok(control);
-    }
-
-    Ok(sandbox)
-}
-
-fn deny_stateful_coordination_bash(command: &str) -> Option<HookOutcome> {
-    if !command_mentions_stateful_coordination(command) {
-        return None;
-    }
-    Some(bash_policy_deny(stateful_coordination_tool_guidance()))
-}
-
-fn command_mentions_stateful_coordination(command: &str) -> bool {
-    let Ok(words) = split_simple_command_words(command) else {
-        return false;
-    };
-    matches!(words.get(1).map(String::as_str), Some("reservation"))
-        || matches!(
-            (
-                words.get(1).map(String::as_str),
-                words.get(2).map(String::as_str)
-            ),
-            (Some("mcp"), Some("call"))
-        )
-}
-
-fn stateful_coordination_tool_guidance() -> &'static str {
-    "Use active Stateful native coordination tools only when they appear in the tool list, for example `state_reservation_declare` and `state_claim_acquire`; runtime-specific names must be copied exactly. If those tools are absent, use OMP native edit/write auto-declare or lazy resume helpers instead of inventing tools. Do not run `stateful reservation declare` or legacy `stateful mcp call` through Bash."
-}
-
-fn authorize_sandbox_run_bash(command: &str) -> HookOutcome {
-    if split_simple_command_words(command)
-        .ok()
-        .is_some_and(|words| {
-            words.len() >= 3 && words[1] == "sandbox" && words[2] == "run-nested-codex-benchmark"
-        })
-    {
-        #[cfg(not(feature = "codex-benchmark"))]
-        {
-            return bash_policy_deny(
-                "stateful sandbox run-nested-codex-benchmark hook authorization requires the codex-benchmark feature",
-            );
-        }
-        #[cfg(feature = "codex-benchmark")]
-        return authorize_nested_codex_benchmark_sandbox_bash(command);
-    }
-
-    if split_simple_command_words(command)
-        .ok()
-        .is_some_and(|words| {
-            words.len() >= 4 && words[1] == "sandbox" && words[2] == "process" && words[3] == "find"
-        })
-    {
-        return authorize_sandbox_process_find_bash(command);
-    }
-
-    let invocation = match parse_sandbox_run_bash_invocation(command) {
-        Ok(invocation) => invocation,
-        Err(reason) => return bash_policy_deny(reason),
-    };
-
-    if !is_trusted_stateful_executable(&invocation.executable) {
-        return bash_policy_deny("stateful sandbox run requires a trusted stateful binary");
-    }
-    if invocation.request.fs == SandboxFsProfile::External
-        && !sandbox_external_profile_has_prompt_prefix(command)
-    {
-        return bash_policy_deny(
-            "stateful sandbox external profile requires canonical prompt-matched prefix: `stateful sandbox run --fs external`",
-        );
-    }
-    if let Err(error) = validate_sandbox_run_request_shape(&invocation.request) {
-        return bash_policy_deny(error.to_string());
-    }
-
-    HookOutcome::Allow
-}
-
-fn sandbox_external_profile_has_prompt_prefix(command: &str) -> bool {
-    split_simple_command_words(command)
-        .ok()
-        .is_some_and(|words| {
-            words.len() >= 5
-                && words[1] == "sandbox"
-                && words[2] == "run"
-                && words[3] == "--fs"
-                && words[4] == "external"
-        })
-}
-
-fn authorize_sandbox_process_find_bash(command: &str) -> HookOutcome {
-    let invocation = match parse_sandbox_process_find_bash_invocation(command) {
-        Ok(invocation) => invocation,
-        Err(reason) => return bash_policy_deny(reason),
-    };
-
-    if !is_trusted_stateful_executable(&invocation.executable) {
-        return bash_policy_deny(
-            "stateful sandbox process find requires a trusted stateful binary",
-        );
-    }
-    if let Err(error) = validate_process_find_request(&invocation.request) {
-        return bash_policy_deny(error.to_string());
-    }
-
-    HookOutcome::Allow
-}
-
-#[cfg(feature = "codex-benchmark")]
-fn authorize_nested_codex_benchmark_sandbox_bash(command: &str) -> HookOutcome {
-    let invocation = match parse_nested_codex_benchmark_sandbox_invocation(command) {
-        Ok(invocation) => invocation,
-        Err(reason) => return bash_policy_deny(reason),
-    };
-
-    if !is_trusted_stateful_executable(&invocation.executable) {
-        return bash_policy_deny(
-            "stateful sandbox run-nested-codex-benchmark requires a trusted stateful binary",
-        );
-    }
-    if invocation.purpose.trim().is_empty() {
-        return bash_policy_deny("stateful sandbox run-nested-codex-benchmark requires --purpose");
-    }
-    if invocation.write_dir != "target" {
-        return bash_policy_deny(
-            "stateful sandbox run-nested-codex-benchmark requires --write-dir target",
-        );
-    }
-    if !hook_path_is_under_target(&invocation.codex_home_root) {
-        return bash_policy_deny(
-            "stateful sandbox run-nested-codex-benchmark requires --codex-home-root under target",
-        );
-    }
-    if let Some(docker_socket) = &invocation.docker_socket {
-        if !Path::new(docker_socket).is_absolute() {
-            return bash_policy_deny(
-                "stateful sandbox run-nested-codex-benchmark requires --docker-socket to be an absolute path",
-            );
-        }
-    }
-    if invocation.command.trim().is_empty() {
-        return bash_policy_deny(
-            "stateful sandbox run-nested-codex-benchmark requires a non-empty --command",
-        );
-    }
-
-    HookOutcome::Allow
-}
-
-#[cfg(feature = "codex-benchmark")]
-fn authorize_tmux_nested_codex_benchmark_bash(command: &str) -> Option<HookOutcome> {
-    if !command_starts_with_trusted_tmux(command) {
-        return None;
-    }
-    match parse_tmux_nested_codex_benchmark_command(command) {
-        Ok(Some(nested_command)) => Some(authorize_nested_codex_benchmark_sandbox_bash(
-            &nested_command,
-        )),
-        Ok(None) => None,
-        Err(reason) => Some(bash_policy_deny(reason)),
-    }
-}
-
-fn authorize_stateful_control_bash(command: &str) -> HookOutcome {
-    let invocation = match parse_stateful_control_invocation(command) {
-        Ok(invocation) => invocation,
-        Err(reason) => return bash_policy_deny(reason),
-    };
-
-    if !is_trusted_stateful_executable(&invocation.executable) {
-        return bash_policy_deny("stateful control commands require a trusted stateful binary");
-    }
-
-    HookOutcome::Allow
-}
-
-fn bash_policy_deny(reason: impl Into<String>) -> HookOutcome {
-    HookOutcome::Deny {
-        reason: format!("{} {}", reason.into(), bash_policy_guidance()),
-    }
-}
-
-fn bash_policy_guidance() -> String {
-    let binary = stateful_binary_for_guidance();
-    format!(
-        "Use the `stateful-command-policy` skill before Bash or eval tools; use `state_context_render` only for planning/manual inspection when active coordination may affect the plan. Raw Bash is denied for Codex. OMP raw Bash and Python/JavaScript/JS/Ruby/Julia eval tools are denied; use built-in Bash with trusted `{binary} sandbox run` or `{binary} sandbox process find` commands. Use `{binary} sandbox run --fs read-only --network disabled --command ...` for read-only shell fallback, `{binary} sandbox run --fs build --network enabled --write-dir <scratch-purpose> --command ...` for builds/tests, and `{binary} sandbox run --fs write-targets --write-target <file> --command ...` for command-shaped edits. Use `{binary} sandbox run --fs git --network disabled ...` for local git, `{binary} sandbox run --fs git --network enabled ...` only for explicit remote git operations, and `{binary} sandbox run --fs github-pr --network enabled ...` for GitHub PR operations. Use active Stateful native coordination tools only when they appear in the tool list, for example `state_reservation_declare` and `state_claim_acquire`; runtime-specific names must be copied exactly. If those tools are absent, use OMP native edit/write auto-declare or lazy resume helpers instead of inventing tools. Do not run `stateful reservation declare` through Bash."
-    )
-}
-
-fn stateful_binary_for_guidance() -> String {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.canonicalize().ok().or(Some(path)))
-        .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "<absolute-stateful-binary>".to_string())
-}
-
-#[cfg(feature = "codex-benchmark")]
-fn parse_nested_codex_benchmark_sandbox_invocation(
-    command: &str,
-) -> Result<NestedCodexBenchmarkSandboxInvocation, String> {
-    reject_outer_shell_syntax(
-        command,
-        "Bash wrapper must be a single stateful sandbox run-nested-codex-benchmark command",
-    )?;
-    let words = split_simple_command_words(command)?;
-    if words.is_empty() {
-        return Err("Bash commands must use stateful sandbox run".to_string());
-    }
-    if first_word_is_env_assignment(&words[0]) {
-        return Err("Bash wrapper must not use outer environment assignments".to_string());
-    }
-    if words.len() < 3 || words[1] != "sandbox" || words[2] != "run-nested-codex-benchmark" {
-        return Err("Bash commands must use stateful sandbox run".to_string());
-    }
-
-    let mut purpose = None;
-    let mut write_dir = None;
-    let mut codex_home_root = None;
-    let mut docker_socket = None;
-    let mut inner_command = None;
-    let mut index = 3;
-    while index < words.len() {
-        let arg = &words[index];
-        match arg.as_str() {
-            "--" => {
-                return Err(
-                    "stateful sandbox run-nested-codex-benchmark does not support argv mode"
-                        .to_string(),
-                );
-            }
-            "--purpose" => {
-                index += 1;
-                purpose = Some(parse_sandbox_run_arg_value(&words, index, "--purpose")?);
-            }
-            "--write-dir" => {
-                index += 1;
-                write_dir = Some(parse_sandbox_run_arg_value(&words, index, "--write-dir")?);
-            }
-            "--codex-home-root" => {
-                index += 1;
-                codex_home_root = Some(parse_sandbox_run_arg_value(
-                    &words,
-                    index,
-                    "--codex-home-root",
-                )?);
-            }
-            "--docker-socket" => {
-                index += 1;
-                docker_socket = Some(parse_sandbox_run_arg_value(
-                    &words,
-                    index,
-                    "--docker-socket",
-                )?);
-            }
-            "--command" => {
-                if inner_command.is_some() {
-                    return Err(
-                        "stateful sandbox run-nested-codex-benchmark requires exactly one --command"
-                            .to_string(),
-                    );
-                }
-                index += 1;
-                inner_command = Some(parse_sandbox_run_arg_value(&words, index, "--command")?);
-            }
-            "--timeout-seconds" => {
-                index += 1;
-                let timeout = parse_sandbox_run_arg_value(&words, index, "--timeout-seconds")?;
-                if timeout.parse::<u64>().is_err() {
-                    return Err(
-                        "stateful sandbox run-nested-codex-benchmark --timeout-seconds requires an integer value"
-                            .to_string(),
-                    );
-                }
-            }
-            _ => {
-                return Err(format!(
-                    "unsupported stateful sandbox run-nested-codex-benchmark argument `{arg}`"
-                ));
-            }
-        }
-        index += 1;
-    }
-
-    let Some(purpose) = purpose else {
-        return Err("stateful sandbox run-nested-codex-benchmark requires --purpose".to_string());
-    };
-    let Some(write_dir) = write_dir else {
-        return Err(
-            "stateful sandbox run-nested-codex-benchmark requires --write-dir target".to_string(),
-        );
-    };
-    let Some(codex_home_root) = codex_home_root else {
-        return Err(
-            "stateful sandbox run-nested-codex-benchmark requires --codex-home-root".to_string(),
-        );
-    };
-    let Some(command) = inner_command else {
-        return Err(
-            "stateful sandbox run-nested-codex-benchmark requires exactly one --command"
-                .to_string(),
-        );
-    };
-
-    Ok(NestedCodexBenchmarkSandboxInvocation {
-        executable: words[0].clone(),
-        purpose,
-        write_dir,
-        codex_home_root,
-        docker_socket,
-        command,
-    })
-}
-
-#[cfg(feature = "codex-benchmark")]
-fn parse_tmux_nested_codex_benchmark_command(command: &str) -> Result<Option<String>, String> {
-    reject_outer_shell_syntax(
-        command,
-        "Bash wrapper must be a single tmux new-session launcher",
-    )?;
-    let words = split_simple_command_words(command)?;
-    if words.is_empty() {
-        return Ok(None);
-    }
-    if !is_trusted_tmux_executable(&words[0]) {
-        return Ok(None);
-    }
-    if words.len() < 2 || words[1] != "new-session" {
-        return Err("tmux benchmark launcher supports only new-session".to_string());
-    }
-
-    let mut detached = false;
-    let mut session_name = None;
-    let mut nested_command = None;
-    let mut index = 2;
-    while index < words.len() {
-        let arg = &words[index];
-        match arg.as_str() {
-            "-d" => detached = true,
-            "-s" => {
-                index += 1;
-                session_name = Some(parse_tmux_arg_value(&words, index, "-s")?);
-            }
-            "-n" | "-c" => {
-                index += 1;
-                parse_tmux_arg_value(&words, index, arg)?;
-            }
-            _ if arg.starts_with('-') => {
-                return Err(format!(
-                    "unsupported tmux benchmark launcher argument `{arg}`"
-                ));
-            }
-            _ => {
-                if nested_command.is_some() || index + 1 != words.len() {
-                    return Err(
-                        "tmux benchmark launcher requires exactly one shell command".to_string()
-                    );
-                }
-                nested_command = Some(arg.clone());
-            }
-        }
-        index += 1;
-    }
-
-    if !detached {
-        return Err("tmux benchmark launcher requires detached -d mode".to_string());
-    }
-    let Some(session_name) = session_name else {
-        return Err("tmux benchmark launcher requires -s session name".to_string());
-    };
-    if !is_denovo_tmux_session_name(&session_name) {
-        return Err("tmux benchmark launcher session name must be a DeNovo run id".to_string());
-    }
-    let Some(nested_command) = nested_command else {
-        return Err("tmux benchmark launcher requires a nested benchmark command".to_string());
-    };
-
-    Ok(Some(nested_command))
-}
-
-#[cfg(feature = "codex-benchmark")]
-fn parse_tmux_arg_value(words: &[String], index: usize, arg: &str) -> Result<String, String> {
-    words
-        .get(index)
-        .cloned()
-        .ok_or_else(|| format!("tmux benchmark launcher argument `{arg}` requires a value"))
-}
-
-#[cfg(feature = "codex-benchmark")]
-fn is_trusted_tmux_executable(executable: &str) -> bool {
-    matches!(executable, "/opt/homebrew/bin/tmux" | "/usr/bin/tmux")
-}
-
-#[cfg(feature = "codex-benchmark")]
-fn command_starts_with_trusted_tmux(command: &str) -> bool {
-    let trimmed = command.trim_start();
-    ["/opt/homebrew/bin/tmux", "/usr/bin/tmux"]
-        .iter()
-        .any(|prefix| {
-            trimmed == *prefix
-                || trimmed
-                    .strip_prefix(prefix)
-                    .and_then(|rest| rest.chars().next())
-                    .is_some_and(char::is_whitespace)
-        })
-}
-
-#[cfg(feature = "codex-benchmark")]
-fn is_denovo_tmux_session_name(session_name: &str) -> bool {
-    !session_name.is_empty()
-        && session_name.contains("-denovo-full-3-codex-")
-        && session_name
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
-}
-
-fn parse_stateful_control_invocation(command: &str) -> Result<StatefulControlInvocation, String> {
-    reject_outer_shell_syntax(command, "Bash wrapper must be a single stateful command")?;
-    let words = split_simple_command_words(command)?;
-    if words.is_empty() {
-        return Err("Bash commands must use a supported stateful command".to_string());
-    }
-    if first_word_is_env_assignment(&words[0]) {
-        return Err("Bash wrapper must not use outer environment assignments".to_string());
-    }
-    if words.len() < 2 || !is_stateful_control_command(&words[1]) {
-        return Err(
-            "Bash commands must use stateful sandbox run or a trusted stateful server command"
-                .to_string(),
-        );
-    }
-
-    Ok(StatefulControlInvocation {
-        executable: words[0].clone(),
-    })
-}
-
-fn command_mentions_stateful_control(command: &str) -> bool {
-    split_simple_command_words(command)
-        .ok()
-        .and_then(|words| words.get(1).cloned())
-        .is_some_and(|command| is_stateful_control_command(&command))
-}
-
-fn is_stateful_control_command(command: &str) -> bool {
-    matches!(command, "server")
-}
-
-#[cfg(feature = "codex-benchmark")]
-fn parse_sandbox_run_arg_value(
-    words: &[String],
-    index: usize,
-    arg: &str,
-) -> Result<String, String> {
-    words
-        .get(index)
-        .cloned()
-        .ok_or_else(|| format!("stateful sandbox run argument `{arg}` requires a value"))
-}
-
-#[cfg(feature = "codex-benchmark")]
-fn hook_path_is_under_target(path: &str) -> bool {
-    let trimmed = path.trim().replace('\\', "/");
-    if trimmed.is_empty() || trimmed.starts_with('/') {
-        return false;
-    }
-    let mut segments = Vec::new();
-    for segment in trimmed.split('/') {
-        if segment.is_empty() || segment == "." {
-            continue;
-        }
-        if segment == ".." || segment.eq_ignore_ascii_case(".git") {
-            return false;
-        }
-        if segment.chars().any(char::is_control) {
-            return false;
-        }
-        segments.push(segment);
-    }
-    segments.len() >= 2 && segments[0] == "target"
-}
-
-fn is_trusted_stateful_executable(executable: &str) -> bool {
-    let Ok(current) = std::env::current_exe() else {
-        return false;
-    };
-    let current = current.canonicalize().unwrap_or(current);
-
-    if is_verified_bare_stateful_executable(
-        executable,
-        &current,
-        std::env::var_os("PATH").as_deref(),
+    let result: TaskCommandResult = match post_command(
+        &runtime,
+        "/v2/tasks/start",
+        &command,
+        &owner.task_start_input,
     ) {
-        return true;
-    }
-
-    let path = Path::new(executable);
-    if !path.is_absolute() {
-        return false;
-    }
-    let Ok(candidate) = path.canonicalize() else {
-        return false;
+        Ok(result) => result,
+        Err(error) => {
+            if error.reason_code == "invalid_input" {
+                let _ = remove_owner(repo, &task.task_id);
+            }
+            return Err(command_error(error));
+        }
     };
-    candidate == current
+    anyhow::ensure!(
+        result.task_id == task.task_id,
+        "task start returned a different task owner"
+    );
+    if owner.heartbeat_enabled
+        && let Err(error) = spawn_codex_heartbeat(repo, &owner)
+    {
+        let _ = deactivate_owner(repo, &task.task_id);
+        if let Ok(result) =
+            end_codex_task_result(&runtime, &task, "/v2/tasks/cancel", "task.cancel")
+        {
+            let _ = finish_codex_owner_result(repo, &task.task_id, result);
+        }
+        return Err(error);
+    }
+    let binary = std::env::current_exe()?.canonicalize()?;
+    Ok(format!(
+        "Stateful V2 task_id={} agent_id={}. Native Codex tools are fail-closed because their terminal payload contract is unverified. Use adapter-owned wrapper commands through Bash, beginning with the exact binary '{}'. Mutation sandbox, commit, and lease release commands must pass this task and agent identity.",
+        task.task_id,
+        task.agent_id,
+        binary.display().to_string().replace('\'', "'\\''"),
+    ))
 }
 
-fn is_verified_bare_stateful_executable(
-    executable: &str,
-    current: &Path,
-    path_env: Option<&OsStr>,
-) -> bool {
-    if executable != "stateful" {
-        return false;
-    }
-    let Some(path_env) = path_env else {
-        return false;
-    };
+pub fn handle_stop_in_repo(input: &str, repo: impl AsRef<Path>) -> anyhow::Result<()> {
+    let input: CodexInput = serde_json::from_str(input)?;
+    nonempty("Codex session_id", &input.session_id)?;
+    nonempty("Codex turn_id", &input.turn_id)?;
+    let repo = repo.as_ref();
+    let task_id = id("codex-task", &[&input.session_id, &input.turn_id]);
+    deactivate_owner(repo, &task_id)?;
+    let runtime = discover_runtime_with_optional_global(repo)?;
+    let task = codex_task(&input, &runtime, repo)?;
+    finish_codex_owner(repo, &runtime, &task, &task_id).map(|_| ())
+}
 
-    for directory in std::env::split_paths(path_env) {
-        let candidate = directory.join("stateful");
-        if !is_executable_file(&candidate) {
+fn end_task(
+    runtime: &ServerRuntime,
+    task: &TaskContext,
+    path: &str,
+    event: &str,
+) -> anyhow::Result<()> {
+    post_command::<_, TaskCommandResult>(
+        runtime,
+        path,
+        &identity(task, event, event, None),
+        &TaskEndInput { handoff: None },
+    )
+    .map_err(command_error)?;
+    Ok(())
+}
+
+fn end_codex_task_result(
+    runtime: &ServerRuntime,
+    task: &TaskContext,
+    path: &str,
+    event: &str,
+) -> Result<TaskCommandResult, CommandError> {
+    let observed_at = now_rfc3339();
+    post_command(
+        runtime,
+        path,
+        &identity_at(task, event, &observed_at, None, &observed_at),
+        &TaskEndInput { handoff: None },
+    )
+}
+
+fn finish_codex_owner(
+    repo: &Path,
+    runtime: &ServerRuntime,
+    task: &TaskContext,
+    task_id: &str,
+) -> anyhow::Result<bool> {
+    match end_codex_task_result(runtime, task, "/v2/tasks/finalize", "task.finalize") {
+        Ok(result) => finish_codex_owner_result(repo, task_id, result),
+        Err(error) if error.reason_code == "not_found" => {
+            remove_owner(repo, task_id)?;
+            Ok(true)
+        }
+        Err(finalize_error) => {
+            match end_codex_task_result(runtime, task, "/v2/tasks/cancel", "task.cancel") {
+                Ok(result) => finish_codex_owner_result(repo, task_id, result),
+                Err(error) if error.reason_code == "not_found" => {
+                    remove_owner(repo, task_id)?;
+                    Ok(true)
+                }
+                Err(cancel_error) => Err(anyhow::anyhow!(
+                    "could not terminally stop Codex task {task_id}: finalize failed ({finalize_error}); cancel failed ({cancel_error})"
+                )),
+            }
+        }
+    }
+}
+
+fn finish_codex_owner_result(
+    repo: &Path,
+    task_id: &str,
+    result: TaskCommandResult,
+) -> anyhow::Result<bool> {
+    if result.status.is_terminal() {
+        remove_owner(repo, task_id)?;
+        return Ok(true);
+    }
+    if result.draining {
+        return Ok(false);
+    }
+    anyhow::bail!(
+        "Codex task {task_id} stop returned unexpected non-terminal status {:?}",
+        result.status
+    )
+}
+
+fn cleanup_missed_codex_owners(
+    repo: &Path,
+    runtime: &ServerRuntime,
+    session_id: &str,
+    current_turn_id: &str,
+) -> anyhow::Result<()> {
+    let entries = match fs::read_dir(owner_directory(repo)) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
             continue;
         }
-        if !candidate.is_absolute() {
-            return false;
+        let owner: OwnedTaskOwner = serde_json::from_slice(&fs::read(&path)?)?;
+        if owner.session_id != session_id || owner.turn_id == current_turn_id {
+            continue;
         }
-        return files_have_same_bytes(current, &candidate);
+        let Some(owner) = deactivate_owner(repo, &owner.task_id)? else {
+            continue;
+        };
+        let task = task_for_owner(&owner, runtime, repo)?;
+        if !finish_codex_owner(repo, runtime, &task, &owner.task_id)? {
+            anyhow::bail!(
+                "previous Codex task {} is draining; refusing a new turn in session {session_id}",
+                owner.task_id
+            );
+        }
     }
-    false
+    Ok(())
 }
 
-fn files_have_same_bytes(left: &Path, right: &Path) -> bool {
-    let Ok(left) = fs::read(left) else {
-        return false;
-    };
-    let Ok(right) = fs::read(right) else {
-        return false;
-    };
-    left == right
+fn task_for_owner(
+    owner: &OwnedTaskOwner,
+    runtime: &ServerRuntime,
+    repo: &Path,
+) -> anyhow::Result<TaskContext> {
+    let workspace = workspace(runtime, repo)?;
+    anyhow::ensure!(
+        workspace.workspace_id == owner.workspace_id,
+        "Codex owner workspace changed"
+    );
+    Ok(TaskContext {
+        task_id: owner.task_id.clone(),
+        agent_id: owner.agent_id.clone(),
+        turn_id: Some(owner.turn_id.clone()),
+        actor_id: format!("{}:{}", owner.agent_id, owner.turn_id),
+        owner_id: owner.agent_id.clone(),
+        workspace,
+    })
 }
 
-fn is_executable_file(path: &Path) -> bool {
-    let Ok(metadata) = fs::metadata(path) else {
-        return false;
+pub(crate) fn resolve_owned_wrapper_task(repo: &Path) -> anyhow::Result<OwnedTaskOwner> {
+    let ancestors = ancestors()?;
+    let entries = match fs::read_dir(owner_directory(repo)) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            anyhow::bail!("owned wrapper has no active Codex task owner")
+        }
+        Err(error) => return Err(error.into()),
     };
-    if !metadata.is_file() {
-        return false;
+    let mut found = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let owner: OwnedTaskOwner = serde_json::from_slice(&fs::read(path)?)?;
+        if !owner.heartbeat_enabled {
+            continue;
+        }
+        let Some(identity) = ancestors.get(&owner.pid) else {
+            continue;
+        };
+        if identity != &owner.process_start_identity {
+            anyhow::bail!("owned wrapper found a stale Codex task owner record")
+        }
+        found.push(owner);
+    }
+    match found.len() {
+        1 => Ok(found.pop().expect("one task owner exists")),
+        0 => anyhow::bail!("owned wrapper has no live Codex task owner"),
+        _ => anyhow::bail!("owned wrapper found multiple live Codex task owners"),
+    }
+}
+
+fn ancestors() -> anyhow::Result<BTreeMap<u32, String>> {
+    let mut result = BTreeMap::new();
+    let mut pid = std::process::id();
+    for _ in 0..128 {
+        if result
+            .insert(pid, process_start_identity_for_pid(pid)?)
+            .is_some()
+        {
+            anyhow::bail!("process ancestor cycle detected")
+        }
+        let Some(parent) = process_parent_pid(pid)? else {
+            break;
+        };
+        if parent == pid {
+            break;
+        }
+        pid = parent;
+    }
+    Ok(result)
+}
+
+fn record_owner(
+    repo: &Path,
+    task: &TaskContext,
+    input: &CodexInput,
+    task_start_observed_at: String,
+    task_start_input: TaskStartInput,
+) -> anyhow::Result<OwnedTaskOwner> {
+    let target = owner_path(repo, &task.task_id);
+    match fs::read(&target) {
+        Ok(contents) => return matching_owner(&contents, task, input),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let pid = process_parent_pid(std::process::id())?
+        .ok_or_else(|| anyhow::anyhow!("Codex hook has no live parent process"))?;
+    let owner = OwnedTaskOwner {
+        task_id: task.task_id.clone(),
+        agent_id: task.agent_id.clone(),
+        workspace_id: task.workspace.workspace_id.clone(),
+        session_id: input.session_id.clone(),
+        turn_id: input.turn_id.clone(),
+        pid,
+        process_start_identity: process_start_identity_for_pid(pid)?,
+        heartbeat_enabled: true,
+        task_start_observed_at,
+        task_start_input,
+    };
+    if create_owner(repo, &owner)? {
+        return Ok(owner);
+    }
+    matching_owner(&fs::read(target)?, task, input)
+}
+
+fn matching_owner(
+    contents: &[u8],
+    task: &TaskContext,
+    input: &CodexInput,
+) -> anyhow::Result<OwnedTaskOwner> {
+    let owner: OwnedTaskOwner = serde_json::from_slice(contents)?;
+    let pid = process_parent_pid(std::process::id())?
+        .ok_or_else(|| anyhow::anyhow!("Codex hook has no live parent process"))?;
+    anyhow::ensure!(
+        owner.task_id == task.task_id
+            && owner.agent_id == task.agent_id
+            && owner.workspace_id == task.workspace.workspace_id
+            && owner.session_id == input.session_id
+            && owner.turn_id == input.turn_id
+            && owner.pid == pid
+            && process_start_identity_for_pid(pid)
+                .is_ok_and(|identity| identity == owner.process_start_identity),
+        "existing Codex owner does not match the replayed task"
+    );
+    Ok(owner)
+}
+
+fn create_owner(repo: &Path, owner: &OwnedTaskOwner) -> anyhow::Result<bool> {
+    let directory = owner_directory(repo);
+    fs::create_dir_all(&directory)?;
+    let target = owner_path(repo, &owner.task_id);
+    let temporary = directory.join(format!(".{}.{}.tmp", owner.task_id, std::process::id()));
+    #[cfg(unix)]
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)?;
+    #[cfg(not(unix))]
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    let written = file
+        .write_all(&serde_json::to_vec(owner)?)
+        .and_then(|_| file.sync_all());
+    drop(file);
+    if let Err(error) = written {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.into());
     }
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
-    }
+    let created: anyhow::Result<bool> = match fs::hard_link(&temporary, &target) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(error.into()),
+    };
     #[cfg(not(unix))]
+    let created: anyhow::Result<bool> = match fs::rename(&temporary, &target) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(error.into()),
+    };
+    let _ = fs::remove_file(&temporary);
+    let created = created?;
+    #[cfg(unix)]
+    if created {
+        fs::set_permissions(target, fs::Permissions::from_mode(0o600))?;
+    }
+    if created {
+        sync_parent_dir(&owner_path(repo, &owner.task_id))?;
+    }
+    Ok(created)
+}
+
+fn deactivate_owner(repo: &Path, task_id: &str) -> anyhow::Result<Option<OwnedTaskOwner>> {
+    let target = owner_path(repo, task_id);
+    let contents = match fs::read(&target) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut owner: OwnedTaskOwner = serde_json::from_slice(&contents)?;
+    owner.heartbeat_enabled = false;
+    persist_owner(repo, &owner)?;
+    Ok(Some(owner))
+}
+
+fn persist_owner(repo: &Path, owner: &OwnedTaskOwner) -> anyhow::Result<()> {
+    let directory = owner_directory(repo);
+    fs::create_dir_all(&directory)?;
+    let target = owner_path(repo, &owner.task_id);
+    let temporary = directory.join(format!(".{}.{}.tmp", owner.task_id, std::process::id()));
+    #[cfg(unix)]
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)?;
+    #[cfg(not(unix))]
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    let written = file
+        .write_all(&serde_json::to_vec(owner)?)
+        .and_then(|_| file.sync_all());
+    drop(file);
+    if let Err(error) = written {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.into());
+    }
+    if let Err(error) = fs::rename(&temporary, &target) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.into());
+    }
+    #[cfg(unix)]
+    fs::set_permissions(target, fs::Permissions::from_mode(0o600))?;
+    sync_parent_dir(&owner_path(repo, &owner.task_id))?;
+    Ok(())
+}
+
+fn remove_owner(repo: &Path, task_id: &str) -> anyhow::Result<()> {
+    let target = owner_path(repo, task_id);
+    match fs::remove_file(&target) {
+        Ok(()) => sync_parent_dir(&target),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn owner_directory(repo: &Path) -> PathBuf {
+    repo.join(".stateful_core/runtime/tasks")
+}
+fn owner_path(repo: &Path, task_id: &str) -> PathBuf {
+    owner_directory(repo).join(format!("{task_id}.json"))
+}
+
+fn spawn_codex_heartbeat(repo: &Path, owner: &OwnedTaskOwner) -> anyhow::Result<()> {
+    let input = serde_json::to_vec(&CodexHeartbeatInput {
+        repo_root: repo.canonicalize()?,
+        owner: owner.clone(),
+    })?;
+    let mut command = ProcessCommand::new(std::env::current_exe()?);
+    command
+        .args(["hook", "codex", "heartbeat"])
+        .current_dir(repo)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
     {
-        true
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Codex heartbeat helper stdin is unavailable"))?
+        .write_all(&input)?;
+    Ok(())
+}
+
+fn run_codex_heartbeat(input: &str) -> anyhow::Result<()> {
+    let input: CodexHeartbeatInput = serde_json::from_str(input)?;
+    let repo = input.repo_root.canonicalize()?;
+    let expected_task_id = id(
+        "codex-task",
+        &[&input.owner.session_id, &input.owner.turn_id],
+    );
+    anyhow::ensure!(
+        input.owner.task_id == expected_task_id
+            && input.owner.agent_id == format!("codex:{}", input.owner.session_id),
+        "Codex heartbeat owner identity is invalid"
+    );
+    input
+        .owner
+        .task_start_input
+        .settings
+        .validate()
+        .map_err(anyhow::Error::msg)?;
+    let settings = input.owner.task_start_input.settings;
+    let interval = Duration::from_secs(settings.heartbeat_interval_seconds);
+    loop {
+        if !owned_task_is_live(&repo, &input.owner)? {
+            return Ok(());
+        }
+        let _ = heartbeat_codex_once(&repo, &input.owner, settings);
+        thread::sleep(interval);
     }
 }
 
-fn authorize_apply_patch(
-    input: &PreToolUseInput,
-    runtime: Option<&ServerRuntime>,
-    repo_root: Option<&Path>,
-    cwd: Option<&Path>,
-    identity: Option<&RepoIdentity>,
-) -> anyhow::Result<HookOutcome> {
-    let Some(patch) = input.patch_text() else {
-        return Ok(HookOutcome::Deny {
-            reason:
-                "apply_patch writes require patch text with file targets for stateful authorization"
-                    .to_string(),
-        });
+fn owned_task_is_live(repo: &Path, expected: &OwnedTaskOwner) -> anyhow::Result<bool> {
+    let contents = match fs::read_to_string(owner_path(repo, &expected.task_id)) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
     };
-    let targets = extract_apply_patch_write_targets(patch);
-    if targets.is_empty() {
-        return Ok(HookOutcome::Deny {
-            reason:
-                "apply_patch writes require at least one file target for stateful authorization"
-                    .to_string(),
-        });
+    let current: OwnedTaskOwner = serde_json::from_str(&contents)?;
+    if current != *expected {
+        return Ok(false);
     }
-    let Some(targets) = normalize_targets(targets, repo_root, cwd)? else {
-        return Ok(HookOutcome::Deny {
-            reason: "apply_patch target is outside the enabled repo".to_string(),
-        });
-    };
-    authorize_targets(input, runtime, repo_root, targets, identity)
+    Ok(process_start_identity_for_pid(expected.pid)
+        .is_ok_and(|identity| identity == expected.process_start_identity))
 }
 
-fn authorize_file_change_tool(
-    input: &PreToolUseInput,
-    runtime: Option<&ServerRuntime>,
-    repo_root: Option<&Path>,
-    cwd: Option<&Path>,
-    identity: Option<&RepoIdentity>,
-) -> anyhow::Result<HookOutcome> {
-    let targets = extract_file_change_targets(&input.tool_input);
-    if targets.is_empty() {
-        return Ok(HookOutcome::Deny {
-            reason: "file_change writes require changed file targets for stateful authorization"
-                .to_string(),
-        });
-    }
-    let Some(targets) = normalize_targets(targets, repo_root, cwd)? else {
-        return Ok(HookOutcome::Deny {
-            reason: "file_change target is outside the enabled repo".to_string(),
-        });
+fn heartbeat_codex_once(
+    repo: &Path,
+    owner: &OwnedTaskOwner,
+    settings: CoordinationSettings,
+) -> anyhow::Result<()> {
+    let runtime = discover_runtime_with_optional_global(repo)?;
+    let input = CodexInput {
+        session_id: owner.session_id.clone(),
+        turn_id: owner.turn_id.clone(),
+        tool_name: None,
+        tool_input: Value::Null,
     };
-    authorize_targets(input, runtime, repo_root, targets, identity)
+    let task = codex_task(&input, &runtime, repo)?;
+    anyhow::ensure!(
+        task.task_id == owner.task_id
+            && task.agent_id == owner.agent_id
+            && task.workspace.workspace_id == owner.workspace_id,
+        "Codex heartbeat task ownership changed"
+    );
+    heartbeat_task(&task, &runtime, settings, "Codex root turn active")
 }
 
-fn authorize_file_write_tool(
-    input: &PreToolUseInput,
-    runtime: Option<&ServerRuntime>,
-    repo_root: Option<&Path>,
-    cwd: Option<&Path>,
-    identity: Option<&RepoIdentity>,
-) -> anyhow::Result<HookOutcome> {
-    let Some(path) = input
-        .tool_input
-        .get("file_path")
-        .or_else(|| input.tool_input.get("path"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-    else {
-        return Ok(HookOutcome::Deny {
-            reason: format!(
-                "{} writes require a file_path target for stateful authorization",
-                input.tool_name
-            ),
-        });
-    };
-
-    let Some(target) = normalize_file_tool_target(path, repo_root, cwd)? else {
-        return Ok(HookOutcome::Deny {
-            reason: format!("{} target is outside the enabled repo", input.tool_name),
-        });
-    };
-
-    authorize_targets(
-        input,
+fn heartbeat_task(
+    task: &TaskContext,
+    runtime: &ServerRuntime,
+    settings: CoordinationSettings,
+    next_action: &str,
+) -> anyhow::Result<()> {
+    let discriminator = now_rfc3339();
+    let command = identity(task, "task.heartbeat", &discriminator, None);
+    post_command::<_, TaskCommandResult>(
         runtime,
-        repo_root,
-        vec![PatchTarget::write(&target)],
-        identity,
+        "/v2/tasks/heartbeat",
+        &command,
+        &TaskHeartbeatInput {
+            next_action: next_action.to_string(),
+            expires_at: after(&command.observed_at, settings.inactivity_timeout_seconds)?,
+        },
     )
+    .map_err(command_error)?;
+    Ok(())
 }
 
-fn normalize_targets(
-    targets: Vec<PatchTarget>,
-    repo_root: Option<&Path>,
-    cwd: Option<&Path>,
-) -> anyhow::Result<Option<Vec<PatchTarget>>> {
-    let mut normalized = Vec::with_capacity(targets.len());
-    for target in targets {
-        let Some(path) = normalize_file_tool_target(&target.path, repo_root, cwd)? else {
-            return Ok(None);
-        };
-        let new_path = if let Some(new_path) = &target.new_path {
-            let Some(new_path) = normalize_file_tool_target(new_path, repo_root, cwd)? else {
-                return Ok(None);
-            };
-            Some(new_path)
-        } else {
-            None
-        };
-        normalized.push(target.with_paths(path, new_path));
-    }
-
-    Ok(Some(normalized))
-}
-
-fn hook_authorize_purpose(
-    input: &PreToolUseInput,
+fn codex_task(
+    input: &CodexInput,
     runtime: &ServerRuntime,
-    target: &PatchTarget,
-    workspace_id: &str,
-) -> Option<String> {
-    let response = get_json(runtime, "/v1/current").ok()?;
-    if !(200..300).contains(&response.status_code) {
-        return None;
-    }
-    let body: serde_json::Value = serde_json::from_str(&response.body).ok()?;
-    let items = body.get("items")?.as_array()?;
-    let mut fallback = None;
-    for item in items {
-        let matches_intent = item.get("kind").and_then(serde_json::Value::as_str)
-            == Some("reservation")
-            && item.get("freshness").and_then(serde_json::Value::as_str) == Some("live")
-            && item.get("agent_id").and_then(serde_json::Value::as_str)
-                == Some(input.stateful_agent_id())
-            && item.get("workspace_id").and_then(serde_json::Value::as_str) == Some(workspace_id);
-        if !matches_intent {
-            continue;
-        }
-        let Some(purpose) = item
-            .get("purpose")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|purpose| !purpose.is_empty())
-            .map(str::to_string)
-        else {
-            continue;
-        };
-        if item.get("resource").and_then(serde_json::Value::as_str) == Some(target.path.as_str()) {
-            return Some(purpose);
-        }
-        if fallback.is_none() {
-            fallback = Some(purpose);
-        }
-    }
-
-    fallback
-}
-
-fn authorize_targets(
-    input: &PreToolUseInput,
-    runtime: Option<&ServerRuntime>,
-    repo_root: Option<&Path>,
-    targets: Vec<PatchTarget>,
-    identity: Option<&RepoIdentity>,
-) -> anyhow::Result<HookOutcome> {
-    if let Some(repo_root) = repo_root
-        && let Err(error) = shadow_guard::check_paths_for_dependency_shadowing(
-            repo_root,
-            shadow_write_paths(&targets),
-        )
-    {
-        return Ok(HookOutcome::Deny {
-            reason: error.to_string(),
-        });
-    }
-
-    let Some(runtime) = runtime else {
-        return Ok(HookOutcome::Deny {
-            reason: format!(
-                "{} writes require a reachable stateful server, task reservation exact file scope, and a same-reservation file claim",
-                input.tool_name
-            ),
-        });
-    };
-
-    if targets.is_empty() {
-        return Ok(HookOutcome::Allow);
-    }
-
-    let workspace_id = effective_workspace_id(runtime, identity);
-    let agent_id = input.stateful_agent_id().to_string();
-    let mut allowed_paths = BTreeSet::new();
-    for target in targets {
-        let purpose = hook_authorize_purpose(input, runtime, &target, &workspace_id);
-        let payload = authorization_payload_for_target(
-            &target,
-            repo_root,
-            purpose.as_deref(),
-            input.reservation_id(),
-            purpose.is_some(),
-        );
-        let body = authorization_request_body(
-            runtime,
-            &agent_id,
-            &workspace_id,
-            identity,
-            "pre_tool_use",
-            "hook:pre_tool_use",
-            &input.tool_name,
-            payload,
-        );
-        let decision: AuthorizeDecision = match post_authorize_decision(runtime, &body) {
-            Ok(decision) => decision,
-            Err(reason) => {
-                release_pre_tool_authorized_claims(
-                    runtime,
-                    &agent_id,
-                    &workspace_id,
-                    &allowed_paths,
-                );
-                return Ok(HookOutcome::Deny { reason });
-            }
-        };
-        if decision.decision != "allow" {
-            release_pre_tool_authorized_claims(runtime, &agent_id, &workspace_id, &allowed_paths);
-            let reason = if let Some(repo_root) = repo_root {
-                if repeated_denial_seen(repo_root, &agent_id, &target.path, &decision.reason_code) {
-                    repeated_denial_reason(&target.path)
-                } else {
-                    authorization_denial_reason(decision)
-                }
-            } else {
-                authorization_denial_reason(decision)
-            };
-            return Ok(HookOutcome::Deny { reason });
-        }
-        allowed_paths.insert(target.path.clone());
-        if let Some(new_path) = &target.new_path {
-            allowed_paths.insert(new_path.clone());
-        }
-    }
-
-    Ok(HookOutcome::Allow)
-}
-
-fn release_pre_tool_authorized_claims(
-    runtime: &ServerRuntime,
-    agent_id: &str,
-    workspace_id: &str,
-    paths: &BTreeSet<String>,
-) {
-    release_claims_for_paths(runtime, agent_id, workspace_id, paths);
-}
-
-fn target_paths(targets: Vec<PatchTarget>) -> BTreeSet<String> {
-    let mut paths = BTreeSet::new();
-    for target in targets {
-        paths.insert(target.path);
-        if let Some(new_path) = target.new_path {
-            paths.insert(new_path);
-        }
-    }
-    paths
-}
-
-fn refresh_claim_observations_for_paths(
-    runtime: &ServerRuntime,
-    agent_id: &str,
-    workspace_id: &str,
-    root: &str,
-    paths: &BTreeSet<String>,
-) {
-    for path in paths {
-        let body = json!({
-            "agent_id": agent_id,
-            "workspace_id": workspace_id,
-            "path": path,
-            "root": root,
-        });
-        let Ok(response) = post_json(runtime, "/v1/claim/refresh-observation", &body) else {
-            continue;
-        };
-        if !(200..300).contains(&response.status_code) {
-            continue;
-        }
-    }
-}
-
-fn release_claims_for_paths(
-    runtime: &ServerRuntime,
-    agent_id: &str,
-    workspace_id: &str,
-    paths: &BTreeSet<String>,
-) {
-    for path in paths {
-        let body = json!({
-            "agent_id": agent_id,
-            "workspace_id": workspace_id,
-            "path": path,
-        });
-        let Ok(response) = post_json(runtime, "/v1/claim/release", &body) else {
-            continue;
-        };
-        if !(200..300).contains(&response.status_code) {
-            continue;
-        }
-    }
-}
-
-fn shadow_write_paths(targets: &[PatchTarget]) -> impl Iterator<Item = &str> {
-    targets.iter().filter_map(|target| match target.action {
-        "write_file" => Some(target.path.as_str()),
-        "move_file" => target.new_path.as_deref(),
-        _ => None,
+    repo: &Path,
+) -> anyhow::Result<TaskContext> {
+    nonempty("Codex session_id", &input.session_id)?;
+    nonempty("Codex turn_id", &input.turn_id)?;
+    let task_id = id("codex-task", &[&input.session_id, &input.turn_id]);
+    let agent_id = format!("codex:{}", input.session_id);
+    Ok(TaskContext {
+        task_id,
+        actor_id: format!("{agent_id}:{}", input.turn_id),
+        owner_id: agent_id.clone(),
+        agent_id,
+        turn_id: Some(input.turn_id.clone()),
+        workspace: workspace(runtime, repo)?,
     })
 }
 
-fn authorization_unavailable_reason(error: &dyn std::fmt::Display) -> String {
-    format!(
-        "server_unavailable: stateful authorization is unavailable while contacting /v1/authorize: {error}. Writes fail closed. Run `stateful server status`, restart or rejoin the stateful server, then retry after task-level reservation covers the target and acquiring a same-reservation file claim."
+fn omp_task(input: &OmpInput, runtime: &ServerRuntime, repo: &Path) -> anyhow::Result<TaskContext> {
+    anyhow::ensure!(
+        input.runtime == "omp" && input.version == "17.2.3",
+        "unsupported OMP runtime contract; requires 17.2.3"
+    );
+    nonempty("OMP sessionId", &input.session_id)?;
+    nonempty("OMP leafAgentId", &input.leaf_agent_id)?;
+    let task_id = id("omp-task", &[&input.session_id, &input.leaf_agent_id]);
+    if let Some(task) = &input.task_id {
+        anyhow::ensure!(
+            task == &task_id,
+            "OMP task_id does not match its session and leaf owner"
+        );
+    }
+    let agent_id = format!("omp:{}:{}", input.session_id, input.leaf_agent_id);
+    Ok(TaskContext {
+        task_id,
+        actor_id: agent_id.clone(),
+        owner_id: input.leaf_agent_id.clone(),
+        agent_id,
+        turn_id: None,
+        workspace: workspace(runtime, repo)?,
+    })
+}
+
+fn workspace(runtime: &ServerRuntime, repo: &Path) -> anyhow::Result<WorkspaceIdentity> {
+    let root = fs::canonicalize(repo)?.to_string_lossy().into_owned();
+    let repo_id = id("repo", &[&root]);
+    Ok(WorkspaceIdentity {
+        root,
+        workspace_id: runtime.workspace_id.clone(),
+        repo_id: repo_id.clone(),
+        worktree_id: repo_id,
+        branch: "canonical".to_string(),
+    })
+}
+
+fn identity(
+    task: &TaskContext,
+    event: &str,
+    discriminator: &str,
+    tool: Option<&str>,
+) -> CommandIdentity {
+    identity_at(task, event, discriminator, tool, &now_rfc3339())
+}
+
+fn identity_at(
+    task: &TaskContext,
+    event: &str,
+    discriminator: &str,
+    tool: Option<&str>,
+    observed_at: &str,
+) -> CommandIdentity {
+    CommandIdentity::new(
+        &task.task_id,
+        id("request", &[&task.task_id, event, discriminator]),
+        observed_at,
+        AgentIdentity {
+            agent_id: task.agent_id.clone(),
+            turn_id: task.turn_id.clone(),
+            actor_id: task.actor_id.clone(),
+            actor_type: ActorType::Agent,
+            owner_id: Some(task.owner_id.clone()),
+            parent_agent_id: None,
+            parent_actor_id: None,
+        },
+        task.workspace.clone(),
+        SourceRef {
+            kind: SourceKind::Hook,
+            event: event.to_string(),
+            tool_name: tool.map(str::to_string),
+            source_ref: format!("{}:{discriminator}", task.agent_id),
+        },
     )
 }
 
-fn authorization_denial_reason(decision: AuthorizeDecision) -> String {
-    let reservation_id = decision.reservation_id();
-    let mut reason = decision.required_next_action.unwrap_or(decision.message);
-    if let Some(reservation_id) = reservation_id {
-        if !reason.contains(&reservation_id) {
-            reason.push_str(&format!(" reservation_id {reservation_id}."));
-        }
-    }
-    let Some(wait) = decision.wait else {
-        return reason;
+fn runtime_process() -> anyhow::Result<RuntimeProcessInput> {
+    let pid = process_parent_pid(std::process::id())?
+        .ok_or_else(|| anyhow::anyhow!("hook has no live adapter parent process"))?;
+    Ok(RuntimeProcessInput {
+        pid,
+        process_start_identity: process_start_identity_for_pid(pid)?,
+    })
+}
+
+pub(crate) fn settings(repo: &Path) -> anyhow::Result<CoordinationSettings> {
+    let configured: SettingsFile = match fs::read_to_string(repo.join(".stateful/config.yml")) {
+        Ok(contents) => serde_yaml::from_str(&contents)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => SettingsFile::default(),
+        Err(error) => return Err(error.into()),
     };
-
-    if !reason.contains(&wait.wait_id) {
-        let mut wait_details = vec![format!("wait_id {}", wait.wait_id)];
-        if let Some(queue_position) = wait.queue_position {
-            wait_details.push(format!("queue position {queue_position}"));
-        }
-        if let Some(blocking_agent_id) = wait.blocking_agent_id {
-            wait_details.push(format!("blocked by agent {blocking_agent_id}"));
-        }
-        reason.push_str(&format!(" Track {}.", wait_details.join(", ")));
-    }
-    let has_resume_guidance = [
-        "state_notifications_poll",
-        "state_resume_next",
-        "reread",
-        "lazy",
-    ]
-    .iter()
-    .all(|term| reason.contains(term));
-    if !has_resume_guidance {
-        let target = wait.path.as_deref().unwrap_or("the target");
-        reason.push_str(&format!(
-            " Resume by polling state_notifications_poll or state_resume_next for wait_id {}; when reserved, reread {}, then resume the queued lazy operation or retry the authorized write so the write boundary can claim wait_id {}. Only clients that expose state_reservation_claim should claim manually before retrying.",
-            wait.wait_id, target, wait.wait_id
-        ));
-    }
-    reason
+    let defaults = CoordinationSettings::default();
+    let settings = CoordinationSettings {
+        heartbeat_interval_seconds: configured
+            .heartbeat_interval_seconds
+            .unwrap_or(defaults.heartbeat_interval_seconds),
+        inactivity_timeout_seconds: configured
+            .inactivity_timeout_seconds
+            .unwrap_or(defaults.inactivity_timeout_seconds),
+        lease_expiry_seconds: configured
+            .lease_expiry_seconds
+            .unwrap_or(defaults.lease_expiry_seconds),
+        offer_ttl_seconds: configured
+            .offer_ttl_seconds
+            .unwrap_or(defaults.offer_ttl_seconds),
+    };
+    settings.validate().map_err(anyhow::Error::msg)?;
+    Ok(settings)
 }
 
-fn base_observation_for_target(
-    repo_root: Option<&Path>,
-    relative_path: &str,
-) -> Option<serde_json::Value> {
-    let repo_root = repo_root?;
-    let target_path = repo_root.join(relative_path);
-    match fs::read(&target_path) {
-        Ok(bytes) => Some(json!({
-            "path": relative_path,
-            "exists": true,
-            "content_hash": hook_content_hash(&bytes),
-        })),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(json!({
-            "path": relative_path,
-            "exists": false,
-            "content_hash": null,
-        })),
-        Err(_) => None,
-    }
-}
-
-fn hook_content_hash(bytes: &[u8]) -> String {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("fnv1a64:{hash:016x}")
-}
-
-fn normalize_file_tool_target(
+fn read_observation(
+    resolver: &ResourceResolver,
     path: &str,
-    repo_root: Option<&Path>,
-    cwd: Option<&Path>,
-) -> anyhow::Result<Option<String>> {
-    let path = path.trim();
-    let candidate = Path::new(path);
-    let Some(repo_root) = repo_root else {
-        return Ok(Some(normalize_relative_path(path)));
-    };
-    let repo_root = repo_root
-        .canonicalize()
-        .unwrap_or_else(|_| repo_root.to_path_buf());
-
-    if candidate.is_absolute() {
-        let raw_candidate = normalize_path(candidate.to_path_buf());
-        if let Ok(relative) = raw_candidate.strip_prefix(&repo_root) {
-            reject_symlinked_target_components(&repo_root, relative)?;
+) -> anyhow::Result<Vec<ResourceObservation>> {
+    match resolver.observe_existing_file(path) {
+        Ok(resources) => Ok(resources),
+        Err(stateful_core::ResourceError::Io { source, .. })
+            if source.kind() == io::ErrorKind::NotFound =>
+        {
+            Ok(resolver
+                .absent_entry(path)?
+                .into_resources()
+                .into_iter()
+                .map(|resource| ResourceObservation::Entry {
+                    resource,
+                    observed: EntryState::Absent,
+                    generation: 0,
+                })
+                .collect())
         }
+        Err(error) => Err(error.into()),
     }
-
-    if candidate.is_absolute() {
-        let canonical = candidate
-            .canonicalize()
-            .unwrap_or_else(|_| candidate.to_path_buf());
-        let candidate = normalize_path(canonical);
-        let Ok(relative) = candidate.strip_prefix(&repo_root) else {
-            return Ok(None);
-        };
-        reject_symlinked_target_components(&repo_root, relative)?;
-        return Ok(Some(normalize_relative_path(relative.to_string_lossy())));
-    }
-
-    let base = cwd.unwrap_or(repo_root.as_path());
-    let base = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
-    let candidate = normalize_path(base.join(candidate));
-    let Ok(relative) = candidate.strip_prefix(&repo_root) else {
-        return Ok(None);
-    };
-
-    reject_symlinked_target_components(&repo_root, relative)?;
-    Ok(Some(normalize_relative_path(relative.to_string_lossy())))
 }
 
-fn reject_symlinked_target_components(
-    repo_root: &Path,
-    relative_path: &Path,
-) -> anyhow::Result<()> {
-    let mut current = repo_root.to_path_buf();
-    for component in relative_path.components() {
-        let Component::Normal(part) = component else {
-            continue;
-        };
-        current.push(part);
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                anyhow::bail!(
-                    "stateful native file target `{}` includes symlinked component `{}`",
-                    relative_path.display(),
-                    current.display()
-                );
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
-            Err(error) => return Err(error.into()),
+fn write_operation(input: &Value, repo: &Path) -> anyhow::Result<MutationOperation> {
+    let path = relative(required(
+        input.get("path").and_then(Value::as_str),
+        "OMP write lacks typed path",
+    )?)?;
+    match fs::symlink_metadata(repo.join(&path)) {
+        Ok(_) => Ok(MutationOperation::Update { path }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Ok(MutationOperation::Create { path })
         }
+        Err(error) => Err(error.into()),
     }
+}
+
+fn observe_written(
+    resolver: &ResourceResolver,
+    operation: &MutationOperation,
+) -> anyhow::Result<Vec<ResourceObservation>> {
+    match operation {
+        MutationOperation::Create { path } | MutationOperation::Update { path } => {
+            Ok(resolver.observe_existing_file(path)?)
+        }
+        _ => anyhow::bail!("OMP native write does not support this operation"),
+    }
+}
+
+fn write_target_matches(input: &OmpInput, repo: &Path, operation: &MutationOperation) -> bool {
+    let (MutationOperation::Create { path } | MutationOperation::Update { path }) = operation
+    else {
+        return false;
+    };
+    let Some(reported) = input.details.get("resolvedPath").and_then(Value::as_str) else {
+        return false;
+    };
+    let Ok(expected) = fs::canonicalize(repo.join(path)) else {
+        return false;
+    };
+    fs::canonicalize(reported).ok().as_ref() == Some(&expected)
+}
+
+fn exact_read(input: &OmpInput, repo: &Path, path: &str) -> bool {
+    if input.is_error
+        || non_null(input.details.get("truncation"))
+        || non_null(input.details.pointer("/meta/truncation"))
+        || non_null(input.details.pointer("/meta/limits"))
+    {
+        return false;
+    }
+    let Some(source) = input
+        .details
+        .pointer("/meta/source")
+        .filter(|value| value.get("type").and_then(Value::as_str) == Some("path"))
+        .and_then(|value| value.get("value").and_then(Value::as_str))
+    else {
+        return false;
+    };
+    let Some([content]) = input.content.as_array().map(Vec::as_slice) else {
+        return false;
+    };
+    let Some(text) = content
+        .get("text")
+        .filter(|_| content.get("type").and_then(Value::as_str) == Some("text"))
+        .and_then(Value::as_str)
+    else {
+        return false;
+    };
+    if input.details.get("fileSize").and_then(Value::as_u64) != Some(text.len() as u64)
+        || input
+            .details
+            .pointer("/displayContent/text")
+            .and_then(Value::as_str)
+            != Some(text)
+    {
+        return false;
+    }
+    let Ok(expected) = fs::canonicalize(repo.join(path)) else {
+        return false;
+    };
+    if fs::canonicalize(source).ok().as_ref() != Some(&expected) {
+        return false;
+    }
+    fs::read(expected)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .as_deref()
+        == Some(text)
+}
+
+fn raw_path(input: &Value) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        input.get("offset").is_none() && input.get("limit").is_none(),
+        "OMP read evidence requires no selector"
+    );
+    relative(
+        required(
+            input.get("path").and_then(Value::as_str),
+            "OMP read lacks typed path",
+        )?
+        .strip_suffix(":raw")
+        .ok_or_else(|| anyhow::anyhow!("OMP read evidence requires unrestricted :raw"))?,
+    )
+}
+
+fn relative(path: &str) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        !path.is_empty() && !Path::new(path).is_absolute(),
+        "target path must be nonempty and relative"
+    );
+    anyhow::ensure!(
+        !path.contains('\\')
+            && path
+                .split('/')
+                .all(|segment| !segment.is_empty() && segment != "." && segment != ".."),
+        "target path must be a normalized relative path"
+    );
+    Ok(path.to_string())
+}
+
+fn invocation(input: &OmpInput) -> anyhow::Result<String> {
+    Ok(required(
+        input.tool_call_id.as_deref(),
+        "OMP tool payload lacks toolCallId",
+    )?
+    .to_string())
+}
+
+fn id(namespace: &str, fields: &[&str]) -> String {
+    let mut bytes = namespace.as_bytes().to_vec();
+    for field in fields {
+        bytes.push(0);
+        bytes.extend_from_slice(field.as_bytes());
+    }
+    format!("{namespace}-{}", digest_bytes(&bytes).value)
+}
+
+fn after(observed_at: &str, seconds: u64) -> anyhow::Result<String> {
+    let observed_at = OffsetDateTime::parse(observed_at, &Rfc3339)?;
+    let seconds = i64::try_from(seconds)
+        .map_err(|_| anyhow::anyhow!("coordination duration is too large"))?;
+    Ok((observed_at + TimeDuration::seconds(seconds)).format(&Rfc3339)?)
+}
+fn required<'a>(value: Option<&'a str>, message: &str) -> anyhow::Result<&'a str> {
+    let value = value.ok_or_else(|| anyhow::anyhow!("{message}"))?;
+    nonempty(message, value)?;
+    Ok(value)
+}
+fn nonempty(label: &str, value: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!value.trim().is_empty(), "{label}");
     Ok(())
 }
-
-fn extract_apply_patch_write_targets(patch: &str) -> Vec<PatchTarget> {
-    let mut targets = Vec::new();
-    let mut pending_update: Option<String> = None;
-
-    for line in patch.lines() {
-        if let Some(path) = line.strip_prefix("*** Update File: ") {
-            if let Some(path) = pending_update.replace(path.trim().to_string())
-                && !path.is_empty()
-            {
-                targets.push(PatchTarget::write(&path));
-            }
-        } else if let Some(path) = line.strip_prefix("*** Move to: ") {
-            if let Some(old_path) = pending_update.take() {
-                let new_path = path.trim();
-                if !old_path.is_empty() && !new_path.is_empty() {
-                    targets.push(PatchTarget::move_file(&old_path, new_path));
-                }
-            }
-        } else if let Some(path) = line.strip_prefix("*** Add File: ") {
-            if let Some(path) = pending_update.take()
-                && !path.is_empty()
-            {
-                targets.push(PatchTarget::write(&path));
-            }
-            targets.push(PatchTarget::write(path));
-        } else if let Some(path) = line.strip_prefix("*** Delete File: ") {
-            if let Some(path) = pending_update.take()
-                && !path.is_empty()
-            {
-                targets.push(PatchTarget::write(&path));
-            }
-            targets.push(PatchTarget::delete(path));
-        }
-    }
-
-    if let Some(path) = pending_update
-        && !path.is_empty()
-    {
-        targets.push(PatchTarget::write(&path));
-    }
-
-    targets
-        .into_iter()
-        .filter(|target| !target.path.is_empty())
-        .collect()
+fn non_null(value: Option<&Value>) -> bool {
+    value.is_some_and(|value| !value.is_null())
 }
 
-fn extract_file_change_targets(input: &serde_json::Value) -> Vec<PatchTarget> {
-    let Some(changes) = input.get("changes").and_then(serde_json::Value::as_array) else {
-        return Vec::new();
-    };
-
-    changes
-        .iter()
-        .filter_map(|change| {
-            let path = change
-                .get("path")
-                .and_then(serde_json::Value::as_str)?
-                .trim();
-            if path.is_empty() {
-                return None;
-            }
-            let kind = change
-                .get("kind")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("update");
-            if kind.eq_ignore_ascii_case("delete")
-                || kind.eq_ignore_ascii_case("deleted")
-                || kind.eq_ignore_ascii_case("remove")
-                || kind.eq_ignore_ascii_case("removed")
-            {
-                Some(PatchTarget::delete(path))
-            } else {
-                Some(PatchTarget::write(path))
-            }
-        })
-        .collect()
+fn hook_cwd(input: &str) -> anyhow::Result<PathBuf> {
+    let value: Value = serde_json::from_str(input)?;
+    Ok(value
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_dir()?))
 }
-
-fn string_payload_field<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
-    if let Some(text) = value.as_str() {
-        return Some(text);
-    }
-
-    for key in keys {
-        if let Some(text) = value.get(key).and_then(serde_json::Value::as_str) {
-            return Some(text);
-        }
-    }
-
-    for nested_key in ["arguments", "args"] {
-        if let Some(nested) = value.get(nested_key)
-            && let Some(text) = string_payload_field(nested, keys)
-        {
-            return Some(text);
-        }
-    }
-
-    None
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PatchTarget {
-    action: &'static str,
-    path: String,
-    new_path: Option<String>,
-}
-
-impl PatchTarget {
-    fn write(path: &str) -> Self {
-        Self {
-            action: "write_file",
-            path: path.trim().to_string(),
-            new_path: None,
-        }
-    }
-
-    fn write_directory(path: &str) -> Self {
-        Self {
-            action: "write_directory",
-            path: path.trim().to_string(),
-            new_path: None,
-        }
-    }
-
-    fn delete(path: &str) -> Self {
-        Self {
-            action: "delete_file",
-            path: path.trim().to_string(),
-            new_path: None,
-        }
-    }
-
-    fn move_file(old_path: &str, new_path: &str) -> Self {
-        Self {
-            action: "move_file",
-            path: old_path.trim().to_string(),
-            new_path: Some(new_path.trim().to_string()),
-        }
-    }
-
-    fn with_paths(mut self, path: String, new_path: Option<String>) -> Self {
-        self.path = path;
-        self.new_path = new_path;
-        self
+fn enabled_repo(start: &Path) -> anyhow::Result<Option<PathBuf>> {
+    match repo_gate(&GlobalPaths::from_env()?, start)? {
+        crate::RepoGate::Enabled { repo_root } => Ok(Some(repo_root)),
+        crate::RepoGate::Disabled | crate::RepoGate::OutsideGitRepo => Ok(None),
     }
 }
-
-fn repo_identity(paths: &GlobalPaths, repo_root: &Path) -> anyhow::Result<RepoIdentity> {
-    repo_identity_for_enabled_repo(paths, repo_root)
+fn stdin() -> anyhow::Result<String> {
+    let mut input = String::new();
+    io::stdin().read_to_string(&mut input)?;
+    Ok(input)
 }
-
-fn hook_start_dir(input: &str) -> anyhow::Result<PathBuf> {
-    let fallback = std::env::current_dir()?;
-    Ok(hook_start_dir_or(input, &fallback))
+fn command_error(error: CommandError) -> anyhow::Error {
+    anyhow::anyhow!("{}: {}", error.reason_code, error.message)
 }
-
-fn hook_start_dir_or(input: &str, fallback: &Path) -> PathBuf {
-    let Ok(input) = serde_json::from_str::<HookCwdInput>(input) else {
-        return fallback.to_path_buf();
-    };
-    input
-        .cwd
-        .filter(|cwd| !cwd.as_os_str().is_empty() && cwd.exists())
-        .unwrap_or_else(|| fallback.to_path_buf())
-}
-
-fn normalize_path(path: PathBuf) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            Component::RootDir => normalized.push(component.as_os_str()),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            Component::Normal(segment) => normalized.push(segment),
-        }
-    }
-    normalized
-}
-
-fn validate_agent_id(agent_id: &str, label: &str) -> anyhow::Result<()> {
-    if agent_id.is_empty() {
-        anyhow::bail!("{label} is set but empty");
-    }
-    if !agent_id
+fn url(value: &str) -> String {
+    value
         .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-    {
-        anyhow::bail!("{label} contains unsupported characters");
-    }
-    Ok(())
-}
-
-#[derive(Debug, Deserialize)]
-pub struct OmpPreToolUseInput {
-    agent_id: String,
-    #[serde(default)]
-    parent_agent_id: Option<String>,
-    #[serde(default)]
-    omp_agent_id: Option<String>,
-    #[serde(default)]
-    workspace_id: Option<String>,
-    #[serde(default)]
-    cwd: Option<PathBuf>,
-    #[serde(default)]
-    yolo: bool,
-    #[serde(default)]
-    reservation_id: Option<String>,
-    #[serde(default)]
-    commit_id: Option<String>,
-    tool_name: String,
-    #[serde(default)]
-    tool_input: serde_json::Value,
-}
-impl OmpPreToolUseInput {
-    fn validate(&self) -> anyhow::Result<()> {
-        validate_agent_id(&self.agent_id, "agent_id")
-    }
-
-    fn audit_metadata(&self) -> serde_json::Value {
-        json!({
-            "runtime": "omp",
-            "parent_agent_id": self.parent_agent_id,
-            "omp_agent_id": self.omp_agent_id,
-            "yolo": self.yolo,
-            "commit_id": self.commit_id,
-            "cwd": self.cwd,
+        .flat_map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                vec![char::from(byte).to_string()]
+            }
+            _ => vec![format!("%{byte:02X}")],
         })
-    }
-
-    fn command(&self) -> Option<&str> {
-        self.tool_input.get("command")?.as_str()
-    }
-
-    fn reservation_id(&self) -> Option<&str> {
-        self.reservation_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|reservation_id| !reservation_id.is_empty())
-            .or_else(|| {
-                self.tool_input
-                    .get("reservation_id")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::trim)
-                    .filter(|reservation_id| !reservation_id.is_empty())
-            })
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct OmpSessionEventInput {
-    agent_id: String,
-    #[serde(default)]
-    parent_agent_id: Option<String>,
-    #[serde(default)]
-    omp_agent_id: Option<String>,
-    #[serde(default)]
-    workspace_id: Option<String>,
-    #[serde(default)]
-    cwd: Option<PathBuf>,
-    #[serde(default)]
-    commit_id: Option<String>,
-    #[serde(default)]
-    tool_name: Option<String>,
-    #[serde(default)]
-    tool_input: serde_json::Value,
-}
-
-impl OmpSessionEventInput {
-    fn validate(&self) -> anyhow::Result<()> {
-        validate_agent_id(&self.agent_id, "agent_id")
-    }
-
-    fn audit_metadata(&self) -> serde_json::Value {
-        json!({
-            "runtime": "omp",
-            "parent_agent_id": self.parent_agent_id,
-            "omp_agent_id": self.omp_agent_id,
-            "commit_id": self.commit_id,
-            "cwd": self.cwd,
-            "raw_runtime_payload": self.tool_input,
-        })
-    }
-
-    fn command(&self) -> Option<&str> {
-        self.tool_input.get("command")?.as_str()
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct PreToolUseInput {
-    #[serde(flatten)]
-    runtime: RuntimeHookInput,
-    #[serde(default)]
-    reservation_id: Option<String>,
-    tool_name: String,
-    #[serde(default)]
-    tool_input: serde_json::Value,
-}
-
-#[derive(Debug, Deserialize)]
-struct RuntimeHookInput {
-    #[serde(alias = "session_id")]
-    agent_id: String,
-}
-
-impl RuntimeHookInput {
-    fn stateful_agent_id(&self) -> &str {
-        &self.agent_id
-    }
-}
-
-impl RuntimeHookInput {
-    fn validate(&self) -> anyhow::Result<()> {
-        validate_agent_id(&self.agent_id, "agent_id")
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct HookCwdInput {
-    #[serde(default)]
-    cwd: Option<PathBuf>,
-}
-
-impl PreToolUseInput {
-    fn stateful_agent_id(&self) -> &str {
-        self.runtime.stateful_agent_id()
-    }
-
-    fn command(&self) -> Option<&str> {
-        self.tool_input.get("command")?.as_str()
-    }
-    fn reservation_id(&self) -> Option<&str> {
-        self.reservation_id
-            .as_deref()
-            .or_else(|| {
-                self.tool_input
-                    .get("reservation_id")
-                    .and_then(serde_json::Value::as_str)
-            })
-            .map(str::trim)
-            .filter(|reservation_id| !reservation_id.is_empty())
-    }
-
-    fn patch_text(&self) -> Option<&str> {
-        string_payload_field(
-            &self.tool_input,
-            &["command", "patch", "input", "cmd", "diff"],
-        )
-    }
-}
-
-impl PreToolUseInput {
-    fn validate(&self) -> anyhow::Result<()> {
-        self.runtime.validate()
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct AuthorizeDecision {
-    decision: String,
-    message: String,
-    #[serde(default)]
-    reason_code: String,
-    #[serde(default)]
-    required_next_action: Option<String>,
-    #[serde(default)]
-    wait: Option<AuthorizeWait>,
-    #[serde(default)]
-    reservation: Option<AuthorizeReservation>,
-}
-
-impl AuthorizeDecision {
-    fn reservation_id(&self) -> Option<String> {
-        self.wait
-            .as_ref()
-            .and_then(|wait| wait.reservation_id.clone())
-            .or_else(|| {
-                self.reservation
-                    .as_ref()
-                    .map(|reservation| reservation.reservation_id.clone())
-            })
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct AuthorizeWait {
-    wait_id: String,
-    #[serde(default)]
-    reservation_id: Option<String>,
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    queue_position: Option<u64>,
-    #[serde(default, rename = "blocking_agent_id", alias = "blocking_agent_id")]
-    blocking_agent_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AuthorizeReservation {
-    reservation_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct SessionStartInput {
-    #[serde(flatten)]
-    runtime: RuntimeHookInput,
-}
-
-#[derive(Debug, Deserialize)]
-struct SessionEventInput {
-    #[serde(flatten)]
-    runtime: RuntimeHookInput,
-    #[serde(default)]
-    cwd: Option<PathBuf>,
-    #[serde(default)]
-    tool_name: Option<String>,
-    #[serde(default)]
-    tool_input: serde_json::Value,
-}
-
-#[derive(Debug, Deserialize)]
-struct UserPromptSubmitInput {
-    #[serde(flatten)]
-    runtime: RuntimeHookInput,
-}
-
-#[derive(Debug, Deserialize)]
-struct ContextRenderResponse {
-    prompt_text: String,
-}
-
-impl SessionStartInput {
-    fn stateful_agent_id(&self) -> &str {
-        self.runtime.stateful_agent_id()
-    }
-}
-
-impl SessionEventInput {
-    fn stateful_agent_id(&self) -> &str {
-        self.runtime.stateful_agent_id()
-    }
-
-    fn patch_text(&self) -> Option<&str> {
-        string_payload_field(
-            &self.tool_input,
-            &["command", "patch", "input", "cmd", "diff"],
-        )
-    }
-}
-
-impl UserPromptSubmitInput {
-    fn stateful_agent_id(&self) -> &str {
-        self.runtime.stateful_agent_id()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn runtime_hook_input_uses_explicit_agent_id() {
-        let input = RuntimeHookInput {
-            agent_id: "codex-agent-1".to_string(),
-        };
-
-        assert_eq!(input.stateful_agent_id(), "codex-agent-1");
-    }
-
-    #[test]
-    fn runtime_hook_input_uses_codex_session_id_parameter() {
-        let input: RuntimeHookInput = serde_json::from_value(serde_json::json!({
-            "session_id": "019f1a3f-0e81-7250-8597-24dd8ef18fb4"
-        }))
-        .expect("Codex session_id parameter should deserialize as active agent id");
-
-        assert_eq!(
-            input.stateful_agent_id(),
-            "019f1a3f-0e81-7250-8597-24dd8ef18fb4"
-        );
-    }
-
-    #[test]
-    fn hook_session_extraction_does_not_keep_fake_runtime_adapter() {
-        let source = include_str!("hook.rs");
-
-        assert!(!source.contains(concat!("Claude", "CodeRuntimeAdapter")));
-        assert!(!source.contains(concat!("trait ", "RuntimeAdapter")));
-    }
-
-    #[test]
-    fn bare_stateful_is_trusted_when_first_path_match_has_current_binary_bytes() {
-        let temp =
-            std::env::temp_dir().join(format!("stateful-bare-trust-match-{}", std::process::id()));
-        let bin_dir = temp.join("bin");
-        fs::create_dir_all(&bin_dir).expect("bin dir should be created");
-        let current = std::env::current_exe().expect("current executable should resolve");
-        let bare = bin_dir.join("stateful");
-        fs::copy(&current, &bare).expect("bare stateful should be copied");
-
-        let path_env = std::env::join_paths([bin_dir]).expect("test PATH should join");
-
-        assert!(is_verified_bare_stateful_executable(
-            "stateful",
-            &current,
-            Some(path_env.as_os_str())
-        ));
-
-        fs::remove_dir_all(temp).expect("temp dir should be removable");
-    }
-
-    #[test]
-    fn bare_stateful_is_denied_when_first_path_match_differs() {
-        let temp = std::env::temp_dir().join(format!(
-            "stateful-bare-trust-mismatch-{}",
-            std::process::id()
-        ));
-        let bin_dir = temp.join("bin");
-        fs::create_dir_all(&bin_dir).expect("bin dir should be created");
-        let current = std::env::current_exe().expect("current executable should resolve");
-        fs::write(
-            bin_dir.join("stateful"),
-            b"not the installed stateful binary",
-        )
-        .expect("fake stateful should be written");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = fs::metadata(bin_dir.join("stateful"))
-                .expect("fake stateful metadata should read")
-                .permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(bin_dir.join("stateful"), permissions)
-                .expect("fake stateful should be executable");
-        }
-
-        let path_env = std::env::join_paths([bin_dir]).expect("test PATH should join");
-
-        assert!(!is_verified_bare_stateful_executable(
-            "stateful",
-            &current,
-            Some(path_env.as_os_str())
-        ));
-
-        fs::remove_dir_all(temp).expect("temp dir should be removable");
-    }
-    #[test]
-    fn stateful_command_policy_reminder_mentions_process_lookup_git_github_pr_and_binary_path() {
-        let reminder = stateful_command_policy_reminder();
-        let current_exe = std::env::current_exe()
-            .expect("current executable should resolve")
-            .canonicalize()
-            .expect("current executable should canonicalize")
-            .to_string_lossy()
-            .to_string();
-
-        assert!(
-            reminder.contains("sandbox process find"),
-            "reminder should mention structured process lookup: {reminder}"
-        );
-        assert!(
-            reminder.contains("built-in Bash with trusted")
-                && reminder.contains("sandbox run")
-                && reminder.contains("sandbox process find"),
-            "reminder should mention built-in Bash trusted Stateful commands: {reminder}"
-        );
-        assert!(
-            reminder.contains(&current_exe),
-            "reminder should show the trusted executable path: {reminder}"
-        );
-
-        let guidance = bash_policy_guidance();
-        assert!(
-            guidance.contains("sandbox run --fs git --network disabled"),
-            "denial guidance should default local git to network disabled: {guidance}"
-        );
-        assert!(
-            guidance.contains("sandbox run --fs github-pr --network enabled"),
-            "denial guidance should mention GitHub PR profile: {guidance}"
-        );
-        assert!(
-            guidance.contains("network enabled"),
-            "denial guidance should mention networked git exception: {guidance}"
-        );
-        assert!(
-            guidance.contains("built-in Bash with trusted")
-                && guidance.contains("sandbox run")
-                && guidance.contains("sandbox process find"),
-            "denial guidance should mention built-in Bash trusted Stateful commands: {guidance}"
-        );
-        for removed_tool in ["process_find", "sandbox_bash", "ext_ro_bash", "ext_rw_bash"] {
-            assert!(
-                !guidance.contains(removed_tool),
-                "denial guidance should not mention removed OMP generated tool {removed_tool}: {guidance}"
-            );
-            assert!(
-                !reminder.contains(removed_tool),
-                "reminder should not mention removed OMP generated tool {removed_tool}: {reminder}"
-            );
-        }
-        assert!(
-            guidance.contains(&current_exe),
-            "denial guidance should show the trusted executable path: {guidance}"
-        );
-    }
-
-    #[test]
-    fn omp_session_start_rejects_legacy_agent_id_input() {
-        let runtime = ServerRuntime::new("http://127.0.0.1:9", "secret", "workspace", 7);
-        let temp = std::env::temp_dir().join(format!(
-            "stateful-omp-legacy-session-id-{}",
-            std::process::id()
-        ));
-        let repo = temp.join("repo");
-        std::fs::create_dir_all(&repo).expect("repo dir should create");
-        let input = serde_json::json!({
-            "session_id": "old-session",
-            "workspace_id": "workspace",
-            "cwd": repo.display().to_string(),
-        });
-
-        let error = handle_omp_session_start_with_runtime(&input.to_string(), &runtime)
-            .expect_err("legacy agent_id should not be accepted");
-
-        assert!(
-            error.to_string().contains("agent_id"),
-            "legacy agent_id error should mention agent_id: {error}"
-        );
-        let _ = std::fs::remove_dir_all(&temp);
-    }
-
-    #[test]
-    fn omp_session_start_rejects_invalid_agent_id_input() {
-        let runtime = ServerRuntime::new("http://127.0.0.1:9", "secret", "workspace", 7);
-        let input = serde_json::json!({
-            "agent_id": "bad agent id",
-            "workspace_id": "workspace",
-            "cwd": "/repo",
-        });
-
-        let error = handle_omp_session_start_with_runtime(&input.to_string(), &runtime)
-            .expect_err("invalid agent_id should not be accepted");
-
-        assert!(
-            error.to_string().contains("agent_id"),
-            "invalid agent_id error should mention agent_id: {error}"
-        );
-    }
-
-    #[test]
-    fn context_render_request_body_includes_resource_when_target_is_known() {
-        let runtime = ServerRuntime::new("http://127.0.0.1:9", "secret", "local", 7);
-        let identity = RepoIdentity {
-            repo_id: "repo-a".to_string(),
-            worktree_id: "worktree-a".to_string(),
-            root: "/repo".to_string(),
-            branch: "main".to_string(),
-        };
-
-        let body =
-            context_render_request_body(&runtime, "session-a", Some(&identity), Some("src/lib.rs"));
-
-        assert_eq!(body["agent_id"], "session-a");
-        assert_eq!(body["workspace_id"], "workspace-worktree-a");
-        assert_eq!(body["mode"], "brief");
-        assert_eq!(body["resource"], "src/lib.rs");
-        assert_eq!(body["repo_id"], "repo-a");
-        assert_eq!(body["worktree_id"], "worktree-a");
-    }
-
-    #[test]
-    fn hook_file_target_uses_core_relative_path_normalization() {
-        let temp =
-            std::env::temp_dir().join(format!("stateful-hook-normalize-{}", std::process::id()));
-        let repo = temp.join("repo");
-        let cwd = repo.join("src");
-        std::fs::create_dir_all(&cwd).expect("repo dirs should create");
-
-        let normalized = normalize_file_tool_target(r".\auth\..\auth.ts", Some(&repo), Some(&cwd))
-            .expect("target should normalize")
-            .expect("target should stay in repo");
-
-        assert_eq!(
-            normalized,
-            stateful_core::normalize_relative_path("src/auth.ts")
-        );
-
-        let _ = std::fs::remove_dir_all(&temp);
-    }
-    #[test]
-    fn omp_post_tool_targets_include_write_path() {
-        let temp =
-            std::env::temp_dir().join(format!("stateful-omp-post-write-{}", std::process::id()));
-        let repo = temp.join("repo");
-        let cwd = repo.join("src");
-        std::fs::create_dir_all(&cwd).expect("repo dirs should create");
-        let input = OmpSessionEventInput {
-            agent_id: "omp-session-1".to_string(),
-            parent_agent_id: None,
-            omp_agent_id: None,
-            workspace_id: None,
-            cwd: Some(cwd),
-            commit_id: None,
-            tool_name: Some("write".to_string()),
-            tool_input: serde_json::json!({ "path": "../README.md" }),
-        };
-
-        let targets =
-            omp_post_tool_refresh_targets(&input, &repo).expect("targets should normalize");
-
-        assert_eq!(targets, vec![PatchTarget::write("README.md")]);
-        let _ = std::fs::remove_dir_all(&temp);
-    }
-
-    #[test]
-    fn omp_post_tool_targets_include_edit_hashlines() {
-        let temp =
-            std::env::temp_dir().join(format!("stateful-omp-post-edit-{}", std::process::id()));
-        let repo = temp.join("repo");
-        std::fs::create_dir_all(&repo).expect("repo dir should create");
-        let input = OmpSessionEventInput {
-            agent_id: "omp-session-1".to_string(),
-            parent_agent_id: None,
-            omp_agent_id: None,
-            workspace_id: None,
-            cwd: Some(repo.clone()),
-            commit_id: None,
-            tool_name: Some("edit".to_string()),
-            tool_input: serde_json::json!({
-                "input": "[src/lib.rs#ABCD]\nSWAP 1.=1:\n+pub fn value() -> u8 { 1 }\n"
-            }),
-        };
-
-        let targets =
-            omp_post_tool_refresh_targets(&input, &repo).expect("targets should normalize");
-
-        assert_eq!(targets, vec![PatchTarget::write("src/lib.rs")]);
-        let _ = std::fs::remove_dir_all(&temp);
-    }
+        .collect()
 }

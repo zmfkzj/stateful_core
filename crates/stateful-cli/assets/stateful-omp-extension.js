@@ -1,59 +1,28 @@
-// The Rust `stateful hook` pipeline is the enforcement authority. This
-// extension's command parsing/preflight is advisory UX only; do not extend
-// its quoting rules independently of crates/stateful-cli/src/shell_command.rs.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { delimiter, dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import {
+  chmodSync,
+  closeSync,
+  fsyncSync,
+  linkSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  readdirSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 const STATEFUL = __STATEFUL_BINARY_JSON__;
-const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
-const OMP_AGENT_CONFIG = resolve(EXTENSION_DIR, "..", "config.yml");
-const BENCHMARK_SOURCE_BLOCK_ENV = "STATEFUL_BENCHMARK_SOURCE_BLOCK_PATTERNS";
- 
-
-function statefulBinaryDigest(path) {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
-}
-
-function executableFile(path) {
-  try {
-    const stat = statSync(path);
-    return stat.isFile() && (stat.mode & 0o111) !== 0;
-  } catch {
-    return false;
-  }
-}
-
-function firstPathStateful(cwd) {
-  const base = cwd || process.cwd();
-  for (const entry of String(process.env.PATH || "").split(delimiter)) {
-    const directory = entry ? resolve(base, entry) : base;
-    const candidate = resolve(directory, "stateful");
-    if (executableFile(candidate)) return candidate;
-  }
-  return null;
-}
-
-function verifyBareStateful(cwd) {
-  const candidate = firstPathStateful(cwd);
-  if (!candidate) return false;
-  try {
-    if (statefulBinaryDigest(candidate) !== statefulBinaryDigest(STATEFUL)) return false;
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-
-function isTrustedStatefulCommand(word, cwd) {
-  if (word === STATEFUL) return true;
-  if (word !== "stateful") return false;
-  return verifyBareStateful(cwd);
-}
-
+const OMP_VERSION = "17.2.3";
+const HEARTBEAT_MS = 1_000;
+const tasks = new Map();
+const writeAttempts = new Map();
+const pendingTerminals = new Map();
+let heartbeatTimer;
 
 function runStatefulHook(event, payload) {
   const result = spawnSync(STATEFUL, ["hook", "omp", event], {
@@ -61,1330 +30,327 @@ function runStatefulHook(event, payload) {
     encoding: "utf8",
   });
   if (result.status !== 0) {
-    return { decision: "block", reason: result.stderr || "stateful hook failed" };
+    return { decision: "block", reason: String(result.stderr || "stateful hook failed").trim() };
   }
-  const text = (result.stdout || "").trim();
-  return text ? JSON.parse(text) : { decision: "allow" };
-}
-
-function isYolo(event, ctx) {
-  const values = [
-    event?.yolo,
-    event?.autoApprove,
-    event?.approvalMode,
-    ctx?.yolo,
-    ctx?.autoApprove,
-    ctx?.approvalMode,
-    ctx?.config?.approvalMode,
-    ctx?.config?.tools?.approvalMode,
-  ];
-  return values.some((value) => value === true || value === "yolo" || value === "auto-approve");
-}
-
-function firstString(...values) {
-  for (const value of values) {
-    if (typeof value === "string" && value.trim().length > 0) return value;
-  }
-  return undefined;
-}
-
-function agentIdFragmentFromString(value) {
-  if (typeof value !== "string") return undefined;
-  const id = value.trim();
-  if (!id) return undefined;
-  if (!/^[A-Za-z0-9_-]+$/.test(id)) return undefined;
-  return id;
-}
-
-function sessionIdFromString(value) {
-  if (typeof value !== "string") return undefined;
-  const id = value.trim();
-  if (!id) return undefined;
-  if (!/^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/.test(id)) return undefined;
-  return id;
-}
-
-function workspaceIdFromString(value) {
-  if (typeof value !== "string") return undefined;
-  const id = value.trim();
-  return id.length > 0 ? id : undefined;
-}
-
-function sessionManagerString(ctx, method, parse) {
-  const sessionManager = ctx?.sessionManager;
-  if (!sessionManager || typeof sessionManager[method] !== "function") return undefined;
   try {
-    return parse(sessionManager[method]());
+    return JSON.parse(String(result.stdout || "").trim() || '{"decision":"allow"}');
   } catch {
-    return undefined;
+    return { decision: "block", reason: "stateful hook returned invalid JSON" };
   }
 }
 
-function detectAgentId(_event, ctx) {
-  const sessionId = sessionManagerString(ctx, "getSessionId", sessionIdFromString);
-  if (!sessionId) return undefined;
-  const leafId = sessionManagerString(ctx, "getLeafId", agentIdFragmentFromString);
-  return leafId ? `omp-${sessionId}-${leafId}` : `omp-${sessionId}`;
-}
-
-function detectWorkspaceId(event, ctx) {
-  return firstString(
-    workspaceIdFromString(event?.workspaceId),
-    workspaceIdFromString(event?.workspace_id),
-    workspaceIdFromString(event?.workspace?.id),
-    workspaceIdFromString(event?.workspace?.workspaceId),
-    workspaceIdFromString(event?.workspace?.workspace_id),
-    workspaceIdFromString(ctx?.workspaceId),
-    workspaceIdFromString(ctx?.workspace_id),
-    workspaceIdFromString(ctx?.workspace?.id),
-    workspaceIdFromString(ctx?.workspace?.workspaceId),
-    workspaceIdFromString(ctx?.workspace?.workspace_id)
-  );
-}
-
-function missingAgentIdReason() {
-  return "Stateful requires OMP ctx.sessionManager.getSessionId() to derive the active agent_id; no session id was available, so Stateful actions are disabled for this agent.";
-}
-
-
-function agentId(event, ctx) {
-  const id = detectAgentId(event, ctx);
-  if (!id) throw new Error(missingAgentIdReason());
-  return id;
-}
-
-function reservationIdFromValue(value) {
-  if (typeof value !== "string") return undefined;
-  const id = value.trim();
-  return id.length > 0 ? id : undefined;
-}
-
-function reservationId(event, decision) {
-  return firstString(
-    reservationIdFromValue(event?.reservation_id),
-    reservationIdFromValue(event?.reservationId),
-    reservationIdFromValue(event?.input?.reservation_id),
-    reservationIdFromValue(event?.input?.reservationId),
-    reservationIdFromValue(decision?.reservation_id),
-    reservationIdFromValue(decision?.wait?.reservation_id),
-    reservationIdFromValue(decision?.reservation?.reservation_id),
-    reservationIdFromValue(decision?.reservation?.wait_id),
-    reservationIdFromValue(decision?.reservation?.id)
-  );
-}
-
-let reservationStreamAbort;
-let reservationStreamKey = "";
-let reservationStreamLastEventId = "";
-const seenReservationWaitIds = new Set();
-
-function stopReservationStream() {
-  if (reservationStreamAbort) {
-    reservationStreamAbort.abort();
-    reservationStreamAbort = undefined;
+function requiredSessionValue(ctx, method, label) {
+  const manager = ctx?.sessionManager;
+  const value = manager && typeof manager[method] === "function" ? manager[method]() : undefined;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error("Stateful requires OMP ctx.sessionManager." + method + "() for " + label);
   }
+  return value.trim();
 }
 
-function sleepWithAbort(ms, signal) {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    if (signal) {
-      signal.addEventListener("abort", () => {
-        clearTimeout(timer);
-        resolve();
-      }, { once: true });
-    }
-  });
+function owner(ctx) {
+  const sessionId = requiredSessionValue(ctx, "getSessionId", "session ownership");
+  const leafAgentId = requiredSessionValue(ctx, "getLeafId", "leaf-agent ownership");
+  return { sessionId, leafAgentId, key: sessionId + ":" + leafAgentId };
 }
 
-function reservationStreamUrl(stream) {
-  const base = String(stream.base_url || "").replace(/\/+$/, "");
-  return base + "/v1/notifications/stream?agent_id=" + encodeURIComponent(stream.agent_id) + "&workspace_id=" + encodeURIComponent(stream.workspace_id);
-}
-
-function reservationResumeUrl(stream) {
-  const base = String(stream.base_url || "").replace(/\/+$/, "");
-  return base + "/v1/resume/next";
-}
-
-function reservationMessage(notification) {
-  const payload = notification?.payload || {};
-  const target = payload.relative_path || "the reserved target";
-  const waitId = payload.wait_id || "unknown";
-  const reservationId = payload.reservation_id || waitId;
-  const action = payload.action || "write";
-  const purpose = payload.purpose;
-  const lines = [
-    "Stateful reservation is ready for " + target + ".",
-    "wait_id: " + waitId,
-    "reservation_id: " + reservationId,
-    "action: " + action,
-  ];
-  if (typeof purpose === "string" && purpose.trim().length > 0) {
-    lines.push("purpose: " + purpose.trim());
-  }
-  lines.push("Next: reread the target, then resume the saved lazy operation or retry the write so the write boundary can claim the reservation. Only clients with an exposed state_reservation_claim tool should claim manually first.");
-  return lines.join("\n");
-}
-
-function notificationTargetsStreamAgent(notification, stream) {
-  const targetAgentId = property(notification, "target_agent_id")
-    || property(notification, "agent_id")
-    || propertyPath(notification, "payload", "agent_id");
-  if (!targetAgentId) return true;
-  return targetAgentId === property(stream, "agent_id");
-}
-
-
-function deliverReservationNotification(pi, notification, stream) {
-  if (!notificationTargetsStreamAgent(notification, stream)) return true;
-  const payload = notification?.payload || {};
-  const waitId = payload.wait_id;
-  if (!waitId || seenReservationWaitIds.has(waitId)) {
-    return true;
-  }
-  if (typeof pi?.sendMessage !== "function") {
-    return false;
-  }
-  const text = reservationMessage(notification);
-  try {
-    pi.sendMessage(
-      {
-        customType: "stateful_reservation_ready",
-        content: text,
-        display: true,
-        details: notification,
-      },
-      { triggerTurn: true, deliverAs: "nextTurn" }
-    );
-    seenReservationWaitIds.add(waitId);
-    return true;
-  } catch (_) {
-    return false;
-  }
-}
-
-async function checkReservationResume(pi, stream, signal) {
-  if (typeof fetch !== "function" || signal?.aborted) return;
-  try {
-    const response = await fetch(reservationResumeUrl(stream), {
-      method: "POST",
-      headers: {
-        authorization: stream.authorization,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({ agent_id: stream.agent_id, workspace_id: stream.workspace_id }),
-      signal,
-    });
-    if (!response.ok) return;
-    const body = await response.json();
-    if (body?.resume_available && body?.reservation) {
-      deliverReservationNotification(pi, {
-        notification_id: "resume:" + body.reservation.wait_id,
-        workspace_id: stream.workspace_id,
-        kind: "reservation_granted",
-        payload: {
-          wait_id: body.reservation.wait_id,
-          reservation_id: body.reservation.reservation_id || body.reservation.wait_id,
-          relative_path: body.reservation.relative_path,
-          action: body.reservation.action,
-          purpose: body.reservation.purpose,
-          reservation_expires_at: body.reservation.reservation_expires_at,
-        },
-        required_next_action: body.required_next_action,
-      }, stream);
-    }
-  } catch (_) {}
-}
-
-function processReservationSseBlock(pi, block, stream) {
-  let event = "message";
-  let id = "";
-  const data = [];
-  for (const rawLine of block.split(/\r?\n/)) {
-    const line = rawLine.trimEnd();
-    if (line.startsWith("id:")) id = line.slice(3).trim();
-    if (line.startsWith("event:")) event = line.slice(6).trim();
-    if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
-  }
-  if (event !== "reservation_granted" || data.length === 0) return;
-  try {
-    if (deliverReservationNotification(pi, JSON.parse(data.join("\n")), stream) && id) {
-      reservationStreamLastEventId = id;
-    }
-  } catch (_) {}
-}
-
-function processReservationSseBuffer(pi, buffer, stream) {
-  buffer = buffer.replace(/\r\n/g, "\n");
-  let cursor = 0;
-  for (;;) {
-    const next = buffer.indexOf("\n\n", cursor);
-    if (next === -1) break;
-    processReservationSseBlock(pi, buffer.slice(cursor, next), stream);
-    cursor = next + 2;
-  }
-  return buffer.slice(cursor);
-}
-
-function startReservationStream(pi, stream) {
-  if (!stream?.base_url || !stream?.authorization || !stream?.agent_id || !stream?.workspace_id) return;
-  if (typeof fetch !== "function" || typeof TextDecoder !== "function") return;
-  stopReservationStream();
-  const streamKey = stream.agent_id + "\u0000" + stream.workspace_id;
-  if (reservationStreamKey !== streamKey) {
-    reservationStreamKey = streamKey;
-    reservationStreamLastEventId = "";
-  }
-  const controller = new AbortController();
-  reservationStreamAbort = controller;
-  const signal = controller.signal;
-  const run = async () => {
-    let backoffMs = 1000;
-    await checkReservationResume(pi, stream, signal);
-    while (!signal.aborted) {
-      try {
-        const headers = { authorization: stream.authorization, accept: "text/event-stream" };
-        if (reservationStreamLastEventId) headers["last-event-id"] = reservationStreamLastEventId;
-        const response = await fetch(reservationStreamUrl(stream), {
-          headers,
-          signal,
-        });
-        if (!response.ok || !response.body?.getReader) throw new Error("reservation stream unavailable");
-        backoffMs = 1000;
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done || signal.aborted) break;
-          buffer = processReservationSseBuffer(pi, buffer + decoder.decode(value, { stream: true }), stream);
-        }
-      } catch (_) {
-        if (signal.aborted) return;
-        await checkReservationResume(pi, stream, signal);
-        await sleepWithAbort(backoffMs, signal);
-        backoffMs = Math.min(backoffMs * 2, 30000);
-      }
-    }
-  };
-  run().catch(() => {});
-}
-
-
-const EXTERNAL_GRANT_DEFAULT_MAX_USES = 5;
-const EXTERNAL_GRANT_MAX_USES_LIMIT = 20;
-const EXTERNAL_GRANT_DEFAULT_TTL_MS = 10 * 60 * 1000;
-const EXTERNAL_GRANT_MAX_TTL_MS = 60 * 60 * 1000;
-const externalBashGrants = new Map();
-
-
-function stringList(value) {
-  if (Array.isArray(value)) {
-    return value.filter((item) => typeof item === "string" && item.trim().length > 0);
-  }
-  if (typeof value === "string" && value.trim().length > 0) {
-    return [value];
-  }
-  return [];
-}
-
-
-const lazyEditOperations = new Map();
-let lazyEditOperationCounter = 0;
-const lazyWriteOperations = new Map();
-let lazyWriteOperationCounter = 0;
-const lazyBashOperations = new Map();
-let lazyBashOperationCounter = 0;
-
-function extractWaitId(reason) {
-  const match = String(reason || "").match(/wait_id ([A-Za-z0-9_-]+)/);
-  return match ? match[1] : "";
-}
-
-function extractReservationId(reason) {
-  const match = String(reason || "").match(/reservation_id[: ]+([A-Za-z0-9_-]+)/);
-  return match ? match[1] : "";
-}
-
-function structuredLazyWaitId(decision) {
-  return decision?.wait?.wait_id
-    || decision?.reservation?.wait_id
-    || decision?.reservation?.id
-    || extractWaitId(decision?.reason)
-    || extractWaitId(decision?.message);
-}
-
-function structuredLazyEditOperationId(decision) {
-  return structuredLazyWaitId(decision);
-}
-
-function structuredLazyWriteOperationId(decision) {
-  return structuredLazyWaitId(decision);
-}
-
-function structuredLazyReservationId(event, decision) {
-  return reservationId(event, decision)
-    || extractReservationId(decision?.reason)
-    || extractReservationId(decision?.message)
-    || "";
-}
-
-function nextLazyEditOperationId() {
-  lazyEditOperationCounter += 1;
-  return "lazy-edit-" + Date.now().toString(36) + "-" + lazyEditOperationCounter.toString(36);
-}
-
-function nextLazyWriteOperationId() {
-  lazyWriteOperationCounter += 1;
-  return "lazy-write-" + Date.now().toString(36) + "-" + lazyWriteOperationCounter.toString(36);
-}
-
-function nextLazyBashOperationId() {
-  lazyBashOperationCounter += 1;
-  return "lazy-bash-" + Date.now().toString(36) + "-" + lazyBashOperationCounter.toString(36);
-}
-
-function editPatchTargets(input) {
-  const patch = String(input?.input || "");
-  const targets = [];
-  for (const line of patch.split(/\r?\n/)) {
-    const match = line.match(/^\[([^#\]\r\n]+)#[0-9A-Fa-f]{4}\]$/);
-    if (match) targets.push(match[1]);
-  }
-  return [...new Set(targets)];
-}
-
-function safeLazyOperationTarget(target) {
-  return typeof target === "string"
-    && target.length > 0
-    && !target.startsWith("/")
-    && !target.includes("\\")
-    && !target.includes(":")
-    && !target.split("/").some((part) => part === "" || part === "." || part === "..");
-}
-
-function readOperationBase(path) {
-  if (!existsSync(path)) return { ok: true, value: null };
-  try {
-    return { ok: true, value: readFileSync(path, "utf8") };
-  } catch (error) {
-    return { ok: false, error: error?.message || String(error) };
-  }
-}
-
-function readOperationBases(cwd, targets) {
-  const bases = new Map();
-  for (const target of targets) {
-    const path = resolve(cwd, target);
-    const base = readOperationBase(path);
-    if (!base.ok) return null;
-    bases.set(target, base.value);
-  }
-  return bases;
-}
-
-function rememberLazyEditOperation(event, ctx, decision) {
-  if (event?.toolName !== "edit") return "";
-  const targets = editPatchTargets(event.input || {});
-  if (targets.length === 0 || !targets.every(safeLazyOperationTarget)) return "";
-  const bases = readOperationBases(ctx.cwd, targets);
-  if (!bases) return "";
-  const operationId = structuredLazyEditOperationId(decision) || nextLazyEditOperationId();
-  lazyEditOperations.set(operationId, {
-    operation_id: operationId,
-    agent_id: agentId(event, ctx),
-    workspace_id: detectWorkspaceId(event, ctx),
-    wait_id: structuredLazyWaitId(decision),
-    reservation_id: structuredLazyReservationId(event, decision),
-    cwd: ctx.cwd,
-    tool_name: event.toolName,
-    tool_input: event.input || {},
-    targets,
-    bases,
-    blocked_reason: decision?.reason || "",
-  });
-  return operationId;
-}
-
-function writeToolTarget(input) {
-  const target = String(input?.path || "").trim();
-  return safeLazyOperationTarget(target) ? target : "";
-}
-
-function rememberLazyWriteOperation(event, ctx, decision) {
-  if (event?.toolName !== "write") return "";
-  const target = writeToolTarget(event.input || {});
-  if (!target) return "";
-  const targets = [target];
-  const bases = readOperationBases(ctx.cwd, targets);
-  if (!bases) return "";
-  const operationId = structuredLazyWriteOperationId(decision) || nextLazyWriteOperationId();
-  lazyWriteOperations.set(operationId, {
-    operation_id: operationId,
-    agent_id: agentId(event, ctx),
-    workspace_id: detectWorkspaceId(event, ctx),
-    wait_id: structuredLazyWaitId(decision),
-    reservation_id: structuredLazyReservationId(event, decision),
-    cwd: ctx.cwd,
-    tool_name: event.toolName,
-    tool_input: event.input || {},
-    targets,
-    bases,
-    blocked_reason: decision?.reason || "",
-  });
-  return operationId;
-}
-
-function normalizedStatefulCommandWords(words) {
-  const normalized = [...words];
-  if (normalized[0] === "stateful") normalized[0] = STATEFUL;
-  return normalized;
-}
-
-function rememberLazyBashOperation(event, ctx, decision) {
-  if (event?.toolName !== "bash" && event?.toolName !== "functions.bash") return "";
-  if (!decision?.externalGrantParams || !Array.isArray(decision?.words)) return "";
-  const operationId = nextLazyBashOperationId();
-  lazyBashOperations.set(operationId, {
-    operation_id: operationId,
-    agent_id: agentId(event, ctx),
-    cwd: ctx.cwd,
-    tool_name: event.toolName,
-    tool_input: event.input || {},
-    command: String(event?.input?.command || ""),
-    command_words: normalizedStatefulCommandWords(decision.words),
-    grant_params: decision.externalGrantParams,
-  });
-  return operationId;
-}
-
-function textToLines(text) {
-  if (text === "") return { lines: [], trailing: false };
-  const trailing = text.endsWith("\n");
-  const body = trailing ? text.slice(0, -1) : text;
-  return { lines: body.length ? body.split("\n") : [], trailing };
-}
-
-function linesToText(lines, trailing) {
-  return lines.join("\n") + (trailing && lines.length ? "\n" : "");
-}
-
-function readPatchBody(lines, cursor) {
-  const body = [];
-  while (cursor < lines.length && lines[cursor].startsWith("+")) {
-    body.push(lines[cursor].slice(1));
-    cursor += 1;
-  }
-  return { body, cursor };
-}
-
-function parseOmpLinePatch(patch) {
-  const lines = String(patch || "").replace(/\r\n/g, "\n").split("\n");
-  const files = new Map();
-  let current = null;
-  for (let i = 0; i < lines.length;) {
-    const line = lines[i];
-    if (line === "*** Begin Patch" || line === "*** End Patch") { i += 1; continue; }
-    if (!line) { i += 1; continue; }
-    const header = line.match(/^\[([^#\]\r\n]+)#[0-9A-Fa-f]{4}\]$/);
-    if (header) {
-      current = header[1];
-      if (!files.has(current)) files.set(current, []);
-      i += 1;
-      continue;
-    }
-    if (!current) throw new Error("lazy_edit_resume patch missing file header");
-    if (/^(SWAP|DEL)\.BLK |^INS\.BLK\.POST /.test(line)) {
-      throw new Error("lazy_edit_resume supports line edits only; regenerate patch for block operations");
-    }
-    let match = line.match(/^SWAP ([1-9]\d*)\.=([1-9]\d*):$/);
-    if (match) {
-      const read = readPatchBody(lines, i + 1);
-      files.get(current).push({ kind: "swap", start: Number(match[1]), end: Number(match[2]), body: read.body });
-      i = read.cursor;
-      continue;
-    }
-    match = line.match(/^DEL ([1-9]\d*)(?:\.=([1-9]\d*))?$/);
-    if (match) {
-      files.get(current).push({ kind: "del", start: Number(match[1]), end: Number(match[2] || match[1]), body: [] });
-      i += 1;
-      continue;
-    }
-    match = line.match(/^INS\.(HEAD|TAIL):$/);
-    if (match) {
-      const read = readPatchBody(lines, i + 1);
-      files.get(current).push({ kind: "ins", pos: match[1].toLowerCase(), line: 0, body: read.body });
-      i = read.cursor;
-      continue;
-    }
-    match = line.match(/^INS\.(PRE|POST) ([1-9]\d*):$/);
-    if (match) {
-      const read = readPatchBody(lines, i + 1);
-      files.get(current).push({ kind: "ins", pos: match[1].toLowerCase(), line: Number(match[2]), body: read.body });
-      i = read.cursor;
-      continue;
-    }
-    throw new Error("unsupported lazy_edit_resume patch line: " + line);
-  }
-  return files;
-}
-
-function validateOmpLinePatchBases(cwd, editsByFile, bases) {
-  for (const target of editsByFile.keys()) {
-    const filePath = resolve(cwd, target);
-    const current = readOperationBase(filePath);
-    if (!current.ok) return { status: "stale", message: target + " cannot be read for stale check" };
-    if (current.value !== (bases.get(target) ?? null)) {
-      return { status: "stale", message: target + " changed since operation was queued" };
-    }
-  }
-  return null;
-}
-
-function applyOmpLinePatch(cwd, patch, bases) {
-  const editsByFile = parseOmpLinePatch(patch);
-  const stale = validateOmpLinePatchBases(cwd, editsByFile, bases);
-  if (stale) return stale;
-  for (const [target, edits] of editsByFile.entries()) {
-    const filePath = resolve(cwd, target);
-    const current = readOperationBase(filePath);
-    if (!current.ok) return { status: "stale", message: target + " cannot be read for patch application" };
-    const text = current.value || "";
-    const split = textToLines(text);
-    const applied = split.lines.slice();
-    const ordered = edits.slice().sort((a, b) => {
-      const aLine = a.kind === "ins" ? (a.pos === "tail" ? Number.MAX_SAFE_INTEGER : a.line) : a.start;
-      const bLine = b.kind === "ins" ? (b.pos === "tail" ? Number.MAX_SAFE_INTEGER : b.line) : b.start;
-      return bLine - aLine;
-    });
-    for (const edit of ordered) {
-      if (edit.kind === "swap") {
-        if (edit.start < 1 || edit.end < edit.start || edit.end > applied.length) throw new Error("invalid SWAP range for " + target);
-        applied.splice(edit.start - 1, edit.end - edit.start + 1, ...edit.body);
-      } else if (edit.kind === "del") {
-        if (edit.start < 1 || edit.end < edit.start || edit.end > applied.length) throw new Error("invalid DEL range for " + target);
-        applied.splice(edit.start - 1, edit.end - edit.start + 1);
-      } else if (edit.kind === "ins") {
-        const index = edit.pos === "head" ? 0 : edit.pos === "tail" ? applied.length : edit.pos === "pre" ? edit.line - 1 : edit.line;
-        if (index < 0 || index > applied.length) throw new Error("invalid INS anchor for " + target);
-        applied.splice(index, 0, ...edit.body);
-      }
-    }
-    writeFileSync(filePath, linesToText(applied, split.trailing || text === ""), "utf8");
-  }
-  return { status: "applied", message: "lazy edit applied" };
-}
-
-function applyOmpWrite(cwd, operation) {
-  const target = operation.targets[0];
-  const stale = validateOmpLinePatchBases(cwd, new Map([[target, []]]), operation.bases);
-  if (stale) return stale;
-  const filePath = resolve(cwd, target);
-  mkdirSync(dirname(filePath), { recursive: true });
-  writeFileSync(filePath, String(operation.tool_input?.content ?? ""), "utf8");
-  return { status: "applied", message: "lazy write applied" };
-}
-
-function emptyToolOutputText(text) {
-  if (!String(text || "").trim()) return "No output.";
-  return String(text);
-}
-
-function lazyToolResult(status, text, details) {
+function taskPayload(event, ctx, taskId, type) {
+  const identity = owner(ctx);
   return {
-    isError: status !== "applied",
-    content: [{ type: "text", text: emptyToolOutputText(text) }],
-    details,
+    ...event,
+    type,
+    runtime: "omp",
+    version: OMP_VERSION,
+    cwd: ctx?.cwd,
+    sessionId: identity.sessionId,
+    leafAgentId: identity.leafAgentId,
+    task_id: taskId,
   };
 }
 
-function bashResumeText(result) {
-  if (result.error) return result.error.message || String(result.error);
-  const stdout = String(result.stdout || "");
-  const stderr = String(result.stderr || "");
-  const text = stdout + stderr;
-  return text.trim().length ? text : "Command exited with code " + result.status;
-}
-
-
-
-
-function hasExternalWriteScope(params) {
-  return stringList(params.write_targets).length > 0
-    || stringList(params.create_targets).length > 0
-    || stringList(params.write_dirs).length > 0;
-}
-
-
-function normalizedStringList(value) {
-  return stringList(value).map((item) => item.trim()).sort();
-}
-
-function externalGrantSettings(params) {
-  const requestedMaxUses = params.grant_max_uses ?? params.grantMaxUses;
-  const requestedTtlSeconds = params.grant_expires_seconds ?? params.grantExpiresSeconds;
-  let maxUses = EXTERNAL_GRANT_DEFAULT_MAX_USES;
-  if (requestedMaxUses !== undefined) {
-    if (!Number.isInteger(requestedMaxUses) || requestedMaxUses < 1 || requestedMaxUses > EXTERNAL_GRANT_MAX_USES_LIMIT) {
-      throw new Error("external sandbox grant grant_max_uses must be an integer from 1 to " + EXTERNAL_GRANT_MAX_USES_LIMIT);
-    }
-    maxUses = requestedMaxUses;
+function terminalCorrelation(payload) {
+  const correlation = [payload.attempt_id, payload.permit_id, payload.task_id, payload.toolCallId];
+  if (
+    !correlation.every(
+      (value) => typeof value === "string" && value.length > 0 && value.length <= 4_096,
+    )
+  ) {
+    throw new Error("Stateful cannot durably correlate an OMP terminal payload");
   }
-  let ttlMs = EXTERNAL_GRANT_DEFAULT_TTL_MS;
-  if (requestedTtlSeconds !== undefined) {
-    if (!Number.isInteger(requestedTtlSeconds) || requestedTtlSeconds < 1 || requestedTtlSeconds > EXTERNAL_GRANT_MAX_TTL_MS / 1000) {
-      throw new Error("external sandbox grant grant_expires_seconds must be an integer from 1 to " + (EXTERNAL_GRANT_MAX_TTL_MS / 1000));
-    }
-    ttlMs = requestedTtlSeconds * 1000;
-  }
-  return { maxUses, ttlMs };
+  return createHash("sha256").update(JSON.stringify(correlation)).digest("hex");
 }
 
-function externalGrantDescriptor(params) {
-  return {
-    purpose: params.purpose.trim(),
-    write_targets: normalizedStringList(params.write_targets),
-    create_targets: normalizedStringList(params.create_targets),
-    write_dirs: normalizedStringList(params.write_dirs),
-    connect_sockets: normalizedStringList(params.connect_sockets),
-    allow_signal: params.allow_signal === true,
-    network: typeof params.network === "string" ? params.network : "default",
-  };
+function terminalOutboxDirectory() {
+  const home = process.env.STATEFUL_HOME || join(process.env.HOME || homedir(), ".stateful_core");
+  const directory = join(home, "omp-terminal-outbox");
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  chmodSync(directory, 0o700);
+  return directory;
 }
 
-
-function externalGrantKey(params) {
-  return JSON.stringify(externalGrantDescriptor(params));
-}
-
-function pruneExternalBashGrants(now) {
-  for (const [key, grant] of externalBashGrants) {
-    if (grant.expiresAt <= now || grant.uses >= grant.maxUses) {
-      externalBashGrants.delete(key);
-    }
-  }
-}
-
-function configBool(value) {
-  return value === true || value === "true" || value === "1" || value === "yes" || value === "on";
-}
-
-function benchmarkSourceBlockPatterns() {
-  const raw = process.env[BENCHMARK_SOURCE_BLOCK_ENV];
-  if (!raw) return [];
+function syncDirectory(directory) {
+  const descriptor = openSync(directory, "r");
   try {
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      return parsed.map((item) => String(item || "").trim()).filter(Boolean);
-    }
-  } catch (_) {}
-  return String(raw).split(/[\r\n,]+/).map((item) => item.trim()).filter(Boolean);
-}
-
-function benchmarkSourcePatternMatches(text, pattern) {
-  const lowerPattern = pattern.toLowerCase();
-  if (lowerPattern === "upstream" || lowerPattern === "upstream/") {
-    return /(^|[^a-z0-9_-])upstream(?:\/|[^a-z0-9_-]|$)/.test(text);
-  }
-  return text.includes(lowerPattern);
-}
-
-
-function benchmarkSourceBlockReason(event) {
-  const patterns = benchmarkSourceBlockPatterns();
-  if (patterns.length === 0) return "";
-  const text = (String(event?.toolName || "") + "\n" + JSON.stringify(event?.input || {})).toLowerCase();
-  for (const pattern of patterns) {
-    if (benchmarkSourcePatternMatches(text, pattern)) {
-      return "DeNovo benchmark blocked target upstream source access before tool execution: " + pattern;
-    }
-  }
-  return "";
-}
-
-function configTextAutoApprove(text) {
-  const value = "(?:true|\\\"true\\\"|'true'|1|\\\"1\\\"|'1'|yes|\\\"yes\\\"|'yes'|on|\\\"on\\\"|'on')";
-  const body = String(text || "");
-  return new RegExp("(^|\\n)\\s*stateful\\.autoApprove\\s*:\\s*" + value + "\\s*(?:#.*)?(?:\\n|$)", "i").test(body)
-    || new RegExp("(^|\\n)stateful\\s*:\\s*\\n(?:[ \\t]+[^\\n]*\\n)*?[ \\t]+autoApprove\\s*:\\s*" + value + "\\s*(?:#.*)?(?:\\n|$)", "i").test(body);
-}
-
-function statefulConfigFileAutoApprove() {
-  const configPaths = [
-    OMP_AGENT_CONFIG,
-    process.env.HOME ? resolve(process.env.HOME, ".omp/profiles/stateful/agent/config.yml") : "",
-  ].filter(Boolean);
-  for (const configPath of configPaths) {
-    try {
-      if (configTextAutoApprove(readFileSync(configPath, "utf8"))) return true;
-    } catch (_) {}
-  }
-  return false;
-}
-
-function statefulPromptAutoApproveConfig(ctx) {
-  return configBool(ctx?.config?.stateful?.autoApprove)
-    || configBool(ctx?.config?.["stateful.autoApprove"])
-    || configBool(ctx?.stateful?.autoApprove)
-    || statefulConfigFileAutoApprove();
-}
-
-function shouldAutoApproveStatefulPrompt(ctx, _params) {
-  return statefulPromptAutoApproveConfig(ctx);
-}
-
-function recordExternalBashGrant(params, now) {
-  const key = externalGrantKey(params);
-  const settings = externalGrantSettings(params);
-  const approvedAt = now ?? Date.now();
-  externalBashGrants.set(key, {
-    expiresAt: approvedAt + settings.ttlMs,
-    maxUses: settings.maxUses,
-    uses: 1,
-  });
-}
-
-function approveExternalBashGrantWithoutPrompt(params) {
-  const now = Date.now();
-  pruneExternalBashGrants(now);
-  const key = externalGrantKey(params);
-  const existing = externalBashGrants.get(key);
-  if (existing && existing.expiresAt > now && existing.uses < existing.maxUses) {
-    existing.uses += 1;
-    return true;
-  }
-  recordExternalBashGrant(params, now);
-  return true;
-}
-
-function externalBashApprovalMessage(params) {
-  const descriptor = externalGrantDescriptor(params);
-  const settings = externalGrantSettings(params);
-  const scope = [
-    ...descriptor.write_targets.map((path) => "write-target: " + path),
-    ...descriptor.create_targets.map((path) => "create-target: " + path),
-    ...descriptor.write_dirs.map((path) => "write-dir: " + path),
-    ...descriptor.connect_sockets.map((path) => "connect-socket: " + path),
-    ...(descriptor.allow_signal ? ["allow-signal"] : []),
-    "network: " + descriptor.network,
-  ];
-  const examples = stringList(params.approval_examples);
-  return [
-    "Stateful is requesting a scoped repo-external sandbox grant.",
-    "",
-    "Purpose:",
-    descriptor.purpose,
-    "",
-    "Allowed external write/socket/signal scope:",
-    scope.length ? scope.join("\n") : "No declared external write/socket/signal scope.",
-    "",
-    "Grant limits:",
-    "max uses: " + settings.maxUses,
-    "expires in seconds: " + Math.floor(settings.ttlMs / 1000),
-    "",
-    "Command examples:",
-    examples.length ? examples.map((example) => "- " + example).join("\n") : "- Commands may vary, but must stay within the purpose and scope above.",
-    "",
-    "Raw command text is intentionally hidden from this approval prompt.",
-  ].join("\n");
-}
-
-async function confirmExternalBashGrant(ctx, params, signal) {
-  if (signal?.aborted) return false;
-  let abortHandler;
-  const abortPromise = signal ? new Promise((resolve) => {
-    abortHandler = () => resolve(false);
-    signal.addEventListener("abort", abortHandler, { once: true });
-  }) : undefined;
-  try {
-    const confirmPromise = ctx.ui.confirm(
-      "Approve external sandbox grant",
-      externalBashApprovalMessage(params)
-    );
-    return abortPromise
-      ? await Promise.race([confirmPromise, abortPromise])
-      : await confirmPromise;
+    fsyncSync(descriptor);
   } finally {
-    if (signal && abortHandler) {
-      signal.removeEventListener("abort", abortHandler);
-    }
+    closeSync(descriptor);
   }
 }
 
-async function ensureExternalBashGrant(ctx, params, signal) {
-  const now = Date.now();
-  pruneExternalBashGrants(now);
-  const key = externalGrantKey(params);
-  const existing = externalBashGrants.get(key);
-  if (existing && existing.expiresAt > now && existing.uses < existing.maxUses) {
-    existing.uses += 1;
-    return true;
-  }
-  const approved = await confirmExternalBashGrant(ctx, params, signal);
-  if (!approved) return false;
-  recordExternalBashGrant(params, Date.now());
-  return true;
+function terminalRecord(payload) {
+  const key = terminalCorrelation(payload);
+  return { key, path: join(terminalOutboxDirectory(), key + ".json"), payload };
 }
 
-function quoteStatefulCommandWord(word) {
-  const value = String(word || "");
-  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) return value;
-  return "'" + value.replace(/'/g, "'\\''") + "'";
-}
-
-function commandWordsToShell(words) {
-  return words.map(quoteStatefulCommandWord).join(" ");
-}
-
-function flagValue(words, flag) {
-  const index = words.indexOf(flag);
-  if (index < 0) return undefined;
-  return words[index + 1];
-}
-
-function insertSandboxIdentityFlag(words, flag, value) {
-  if (flagValue(words, flag) !== undefined) return words;
-  words.splice(3, 0, flag, value);
-  return words;
-}
-
-function commandWithActiveSandboxIdentity(words, event, ctx) {
-  if (!Array.isArray(words) || words[1] !== "sandbox" || words[2] !== "run") {
-    return { words, command: undefined };
-  }
-  const activeAgentId = agentId(event, ctx);
-  const suppliedAgentId = flagValue(words, "--agent-id");
-  if (suppliedAgentId !== undefined && suppliedAgentId !== activeAgentId) {
-    throw new Error("stateful sandbox run --agent-id must match the active agent_id");
-  }
-  const rewritten = [...words];
-  insertSandboxIdentityFlag(rewritten, "--agent-id", activeAgentId);
-
-  const activeWorkspaceId = detectWorkspaceId(event, ctx);
-  const suppliedWorkspaceId = flagValue(words, "--workspace-id");
-  if (activeWorkspaceId) {
-    if (suppliedWorkspaceId !== undefined && suppliedWorkspaceId !== activeWorkspaceId) {
-      throw new Error("stateful sandbox run --workspace-id must match the active workspace_id");
-    }
-    insertSandboxIdentityFlag(rewritten, "--workspace-id", activeWorkspaceId);
-  }
-  return { words: rewritten, command: commandWordsToShell(rewritten) };
-}
-
-
-function splitStatefulCommandWords(command) {
-  const words = [];
-  let current = "";
-  let quote = null;
-  for (let index = 0; index < command.length; index += 1) {
-    const ch = command[index];
-    if (quote) {
-      if (ch === quote) {
-        quote = null;
-      } else {
-        current += ch;
-      }
-      continue;
-    }
-    if (ch === "'" || ch === "\"") {
-      quote = ch;
-      continue;
-    }
-    if (ch === "\\" || ch === "`" || ch === "\n" || ch === "\r") {
-      throw new Error("Bash wrapper must be a single stateful sandbox command");
-    }
-    if (ch === "$" && command[index + 1] === "(") {
-      throw new Error("Bash wrapper must not use command substitution");
-    }
-    if (";|&<>".includes(ch)) {
-      throw new Error("Bash wrapper must be a single stateful sandbox command");
-    }
-    if (/\s/.test(ch)) {
-      if (current) {
-        words.push(current);
-        current = "";
-      }
-      continue;
-    }
-    current += ch;
-  }
-  if (quote) throw new Error("Bash wrapper command has unterminated quotes");
-  if (current) words.push(current);
-  return words;
-}
-
-function parseStatefulSandboxRunWords(words) {
-  if (words.length < 4 || words[1] !== "sandbox" || words[2] !== "run") {
-    return { allow: false, reason: "Bash commands must use stateful sandbox run" };
-  }
-  const params = {
-    fs: "read-only",
-    purpose: "",
-    write_targets: [],
-    create_targets: [],
-    write_dirs: [],
-    connect_sockets: [],
-    allow_signal: false,
-    network: undefined,
-    agent_id: undefined,
-    workspace_id: undefined,
-    command: "",
-    sequences: [],
-    sequence_shell: undefined,
-  };
-  for (let index = 3; index < words.length; index += 1) {
-    const arg = words[index];
-    const nextValue = (name) => {
-      index += 1;
-      if (index >= words.length || !words[index]) throw new Error("stateful sandbox run " + name + " requires a value");
-      return words[index];
-    };
-    if (arg === "--fs") params.fs = nextValue("--fs");
-    else if (arg === "--purpose") params.purpose = nextValue("--purpose");
-    else if (arg === "--write-target") params.write_targets.push(nextValue("--write-target"));
-    else if (arg === "--create-target") params.create_targets.push(nextValue("--create-target"));
-    else if (arg === "--write-dir") params.write_dirs.push(nextValue("--write-dir"));
-    else if (arg === "--connect-socket") params.connect_sockets.push(nextValue("--connect-socket"));
-    else if (arg === "--network") params.network = nextValue("--network");
-    else if (arg === "--timeout-seconds") nextValue("--timeout-seconds");
-    else if (arg === "--stream-events") continue;
-    else if (arg === "--allow-signal") params.allow_signal = true;
-    else if (arg === "--agent-id") params.agent_id = nextValue("--agent-id");
-    else if (arg === "--workspace-id") params.workspace_id = nextValue("--workspace-id");
-    else if (arg === "--command") params.command = nextValue("--command");
-    else if (arg === "--sequence") params.sequences.push(nextValue("--sequence"));
-    else if (arg === "--sequence-shell") {
-      if (params.sequence_shell !== undefined) throw new Error("stateful sandbox run accepts at most one --sequence-shell");
-      params.sequence_shell = nextValue("--sequence-shell");
-    }
-    else throw new Error("unsupported stateful sandbox run argument `" + arg + "`");
-  }
-  const hasCommand = Boolean(params.command);
-  const hasSequence = params.sequences.length > 0;
-  if (hasCommand && hasSequence) {
-    return { allow: false, reason: "stateful sandbox run accepts either --command or --sequence, not both" };
-  }
-  if (!hasCommand && !hasSequence) {
-    return { allow: false, reason: "stateful sandbox run requires exactly one --command or at least one --sequence" };
-  }
-  if (params.sequence_shell !== undefined && !hasSequence) {
-    return { allow: false, reason: "stateful sandbox run --sequence-shell requires --sequence" };
-  }
-  if (params.sequence_shell !== undefined && !/^\//.test(params.sequence_shell)) {
-    return { allow: false, reason: "stateful sandbox run --sequence-shell requires an absolute shell path" };
-  }
-  if (hasSequence && params.fs === "git") {
-    return { allow: false, reason: "git profile requires a single git command" };
-  }
-  if (hasSequence && params.fs === "github-pr") {
-    return { allow: false, reason: "github-pr profile requires a single gh pr command" };
-  }
-  if (params.fs === "external" && !params.purpose.trim()) {
-    return { allow: false, reason: "stateful sandbox run --fs external requires --purpose" };
-  }
-  if (params.fs === "external" && (hasExternalWriteScope(params) || stringList(params.connect_sockets).length > 0 || params.allow_signal === true)) {
-    return { allow: true, externalGrantParams: params };
-  }
-  return { allow: true };
-}
-
-function parseStatefulProcessFindWords(words) {
-  if (words.length < 5 || words[1] !== "sandbox" || words[2] !== "process" || words[3] !== "find") {
-    return { allow: false, reason: "Bash commands must use stateful sandbox process find" };
-  }
-  return { allow: true };
-}
-function statefulBashPassthroughDecision(command, cwd) {
+function persistTerminal(payload) {
+  const record = terminalRecord(payload);
+  const temporary = record.path + "." + process.pid + ".tmp";
+  const descriptor = openSync(temporary, "w", 0o600);
   try {
-    const words = splitStatefulCommandWords(String(command || "").trim());
-    if (words.length === 0) return { allow: false, reason: "Bash command is empty" };
-    if (!isTrustedStatefulCommand(words[0], cwd)) {
-      return { allow: false, reason: "OMP raw Bash is denied; use the trusted stateful sandbox command" };
-    }
-    let decision;
-    if (words[1] === "sandbox" && words[2] === "run") decision = parseStatefulSandboxRunWords(words);
-    else if (words[1] === "sandbox" && words[2] === "process" && words[3] === "find") decision = parseStatefulProcessFindWords(words);
-    else decision = { allow: false, reason: "Bash commands must use stateful sandbox run or stateful sandbox process find" };
-    if (decision.allow) decision.words = words;
-    return decision;
+    writeFileSync(descriptor, JSON.stringify(payload), "utf8");
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+  chmodSync(temporary, 0o600);
+  let created = false;
+  try {
+    linkSync(temporary, record.path);
+    created = true;
   } catch (error) {
-    return { allow: false, reason: error instanceof Error ? error.message : String(error) };
+    if (error?.code !== "EEXIST") throw error;
+    const existing = JSON.parse(readFileSync(record.path, "utf8"));
+    if (terminalCorrelation(existing) !== record.key) throw error;
+    record.payload = existing;
+  } finally {
+    try {
+      unlinkSync(temporary);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+  }
+  if (created) syncDirectory(terminalOutboxDirectory());
+  pendingTerminals.set(record.key, record);
+  return record;
+}
+
+function loadPendingTerminals() {
+  let directory;
+  try {
+    directory = terminalOutboxDirectory();
+  } catch {
+    return;
+  }
+  for (const name of readdirSync(directory)) {
+    if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
+    const path = join(directory, name);
+    try {
+      const payload = JSON.parse(readFileSync(path, "utf8"));
+      const record = terminalRecord(payload);
+      if (name !== record.key + ".json") {
+        throw new Error("payload correlation does not match its filename");
+      }
+      pendingTerminals.set(record.key, record);
+    } catch (error) {
+      const quarantined = path + `.bad-${Date.now()}-${process.pid}`;
+      renameSync(path, quarantined);
+      syncDirectory(directory);
+      console.error(
+        `Stateful quarantined invalid OMP terminal outbox file ${path} as ${quarantined}: ${error}`,
+      );
+    }
   }
 }
 
+function removeTerminal(record) {
+  try {
+    unlinkSync(record.path);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  syncDirectory(terminalOutboxDirectory());
+  pendingTerminals.delete(record.key);
+  stopHeartbeatWhenIdle();
+}
+
+function pendingTerminal(toolCallId) {
+  for (const record of pendingTerminals.values()) {
+    if (record.payload.toolCallId === toolCallId) return record;
+  }
+}
+
+function retryPendingTerminals(matches = () => true) {
+  for (const record of pendingTerminals.values()) {
+    if (!matches(record.payload)) continue;
+    try {
+      if (runStatefulHook("post-tool-use", record.payload).decision === "allow") {
+        removeTerminal(record);
+      }
+    } catch {
+      // Preserve the exact terminal payload for the next lifecycle retry.
+    }
+  }
+}
+
+function startHeartbeat() {
+  if (heartbeatTimer) return;
+  heartbeatTimer = setInterval(() => {
+    retryPendingTerminals();
+    for (const task of tasks.values()) {
+      runStatefulHook("post-tool-use", {
+        type: "heartbeat",
+        runtime: "omp",
+        version: OMP_VERSION,
+        cwd: task.cwd,
+        sessionId: task.sessionId,
+        leafAgentId: task.leafAgentId,
+        task_id: task.taskId,
+      });
+    }
+  }, HEARTBEAT_MS);
+  heartbeatTimer.unref?.();
+}
+
+function stopHeartbeatWhenIdle() {
+  if (tasks.size || pendingTerminals.size || !heartbeatTimer) return;
+  clearInterval(heartbeatTimer);
+  heartbeatTimer = undefined;
+}
+
+function taskFor(ctx) {
+  const identity = owner(ctx);
+  return tasks.get(identity.key);
+}
+
+function block(reason) {
+  return { block: true, reason };
+}
 
 export default function statefulOmpExtension(pi) {
   pi.setLabel("Stateful");
-  pi.on("tool_call", async (event, ctx) => {
-    if (event?.toolName !== "bash" && event?.toolName !== "functions.bash") return;
-    const decision = statefulBashPassthroughDecision(event?.input?.command, ctx?.cwd);
-    if (!decision.allow) return { block: true, reason: decision.reason };
-    try {
-      const rewritten = commandWithActiveSandboxIdentity(decision.words, event, ctx);
-      decision.words = rewritten.words;
-      if (rewritten.command && event?.input) event.input.command = rewritten.command;
-    } catch (error) {
-      return { block: true, reason: error instanceof Error ? error.message : String(error) };
-    }
-    if (decision.externalGrantParams) {
-      const params = decision.externalGrantParams;
-      if (shouldAutoApproveStatefulPrompt(ctx, params)) {
-        approveExternalBashGrantWithoutPrompt(params);
-        return;
-      }
-      if (typeof ctx?.ui?.confirm !== "function") {
-        const operationId = rememberLazyBashOperation(event, ctx, decision);
-        const suffix = operationId
-          ? "\n\nQueued lazy bash operation_id: " + operationId + "\nNext: approve the external sandbox grant, then call lazy_bash_resume with this operation_id."
-          : "";
-        return { block: true, reason: "Built-in Bash external sandbox command requires OMP UI confirmation; use stateful.autoApprove to skip this prompt." + suffix };
-      }
-      const signal = undefined;
-      const approved = await ensureExternalBashGrant(ctx, params, signal);
-      if (!approved) return { block: true, reason: "user denied stateful external sandbox grant" };
-    }
-  });
-function state_reservation_claim(operation, ctx) {
-  const waitId = String(operation?.wait_id || "").trim();
-  if (!waitId) return { ok: true };
-  const agentId = String(operation?.agent_id || "").trim();
-  if (!agentId) return { ok: false, message: "state_reservation_claim missing agent_id" };
-  const args = ["reservation", "claim", "--agent-id", agentId, "--wait-id", waitId];
-  const workspaceId = firstString(operation?.workspace_id, detectWorkspaceId({}, ctx));
-  if (workspaceId) args.push("--workspace-id", workspaceId);
-  const reservationId = String(operation?.reservation_id || "").trim();
-  if (reservationId) args.push("--reservation-id", reservationId);
-  const options = { encoding: "utf8" };
-  const cwd = operation?.cwd || ctx?.cwd;
-  if (cwd) options.cwd = cwd;
-  const result = spawnSync(STATEFUL, args, options);
-  if (result.status === 0) return { ok: true };
-  const detail = String(result.stderr || result.stdout || "").trim();
-  return {
-    ok: false,
-    message: "state_reservation_claim failed" + (detail ? ": " + detail : ""),
-  };
-}
+  loadPendingTerminals();
+  retryPendingTerminals();
+  if (pendingTerminals.size) startHeartbeat();
 
-  pi.registerTool({
-    name: "lazy_edit_resume",
-    label: "Lazy Edit Resume",
-    description: "Resume a blocked OMP edit operation after the needed reservation or claim is ready. Applies only strict line-based OMP edit patches captured in this live extension session.",
-    parameters: {
-      type: "object",
-      properties: {
-        operation_id: { type: "string", description: "Queued lazy edit operation id; either a Stateful wait_id or a generated live-session id printed in the block message." },
-      },
-      required: ["operation_id"],
-    },
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const operationId = String(params?.operation_id || "").trim();
-      const operation = lazyEditOperations.get(operationId);
-      if (!operation) {
-        return lazyToolResult("failed", "lazy edit operation not found in this live OMP extension session", { operation_id: operationId });
-      }
-      const claim = state_reservation_claim(operation, ctx);
-      if (!claim.ok) return lazyToolResult("failed", claim.message, { operation_id: operationId, targets: operation.targets });
-      const authorization = runStatefulHook("pre-tool-use", {
-        agent_id: operation.agent_id,
-        reservation_id: operation.reservation_id || undefined,
-        cwd: operation.cwd || ctx.cwd,
-        yolo: true,
-        tool_name: operation.tool_name,
-        tool_input: operation.tool_input,
-      });
-      if (authorization.decision !== "allow") {
-        return lazyToolResult("failed", authorization.reason || "stateful authorization denied lazy edit resume", { operation_id: operationId, authorization });
-      }
-      let result;
-      try {
-        result = applyOmpLinePatch(operation.cwd || ctx.cwd, operation.tool_input?.input || "", operation.bases);
-      } catch (error) {
-        result = { status: "failed", message: error instanceof Error ? error.message : String(error) };
-      }
-      if (result.status === "applied") {
-        lazyEditOperations.delete(operationId);
-        runStatefulHook("post-tool-use", {
-          agent_id: operation.agent_id,
-          cwd: operation.cwd || ctx.cwd,
-          tool_name: operation.tool_name,
-          tool_input: operation.tool_input,
-        });
-      }
-      return lazyToolResult(result.status, result.message, { operation_id: operationId, targets: operation.targets });
-    },
+
+  pi.on("agent_start", async (event, ctx) => {
+    let identity;
+    try {
+      identity = owner(ctx);
+    } catch (error) {
+      return block(error instanceof Error ? error.message : String(error));
+    }
+    const result = runStatefulHook("session-start", taskPayload(event, ctx, undefined, "agent_start"));
+    if (result.decision !== "allow" || typeof result.task_id !== "string" || !result.task_id) {
+      return block(result.reason || "stateful task start failed");
+    }
+    tasks.set(identity.key, {
+      taskId: result.task_id,
+      sessionId: identity.sessionId,
+      leafAgentId: identity.leafAgentId,
+      cwd: ctx?.cwd,
+    });
+    startHeartbeat();
   });
-  pi.registerTool({
-    name: "lazy_write_resume",
-    label: "Lazy Write Resume",
-    description: "Resume a blocked OMP write operation after the needed reservation or claim is ready. Replays only write operations captured in this live extension session and fails if the target changed while queued.",
-    parameters: {
-      type: "object",
-      properties: {
-        operation_id: { type: "string", description: "Queued lazy write operation id; either a Stateful wait_id or a generated live-session id printed in the block message." },
-      },
-      required: ["operation_id"],
-    },
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const operationId = String(params?.operation_id || "").trim();
-      const operation = lazyWriteOperations.get(operationId);
-      if (!operation) {
-        return lazyToolResult("failed", "lazy write operation not found in this live OMP extension session", { operation_id: operationId });
-      }
-      const claim = state_reservation_claim(operation, ctx);
-      if (!claim.ok) return lazyToolResult("failed", claim.message, { operation_id: operationId, targets: operation.targets });
-      const authorization = runStatefulHook("pre-tool-use", {
-        agent_id: operation.agent_id,
-        reservation_id: operation.reservation_id || undefined,
-        cwd: operation.cwd || ctx.cwd,
-        yolo: true,
-        tool_name: operation.tool_name,
-        tool_input: operation.tool_input,
-      });
-      if (authorization.decision !== "allow") {
-        return lazyToolResult("failed", authorization.reason || "stateful authorization denied lazy write resume", { operation_id: operationId, authorization });
-      }
-      let result;
-      try {
-        result = applyOmpWrite(operation.cwd || ctx.cwd, operation);
-      } catch (error) {
-        result = { status: "failed", message: error instanceof Error ? error.message : String(error) };
-      }
-      if (result.status === "applied") {
-        lazyWriteOperations.delete(operationId);
-        runStatefulHook("post-tool-use", {
-          agent_id: operation.agent_id,
-          cwd: operation.cwd || ctx.cwd,
-          tool_name: operation.tool_name,
-          tool_input: operation.tool_input,
-        });
-      }
-      return lazyToolResult(result.status, result.message, { operation_id: operationId, targets: operation.targets });
-    },
-  });
-  pi.registerTool({
-    name: "lazy_bash_resume",
-    label: "Lazy Bash Resume",
-    description: "Resume a blocked OMP Bash command after approving an external sandbox grant.",
-    parameters: {
-      type: "object",
-      properties: {
-        operation_id: { type: "string", description: "Queued lazy bash operation id printed in the block message." },
-      },
-      required: ["operation_id"],
-    },
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const operationId = String(params?.operation_id || "").trim();
-      const operation = lazyBashOperations.get(operationId);
-      if (!operation) {
-        return lazyToolResult("failed", "lazy bash operation not found in this live OMP extension session", { operation_id: operationId });
-      }
-      if (typeof ctx?.ui?.confirm !== "function" && !shouldAutoApproveStatefulPrompt(ctx, operation.grant_params)) {
-        return lazyToolResult("failed", "lazy bash resume requires OMP UI confirmation or stateful.autoApprove", { operation_id: operationId });
-      }
-      const approved = shouldAutoApproveStatefulPrompt(ctx, operation.grant_params)
-        ? approveExternalBashGrantWithoutPrompt(operation.grant_params)
-        : await ensureExternalBashGrant(ctx, operation.grant_params, signal);
-      if (!approved) {
-        return lazyToolResult("failed", "user denied stateful external sandbox grant", { operation_id: operationId });
-      }
-      const authorization = runStatefulHook("pre-tool-use", {
-        agent_id: operation.agent_id,
-        cwd: operation.cwd || ctx.cwd,
-        yolo: true,
-        tool_name: operation.tool_name,
-        tool_input: operation.tool_input,
-      });
-      if (authorization.decision !== "allow") {
-        return lazyToolResult("failed", authorization.reason || "stateful authorization denied lazy bash resume", { operation_id: operationId, authorization });
-      }
-      const words = operation.command_words || [];
-      const result = spawnSync(words[0], words.slice(1), {
-        cwd: operation.cwd || ctx.cwd,
-        encoding: "utf8",
-      });
-      if (result.status === 0) {
-        lazyBashOperations.delete(operationId);
-        runStatefulHook("post-tool-use", {
-          agent_id: operation.agent_id,
-          cwd: operation.cwd || ctx.cwd,
-          tool_name: operation.tool_name,
-          tool_input: operation.tool_input,
-        });
-      }
-      return lazyToolResult(result.status === 0 ? "applied" : "failed", bashResumeText(result), { operation_id: operationId, exit_code: result.status });
-    },
-  });
-  pi.on("session_start", async (event, ctx) => {
-    verifyBareStateful(ctx.cwd);
-    const activeAgentId = detectAgentId(event, ctx);
-    if (!activeAgentId) {
-      stopReservationStream();
+
+  pi.on("agent_end", async (event, ctx) => {
+    let identity;
+    try {
+      identity = owner(ctx);
+    } catch {
+      if (event?.willContinue !== true) retryPendingTerminals();
       return;
     }
-    const result = runStatefulHook("session-start", {
-      agent_id: activeAgentId,
-      cwd: ctx.cwd,
-    });
-    startReservationStream(pi, result?.notifications_stream);
+    if (event?.willContinue === true) return;
+    retryPendingTerminals(
+      (payload) =>
+        payload.sessionId === identity.sessionId && payload.leafAgentId === identity.leafAgentId,
+    );
+    const task = tasks.get(identity.key);
+    if (!task) {
+      stopHeartbeatWhenIdle();
+      return;
+    }
+    runStatefulHook("stop", taskPayload(event, ctx, task.taskId, "agent_end"));
+    tasks.delete(identity.key);
+    stopHeartbeatWhenIdle();
   });
+
   pi.on("tool_call", async (event, ctx) => {
-    const benchmarkBlockReason = benchmarkSourceBlockReason(event);
-    if (benchmarkBlockReason) return { block: true, reason: benchmarkBlockReason };
-    const activeAgentId = detectAgentId(event, ctx);
-    if (!activeAgentId) return { block: true, reason: missingAgentIdReason() };
-    const decision = runStatefulHook("pre-tool-use", {
-      agent_id: activeAgentId,
-      reservation_id: reservationId(event),
-      cwd: ctx.cwd,
-      yolo: isYolo(event, ctx),
-      tool_name: event.toolName,
-      tool_input: event.input || {},
-    });
-    if (decision.decision === "prompt" && !shouldAutoApproveStatefulPrompt(ctx, event.input || {})) {
-      if (typeof ctx?.ui?.confirm !== "function") {
-        return {
-          block: true,
-          reason: "Stateful requested approval, but OMP UI confirmation is unavailable.",
-        };
-      }
-      const approved = await ctx.ui.confirm(
-        decision.title || "Approve stateful action",
-        decision.message || decision.reason || "Approve this stateful action?"
-      );
-      if (!approved) {
-        return { block: true, reason: decision.reason || "Blocked by user" };
-      }
+    let task;
+    try {
+      task = taskFor(ctx);
+    } catch (error) {
+      return block(error instanceof Error ? error.message : String(error));
     }
-    if (decision.decision === "block") {
-      const editOperationId = rememberLazyEditOperation(event, ctx, decision);
-      const writeOperationId = rememberLazyWriteOperation(event, ctx, decision);
-      const suffix = editOperationId
-        ? "\n\nQueued lazy edit operation_id: " + editOperationId + "\nNext: when reservation or claim is ready, call lazy_edit_resume with this operation_id."
-        : writeOperationId
-          ? "\n\nQueued lazy write operation_id: " + writeOperationId + "\nNext: when reservation or claim is ready, call lazy_write_resume with this operation_id."
-          : "";
-      return { block: true, reason: decision.reason + suffix };
+    if (!task) return block("Stateful has no active task for this OMP leaf agent");
+    const result = runStatefulHook("pre-tool-use", taskPayload(event, ctx, task.taskId, "tool_call"));
+    if (result.decision !== "allow") return block(result.reason || "stateful denied tool execution");
+    const attempt = result.stateful?.write_attempt;
+    if (attempt?.attempt_id && attempt?.permit_id && typeof event?.toolCallId === "string") {
+      writeAttempts.set(event.toolCallId, {
+        ...attempt,
+        task_id: task.taskId,
+        sessionId: task.sessionId,
+        leafAgentId: task.leafAgentId,
+        cwd: task.cwd,
+      });
     }
   });
+
   pi.on("tool_result", async (event, ctx) => {
-    const activeAgentId = detectAgentId(event, ctx);
-    if (!activeAgentId) return;
-    runStatefulHook("post-tool-use", {
-      agent_id: activeAgentId,
-      cwd: ctx.cwd,
-      tool_name: event.toolName,
-      tool_input: event.input || {},
-    });
+    const toolCallId = event?.toolCallId;
+    const pending = pendingTerminal(toolCallId);
+    if (pending) {
+      retryPendingTerminals((payload) => payload === pending.payload);
+      return;
+    }
+    const attempt = writeAttempts.get(toolCallId);
+    let task;
+    try {
+      task = taskFor(ctx);
+    } catch {
+      task = undefined;
+    }
+    const identity = attempt || task;
+    if (!identity) return;
+    const payload = {
+      ...event,
+      type: "tool_result",
+      runtime: "omp",
+      version: OMP_VERSION,
+      cwd: identity.cwd || ctx?.cwd,
+      sessionId: identity.sessionId,
+      leafAgentId: identity.leafAgentId,
+      task_id: identity.task_id || identity.taskId,
+    };
+    if (!attempt) {
+      runStatefulHook("post-tool-use", payload);
+      return;
+    }
+    Object.assign(payload, attempt);
+    const record = persistTerminal(payload);
+    writeAttempts.delete(toolCallId);
+    retryPendingTerminals((pendingPayload) => pendingPayload === record.payload);
   });
+
   pi.on("session_shutdown", async (event, ctx) => {
-    stopReservationStream();
-    const activeAgentId = detectAgentId(event, ctx);
-    if (!activeAgentId) return;
-    runStatefulHook("stop", {
-      agent_id: activeAgentId,
-      cwd: ctx.cwd,
-    });
+    const sessionId = typeof event?.sessionId === "string" ? event.sessionId : undefined;
+    retryPendingTerminals((payload) => !sessionId || payload.sessionId === sessionId);
+    for (const [key, task] of tasks) {
+      if (sessionId && task.sessionId !== sessionId) continue;
+      runStatefulHook("stop", {
+        ...event,
+        type: "session_shutdown",
+        runtime: "omp",
+        version: OMP_VERSION,
+        cwd: task.cwd || ctx?.cwd,
+        sessionId: task.sessionId,
+        leafAgentId: task.leafAgentId,
+        task_id: task.taskId,
+      });
+      tasks.delete(key);
+    }
+    stopHeartbeatWhenIdle();
   });
-};
+}

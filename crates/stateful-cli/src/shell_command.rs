@@ -5,59 +5,6 @@ enum QuoteState {
     Double,
 }
 
-pub(crate) fn reject_outer_shell_syntax(
-    command: &str,
-    single_command_message: &str,
-) -> Result<(), String> {
-    let mut state = QuoteState::None;
-    let mut chars = command.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match state {
-            QuoteState::None => match ch {
-                '\'' => state = QuoteState::Single,
-                '"' => state = QuoteState::Double,
-                '$' if chars.peek().is_some_and(|next| *next == '(') => {
-                    return Err("Bash wrapper must not use command substitution".to_string());
-                }
-                '\\' if chars.peek().is_some_and(|next| *next == '\'') => {
-                    chars.next();
-                }
-                '\\' => {
-                    return Err("Bash wrapper must not use shell escapes".to_string());
-                }
-                ';' | '|' | '&' | '<' | '>' | '\n' | '\r' | '`' => {
-                    return Err(single_command_message.to_string());
-                }
-                _ => {}
-            },
-            QuoteState::Single => {
-                if ch == '\'' {
-                    state = QuoteState::None;
-                }
-            }
-            QuoteState::Double => match ch {
-                '"' => state = QuoteState::None,
-                '$' if chars.peek().is_some_and(|next| *next == '(') => {
-                    return Err("Bash wrapper must not use command substitution".to_string());
-                }
-                '`' => {
-                    return Err("Bash wrapper must not use command substitution".to_string());
-                }
-                '\\' => {
-                    return Err("Bash wrapper must not use shell escapes".to_string());
-                }
-                _ => {}
-            },
-        }
-    }
-
-    if state != QuoteState::None {
-        return Err("Bash wrapper command has unterminated quotes".to_string());
-    }
-
-    Ok(())
-}
-
 pub(crate) fn split_simple_command_words(command: &str) -> Result<Vec<String>, String> {
     let mut words = Vec::new();
     let mut current = String::new();
@@ -68,6 +15,10 @@ pub(crate) fn split_simple_command_words(command: &str) -> Result<Vec<String>, S
     while let Some(ch) = chars.next() {
         match state {
             QuoteState::None => match ch {
+                '\n' | '\r' | ';' | '|' | '&' | '<' | '>' | '`' | '$' | '*' | '?' | '[' | ']'
+                | '{' | '}' | '~' | '(' | ')' | '#' | '!' => {
+                    return Err("Bash wrapper command must be a single literal command".to_string());
+                }
                 '\'' => {
                     state = QuoteState::Single;
                     in_word = true;
@@ -80,6 +31,9 @@ pub(crate) fn split_simple_command_words(command: &str) -> Result<Vec<String>, S
                     chars.next();
                     current.push('\'');
                     in_word = true;
+                }
+                '\\' => {
+                    return Err("Bash wrapper command must not use shell escapes".to_string());
                 }
                 ch if ch.is_whitespace() => {
                     if in_word {
@@ -102,6 +56,8 @@ pub(crate) fn split_simple_command_words(command: &str) -> Result<Vec<String>, S
             QuoteState::Double => {
                 if ch == '"' {
                     state = QuoteState::None;
+                } else if matches!(ch, '`' | '$' | '\\') {
+                    return Err("Bash wrapper command must not use shell expansion".to_string());
                 } else {
                     current.push(ch);
                 }
@@ -126,4 +82,39 @@ pub(crate) fn first_word_is_env_assignment(word: &str) -> bool {
     !name.is_empty()
         && name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
         && !name.chars().next().is_some_and(|c| c.is_ascii_digit())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_simple_command_words;
+
+    #[test]
+    fn parses_literal_single_quoted_wrapper_arguments() {
+        assert_eq!(
+            split_simple_command_words("'/tmp/stateful' status --value '{\"path\":\"a b\"}'")
+                .expect("literal wrapper should parse"),
+            ["/tmp/stateful", "status", "--value", "{\"path\":\"a b\"}"]
+        );
+    }
+
+    #[test]
+    fn rejects_shell_control_and_expansion() {
+        for command in [
+            "/tmp/stateful status; bypass",
+            "/tmp/stateful status $(bypass)",
+            "/tmp/stateful status *",
+            "/tmp/stateful status {one,two}",
+            "~/stateful status",
+            r"/tmp/stateful status a\ b",
+            "/tmp/stateful status (bypass)",
+            "/tmp/stateful status # bypass",
+            "/tmp/stateful status !",
+            r#""/tmp/stateful" status "a\"b""#,
+        ] {
+            assert!(
+                split_simple_command_words(command).is_err(),
+                "`{command}` should be rejected"
+            );
+        }
+    }
 }

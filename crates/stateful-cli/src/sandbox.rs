@@ -1,11 +1,17 @@
 use clap::ValueEnum;
 use serde_json::Value;
-use stateful_core::normalize_relative_path;
+use stateful_core::{
+    ActorType, AgentIdentity, MutationOperation, ResourceObservation, ResourceResolver, SourceKind,
+    SourceRef, WorkspaceIdentity, validate_operation_transition,
+};
+use stateful_store::{
+    LeaseActivateInput, LeaseRequestState, LeaseRequestStatus, ReadCompleteInput, ReadStartInput,
+    WriteCompleteInput, WritePrepareInput, WritePrepareResult, WriteTerminal,
+};
 use std::{
     collections::BTreeSet,
-    error::Error as StdError,
     ffi::OsString,
-    fmt, fs, io,
+    fs, io,
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
@@ -23,38 +29,26 @@ use signal_hook::{
     iterator::{Handle as SignalsHandle, Signals},
 };
 #[cfg(unix)]
-use std::os::unix::fs::FileTypeExt;
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
+use std::os::unix::{fs::MetadataExt, process::CommandExt};
 
 use crate::{
-    AgentContext, GlobalPaths, HttpResponse, ProtocolEnvelopeArgs, RepoGate, ServerRuntime,
-    discover_runtime_with_global, effective_workspace_id_for_repo, ensure_server, post_json,
-    protocol_envelope, repo_gate, repo_identity_for_enabled_repo,
-    runtime_env_override_is_configured, shadow_guard,
+    CommandIdentity, GlobalPaths, RepoGate, ServerRuntime, discover_runtime_with_global,
+    get_payload,
+    hook::settings,
+    now_rfc3339, post_command, repo_gate, repo_identity_for_enabled_repo,
     shell_command::{first_word_is_env_assignment, split_simple_command_words},
     validate_agent_id,
 };
 mod parse;
 mod process_find;
 
-pub(crate) use parse::{
-    parse_sandbox_process_find_bash_invocation, parse_sandbox_run_bash_invocation,
-};
 // Temporary re-export for CLI sequence plumbing; keep the lint narrow.
-#[allow(unused_imports)]
 pub(crate) use parse::resolve_sandbox_run_command;
 use process_find::process_comm_basename;
 pub use process_find::run_sandbox_process_find;
-pub(crate) use process_find::validate_process_find_request;
-#[cfg(test)]
-use process_find::{
-    filter_process_find_rows, parse_process_find_ps_output, process_find_output_for_rows,
-};
 
 pub(crate) const STATEFUL_SANDBOX_RUN_ACTIVE_ENV: &str = "STATEFUL_SANDBOX_RUN_ACTIVE";
 pub(crate) const STATEFUL_ALLOW_NESTED_SANDBOX_RUN_ENV: &str = "STATEFUL_ALLOW_NESTED_SANDBOX_RUN";
-const SANDBOX_TMP_ROOT: &str = "/tmp/stateful";
 const DEFAULT_SANDBOX_RUN_TIMEOUT_SECONDS: u64 = 3600;
 #[cfg(unix)]
 const SIGKILL: i32 = 9;
@@ -62,11 +56,8 @@ const SIGKILL: i32 = 9;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize, ValueEnum)]
 pub enum SandboxFsProfile {
     ReadOnly,
-    WriteTargets,
-    External,
-    Build,
+    Mutation,
     Git,
-    GithubPr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize, ValueEnum)]
@@ -80,14 +71,11 @@ pub struct SandboxRunRequest {
     pub fs: SandboxFsProfile,
     pub network: SandboxNetworkPolicy,
     pub purpose: Option<String>,
-    pub reservation_id: Option<String>,
+    pub task_id: Option<String>,
     pub agent_id: Option<String>,
     pub workspace_id: Option<String>,
-    pub write_targets: Vec<String>,
-    pub create_targets: Vec<String>,
-    pub write_dirs: Vec<String>,
-    pub connect_sockets: Vec<String>,
-    pub allow_signal: bool,
+    /// JSON-serialized `MutationOperation` values. Only this typed surface may mutate a workspace.
+    pub operations: Vec<String>,
     pub command: String,
     pub timeout_seconds: Option<u64>,
     pub stream_events: bool,
@@ -104,29 +92,13 @@ pub struct SandboxProcessFindRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SandboxRunBashInvocation {
-    pub(crate) executable: String,
-    pub(crate) request: SandboxRunRequest,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SandboxProcessFindBashInvocation {
-    pub(crate) executable: String,
-    pub(crate) request: SandboxProcessFindRequest,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ValidatedSandboxDirectCommand {
     Git(Vec<String>),
-    GithubPr(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ValidatedSandboxRunShape {
-    pub(crate) write_targets: Vec<String>,
-    pub(crate) create_targets: Vec<String>,
-    pub(crate) write_dirs: Vec<String>,
-    pub(crate) connect_sockets: Vec<String>,
+    pub(crate) operations: Vec<MutationOperation>,
     pub(crate) direct_command: Option<ValidatedSandboxDirectCommand>,
 }
 
@@ -136,8 +108,6 @@ pub struct SandboxRunOutput {
     pub exit_code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
-    pub allowed_write_targets: Vec<String>,
-    pub denied_write_targets: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -167,29 +137,6 @@ pub struct SandboxProcessInfo {
     pub comm: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SandboxAuthorizationDenied {
-    body: String,
-}
-
-impl SandboxAuthorizationDenied {
-    pub(crate) fn new(body: String) -> Self {
-        Self { body }
-    }
-
-    pub fn body(&self) -> &str {
-        &self.body
-    }
-}
-
-impl fmt::Display for SandboxAuthorizationDenied {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.body)
-    }
-}
-
-impl StdError for SandboxAuthorizationDenied {}
-
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SandboxCommandResult {
     pub status: &'static str,
@@ -202,24 +149,6 @@ pub struct SandboxCommandResult {
 pub(crate) struct SandboxWritablePath {
     pub(crate) path: PathBuf,
     pub(crate) kind: SandboxWritablePathKind,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PreparedExternalSandboxScope {
-    writable_paths: Vec<SandboxWritablePath>,
-    connect_sockets: Vec<PathBuf>,
-    allowed_write_targets: Vec<String>,
-    repo_write_targets: Vec<String>,
-    repo_create_targets: Vec<String>,
-    repo_write_dirs: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExternalSandboxTargetKind {
-    ExistingFile,
-    CreatableFile,
-    ExistingDirectory,
-    ExistingUnixSocket,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,13 +170,12 @@ pub(crate) enum SandboxWritablePathKind {
 }
 
 impl SandboxWritablePath {
-    fn file(path: PathBuf) -> Self {
+    pub(crate) fn file(path: PathBuf) -> Self {
         Self {
             path,
             kind: SandboxWritablePathKind::File,
         }
     }
-
     pub(crate) fn directory(path: PathBuf) -> Self {
         Self {
             path,
@@ -278,349 +206,51 @@ pub fn run_sandbox_in_repo(
     paths: &GlobalPaths,
     request: SandboxRunRequest,
 ) -> anyhow::Result<SandboxRunOutput> {
-    let repo_root = if request.fs == SandboxFsProfile::External {
-        let repo_root = repo_root.canonicalize().map_err(|error| {
-            anyhow::anyhow!("stateful sandbox external repo root must exist: {error}")
-        })?;
-        if !repo_root.is_dir() {
-            anyhow::bail!("stateful sandbox external repo root must be a directory");
-        }
-        repo_root
-    } else {
-        match repo_gate(paths, repo_root)? {
-            RepoGate::Enabled { repo_root } => repo_root,
-            RepoGate::Disabled => anyhow::bail!("stateful sandbox run requires an enabled repo"),
-            RepoGate::OutsideGitRepo => anyhow::bail!("stateful sandbox run requires a Git repo"),
-        }
+    let repo_root = match repo_gate(paths, repo_root)? {
+        RepoGate::Enabled { repo_root } => repo_root,
+        RepoGate::Disabled => anyhow::bail!("stateful sandbox run requires an enabled repo"),
+        RepoGate::OutsideGitRepo => anyhow::bail!("stateful sandbox run requires a Git repo"),
     };
     let shape = validate_sandbox_run_request_shape(&request)?;
-    let write_targets = shape.write_targets;
-    let create_targets = shape.create_targets;
-    let write_dirs = shape.write_dirs;
-    let connect_socket_targets = shape.connect_sockets;
-    let direct_command = shape.direct_command;
-    let mut connect_sockets = Vec::new();
-    if request.fs == SandboxFsProfile::Build {
-        shadow_guard::audit_dependency_shadowing(&repo_root)?;
-    } else if request.fs == SandboxFsProfile::WriteTargets {
-        shadow_guard::check_paths_for_dependency_shadowing(
-            &repo_root,
-            create_targets.iter().map(String::as_str),
-        )?;
-    }
-    let external_has_repo_targets = request.fs == SandboxFsProfile::External
-        && write_targets
-            .iter()
-            .chain(create_targets.iter())
-            .chain(write_dirs.iter())
-            .any(|path| !Path::new(path).is_absolute());
-    let runtime = if sandbox_profile_requires_runtime(request.fs) || external_has_repo_targets {
-        if !runtime_env_override_is_configured() {
-            ensure_server(paths)?;
-        }
-        Some(discover_runtime_with_global(&repo_root, paths)?)
-    } else {
-        None
-    };
-
-    let mut allowed_write_targets = Vec::new();
-    let mut denied_write_targets = Vec::new();
-    let mut release_after_run: Option<SandboxLeaseReleaseContext> = None;
-    let writable_paths = match request.fs {
-        SandboxFsProfile::ReadOnly => Vec::new(),
-        SandboxFsProfile::External => {
-            let external_scope = prepare_external_sandbox_scope(
-                &repo_root,
-                &write_targets,
-                &create_targets,
-                &write_dirs,
-                &connect_socket_targets,
-            )?;
-            allowed_write_targets.extend(external_scope.allowed_write_targets);
-            connect_sockets = external_scope.connect_sockets;
-
-            let mut writable_paths = external_scope.writable_paths;
-            if !external_scope.repo_write_targets.is_empty()
-                || !external_scope.repo_create_targets.is_empty()
-                || !external_scope.repo_write_dirs.is_empty()
-            {
-                let runtime = runtime
-                    .as_ref()
-                    .expect("external sandbox repo targets require runtime");
-                let agent_context = agent_context_for_sandbox_profile(
-                    &repo_root,
-                    paths,
-                    runtime,
-                    request.agent_id.as_deref(),
-                    request.workspace_id.as_deref(),
-                    "sandbox external repo targets require --agent-id",
-                )?;
-                let authorize_context = SandboxAuthorizeContext {
-                    runtime,
-                    repo_root: &repo_root,
-                    paths,
-                    agent_id: &agent_context.agent_id,
-                    workspace_id: &agent_context.workspace_id,
-                    network: request.network,
-                    fs_profile: sandbox_fs_profile_name(request.fs),
-                    reservation_id: request.reservation_id.as_deref(),
-                };
-
-                for path in external_scope
-                    .repo_write_targets
-                    .iter()
-                    .chain(external_scope.repo_create_targets.iter())
-                {
-                    let response = authorize_sandbox_write(&authorize_context, "write_file", path)?;
-                    match classify_sandbox_authorize_response(path, response)? {
-                        SandboxAuthorizeDecision::Allow => allowed_write_targets.push(path.clone()),
-                        SandboxAuthorizeDecision::Deny(body) => {
-                            denied_write_targets.push(serde_json::json!({
-                                "path": path,
-                                "authorization": body,
-                            }));
-                        }
-                    }
-                }
-                for path in &external_scope.repo_write_dirs {
-                    let authorization_path = sandbox_write_dir_display_path(path);
-                    let response = authorize_sandbox_write(
-                        &authorize_context,
-                        "write_directory",
-                        &authorization_path,
-                    )?;
-                    match classify_sandbox_authorize_response(path, response)? {
-                        SandboxAuthorizeDecision::Allow => {
-                            allowed_write_targets.push(sandbox_write_dir_display_path(path));
-                        }
-                        SandboxAuthorizeDecision::Deny(body) => {
-                            let body = enrich_sandbox_write_dir_denial(body);
-                            denied_write_targets.push(serde_json::json!({
-                                "path": sandbox_write_dir_display_path(path),
-                                "authorization": body,
-                            }));
-                        }
-                    }
-                }
-
-                release_after_run = Some(SandboxLeaseReleaseContext {
-                    agent_id: agent_context.agent_id.clone(),
-                    workspace_id: agent_context.workspace_id.clone(),
-                    paths: external_scope
-                        .repo_write_targets
-                        .iter()
-                        .chain(external_scope.repo_create_targets.iter())
-                        .cloned()
-                        .chain(
-                            external_scope
-                                .repo_write_dirs
-                                .iter()
-                                .map(|path| sandbox_write_dir_display_path(path)),
-                        )
-                        .collect(),
-                });
-
-                if !denied_write_targets.is_empty() {
-                    let body = sandbox_authorization_denied_body(
-                        allowed_write_targets,
-                        denied_write_targets,
-                    )
-                    .to_string();
-                    if let Some(release_context) = &release_after_run {
-                        release_sandbox_write_claims(runtime, release_context);
-                    }
-                    return Err(SandboxAuthorizationDenied::new(body).into());
-                }
-
-                writable_paths.extend(prepare_sandbox_writable_paths(
-                    &repo_root,
-                    &external_scope.repo_write_targets,
-                    &external_scope.repo_create_targets,
-                    &external_scope.repo_write_dirs,
-                )?);
-            }
-            writable_paths
-        }
-        SandboxFsProfile::WriteTargets => {
-            let runtime = runtime
-                .as_ref()
-                .expect("write-targets sandbox profile requires runtime");
-            let agent_context = agent_context_for_sandbox_profile(
-                &repo_root,
-                paths,
-                runtime,
-                request.agent_id.as_deref(),
-                request.workspace_id.as_deref(),
-                "sandbox write-targets requires --agent-id",
-            )?;
-            let authorize_context = SandboxAuthorizeContext {
-                runtime,
-                repo_root: &repo_root,
-                paths,
-                agent_id: &agent_context.agent_id,
-                workspace_id: &agent_context.workspace_id,
-                network: request.network,
-                fs_profile: sandbox_fs_profile_name(request.fs),
-                reservation_id: request.reservation_id.as_deref(),
-            };
-
-            for path in write_targets.iter().chain(create_targets.iter()) {
-                let response = authorize_sandbox_write(&authorize_context, "write_file", path)?;
-                match classify_sandbox_authorize_response(path, response)? {
-                    SandboxAuthorizeDecision::Allow => allowed_write_targets.push(path.clone()),
-                    SandboxAuthorizeDecision::Deny(body) => {
-                        denied_write_targets.push(serde_json::json!({
-                            "path": path,
-                            "authorization": body,
-                        }));
-                    }
-                }
-            }
-            for path in &write_dirs {
-                let authorization_path = sandbox_write_dir_display_path(path);
-                let response = authorize_sandbox_write(
-                    &authorize_context,
-                    "write_directory",
-                    &authorization_path,
-                )?;
-                match classify_sandbox_authorize_response(path, response)? {
-                    SandboxAuthorizeDecision::Allow => {
-                        allowed_write_targets.push(sandbox_write_dir_display_path(path));
-                    }
-                    SandboxAuthorizeDecision::Deny(body) => {
-                        let body = enrich_sandbox_write_dir_denial(body);
-                        denied_write_targets.push(serde_json::json!({
-                            "path": sandbox_write_dir_display_path(path),
-                            "authorization": body,
-                        }));
-                    }
-                }
-            }
-
-            release_after_run = Some(SandboxLeaseReleaseContext {
-                agent_id: agent_context.agent_id.clone(),
-                workspace_id: agent_context.workspace_id.clone(),
-                paths: write_targets
-                    .iter()
-                    .chain(create_targets.iter())
-                    .cloned()
-                    .chain(
-                        write_dirs
-                            .iter()
-                            .map(|path| sandbox_write_dir_display_path(path)),
-                    )
-                    .collect(),
-            });
-
-            if !denied_write_targets.is_empty() {
-                let body =
-                    sandbox_authorization_denied_body(allowed_write_targets, denied_write_targets)
-                        .to_string();
-                if let Some(release_context) = &release_after_run {
-                    release_sandbox_write_claims(runtime, release_context);
-                }
-                return Err(SandboxAuthorizationDenied::new(body).into());
-            }
-
-            prepare_sandbox_writable_paths(
-                &repo_root,
-                &write_targets,
-                &create_targets,
-                &write_dirs,
-            )?
-        }
-        SandboxFsProfile::Build => {
-            let runtime = runtime
-                .as_ref()
-                .expect("build sandbox profile requires runtime");
-            let agent_context = agent_context_for_sandbox_profile(
-                &repo_root,
-                paths,
-                runtime,
-                request.agent_id.as_deref(),
-                request.workspace_id.as_deref(),
-                "sandbox build profile requires --agent-id",
-            )?;
-            let build_write_dir = write_dirs
-                .first()
-                .expect("build profile validation requires one write dir");
-            let (display_path, writable_paths) =
-                prepare_build_profile_writable_paths(&agent_context.agent_id, build_write_dir)?;
-            allowed_write_targets.push(sandbox_write_dir_display_path(&display_path));
-            writable_paths
-        }
-        SandboxFsProfile::Git => {
-            allowed_write_targets
-                .push(sandbox_write_dir_display_path(&repo_root.to_string_lossy()));
-            prepare_git_profile_writable_paths(&repo_root)?
-        }
-        SandboxFsProfile::GithubPr => {
-            allowed_write_targets.push(sandbox_write_dir_display_path(
-                &github_pr_profile_private_dir(&repo_root).to_string_lossy(),
-            ));
-            prepare_github_pr_profile_writable_paths(&repo_root)?
-        }
-    };
-
-    let cwd = resolve_sandbox_cwd(&repo_root)?;
     let timeout = sandbox_run_timeout_duration(request.timeout_seconds);
-    let result = (|| -> anyhow::Result<_> {
-        match direct_command.as_ref() {
-            Some(ValidatedSandboxDirectCommand::Git(words)) => {
-                let temp_dir = sandbox_temp_dir(&writable_paths)
-                    .ok_or_else(|| anyhow::anyhow!("git profile requires a temp directory"))?;
-                run_sandboxed_git_command(
-                    words,
-                    &cwd,
-                    &writable_paths,
-                    &temp_dir,
-                    &git_profile_hooks_dir(&repo_root),
-                    request.network,
-                    timeout,
-                    request.stream_events,
-                )
-            }
-            Some(ValidatedSandboxDirectCommand::GithubPr(words)) => {
-                let temp_dir = sandbox_temp_dir(&writable_paths).ok_or_else(|| {
-                    anyhow::anyhow!("github-pr profile requires a temp directory")
-                })?;
-                run_sandboxed_github_pr_command(
-                    words,
-                    &cwd,
-                    &writable_paths,
-                    &temp_dir,
-                    request.network,
-                    timeout,
-                    request.stream_events,
-                )
-            }
-            None => run_sandboxed_command(
-                &request.command,
-                &cwd,
-                &writable_paths,
-                &connect_sockets,
-                request.fs == SandboxFsProfile::External && request.allow_signal,
-                request.fs == SandboxFsProfile::External,
+    let result = match request.fs {
+        SandboxFsProfile::ReadOnly => run_sandboxed_command(
+            &request.command,
+            &resolve_sandbox_cwd(&repo_root)?,
+            &[],
+            &[],
+            false,
+            false,
+            request.network,
+            timeout,
+            request.stream_events,
+            true,
+        )?,
+        SandboxFsProfile::Git => {
+            let Some(ValidatedSandboxDirectCommand::Git(words)) = shape.direct_command else {
+                unreachable!("git request shape always contains a git command")
+            };
+            let temporary = PrivateStage::new(&repo_root)?;
+            run_sandboxed_git_command(
+                &words,
+                &resolve_sandbox_cwd(&repo_root)?,
+                &[SandboxWritablePath::directory(temporary.root.clone())],
+                &temporary.root,
+                &temporary.root.join("hooks-disabled"),
                 request.network,
                 timeout,
                 request.stream_events,
-            ),
+            )?
         }
-    })();
-    if let Some(release_context) = &release_after_run
-        && let Some(runtime) = runtime.as_ref()
-    {
-        release_sandbox_write_claims(runtime, release_context);
-    }
-    let result = result?;
-
+        SandboxFsProfile::Mutation => {
+            return run_staged_mutations(&repo_root, paths, &request, shape.operations, timeout);
+        }
+    };
     Ok(SandboxRunOutput {
         status: result.status,
         exit_code: result.exit_code,
         stdout: result.stdout,
         stderr: result.stderr,
-        allowed_write_targets,
-        denied_write_targets: Vec::new(),
     })
 }
 
@@ -630,75 +260,886 @@ pub(crate) fn validate_sandbox_run_request_shape(
     if request.command.trim().is_empty() {
         anyhow::bail!("stateful sandbox run requires a non-empty --command");
     }
-
-    let (write_targets, create_targets, write_dirs, connect_sockets) = if request.fs
-        == SandboxFsProfile::External
-    {
-        (
-            normalize_external_sandbox_write_paths("write_targets", &request.write_targets)?,
-            normalize_external_sandbox_write_paths("create_targets", &request.create_targets)?,
-            normalize_external_sandbox_write_paths("write_dirs", &request.write_dirs)?,
-            normalize_external_sandbox_target_paths("connect_sockets", &request.connect_sockets)?,
-        )
-    } else {
-        (
-            normalize_sandbox_target_paths("write_targets", &request.write_targets)?,
-            normalize_sandbox_target_paths("create_targets", &request.create_targets)?,
-            normalize_sandbox_target_paths("write_dirs", &request.write_dirs)?,
-            normalize_external_optionless_paths("connect-socket", &request.connect_sockets)?,
-        )
-    };
-    validate_profile_purpose(request.fs, request.purpose.as_deref())?;
-    validate_profile_network_policy(request.fs, request.network)?;
-    validate_profile_targets(
-        request.fs,
-        &write_targets,
-        &create_targets,
-        &write_dirs,
-        &connect_sockets,
-        request.allow_signal,
-    )?;
     validate_sandbox_run_process_inspection(&request.command)?;
+    let operations = parse_mutation_operations(&request.operations)?;
     let direct_command = match request.fs {
-        SandboxFsProfile::Git => Some(ValidatedSandboxDirectCommand::Git(
-            validate_git_profile_command(&request.command)?,
-        )),
-        SandboxFsProfile::GithubPr => Some(ValidatedSandboxDirectCommand::GithubPr(
-            validate_github_pr_profile_command(&request.command)?,
-        )),
-        SandboxFsProfile::ReadOnly
-        | SandboxFsProfile::WriteTargets
-        | SandboxFsProfile::External
-        | SandboxFsProfile::Build => None,
+        SandboxFsProfile::ReadOnly => {
+            if !operations.is_empty() {
+                anyhow::bail!("read-only sandbox does not accept --operation");
+            }
+            if request.network != SandboxNetworkPolicy::Disabled {
+                anyhow::bail!("read-only sandbox run requires --network disabled");
+            }
+            None
+        }
+        SandboxFsProfile::Git => {
+            if !operations.is_empty() || request.network == SandboxNetworkPolicy::Enabled {
+                anyhow::bail!(
+                    "git sandbox permits only read-only git commands with disabled network"
+                );
+            }
+            Some(ValidatedSandboxDirectCommand::Git(
+                validate_git_profile_command(&request.command)?,
+            ))
+        }
+        SandboxFsProfile::Mutation => {
+            if operations.is_empty() {
+                anyhow::bail!("mutation sandbox requires at least one --operation");
+            }
+            if operations.len() != 1 {
+                anyhow::bail!("mutation sandbox accepts exactly one --operation per command");
+            }
+            if request.task_id.as_deref().is_none_or(str::is_empty) {
+                anyhow::bail!("mutation sandbox requires --task-id");
+            }
+            if request.agent_id.as_deref().is_none_or(str::is_empty) {
+                anyhow::bail!("mutation sandbox requires --agent-id");
+            }
+            if request.network == SandboxNetworkPolicy::Enabled
+                && request.purpose.as_deref().is_none_or(str::is_empty)
+            {
+                anyhow::bail!("networked mutation sandbox requires --purpose");
+            }
+            None
+        }
     };
-
     Ok(ValidatedSandboxRunShape {
-        write_targets,
-        create_targets,
-        write_dirs,
-        connect_sockets,
+        operations,
         direct_command,
     })
 }
 
-pub(crate) fn agent_context_for_sandbox_profile(
+fn parse_mutation_operations(values: &[String]) -> anyhow::Result<Vec<MutationOperation>> {
+    let mut operations = Vec::with_capacity(values.len());
+    let mut targets = BTreeSet::new();
+    for value in values {
+        let mut operation: MutationOperation = serde_json::from_str(value).map_err(|error| {
+            anyhow::anyhow!("--operation must be a typed MutationOperation JSON object: {error}")
+        })?;
+        normalize_mutation_operation(&mut operation)?;
+        for path in operation_paths(&operation) {
+            if !targets.insert(path.to_string()) {
+                anyhow::bail!("sandbox operations must not declare target `{path}` more than once");
+            }
+        }
+        operations.push(operation);
+    }
+    Ok(operations)
+}
+
+fn normalize_mutation_operation(operation: &mut MutationOperation) -> anyhow::Result<()> {
+    let normalize = |path: &mut String| -> anyhow::Result<()> {
+        *path = normalize_sandbox_target_path("operation path", path)?;
+        Ok(())
+    };
+    match operation {
+        MutationOperation::Create { path }
+        | MutationOperation::Update { path }
+        | MutationOperation::Mkdir { path }
+        | MutationOperation::Rmdir { path }
+        | MutationOperation::WriteDirectory { path } => normalize(path),
+        MutationOperation::Delete { path, entry_only } => {
+            if *entry_only {
+                anyhow::bail!("sandbox does not execute symlink-entry deletes");
+            }
+            normalize(path)
+        }
+        MutationOperation::Rename {
+            old_path,
+            new_path,
+            entry_only,
+        }
+        | MutationOperation::Move {
+            old_path,
+            new_path,
+            entry_only,
+        } => {
+            if *entry_only {
+                anyhow::bail!("sandbox does not execute symlink-entry moves");
+            }
+            normalize(old_path)?;
+            normalize(new_path)?;
+            if old_path == new_path {
+                anyhow::bail!("sandbox move source and destination must differ");
+            }
+            Ok(())
+        }
+        MutationOperation::Hardlink { old_path, new_path } => {
+            normalize(old_path)?;
+            normalize(new_path)?;
+            if old_path == new_path {
+                anyhow::bail!("sandbox hardlink source and destination must differ");
+            }
+            Ok(())
+        }
+        _ => anyhow::bail!(
+            "sandbox does not execute operation `{}`",
+            operation.kind_name()
+        ),
+    }
+}
+
+fn operation_paths(operation: &MutationOperation) -> Vec<&str> {
+    match operation {
+        MutationOperation::Create { path }
+        | MutationOperation::Update { path }
+        | MutationOperation::Mkdir { path }
+        | MutationOperation::Rmdir { path }
+        | MutationOperation::WriteDirectory { path }
+        | MutationOperation::Delete { path, .. } => vec![path],
+        MutationOperation::Rename {
+            old_path, new_path, ..
+        }
+        | MutationOperation::Move {
+            old_path, new_path, ..
+        }
+        | MutationOperation::Hardlink { old_path, new_path } => vec![old_path, new_path],
+        _ => Vec::new(),
+    }
+}
+
+fn run_staged_mutations(
+    repo_root: &Path,
+    paths: &GlobalPaths,
+    request: &SandboxRunRequest,
+    operations: Vec<MutationOperation>,
+    timeout: Duration,
+) -> anyhow::Result<SandboxRunOutput> {
+    let owner = crate::hook::resolve_owned_wrapper_task(repo_root)?;
+    let task_id = request.task_id.as_deref().expect("validated task id");
+    let agent_id = request.agent_id.as_deref().expect("validated agent id");
+    if owner.task_id != task_id || owner.agent_id != agent_id {
+        anyhow::bail!("mutation sandbox task and agent must match its live hook-owned ancestor");
+    }
+    validate_agent_id(agent_id, "agent_id")?;
+    let runtime = discover_runtime_with_global(repo_root, paths)?;
+    let workspace =
+        sandbox_workspace_identity(repo_root, paths, &runtime, request.workspace_id.as_deref())?;
+    let mut output = SandboxRunOutput {
+        status: "exited",
+        exit_code: Some(0),
+        stdout: String::new(),
+        stderr: String::new(),
+    };
+    for operation in operations {
+        let result = run_staged_mutation(
+            repo_root, &runtime, &workspace, task_id, agent_id, &operation, request, timeout,
+        )?;
+        output.stdout.push_str(&result.stdout);
+        output.stderr.push_str(&result.stderr);
+        if result.status != "exited" || result.exit_code != Some(0) {
+            output.status = result.status;
+            output.exit_code = result.exit_code;
+            break;
+        }
+    }
+    Ok(output)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the write permit owns explicit staging boundaries"
+)]
+fn run_staged_mutation(
+    repo_root: &Path,
+    runtime: &ServerRuntime,
+    workspace: &WorkspaceIdentity,
+    task_id: &str,
+    agent_id: &str,
+    operation: &MutationOperation,
+    request: &SandboxRunRequest,
+    timeout: Duration,
+) -> anyhow::Result<SandboxCommandResult> {
+    let resolver = ResourceResolver::new(&workspace.workspace_id, repo_root)?;
+    let pre_resources = resolver.observe_operation(operation)?;
+    let invocation_id = uuid::Uuid::new_v4().to_string();
+    let WritePrepareResult::Ready {
+        attempt_id,
+        permit_id,
+        ..
+    } = prepare_until_ready(
+        runtime,
+        workspace,
+        task_id,
+        agent_id,
+        operation,
+        &invocation_id,
+        &pre_resources,
+        timeout,
+    )?
+    else {
+        anyhow::bail!("write prepare did not return an executable permit");
+    };
+
+    let execution = (|| -> anyhow::Result<SandboxCommandResult> {
+        let stage = PrivateStage::new(repo_root)?;
+        stage.populate(operation)?;
+        let result = run_sandboxed_command(
+            &request.command,
+            &stage.root,
+            &[SandboxWritablePath::directory(stage.root.clone())],
+            &[],
+            false,
+            false,
+            request.network,
+            timeout,
+            request.stream_events,
+            true,
+        )?;
+        if result.status != "exited" || result.exit_code != Some(0) {
+            return Ok(result);
+        }
+        stage.validate(operation)?;
+        if resolver.observe_operation(operation)? != pre_resources {
+            anyhow::bail!("workspace changed after write permit was issued");
+        }
+        stage.apply(operation)?;
+        let post = observe_expected_post(&resolver, operation)?;
+        validate_operation_transition(operation, &pre_resources, &post, &post)?;
+        Ok(result)
+    })();
+
+    let (result, terminal, post_resources, expected_post_resources, error) = match execution {
+        Ok(result) if result.status == "exited" && result.exit_code == Some(0) => {
+            match observe_expected_post(&resolver, operation) {
+                Ok(post) => (result, WriteTerminal::Success, post.clone(), post, None),
+                Err(error) => (
+                    SandboxCommandResult {
+                        status: "failed",
+                        exit_code: Some(1),
+                        stdout: result.stdout,
+                        stderr: format!(
+                            "{}; post-write state is uncertain: {error}",
+                            result.stderr
+                        ),
+                    },
+                    WriteTerminal::Uncertain,
+                    pre_resources.clone(),
+                    Vec::new(),
+                    Some(error.to_string()),
+                ),
+            }
+        }
+        Ok(result) => (
+            result,
+            WriteTerminal::FailedKnown,
+            resolver
+                .observe_operation(operation)
+                .unwrap_or_else(|_| pre_resources.clone()),
+            Vec::new(),
+            Some("sandbox child failed; private staging was discarded".to_string()),
+        ),
+        Err(error) => {
+            let post = resolver
+                .observe_operation(operation)
+                .unwrap_or_else(|_| pre_resources.clone());
+            let terminal = if post == pre_resources {
+                WriteTerminal::FailedKnown
+            } else {
+                WriteTerminal::Uncertain
+            };
+            (
+                SandboxCommandResult {
+                    status: "failed",
+                    exit_code: Some(1),
+                    stdout: String::new(),
+                    stderr: error.to_string(),
+                },
+                terminal,
+                post,
+                Vec::new(),
+                Some(error.to_string()),
+            )
+        }
+    };
+    let complete = WriteCompleteInput {
+        invocation_id,
+        attempt_id,
+        permit_id,
+        terminal,
+        post_resources,
+        expected_post_resources,
+        error,
+    };
+    let _: stateful_store::WriteCompleteResult = post_command(
+        runtime,
+        "/v2/writes/complete",
+        &sandbox_identity(
+            task_id,
+            agent_id,
+            workspace.clone(),
+            "sandbox.write.complete",
+        ),
+        &complete,
+    )?;
+    Ok(result)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each prepare retry needs a complete command identity"
+)]
+fn prepare_until_ready(
+    runtime: &ServerRuntime,
+    workspace: &WorkspaceIdentity,
+    task_id: &str,
+    agent_id: &str,
+    operation: &MutationOperation,
+    invocation_id: &str,
+    current: &[ResourceObservation],
+    timeout: Duration,
+) -> anyhow::Result<WritePrepareResult> {
+    let started = Instant::now();
+    let settings = settings(Path::new(&workspace.root))?;
+    let offer_timeout = Duration::from_secs(settings.offer_ttl_seconds);
+    let mut current = current.to_vec();
+    record_exact_read(runtime, workspace, task_id, agent_id, &current)?;
+    loop {
+        let command = sandbox_identity(
+            task_id,
+            agent_id,
+            workspace.clone(),
+            "sandbox.write.prepare",
+        );
+        let prepared: WritePrepareResult = post_command(
+            runtime,
+            "/v2/writes/prepare",
+            &command,
+            &WritePrepareInput {
+                invocation_id: invocation_id.to_string(),
+                operation: operation.clone(),
+                current: current.clone(),
+                request_expires_at: timestamp_after(
+                    &command.observed_at,
+                    settings.offer_ttl_seconds,
+                )?,
+                lease_expires_at: timestamp_after(
+                    &command.observed_at,
+                    settings.lease_expiry_seconds,
+                )?,
+                attempt_deadline: timestamp_after(&command.observed_at, timeout.as_secs())?,
+            },
+        )?;
+        match prepared {
+            ready @ WritePrepareResult::Ready { .. }
+            | ready @ WritePrepareResult::Denied { .. } => return Ok(ready),
+            WritePrepareResult::RereadRequired { .. } => {
+                current = ResourceResolver::new(&workspace.workspace_id, &workspace.root)?
+                    .observe_operation(operation)?;
+                record_exact_read(runtime, workspace, task_id, agent_id, &current)?;
+            }
+            WritePrepareResult::Queued { batch_id } => {
+                let (batch_id, status) = wait_for_offer(
+                    runtime,
+                    workspace,
+                    task_id,
+                    &batch_id,
+                    started,
+                    offer_timeout,
+                )?;
+                current = ResourceResolver::new(&workspace.workspace_id, &workspace.root)?
+                    .observe_operation(operation)?;
+                record_exact_read(runtime, workspace, task_id, agent_id, &current)?;
+                if status.state == LeaseRequestState::Offered {
+                    let offer_id = status
+                        .offer_id
+                        .ok_or_else(|| anyhow::anyhow!("offered lease request has no offer id"))?;
+                    let command = sandbox_identity(
+                        task_id,
+                        agent_id,
+                        workspace.clone(),
+                        "sandbox.lease.activate",
+                    );
+                    let activated: stateful_store::LeaseActivateResult = post_command(
+                        runtime,
+                        "/v2/leases/activate",
+                        &command,
+                        &LeaseActivateInput {
+                            batch_id,
+                            offer_id,
+                            version: status.version,
+                            lease_expires_at: timestamp_after(
+                                &command.observed_at,
+                                settings.lease_expiry_seconds,
+                            )?,
+                        },
+                    )?;
+                    anyhow::ensure!(activated.active, "sandbox lease activation was rejected");
+                }
+            }
+        }
+    }
+}
+fn record_exact_read(
+    runtime: &ServerRuntime,
+    workspace: &WorkspaceIdentity,
+    task_id: &str,
+    agent_id: &str,
+    resources: &[ResourceObservation],
+) -> anyhow::Result<()> {
+    let read_id = uuid::Uuid::new_v4().to_string();
+    let invocation_id = uuid::Uuid::new_v4().to_string();
+    let _: stateful_store::ReadCommandResult = post_command(
+        runtime,
+        "/v2/reads/start",
+        &sandbox_identity(task_id, agent_id, workspace.clone(), "sandbox.read.start"),
+        &ReadStartInput {
+            read_id: read_id.clone(),
+            invocation_id: invocation_id.clone(),
+            resources: resources.to_vec(),
+        },
+    )?;
+    let _: stateful_store::ReadCommandResult = post_command(
+        runtime,
+        "/v2/reads/complete",
+        &sandbox_identity(
+            task_id,
+            agent_id,
+            workspace.clone(),
+            "sandbox.read.complete",
+        ),
+        &ReadCompleteInput {
+            read_id,
+            invocation_id,
+            resources: resources.to_vec(),
+            terminal_success: true,
+            complete: true,
+            stable: true,
+            exact: true,
+        },
+    )?;
+    Ok(())
+}
+
+fn wait_for_offer(
+    runtime: &ServerRuntime,
+    workspace: &WorkspaceIdentity,
+    task_id: &str,
+    initial_batch_id: &str,
+    started: Instant,
+    timeout: Duration,
+) -> anyhow::Result<(String, LeaseRequestStatus)> {
+    let mut batch_id = initial_batch_id.to_string();
+    while started.elapsed() < timeout {
+        let status: LeaseRequestStatus = get_payload(
+            runtime,
+            &format!(
+                "/v2/lease-requests/{batch_id}?workspace_id={}&task_id={task_id}&now={}",
+                workspace.workspace_id,
+                now_rfc3339()
+            ),
+        )?;
+        match status.state {
+            LeaseRequestState::Offered => return Ok((batch_id, status)),
+            LeaseRequestState::Superseded => {
+                batch_id = status.superseded_by.ok_or_else(|| {
+                    anyhow::anyhow!("superseded lease request has no replacement")
+                })?;
+            }
+            LeaseRequestState::Queued => thread::sleep(Duration::from_millis(50)),
+            LeaseRequestState::Activated => return Ok((batch_id, status)),
+            LeaseRequestState::Cancelled | LeaseRequestState::Expired => {
+                anyhow::bail!("sandbox write lease request is no longer active");
+            }
+        }
+    }
+    anyhow::bail!("sandbox write lease offer timed out")
+}
+
+fn observe_expected_post(
+    resolver: &ResourceResolver,
+    operation: &MutationOperation,
+) -> anyhow::Result<Vec<ResourceObservation>> {
+    match operation {
+        MutationOperation::Create { path } | MutationOperation::Update { path } => {
+            Ok(resolver.observe_operation(&MutationOperation::Update { path: path.clone() })?)
+        }
+        MutationOperation::Delete { path, .. } | MutationOperation::Rmdir { path } => {
+            Ok(resolver.observe_operation(&MutationOperation::Create { path: path.clone() })?)
+        }
+        MutationOperation::Mkdir { path } => {
+            Ok(resolver.observe_operation(&MutationOperation::Rmdir { path: path.clone() })?)
+        }
+        MutationOperation::Rename {
+            old_path, new_path, ..
+        }
+        | MutationOperation::Move {
+            old_path, new_path, ..
+        } => {
+            let mut post = resolver.observe_operation(&MutationOperation::Update {
+                path: new_path.clone(),
+            })?;
+            post.extend(resolver.observe_operation(&MutationOperation::Create {
+                path: old_path.clone(),
+            })?);
+            Ok(post)
+        }
+        MutationOperation::Hardlink { old_path, new_path } => {
+            let mut post = resolver.observe_operation(&MutationOperation::Update {
+                path: old_path.clone(),
+            })?;
+            post.extend(resolver.observe_operation(&MutationOperation::Update {
+                path: new_path.clone(),
+            })?);
+            Ok(post)
+        }
+        MutationOperation::WriteDirectory { path } => Ok(resolver
+            .observe_operation(&MutationOperation::WriteDirectory { path: path.clone() })?),
+        _ => anyhow::bail!(
+            "sandbox does not execute operation `{}`",
+            operation.kind_name()
+        ),
+    }
+}
+
+fn sandbox_workspace_identity(
     repo_root: &Path,
     paths: &GlobalPaths,
     runtime: &ServerRuntime,
-    agent_id: Option<&str>,
     workspace_id: Option<&str>,
-    missing_message: &'static str,
-) -> anyhow::Result<AgentContext> {
-    let agent_id = agent_id.ok_or_else(|| anyhow::anyhow!(missing_message))?;
-    validate_agent_id(agent_id, "agent_id")?;
-    let workspace_id = match workspace_id {
-        Some(workspace_id) => workspace_id.to_string(),
-        None => {
-            let identity = repo_identity_for_enabled_repo(paths, repo_root).ok();
-            effective_workspace_id_for_repo(&runtime.workspace_id, identity.as_ref())
+) -> anyhow::Result<WorkspaceIdentity> {
+    let repo = repo_identity_for_enabled_repo(paths, repo_root)?;
+    Ok(WorkspaceIdentity {
+        root: repo.root,
+        workspace_id: workspace_id.unwrap_or(&runtime.workspace_id).to_string(),
+        repo_id: repo.repo_id,
+        worktree_id: repo.worktree_id,
+        branch: repo.branch,
+    })
+}
+
+fn sandbox_identity(
+    task_id: &str,
+    agent_id: &str,
+    workspace: WorkspaceIdentity,
+    event: &str,
+) -> CommandIdentity {
+    CommandIdentity::new(
+        task_id.to_string(),
+        uuid::Uuid::new_v4().to_string(),
+        now_rfc3339(),
+        AgentIdentity {
+            agent_id: agent_id.to_string(),
+            turn_id: None,
+            actor_id: agent_id.to_string(),
+            actor_type: ActorType::Agent,
+            owner_id: None,
+            parent_agent_id: None,
+            parent_actor_id: None,
+        },
+        workspace,
+        SourceRef {
+            kind: SourceKind::Cli,
+            event: event.to_string(),
+            tool_name: Some("sandbox".to_string()),
+            source_ref: event.to_string(),
+        },
+    )
+}
+
+fn timestamp_after(observed_at: &str, seconds: u64) -> anyhow::Result<String> {
+    use time::{Duration as TimeDuration, OffsetDateTime, format_description::well_known::Rfc3339};
+    let observed_at = OffsetDateTime::parse(observed_at, &Rfc3339)?;
+    let seconds = i64::try_from(seconds)
+        .map_err(|_| anyhow::anyhow!("sandbox command duration is too large"))?;
+    Ok((observed_at + TimeDuration::seconds(seconds)).format(&Rfc3339)?)
+}
+
+struct PrivateStage {
+    repo_root: PathBuf,
+    root: PathBuf,
+}
+
+impl PrivateStage {
+    fn new(repo_root: &Path) -> anyhow::Result<Self> {
+        let private_root = repo_root.join(".stateful").join("sandbox-staging");
+        ensure_private_directory(repo_root, &private_root)?;
+        let root = private_root.join(uuid::Uuid::new_v4().to_string());
+        fs::create_dir(&root)?;
+        Ok(Self {
+            repo_root: repo_root.to_path_buf(),
+            root,
+        })
+    }
+
+    fn populate(&self, operation: &MutationOperation) -> anyhow::Result<()> {
+        self.validate_workspace_paths(operation)?;
+        match operation {
+            MutationOperation::Update { path }
+            | MutationOperation::Delete { path, .. }
+            | MutationOperation::Rmdir { path }
+            | MutationOperation::WriteDirectory { path } => self.copy_existing(path),
+            MutationOperation::Create { path } | MutationOperation::Mkdir { path } => {
+                self.make_parent(path)
+            }
+            MutationOperation::Rename {
+                old_path, new_path, ..
+            }
+            | MutationOperation::Move {
+                old_path, new_path, ..
+            }
+            | MutationOperation::Hardlink { old_path, new_path } => {
+                self.copy_existing(old_path)?;
+                self.make_parent(new_path)
+            }
+            _ => anyhow::bail!("unsupported staged operation `{}`", operation.kind_name()),
         }
-    };
-    Ok(AgentContext::new(agent_id, workspace_id))
+    }
+
+    fn copy_existing(&self, path: &str) -> anyhow::Result<()> {
+        let source = self.workspace(path);
+        let metadata = fs::symlink_metadata(&source)?;
+        if metadata.file_type().is_symlink() {
+            anyhow::bail!("sandbox staging refuses symlink target `{path}`");
+        }
+        self.make_parent(path)?;
+        let destination = self.staged(path);
+        if metadata.is_file() {
+            fs::copy(source, destination)?;
+        } else if metadata.is_dir() {
+            copy_directory_tree(&source, &destination)?;
+        } else {
+            anyhow::bail!("sandbox staging supports only regular files and directories");
+        }
+        Ok(())
+    }
+
+    fn make_parent(&self, path: &str) -> anyhow::Result<()> {
+        let parent = self
+            .staged(path)
+            .parent()
+            .expect("normalized relative target has a parent")
+            .to_path_buf();
+        fs::create_dir_all(parent)?;
+        Ok(())
+    }
+
+    fn validate(&self, operation: &MutationOperation) -> anyhow::Result<()> {
+        match operation {
+            MutationOperation::Create { path } | MutationOperation::Update { path } => {
+                require_regular_file(&self.staged(path), path)
+            }
+            MutationOperation::Delete { path, .. } | MutationOperation::Rmdir { path } => {
+                require_absent(&self.staged(path), path)
+            }
+            MutationOperation::Mkdir { path } => require_empty_directory(&self.staged(path), path),
+            MutationOperation::Rename {
+                old_path, new_path, ..
+            }
+            | MutationOperation::Move {
+                old_path, new_path, ..
+            } => {
+                require_absent(&self.staged(old_path), old_path)?;
+                require_regular_file(&self.staged(new_path), new_path)
+            }
+            MutationOperation::Hardlink { old_path, new_path } => require_same_regular_file(
+                &self.staged(old_path),
+                &self.staged(new_path),
+                old_path,
+                new_path,
+            ),
+            MutationOperation::WriteDirectory { path } => {
+                validate_directory_tree(&self.staged(path))
+            }
+            _ => anyhow::bail!("unsupported staged operation `{}`", operation.kind_name()),
+        }
+    }
+
+    fn apply(&self, operation: &MutationOperation) -> anyhow::Result<()> {
+        self.validate_workspace_paths(operation)?;
+        match operation {
+            MutationOperation::Create { path } | MutationOperation::Update { path } => {
+                fs::rename(self.staged(path), self.workspace(path))?;
+            }
+            MutationOperation::Delete { path, .. } => fs::remove_file(self.workspace(path))?,
+            MutationOperation::Rename {
+                old_path, new_path, ..
+            }
+            | MutationOperation::Move {
+                old_path, new_path, ..
+            } => {
+                fs::rename(self.workspace(old_path), self.workspace(new_path))?;
+            }
+            MutationOperation::Hardlink { old_path, new_path } => {
+                fs::hard_link(self.workspace(old_path), self.workspace(new_path))?;
+            }
+            MutationOperation::Mkdir { path } => fs::create_dir(self.workspace(path))?,
+            MutationOperation::Rmdir { path } => fs::remove_dir(self.workspace(path))?,
+            MutationOperation::WriteDirectory { path } => self.replace_directory(path)?,
+            _ => anyhow::bail!("unsupported staged operation `{}`", operation.kind_name()),
+        }
+        Ok(())
+    }
+
+    fn replace_directory(&self, path: &str) -> anyhow::Result<()> {
+        let destination = self.workspace(path);
+        let backup = self.root.join("previous-directory");
+        fs::rename(&destination, &backup)?;
+        if let Err(error) = fs::rename(self.staged(path), &destination) {
+            let _ = fs::rename(&backup, &destination);
+            return Err(error.into());
+        }
+        fs::remove_dir_all(backup)?;
+        Ok(())
+    }
+    fn validate_workspace_paths(&self, operation: &MutationOperation) -> anyhow::Result<()> {
+        for path in operation_paths(operation) {
+            ensure_workspace_components(&self.repo_root, path)?;
+        }
+        Ok(())
+    }
+
+    fn workspace(&self, relative: &str) -> PathBuf {
+        self.repo_root.join(relative)
+    }
+
+    fn staged(&self, relative: &str) -> PathBuf {
+        self.root.join(relative)
+    }
+}
+
+impl Drop for PrivateStage {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+fn ensure_private_directory(repo_root: &Path, directory: &Path) -> anyhow::Result<()> {
+    let relative = directory.strip_prefix(repo_root)?;
+    let mut cursor = repo_root.to_path_buf();
+    for component in relative.components() {
+        cursor.push(component);
+        match fs::symlink_metadata(&cursor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                anyhow::bail!("sandbox private staging path is symlinked")
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                anyhow::bail!("sandbox private staging path is not a directory")
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir(&cursor)?,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn ensure_workspace_components(repo_root: &Path, relative: &str) -> anyhow::Result<()> {
+    let mut cursor = repo_root.canonicalize()?;
+    for component in Path::new(relative).components() {
+        cursor.push(component);
+        match fs::symlink_metadata(&cursor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                anyhow::bail!("sandbox workspace target has a symlinked component")
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn copy_directory_tree(source: &Path, destination: &Path) -> anyhow::Result<()> {
+    validate_directory_tree(source)?;
+    fs::create_dir(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source = entry.path();
+        let destination = destination.join(entry.file_name());
+        let metadata = fs::symlink_metadata(&source)?;
+        if metadata.is_dir() {
+            copy_directory_tree(&source, &destination)?;
+        } else if metadata.is_file() {
+            fs::copy(source, destination)?;
+        } else {
+            anyhow::bail!("sandbox directory staging supports only regular files");
+        }
+    }
+    Ok(())
+}
+
+fn validate_directory_tree(path: &Path) -> anyhow::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        anyhow::bail!("sandbox write-directory target must be a real directory");
+    }
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            anyhow::bail!(
+                "sandbox write-directory refuses symlink `{}`",
+                path.display()
+            );
+        }
+        if metadata.is_dir() {
+            validate_directory_tree(&path)?;
+        } else if metadata.is_file() {
+            #[cfg(unix)]
+            if metadata.nlink() > 1 {
+                anyhow::bail!(
+                    "sandbox write-directory refuses hardlinked file `{}`",
+                    path.display()
+                );
+            }
+        } else {
+            anyhow::bail!(
+                "sandbox write-directory refuses unsupported entry `{}`",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn require_regular_file(path: &Path, display: &str) -> anyhow::Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| anyhow::anyhow!("sandbox staged target `{display}` must be a regular file"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        anyhow::bail!("sandbox staged target `{display}` must be a regular file");
+    }
+    Ok(())
+}
+
+fn require_absent(path: &Path, display: &str) -> anyhow::Result<()> {
+    if fs::symlink_metadata(path).is_ok() {
+        anyhow::bail!("sandbox staged target `{display}` must be absent");
+    }
+    Ok(())
+}
+
+fn require_empty_directory(path: &Path, display: &str) -> anyhow::Result<()> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| {
+        anyhow::anyhow!("sandbox staged target `{display}` must be an empty directory")
+    })?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || fs::read_dir(path)?.next().is_some()
+    {
+        anyhow::bail!("sandbox staged target `{display}` must be an empty directory");
+    }
+    Ok(())
+}
+
+fn require_same_regular_file(
+    left: &Path,
+    right: &Path,
+    old: &str,
+    new: &str,
+) -> anyhow::Result<()> {
+    require_regular_file(left, old)?;
+    require_regular_file(right, new)?;
+    #[cfg(unix)]
+    {
+        let left = fs::metadata(left)?;
+        let right = fs::metadata(right)?;
+        if (left.dev(), left.ino()) != (right.dev(), right.ino()) {
+            anyhow::bail!("sandbox staged hardlink targets must be aliases");
+        }
+    }
+    Ok(())
 }
 
 #[expect(
@@ -715,11 +1156,12 @@ fn run_sandboxed_command(
     network: SandboxNetworkPolicy,
     timeout: Duration,
     stream_events: bool,
+    allow_direct_nested: bool,
 ) -> anyhow::Result<SandboxCommandResult> {
     let temp_dir = sandbox_temp_dir(writable_paths);
     #[cfg(not(target_os = "macos"))]
     let _ = allow_macos_identity_and_trust_services;
-    if allow_direct_nested_sandbox_run() {
+    if allow_direct_nested && allow_direct_nested_sandbox_run() {
         let mut command = direct_shell_command(command, cwd);
         apply_sandbox_temp_env(&mut command, temp_dir.as_deref());
         return run_command_with_timeout(command, timeout, stream_events);
@@ -774,6 +1216,26 @@ fn run_sandboxed_command(
         );
         anyhow::bail!("stateful sandbox run is only supported on macOS and Linux");
     }
+}
+
+pub(crate) fn run_private_sandbox_command(
+    command: &str,
+    cwd: &Path,
+    writable_paths: &[SandboxWritablePath],
+    timeout: Duration,
+) -> anyhow::Result<SandboxCommandResult> {
+    run_sandboxed_command(
+        command,
+        cwd,
+        writable_paths,
+        &[],
+        false,
+        false,
+        SandboxNetworkPolicy::Disabled,
+        timeout,
+        false,
+        false,
+    )
 }
 
 #[expect(
@@ -847,46 +1309,6 @@ fn run_sandboxed_git_command(
     }
 }
 
-fn run_sandboxed_github_pr_command(
-    words: &[String],
-    cwd: &Path,
-    writable_paths: &[SandboxWritablePath],
-    temp_dir: &Path,
-    network: SandboxNetworkPolicy,
-    timeout: Duration,
-    stream_events: bool,
-) -> anyhow::Result<SandboxCommandResult> {
-    if allow_direct_nested_sandbox_run() {
-        let mut command = direct_github_pr_command(words, cwd);
-        apply_github_pr_profile_env(&mut command, temp_dir);
-        return run_command_with_timeout(command, timeout, stream_events);
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        run_command_with_timeout(
-            seatbelt_github_pr_command(words, cwd, writable_paths, temp_dir, network),
-            timeout,
-            stream_events,
-        )
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        run_command_with_timeout(
-            bubblewrap_github_pr_command(words, cwd, writable_paths, temp_dir, network),
-            timeout,
-            stream_events,
-        )
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        let _ = (words, cwd, writable_paths, temp_dir, network, timeout);
-        anyhow::bail!("stateful sandbox run is only supported on macOS and Linux");
-    }
-}
-
 fn allow_direct_nested_sandbox_run() -> bool {
     std::env::var_os(STATEFUL_SANDBOX_RUN_ACTIVE_ENV).is_some()
         && matches!(
@@ -907,362 +1329,6 @@ fn direct_git_command(words: &[String], cwd: &Path) -> Command {
     let mut direct = Command::new("git");
     direct.args(&words[1..]).current_dir(cwd);
     direct
-}
-
-fn direct_github_pr_command(words: &[String], cwd: &Path) -> Command {
-    let mut direct = Command::new("gh");
-    direct.args(&words[1..]).current_dir(cwd);
-    direct
-}
-
-fn prepare_external_sandbox_scope(
-    repo_root: &Path,
-    write_targets: &[String],
-    create_targets: &[String],
-    write_dirs: &[String],
-    connect_sockets: &[String],
-) -> anyhow::Result<PreparedExternalSandboxScope> {
-    let canonical_repo = repo_root.canonicalize().map_err(|error| {
-        anyhow::anyhow!("stateful sandbox external repo root must exist: {error}")
-    })?;
-    let (repo_write_targets, write_target_paths) = split_external_sandbox_targets(
-        &canonical_repo,
-        "write target",
-        write_targets,
-        ExternalSandboxTargetKind::ExistingFile,
-    )?;
-    let (repo_create_targets, create_target_paths) = split_external_sandbox_targets(
-        &canonical_repo,
-        "create target",
-        create_targets,
-        ExternalSandboxTargetKind::CreatableFile,
-    )?;
-    let (repo_write_dirs, write_dir_paths) = split_external_sandbox_targets(
-        &canonical_repo,
-        "write dir",
-        write_dirs,
-        ExternalSandboxTargetKind::ExistingDirectory,
-    )?;
-    let connect_socket_paths = paths_from_strings(connect_sockets);
-
-    ensure_external_targets_outside_repo(
-        &canonical_repo,
-        "connect socket",
-        &connect_socket_paths,
-        ExternalSandboxTargetKind::ExistingUnixSocket,
-    )?;
-
-    let writable_paths = prepare_external_writable_paths(
-        &write_target_paths,
-        &create_target_paths,
-        &write_dir_paths,
-    )?;
-    let connect_sockets = prepare_external_connect_sockets(&connect_socket_paths)?;
-    let allowed_write_targets = write_target_paths
-        .iter()
-        .chain(create_target_paths.iter())
-        .map(|path| path.to_string_lossy().into_owned())
-        .chain(
-            write_dir_paths
-                .iter()
-                .map(|path| sandbox_write_dir_display_path(&path.to_string_lossy())),
-        )
-        .collect();
-
-    Ok(PreparedExternalSandboxScope {
-        writable_paths,
-        connect_sockets,
-        allowed_write_targets,
-        repo_write_targets,
-        repo_create_targets,
-        repo_write_dirs,
-    })
-}
-
-fn split_external_sandbox_targets(
-    repo_root: &Path,
-    label: &str,
-    paths: &[String],
-    kind: ExternalSandboxTargetKind,
-) -> anyhow::Result<(Vec<String>, Vec<PathBuf>)> {
-    let mut repo_targets = Vec::new();
-    let mut external_targets = Vec::new();
-    for path in paths {
-        if Path::new(path).is_absolute() {
-            let external_path = PathBuf::from(path);
-            let normalized = external_target_resolved_path(label, &external_path, kind)?;
-            if normalized.starts_with(repo_root) {
-                anyhow::bail!(
-                    "stateful sandbox external {label} `{}` resolves inside the repo; use a repo-relative target so Stateful authorization can apply",
-                    external_path.display()
-                );
-            }
-            external_targets.push(external_path);
-        } else {
-            repo_targets.push(path.clone());
-        }
-    }
-
-    Ok((repo_targets, external_targets))
-}
-
-fn ensure_external_targets_outside_repo(
-    repo_root: &Path,
-    label: &str,
-    paths: &[PathBuf],
-    kind: ExternalSandboxTargetKind,
-) -> anyhow::Result<()> {
-    for path in paths {
-        let normalized = external_target_resolved_path(label, path, kind)?;
-        if normalized.starts_with(repo_root) {
-            anyhow::bail!(
-                "stateful sandbox external {label} `{}` resolves inside the repo; targets must be outside the repo",
-                path.display()
-            );
-        }
-    }
-    Ok(())
-}
-
-fn external_target_resolved_path(
-    label: &str,
-    path: &Path,
-    kind: ExternalSandboxTargetKind,
-) -> anyhow::Result<PathBuf> {
-    match kind {
-        ExternalSandboxTargetKind::ExistingFile
-        | ExternalSandboxTargetKind::ExistingDirectory
-        | ExternalSandboxTargetKind::ExistingUnixSocket => path.canonicalize().map_err(|error| {
-            anyhow::anyhow!(
-                "stateful sandbox external {label} `{}` must exist: {error}",
-                path.display()
-            )
-        }),
-        ExternalSandboxTargetKind::CreatableFile => {
-            let Some(file_name) = path.file_name() else {
-                anyhow::bail!(
-                    "stateful sandbox external {label} `{}` must name a file",
-                    path.display()
-                );
-            };
-            let Some(parent) = path.parent() else {
-                anyhow::bail!(
-                    "stateful sandbox external {label} `{}` has no parent directory",
-                    path.display()
-                );
-            };
-            let canonical_parent = parent.canonicalize().map_err(|error| {
-                anyhow::anyhow!(
-                    "stateful sandbox external {label} `{}` parent must exist: {error}",
-                    path.display()
-                )
-            })?;
-            Ok(canonical_parent.join(file_name))
-        }
-    }
-}
-
-fn paths_from_strings(paths: &[String]) -> Vec<PathBuf> {
-    paths.iter().map(PathBuf::from).collect()
-}
-
-fn prepare_external_writable_paths(
-    write_targets: &[PathBuf],
-    create_targets: &[PathBuf],
-    write_dirs: &[PathBuf],
-) -> anyhow::Result<Vec<SandboxWritablePath>> {
-    let create_set = create_targets.iter().collect::<BTreeSet<_>>();
-
-    for path in create_targets {
-        ensure_external_file_target(path, true).map_err(|error| {
-            anyhow::anyhow!(
-                "stateful sandbox external create target `{}` is unsafe: {error}",
-                path.display()
-            )
-        })?;
-    }
-
-    for path in write_targets {
-        ensure_external_file_target(path, false).map_err(|error| {
-            anyhow::anyhow!(
-                "stateful sandbox external write target `{}` is unsafe: {error}",
-                path.display()
-            )
-        })?;
-        if !path.exists() && !create_set.contains(path) {
-            anyhow::bail!(
-                "stateful sandbox external write target `{}` must already exist or be listed in create targets",
-                path.display()
-            );
-        }
-    }
-
-    for path in write_dirs {
-        ensure_external_dir_target(path).map_err(|error| {
-            anyhow::anyhow!(
-                "stateful sandbox external write dir `{}` is unsafe: {error}",
-                path.display()
-            )
-        })?;
-    }
-
-    for path in create_targets {
-        let Some(parent) = path.parent() else {
-            anyhow::bail!(
-                "stateful sandbox external create target `{}` has no parent directory",
-                path.display()
-            );
-        };
-        if !parent.is_dir() {
-            anyhow::bail!(
-                "stateful sandbox external create target parent `{}` is not a directory",
-                parent.display()
-            );
-        }
-        if !path.exists() {
-            fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)?;
-        }
-    }
-
-    let mut seen = BTreeSet::new();
-    let mut writable_paths = Vec::new();
-    for path in write_targets.iter().chain(create_targets.iter()) {
-        let canonical = path.canonicalize()?;
-        if seen.insert(canonical.clone()) {
-            writable_paths.push(SandboxWritablePath::file(canonical));
-        }
-    }
-    for path in write_dirs {
-        let canonical = path.canonicalize()?;
-        if seen.insert(canonical.clone()) {
-            writable_paths.push(SandboxWritablePath::directory(canonical));
-        }
-    }
-
-    Ok(writable_paths)
-}
-
-fn prepare_external_connect_sockets(connect_sockets: &[PathBuf]) -> anyhow::Result<Vec<PathBuf>> {
-    let mut seen = BTreeSet::new();
-    let mut normalized = Vec::new();
-    for socket_path in connect_sockets {
-        ensure_external_socket_target(socket_path).map_err(|error| {
-            anyhow::anyhow!(
-                "stateful sandbox external connect socket `{}` is unsafe: {error}",
-                socket_path.display()
-            )
-        })?;
-        let canonical = socket_path.canonicalize()?;
-        if seen.insert(canonical.clone()) {
-            normalized.push(canonical);
-        }
-    }
-
-    Ok(normalized)
-}
-
-fn ensure_external_socket_target(path: &Path) -> anyhow::Result<()> {
-    if !path.is_absolute() {
-        anyhow::bail!(
-            "stateful sandbox external connect socket targets must be normalized absolute paths"
-        );
-    }
-    ensure_no_symlinked_existing_components(path)?;
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() {
-        anyhow::bail!("stateful sandbox external refuses symlink socket targets");
-    }
-    #[cfg(unix)]
-    {
-        if !metadata.file_type().is_socket() {
-            anyhow::bail!("stateful sandbox external connect socket target must be a Unix socket");
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = metadata;
-        anyhow::bail!("stateful sandbox external connect socket is only supported on Unix");
-    }
-
-    Ok(())
-}
-
-fn normalize_sandbox_target_paths(field: &str, paths: &[String]) -> anyhow::Result<Vec<String>> {
-    let mut seen = BTreeSet::new();
-    let mut normalized = Vec::new();
-    for path in paths {
-        let path = normalize_sandbox_target_path(field, path)?;
-        if seen.insert(path.clone()) {
-            normalized.push(path);
-        }
-    }
-
-    Ok(normalized)
-}
-
-fn normalize_external_optionless_paths(
-    field: &str,
-    paths: &[String],
-) -> anyhow::Result<Vec<String>> {
-    if !paths.is_empty() {
-        anyhow::bail!("stateful sandbox run --{field} is supported only with --fs external");
-    }
-    Ok(Vec::new())
-}
-
-fn normalize_external_sandbox_write_paths(
-    field: &str,
-    paths: &[String],
-) -> anyhow::Result<Vec<String>> {
-    let mut seen = BTreeSet::new();
-    let mut normalized = Vec::new();
-    for path in paths {
-        let trimmed = path.trim();
-        let path = if Path::new(trimmed).is_absolute() {
-            normalize_external_sandbox_target_path(field, path)?
-        } else {
-            normalize_sandbox_target_path(field, path)?
-        };
-        if seen.insert(path.clone()) {
-            normalized.push(path);
-        }
-    }
-
-    Ok(normalized)
-}
-
-fn normalize_external_sandbox_target_paths(
-    field: &str,
-    paths: &[String],
-) -> anyhow::Result<Vec<String>> {
-    let mut seen = BTreeSet::new();
-    let mut normalized = Vec::new();
-    for path in paths {
-        let path = normalize_external_sandbox_target_path(field, path)?;
-        if seen.insert(path.clone()) {
-            normalized.push(path);
-        }
-    }
-
-    Ok(normalized)
-}
-
-fn normalize_external_sandbox_target_path(field: &str, path: &str) -> anyhow::Result<String> {
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        anyhow::bail!("stateful sandbox external {field} entries must not be empty");
-    }
-    if trimmed.chars().any(char::is_control) {
-        anyhow::bail!("stateful sandbox external paths must not contain control characters");
-    }
-    if !Path::new(trimmed).is_absolute() {
-        anyhow::bail!("stateful sandbox external {field} entries must be absolute paths");
-    }
-
-    Ok(trimmed.to_string())
 }
 
 pub(crate) fn normalize_sandbox_target_path(field: &str, path: &str) -> anyhow::Result<String> {
@@ -1290,6 +1356,9 @@ pub(crate) fn normalize_sandbox_target_path(field: &str, path: &str) -> anyhow::
         if is_git_internal_segment(segment) {
             anyhow::bail!("stateful sandbox run refuses Git internals");
         }
+        if segment == ".stateful" {
+            anyhow::bail!("stateful sandbox run refuses its private staging directory");
+        }
         if segment.chars().any(char::is_control) {
             anyhow::bail!("stateful sandbox run paths must not contain control characters");
         }
@@ -1300,142 +1369,7 @@ pub(crate) fn normalize_sandbox_target_path(field: &str, path: &str) -> anyhow::
         anyhow::bail!("stateful sandbox run {field} entries must not be empty");
     }
 
-    Ok(normalize_relative_path(segments.join("/")))
-}
-
-fn ensure_repo_file_target(repo_root: &Path, relative_path: &str) -> anyhow::Result<()> {
-    let canonical_repo = repo_root
-        .canonicalize()
-        .unwrap_or_else(|_| repo_root.to_path_buf());
-    let target = repo_root.join(relative_path);
-    let Some(parent) = Path::new(relative_path).parent() else {
-        anyhow::bail!("stateful sandbox run target has no parent directory");
-    };
-
-    let mut cursor = repo_root.to_path_buf();
-    for component in parent.components() {
-        cursor.push(component);
-        if let Ok(metadata) = fs::symlink_metadata(&cursor) {
-            if metadata.file_type().is_symlink() {
-                anyhow::bail!("stateful sandbox run refuses symlinked parent directories");
-            }
-            if !metadata.is_dir() {
-                anyhow::bail!("stateful sandbox run parent path is not a directory");
-            }
-        }
-    }
-
-    if let Ok(metadata) = fs::symlink_metadata(&target) {
-        if metadata.file_type().is_symlink() {
-            anyhow::bail!("stateful sandbox run refuses symlink file targets");
-        }
-        if metadata.is_dir() {
-            anyhow::bail!("stateful sandbox run target is a directory");
-        }
-    }
-
-    if let Some(parent) = target.parent()
-        && parent.exists()
-    {
-        let canonical_parent = parent.canonicalize()?;
-        if !canonical_parent.starts_with(canonical_repo) {
-            anyhow::bail!("stateful sandbox run parent path escapes the repo");
-        }
-    }
-
-    Ok(())
-}
-
-pub(crate) fn ensure_repo_dir_target(repo_root: &Path, relative_path: &str) -> anyhow::Result<()> {
-    let canonical_repo = repo_root
-        .canonicalize()
-        .unwrap_or_else(|_| repo_root.to_path_buf());
-    let target = repo_root.join(relative_path);
-
-    let mut cursor = repo_root.to_path_buf();
-    for component in Path::new(relative_path).components() {
-        cursor.push(component);
-        if let Ok(metadata) = fs::symlink_metadata(&cursor) {
-            if metadata.file_type().is_symlink() {
-                anyhow::bail!("stateful sandbox run refuses symlinked directory targets");
-            }
-            if !metadata.is_dir() {
-                anyhow::bail!("stateful sandbox run directory target path is not a directory");
-            }
-        }
-    }
-
-    if let Some(parent) = target.parent()
-        && parent.exists()
-    {
-        let canonical_parent = parent.canonicalize()?;
-        if !canonical_parent.starts_with(canonical_repo) {
-            anyhow::bail!("stateful sandbox run directory target escapes the repo");
-        }
-    }
-
-    Ok(())
-}
-
-fn ensure_external_file_target(path: &Path, allow_missing_file: bool) -> anyhow::Result<()> {
-    if !path.is_absolute() {
-        anyhow::bail!("stateful sandbox external targets must be normalized absolute paths");
-    }
-    ensure_no_symlinked_existing_components(path)?;
-    let Some(parent) = path.parent() else {
-        anyhow::bail!("stateful sandbox external target has no parent directory");
-    };
-    if !parent.is_dir() {
-        anyhow::bail!("stateful sandbox external target parent is not a directory");
-    }
-
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() {
-                anyhow::bail!("stateful sandbox external refuses symlink file targets");
-            }
-            if metadata.is_dir() {
-                anyhow::bail!("stateful sandbox external file target is a directory");
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound && allow_missing_file => {}
-        Err(error) => return Err(error.into()),
-    }
-
-    Ok(())
-}
-
-fn ensure_external_dir_target(path: &Path) -> anyhow::Result<()> {
-    if !path.is_absolute() {
-        anyhow::bail!("stateful sandbox external targets must be normalized absolute paths");
-    }
-    ensure_no_symlinked_existing_components(path)?;
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() {
-        anyhow::bail!("stateful sandbox external refuses symlink directory targets");
-    }
-    if !metadata.is_dir() {
-        anyhow::bail!("stateful sandbox external directory target is not a directory");
-    }
-
-    Ok(())
-}
-
-fn ensure_no_symlinked_existing_components(path: &Path) -> anyhow::Result<()> {
-    let mut cursor = PathBuf::new();
-    for component in path.components() {
-        cursor.push(component.as_os_str());
-        match fs::symlink_metadata(&cursor) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                anyhow::bail!("stateful sandbox external refuses symlinked target components");
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
-            Err(error) => return Err(error.into()),
-        }
-    }
-
-    Ok(())
+    Ok(segments.join("/"))
 }
 
 pub(crate) fn resolve_sandbox_cwd(repo_root: &Path) -> anyhow::Result<PathBuf> {
@@ -1445,275 +1379,7 @@ pub(crate) fn resolve_sandbox_cwd(repo_root: &Path) -> anyhow::Result<PathBuf> {
     if !cwd.is_dir() {
         anyhow::bail!("stateful sandbox run cwd must be a directory");
     }
-
     Ok(cwd)
-}
-
-fn prepare_sandbox_writable_paths(
-    repo_root: &Path,
-    write_targets: &[String],
-    create_targets: &[String],
-    write_dirs: &[String],
-) -> anyhow::Result<Vec<SandboxWritablePath>> {
-    let create_set = create_targets
-        .iter()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-
-    for path in create_targets {
-        ensure_repo_file_target(repo_root, path).map_err(|error| {
-            anyhow::anyhow!("stateful sandbox run create target `{path}` is unsafe: {error}")
-        })?;
-    }
-
-    for path in write_targets {
-        ensure_repo_file_target(repo_root, path).map_err(|error| {
-            anyhow::anyhow!("stateful sandbox run write target `{path}` is unsafe: {error}")
-        })?;
-        let target = repo_root.join(path);
-        if !target.exists() && !create_set.contains(path.as_str()) {
-            anyhow::bail!(
-                "stateful sandbox run write target `{path}` must already exist or be listed in create_targets"
-            );
-        }
-    }
-
-    for path in write_dirs {
-        ensure_repo_dir_target(repo_root, path).map_err(|error| {
-            anyhow::anyhow!("stateful sandbox run write dir `{path}` is unsafe: {error}")
-        })?;
-    }
-
-    for path in write_dirs {
-        let target = repo_root.join(path);
-        fs::create_dir_all(&target)?;
-        fs::create_dir_all(target.join(".stateful-tmp"))?;
-    }
-
-    for path in create_targets {
-        let target = repo_root.join(path);
-        let Some(parent) = target.parent() else {
-            anyhow::bail!("stateful sandbox run create target `{path}` has no parent directory");
-        };
-        fs::create_dir_all(parent)?;
-        if !target.exists() {
-            fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&target)?;
-        }
-    }
-
-    let mut seen = BTreeSet::new();
-    let mut writable_paths = Vec::new();
-    for path in write_targets.iter().chain(create_targets.iter()) {
-        if !seen.insert(path.clone()) {
-            continue;
-        }
-        let canonical = repo_root.join(path).canonicalize().map_err(|error| {
-            anyhow::anyhow!("stateful sandbox run target `{path}` must exist: {error}")
-        })?;
-        writable_paths.push(SandboxWritablePath::file(canonical));
-    }
-
-    for path in write_dirs {
-        let key = format!("{path}/");
-        if !seen.insert(key) {
-            continue;
-        }
-        let canonical = repo_root.join(path).canonicalize().map_err(|error| {
-            anyhow::anyhow!("stateful sandbox run write dir `{path}` must exist: {error}")
-        })?;
-        writable_paths.push(SandboxWritablePath::directory(canonical));
-    }
-
-    Ok(writable_paths)
-}
-
-fn prepare_build_profile_writable_paths(
-    agent_id: &str,
-    scratch_purpose: &str,
-) -> anyhow::Result<(String, Vec<SandboxWritablePath>)> {
-    ensure_build_scratch_purpose_target(scratch_purpose)?;
-
-    let session_fragment = sandbox_tmp_fragment(agent_id);
-    let scratch_root = PathBuf::from(SANDBOX_TMP_ROOT);
-    let scratch_relative = PathBuf::from(&session_fragment).join(scratch_purpose);
-    let scratch_dir = scratch_root.join(&scratch_relative);
-
-    fs::create_dir_all(&scratch_root)?;
-    ensure_build_scratch_components_are_not_symlinks(&scratch_root, Path::new(""))?;
-    ensure_build_scratch_components_are_not_symlinks(&scratch_root, &scratch_relative)?;
-
-    fs::create_dir_all(&scratch_dir)?;
-    fs::create_dir_all(scratch_dir.join(".stateful-tmp"))?;
-    ensure_build_scratch_components_are_not_symlinks(&scratch_root, &scratch_relative)?;
-
-    let canonical_root = scratch_root.canonicalize().map_err(|error| {
-        anyhow::anyhow!(
-            "stateful sandbox build scratch root `{SANDBOX_TMP_ROOT}` must exist: {error}"
-        )
-    })?;
-    let canonical_scratch = scratch_dir.canonicalize().map_err(|error| {
-        anyhow::anyhow!(
-            "stateful sandbox build scratch dir `{}` must exist: {error}",
-            scratch_dir.display()
-        )
-    })?;
-    if !canonical_scratch.starts_with(&canonical_root) {
-        anyhow::bail!(
-            "stateful sandbox build scratch dir `{}` escapes `{SANDBOX_TMP_ROOT}`",
-            scratch_dir.display()
-        );
-    }
-
-    let mut writable_paths = vec![SandboxWritablePath::directory(scratch_dir.clone())];
-    if canonical_scratch != scratch_dir {
-        writable_paths.push(SandboxWritablePath::directory(canonical_scratch));
-    }
-
-    Ok((scratch_dir.to_string_lossy().into_owned(), writable_paths))
-}
-
-fn ensure_build_scratch_components_are_not_symlinks(
-    scratch_root: &Path,
-    relative_path: &Path,
-) -> anyhow::Result<()> {
-    if let Ok(metadata) = fs::symlink_metadata(scratch_root) {
-        if metadata.file_type().is_symlink() {
-            anyhow::bail!(
-                "stateful sandbox build scratch root `{}` must not be a symlink",
-                scratch_root.display()
-            );
-        }
-    }
-
-    let mut cursor = scratch_root.to_path_buf();
-    for component in relative_path.components() {
-        cursor.push(component.as_os_str());
-        match fs::symlink_metadata(&cursor) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                anyhow::bail!(
-                    "stateful sandbox build scratch path `{}` must not contain symlinked components",
-                    cursor.display()
-                );
-            }
-            Ok(metadata) if !metadata.is_dir() => {
-                anyhow::bail!(
-                    "stateful sandbox build scratch path `{}` must be a directory",
-                    cursor.display()
-                );
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
-            Err(error) => return Err(error.into()),
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_profile_purpose(fs: SandboxFsProfile, purpose: Option<&str>) -> anyhow::Result<()> {
-    let purpose = purpose.map(str::trim);
-    match (fs, purpose) {
-        (SandboxFsProfile::External, Some(value)) if !value.is_empty() => Ok(()),
-        (SandboxFsProfile::External, _) => {
-            anyhow::bail!("external sandbox profile requires --purpose")
-        }
-        (_, Some(_)) => anyhow::bail!("--purpose is supported only with --fs external"),
-        (_, None) => Ok(()),
-    }
-}
-
-fn validate_profile_targets(
-    fs: SandboxFsProfile,
-    write_targets: &[String],
-    create_targets: &[String],
-    write_dirs: &[String],
-    connect_sockets: &[String],
-    allow_signal: bool,
-) -> anyhow::Result<()> {
-    match fs {
-        SandboxFsProfile::ReadOnly => {
-            if !write_targets.is_empty()
-                || !create_targets.is_empty()
-                || !write_dirs.is_empty()
-                || !connect_sockets.is_empty()
-                || allow_signal
-            {
-                anyhow::bail!(
-                    "read-only profile rejects write targets, create targets, write dirs, connect sockets, and signal scope"
-                );
-            }
-        }
-        SandboxFsProfile::WriteTargets => {
-            if !connect_sockets.is_empty() || allow_signal {
-                anyhow::bail!("write-targets profile rejects connect sockets and signal scope");
-            }
-            if write_targets.is_empty() && create_targets.is_empty() && write_dirs.is_empty() {
-                anyhow::bail!(
-                    "write-targets profile requires at least one write target, create target, or write dir"
-                );
-            }
-        }
-        SandboxFsProfile::External => {}
-        SandboxFsProfile::Build => {
-            if !write_targets.is_empty()
-                || !create_targets.is_empty()
-                || !connect_sockets.is_empty()
-                || allow_signal
-            {
-                anyhow::bail!(
-                    "build profile rejects explicit write targets, create targets, connect sockets, and signal scope"
-                );
-            }
-            if write_dirs.len() != 1 {
-                anyhow::bail!(
-                    "build profile requires exactly one scratch purpose with --write-dir <scratch-purpose>"
-                );
-            }
-            ensure_build_scratch_purpose_target(&write_dirs[0])?;
-        }
-        SandboxFsProfile::Git => {
-            if !write_targets.is_empty()
-                || !create_targets.is_empty()
-                || !write_dirs.is_empty()
-                || !connect_sockets.is_empty()
-                || allow_signal
-            {
-                anyhow::bail!(
-                    "git profile manages repo writes automatically and rejects explicit write targets, create targets, write dirs, connect sockets, and signal scope"
-                );
-            }
-        }
-        SandboxFsProfile::GithubPr => {
-            if !write_targets.is_empty()
-                || !create_targets.is_empty()
-                || !write_dirs.is_empty()
-                || !connect_sockets.is_empty()
-                || allow_signal
-            {
-                anyhow::bail!(
-                    "github-pr profile manages transient PR state automatically and rejects explicit write targets, create targets, write dirs, connect sockets, and signal scope"
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_profile_network_policy(
-    fs: SandboxFsProfile,
-    network: SandboxNetworkPolicy,
-) -> anyhow::Result<()> {
-    if fs == SandboxFsProfile::ReadOnly && network == SandboxNetworkPolicy::Enabled {
-        anyhow::bail!("read-only sandbox run requires --network disabled");
-    }
-    if fs == SandboxFsProfile::GithubPr && network != SandboxNetworkPolicy::Enabled {
-        anyhow::bail!("github-pr sandbox run requires --network enabled");
-    }
-
-    Ok(())
 }
 
 fn validate_sandbox_run_process_inspection(command: &str) -> anyhow::Result<()> {
@@ -2183,77 +1849,6 @@ enum ShellSegmentQuoteState {
     Double,
 }
 
-fn sandbox_fs_profile_name(fs: SandboxFsProfile) -> &'static str {
-    match fs {
-        SandboxFsProfile::ReadOnly => "read-only",
-        SandboxFsProfile::WriteTargets => "write-targets",
-        SandboxFsProfile::External => "external",
-        SandboxFsProfile::Build => "build",
-        SandboxFsProfile::Git => "git",
-        SandboxFsProfile::GithubPr => "github-pr",
-    }
-}
-
-fn sandbox_profile_requires_runtime(fs: SandboxFsProfile) -> bool {
-    !matches!(fs, SandboxFsProfile::ReadOnly | SandboxFsProfile::External)
-}
-
-fn git_profile_writable_paths(repo_root: &Path) -> Vec<SandboxWritablePath> {
-    vec![
-        SandboxWritablePath::directory(git_profile_private_dir(repo_root)),
-        SandboxWritablePath::directory(repo_root.to_path_buf()),
-    ]
-}
-
-fn prepare_git_profile_writable_paths(
-    repo_root: &Path,
-) -> anyhow::Result<Vec<SandboxWritablePath>> {
-    let writable_paths = git_profile_writable_paths(repo_root);
-    let temp_dir = sandbox_temp_dir(&writable_paths)
-        .ok_or_else(|| anyhow::anyhow!("git profile requires a temp directory"))?;
-    fs::create_dir_all(&temp_dir)?;
-    fs::create_dir_all(git_profile_hooks_dir(repo_root))?;
-    Ok(writable_paths)
-}
-
-fn github_pr_profile_private_dir(repo_root: &Path) -> PathBuf {
-    let dot_git = repo_root.join(".git");
-    if dot_git.is_dir() || !dot_git.exists() {
-        dot_git.join("stateful").join("github-pr")
-    } else {
-        repo_root.join(".stateful-git").join("github-pr")
-    }
-}
-
-fn github_pr_profile_writable_paths(repo_root: &Path) -> Vec<SandboxWritablePath> {
-    vec![SandboxWritablePath::directory(
-        github_pr_profile_private_dir(repo_root),
-    )]
-}
-
-fn prepare_github_pr_profile_writable_paths(
-    repo_root: &Path,
-) -> anyhow::Result<Vec<SandboxWritablePath>> {
-    let writable_paths = github_pr_profile_writable_paths(repo_root);
-    let temp_dir = sandbox_temp_dir(&writable_paths)
-        .ok_or_else(|| anyhow::anyhow!("github-pr profile requires a temp directory"))?;
-    fs::create_dir_all(&temp_dir)?;
-    Ok(writable_paths)
-}
-
-fn git_profile_private_dir(repo_root: &Path) -> PathBuf {
-    let dot_git = repo_root.join(".git");
-    if dot_git.is_dir() || !dot_git.exists() {
-        dot_git.join("stateful")
-    } else {
-        repo_root.join(".stateful-git")
-    }
-}
-
-fn git_profile_hooks_dir(repo_root: &Path) -> PathBuf {
-    git_profile_private_dir(repo_root).join("hooks-disabled")
-}
-
 fn git_profile_persistent_metadata_paths(repo_root: &Path) -> Vec<SandboxWritablePath> {
     let dot_git = repo_root.join(".git");
     if dot_git.exists() && !dot_git.is_dir() {
@@ -2279,105 +1874,16 @@ fn validate_git_profile_command(command: &str) -> anyhow::Result<Vec<String>> {
         .map_err(|reason| anyhow::anyhow!("git profile requires a single git command: {reason}"))
 }
 
-fn validate_github_pr_profile_command(command: &str) -> anyhow::Result<Vec<String>> {
-    parse_github_pr_profile_command(command).map_err(|reason| {
-        anyhow::anyhow!("github-pr profile requires a single gh pr command: {reason}")
-    })
-}
-
-pub(crate) fn parse_github_pr_profile_command(command: &str) -> Result<Vec<String>, String> {
-    reject_direct_profile_shell_syntax(command)
-        .map_err(|reason| format!("github-pr profile requires a single gh pr command: {reason}"))?;
-    let words = split_simple_command_words(command)
-        .map_err(|reason| format!("github-pr profile requires a single gh pr command: {reason}"))?;
-    validate_github_pr_profile_words(&words)?;
-    Ok(words)
-}
-
 pub(crate) fn parse_git_profile_command(command: &str) -> Result<Vec<String>, String> {
     reject_direct_profile_shell_syntax(command)
         .map_err(|reason| format!("git profile requires a single git command: {reason}"))?;
     let words = split_simple_command_words(command)
         .map_err(|reason| format!("git profile requires a single git command: {reason}"))?;
-    let words = coalesce_git_commit_message_flag(words);
     if words.first().is_none_or(|word| word != "git") {
         return Err("git profile requires a single git command".to_string());
     }
     validate_git_profile_words(&words)?;
     Ok(words)
-}
-
-fn coalesce_git_commit_message_flag(words: Vec<String>) -> Vec<String> {
-    if words.get(1).map(String::as_str) != Some("commit") {
-        return words;
-    }
-
-    // ponytail: unquoted `-m msg path` is ambiguous; use `--` before pathspecs.
-    let mut coalesced = Vec::with_capacity(words.len());
-    let mut index = 0;
-    while index < words.len() {
-        let word = &words[index];
-        coalesced.push(word.clone());
-        if matches!(word.as_str(), "-m" | "--message")
-            && words.get(index + 1).is_some()
-            && words
-                .get(index + 2)
-                .is_some_and(|next| !next.starts_with('-'))
-        {
-            index += 1;
-            let mut message = words[index].clone();
-            while words
-                .get(index + 1)
-                .is_some_and(|next| !next.starts_with('-'))
-            {
-                index += 1;
-                message.push(' ');
-                message.push_str(&words[index]);
-            }
-            coalesced.push(message);
-        }
-        index += 1;
-    }
-    coalesced
-}
-
-fn validate_github_pr_profile_words(words: &[String]) -> Result<(), String> {
-    if words.len() < 3 || words[0] != "gh" || words[1] != "pr" {
-        return Err("github-pr profile requires a single gh pr command".to_string());
-    }
-
-    let subcommand = words[2].as_str();
-    if !GITHUB_PR_PROFILE_ALLOWED_SUBCOMMANDS.contains(&subcommand) {
-        return Err(format!(
-            "github-pr profile does not allow gh pr subcommand `{subcommand}`"
-        ));
-    }
-
-    for word in &words[3..] {
-        if let Some(flag) = github_pr_profile_denied_flag(word) {
-            return Err(format!(
-                "github-pr profile does not allow interactive/browser flag `{flag}`"
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-fn github_pr_profile_denied_flag(word: &str) -> Option<String> {
-    let flag = word.split_once('=').map_or(word, |(flag, _)| flag);
-    if GITHUB_PR_PROFILE_DENIED_FLAGS.contains(&flag) {
-        return Some(flag.to_string());
-    }
-    if flag.starts_with("--") {
-        return None;
-    }
-
-    flag.strip_prefix('-')?.chars().find_map(|short| {
-        GITHUB_PR_PROFILE_DENIED_SHORT_FLAGS
-            .contains(&short)
-            .then(|| format!("-{short}"))
-    })
 }
 
 fn validate_git_profile_words(words: &[String]) -> Result<(), String> {
@@ -2414,7 +1920,7 @@ fn git_profile_subcommand(words: &[String]) -> Result<(usize, &str), String> {
             || word.starts_with("--namespace=")
             || word.starts_with("--exec-path=")
         {
-            return Err("git profile does not allow git path or exec overrides".to_string());
+            return Err("git profile does not allow git path or exec flags".to_string());
         }
         if word.starts_with('-') {
             index += 1;
@@ -2425,173 +1931,22 @@ fn git_profile_subcommand(words: &[String]) -> Result<(usize, &str), String> {
     Err("git profile requires an explicit git subcommand".to_string())
 }
 
-fn validate_git_profile_subcommand_args(subcommand: &str, args: &[String]) -> Result<(), String> {
-    if subcommand == "remote" {
-        return validate_git_profile_remote_args(args);
-    }
-
-    for arg in args {
-        match subcommand {
-            "branch" if is_git_profile_branch_config_persistence_arg(arg) => {
-                return Err("git profile does not allow branch config persistence".to_string());
-            }
-            "checkout" | "switch" if is_git_profile_tracking_arg(arg) => {
-                return Err(
-                    "git profile does not allow branch tracking config persistence".to_string(),
-                );
-            }
-            "grep"
-                if arg == "-O"
-                    || arg.starts_with("-O")
-                    || arg == "--open-files-in-pager"
-                    || arg.starts_with("--open-files-in-pager=") =>
-            {
-                return Err("git profile does not allow grep pager dispatch".to_string());
-            }
-            "archive" if arg == "--exec" || arg.starts_with("--exec=") => {
-                return Err("git profile does not allow archive --exec".to_string());
-            }
-            "fetch" | "pull" if arg == "--upload-pack" || arg.starts_with("--upload-pack=") => {
-                return Err("git profile does not allow upload-pack overrides".to_string());
-            }
-            "push"
-                if arg == "--receive-pack"
-                    || arg.starts_with("--receive-pack=")
-                    || arg == "--exec"
-                    || arg.starts_with("--exec=") =>
-            {
-                return Err("git profile does not allow receive-pack overrides".to_string());
-            }
-            "push" if is_git_profile_push_set_upstream_arg(arg) => {
-                return Err("git profile does not allow push upstream persistence".to_string());
-            }
-            "rebase" if arg == "--exec" || arg == "-x" || arg.starts_with("--exec=") => {
-                return Err("git profile does not allow rebase --exec".to_string());
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-fn is_git_profile_branch_config_persistence_arg(arg: &str) -> bool {
-    arg == "--set-upstream-to"
-        || arg.starts_with("--set-upstream-to=")
-        || arg == "--set-upstream"
-        || arg.starts_with("--set-upstream=")
-        || arg == "--unset-upstream"
-        || is_git_profile_tracking_arg(arg)
-        || is_git_profile_short_option(arg, 'u')
-}
-
-fn is_git_profile_tracking_arg(arg: &str) -> bool {
-    arg == "--track" || arg.starts_with("--track=") || is_git_profile_short_option(arg, 't')
-}
-
-fn is_git_profile_push_set_upstream_arg(arg: &str) -> bool {
-    arg == "--set-upstream"
-        || arg.starts_with("--set-upstream=")
-        || is_git_profile_short_option(arg, 'u')
-}
-
-fn is_git_profile_short_option(arg: &str, short: char) -> bool {
-    let Some(rest) = arg.strip_prefix('-') else {
-        return false;
-    };
-    !rest.starts_with('-') && rest.starts_with(short)
-}
-
-fn validate_git_profile_remote_args(args: &[String]) -> Result<(), String> {
-    let mut index = 0;
-    while let Some(arg) = args.get(index) {
-        match arg.as_str() {
-            "-v" | "--verbose" => index += 1,
-            arg if arg.starts_with('-') => {
-                return Err(format!("git profile does not allow remote option `{arg}`"));
-            }
-            _ => break,
-        }
-    }
-
-    let Some(action) = args.get(index).map(String::as_str) else {
-        return Ok(());
-    };
-
-    match action {
-        "get-url" => validate_git_profile_remote_get_url_args(&args[index + 1..]),
-        "show" => validate_git_profile_remote_show_args(&args[index + 1..]),
-        "add" | "rename" | "remove" | "rm" | "set-branches" | "set-head" | "set-url" | "update"
-        | "prune" => Err("git profile does not allow remote metadata mutation".to_string()),
-        _ => Err(format!(
-            "git profile does not allow remote subcommand `{action}`"
-        )),
-    }
-}
-
-fn validate_git_profile_remote_get_url_args(args: &[String]) -> Result<(), String> {
-    for arg in args {
-        if arg == "--all" || arg == "--push" || !arg.starts_with('-') {
-            continue;
-        }
-        return Err(format!(
-            "git profile does not allow remote get-url option `{arg}`"
-        ));
-    }
-    Ok(())
-}
-
-fn validate_git_profile_remote_show_args(args: &[String]) -> Result<(), String> {
-    for arg in args {
-        if arg == "-n" || !arg.starts_with('-') {
-            continue;
-        }
-        return Err(format!(
-            "git profile does not allow remote show option `{arg}`"
-        ));
-    }
+fn validate_git_profile_subcommand_args(_subcommand: &str, _args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
 const GIT_PROFILE_ALLOWED_SUBCOMMANDS: &[&str] = &[
-    "add",
-    "am",
-    "apply",
-    "archive",
     "blame",
-    "branch",
     "cat-file",
-    "checkout",
-    "cherry-pick",
-    "clean",
-    "commit",
     "describe",
     "diff",
-    "fetch",
-    "grep",
     "log",
     "ls-files",
-    "merge",
-    "mv",
-    "pull",
-    "push",
-    "rebase",
-    "remote",
-    "reset",
-    "restore",
     "rev-list",
     "rev-parse",
-    "revert",
-    "rm",
     "show",
-    "stash",
     "status",
-    "switch",
-    "tag",
 ];
-
-const GITHUB_PR_PROFILE_ALLOWED_SUBCOMMANDS: &[&str] = &["create", "list", "status", "view"];
-const GITHUB_PR_PROFILE_DENIED_FLAGS: &[&str] = &["--editor", "--recover", "--web"];
-const GITHUB_PR_PROFILE_DENIED_SHORT_FLAGS: &[char] = &['w', 'e'];
 
 fn reject_direct_profile_shell_syntax(command: &str) -> Result<(), String> {
     let mut state = ShellQuoteState::None;
@@ -2641,75 +1996,6 @@ enum ShellQuoteState {
     Double,
 }
 
-fn ensure_build_scratch_purpose_target(relative_path: &str) -> anyhow::Result<()> {
-    if relative_path.is_empty() {
-        anyhow::bail!(
-            "build profile requires exactly one scratch purpose with --write-dir <scratch-purpose>"
-        );
-    }
-    if relative_path == "tmp"
-        || relative_path.starts_with("tmp/")
-        || relative_path.starts_with("tmp\\")
-    {
-        anyhow::bail!(
-            "build profile scratch dirs live under /tmp/stateful/<session>/<purpose>; use --write-dir <scratch-purpose>, not repo tmp paths"
-        );
-    }
-    if Path::new(relative_path).is_absolute()
-        || matches!(relative_path, "." | "..")
-        || relative_path.contains('/')
-        || relative_path.contains('\\')
-    {
-        anyhow::bail!(
-            "build profile scratch dirs live under /tmp/stateful/<session>/<purpose>; --write-dir must be one scratch purpose name, not a path"
-        );
-    }
-    Ok(())
-}
-
-fn sandbox_tmp_fragment(value: &str) -> String {
-    let fragment = value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
-                character
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_string();
-
-    if fragment.is_empty() || fragment == "." || fragment == ".." {
-        "session".to_string()
-    } else {
-        fragment
-    }
-}
-
-pub(crate) fn sandbox_write_dir_display_path(path: &str) -> String {
-    format!("{}/", path.trim_end_matches('/'))
-}
-
-pub(crate) fn enrich_sandbox_write_dir_denial(mut body: Value) -> Value {
-    let is_unsupported_action = body
-        .get("reason_code")
-        .and_then(Value::as_str)
-        .is_some_and(|reason_code| reason_code == "unsupported_action");
-
-    if is_unsupported_action {
-        body["message"] = Value::String(
-            "The running stateful server does not support sandbox write directories.".to_string(),
-        );
-        body["required_next_action"] = Value::String(
-            "Restart the stateful server with the newly built stateful binary, then retry the sandbox run.".to_string(),
-        );
-    }
-
-    body
-}
-
 pub(crate) fn sandbox_temp_dir(writable_paths: &[SandboxWritablePath]) -> Option<PathBuf> {
     writable_paths
         .iter()
@@ -2746,174 +2032,6 @@ pub(crate) fn apply_sandbox_temp_env(command: &mut Command, temp_dir: Option<&Pa
     if let Some(tmp_root) = temp_dir.parent() {
         command.env("CARGO_TARGET_DIR", tmp_root.join("target"));
     }
-}
-
-pub(crate) struct SandboxAuthorizeContext<'a> {
-    pub(crate) runtime: &'a ServerRuntime,
-    pub(crate) repo_root: &'a Path,
-    pub(crate) paths: &'a GlobalPaths,
-    pub(crate) agent_id: &'a str,
-    pub(crate) workspace_id: &'a str,
-    pub(crate) network: SandboxNetworkPolicy,
-    pub(crate) fs_profile: &'static str,
-    pub(crate) reservation_id: Option<&'a str>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SandboxLeaseReleaseContext {
-    agent_id: String,
-    workspace_id: String,
-    paths: Vec<String>,
-}
-
-pub(crate) fn authorize_sandbox_write(
-    context: &SandboxAuthorizeContext<'_>,
-    action: &str,
-    path: &str,
-) -> anyhow::Result<HttpResponse> {
-    let mut payload = serde_json::json!({
-        "action": action,
-        "path": path,
-        "purpose": sandbox_authorize_purpose(action, path),
-        "queue_on_conflict": true,
-        "fs_profile": context.fs_profile,
-        "network_policy": match context.network {
-            SandboxNetworkPolicy::Disabled => "disabled",
-            SandboxNetworkPolicy::Enabled => "enabled",
-        },
-    });
-    if action == "write_file"
-        && let Some(observation) = base_observation_for_sandbox_target(context.repo_root, path)
-    {
-        payload["base_observations"] = serde_json::json!([observation]);
-    }
-    if let Some(reservation_id) = context
-        .reservation_id
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-    {
-        payload["reservation_id"] = serde_json::json!(reservation_id);
-    }
-    let body = protocol_envelope(ProtocolEnvelopeArgs {
-        runtime: context.runtime,
-        request_id: uuid::Uuid::new_v4().to_string(),
-        agent_id: context.agent_id.to_string(),
-        workspace_id: context.workspace_id.to_string(),
-        identity: repo_identity_for_enabled_repo(context.paths, context.repo_root).ok(),
-        source_kind: "cli",
-        event: "sandbox_run",
-        source_ref: "stateful.sandbox.run",
-        source_tool_name: None,
-        payload,
-    });
-
-    post_json(context.runtime, "/v1/authorize", &body)
-}
-
-fn base_observation_for_sandbox_target(
-    repo_root: &Path,
-    relative_path: &str,
-) -> Option<serde_json::Value> {
-    let path = repo_root.join(relative_path);
-    match fs::read(&path) {
-        Ok(bytes) => Some(serde_json::json!({
-            "path": relative_path,
-            "exists": true,
-            "content_hash": sandbox_content_hash(&bytes),
-        })),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(serde_json::json!({
-            "path": relative_path,
-            "exists": false,
-            "content_hash": null,
-        })),
-        Err(_) => None,
-    }
-}
-
-fn sandbox_content_hash(bytes: &[u8]) -> String {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("fnv1a64:{hash:016x}")
-}
-
-fn release_sandbox_write_claims(runtime: &ServerRuntime, context: &SandboxLeaseReleaseContext) {
-    let mut paths = BTreeSet::new();
-    for path in &context.paths {
-        paths.insert(path);
-    }
-
-    for path in paths {
-        let body = serde_json::json!({
-            "agent_id": context.agent_id,
-            "workspace_id": context.workspace_id,
-            "path": path,
-        });
-        let Ok(response) = post_json(runtime, "/v1/claim/release", &body) else {
-            continue;
-        };
-        if !(200..300).contains(&response.status_code) {
-            continue;
-        }
-    }
-}
-
-fn sandbox_authorize_purpose(action: &str, path: &str) -> String {
-    match action {
-        "write_directory" => format!("Run sandbox command for write directory `{path}`."),
-        _ => format!("Run sandbox command for write target `{path}`."),
-    }
-}
-
-pub(crate) enum SandboxAuthorizeDecision {
-    Allow,
-    Deny(Value),
-}
-
-pub(crate) fn classify_sandbox_authorize_response(
-    path: &str,
-    response: HttpResponse,
-) -> anyhow::Result<SandboxAuthorizeDecision> {
-    if !(200..300).contains(&response.status_code) {
-        anyhow::bail!(
-            "stateful sandbox run authorize request for `{path}` failed with HTTP {}: {}",
-            response.status_code,
-            response.body
-        );
-    }
-
-    let body = serde_json::from_str::<Value>(&response.body).map_err(|error| {
-        anyhow::anyhow!(
-            "stateful sandbox run authorize response for `{path}` was not valid JSON: {error}"
-        )
-    })?;
-
-    match body.get("decision").and_then(Value::as_str) {
-        Some("allow") => Ok(SandboxAuthorizeDecision::Allow),
-        Some("deny") => Ok(SandboxAuthorizeDecision::Deny(body)),
-        Some(decision) => {
-            anyhow::bail!(
-                "stateful sandbox run authorize response for `{path}` returned unsupported decision `{decision}`"
-            );
-        }
-        None => {
-            anyhow::bail!("stateful sandbox run authorize response for `{path}` missing decision");
-        }
-    }
-}
-
-fn sandbox_authorization_denied_body(
-    allowed_write_targets: Vec<String>,
-    denied_write_targets: Vec<serde_json::Value>,
-) -> serde_json::Value {
-    serde_json::json!({
-        "status": "error",
-        "message": "stateful sandbox run target authorization denied",
-        "allowed_write_targets": allowed_write_targets,
-        "denied_write_targets": denied_write_targets,
-    })
 }
 
 fn is_git_internal_segment(segment: &str) -> bool {
@@ -2978,26 +2096,6 @@ fn seatbelt_git_command(
     sandbox
 }
 
-#[cfg(target_os = "macos")]
-fn seatbelt_github_pr_command(
-    words: &[String],
-    cwd: &Path,
-    writable_paths: &[SandboxWritablePath],
-    temp_dir: &Path,
-    network: SandboxNetworkPolicy,
-) -> Command {
-    let profile = seatbelt_github_pr_profile(writable_paths, network);
-    let mut sandbox = Command::new("/usr/bin/sandbox-exec");
-    sandbox
-        .arg("-p")
-        .arg(profile)
-        .arg("gh")
-        .args(&words[1..])
-        .current_dir(cwd);
-    apply_github_pr_profile_env(&mut sandbox, temp_dir);
-    sandbox
-}
-
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn seatbelt_git_profile(
     writable_paths: &[SandboxWritablePath],
@@ -3009,16 +2107,6 @@ fn seatbelt_git_profile(
         &mut profile,
         &git_profile_persistent_metadata_paths(repo_root),
     );
-    push_seatbelt_macos_identity_and_trust_services(&mut profile);
-    profile
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn seatbelt_github_pr_profile(
-    writable_paths: &[SandboxWritablePath],
-    network: SandboxNetworkPolicy,
-) -> String {
-    let mut profile = seatbelt_profile(writable_paths, network);
     push_seatbelt_macos_identity_and_trust_services(&mut profile);
     profile
 }
@@ -3145,24 +2233,6 @@ fn bubblewrap_git_command(
     let mut bwrap = Command::new("bwrap");
     bwrap.args(bubblewrap_git_args(words, cwd, writable_paths, network));
     apply_git_profile_env(&mut bwrap, temp_dir, hooks_dir, config);
-    bwrap
-}
-
-#[cfg(target_os = "linux")]
-fn bubblewrap_github_pr_command(
-    words: &[String],
-    cwd: &Path,
-    writable_paths: &[SandboxWritablePath],
-    temp_dir: &Path,
-    network: SandboxNetworkPolicy,
-) -> Command {
-    let mut bwrap = Command::new("bwrap");
-    let mut args = bubblewrap_base_args(cwd, writable_paths, network);
-    args.push(OsString::from("--"));
-    args.push(OsString::from("gh"));
-    args.extend(words.iter().skip(1).map(OsString::from));
-    bwrap.args(args);
-    apply_github_pr_profile_env(&mut bwrap, temp_dir);
     bwrap
 }
 
@@ -3383,36 +2453,6 @@ fn apply_git_profile_env(
             .env(format!("GIT_CONFIG_KEY_{index}"), key)
             .env(format!("GIT_CONFIG_VALUE_{index}"), value);
     }
-}
-
-fn apply_github_pr_profile_env(command: &mut Command, temp_dir: &Path) {
-    apply_sandbox_temp_env(command, Some(temp_dir));
-    remove_git_profile_env(command);
-    for key in [
-        "GH_PAGER",
-        "GH_EDITOR",
-        "VISUAL",
-        "EDITOR",
-        "GH_BROWSER",
-        "BROWSER",
-        "GH_FORCE_TTY",
-    ] {
-        command.env_remove(key);
-    }
-    for key in ["GH_TOKEN", "GITHUB_TOKEN"] {
-        if let Some(value) = std::env::var_os(key) {
-            command.env(key, value);
-        }
-    }
-    command
-        .env("GH_PROMPT_DISABLED", "1")
-        .env("GH_NO_UPDATE_NOTIFIER", "1")
-        .env("GH_NO_EXTENSION_UPDATE_NOTIFIER", "1")
-        .env("GH_SPINNER_DISABLED", "1")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_EDITOR", ":")
-        .env("GIT_PAGER", "cat")
-        .env("PAGER", "cat");
 }
 
 fn emit_sandbox_stream_event(stream: &str, bytes: &[u8]) {
@@ -3691,2153 +2731,159 @@ fn signal_sandbox_process_group(child: &std::process::Child, signal: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        fs,
-        path::{Path, PathBuf},
-        time::{Duration, Instant},
-    };
 
     #[test]
-    fn sandbox_agent_context_requires_explicit_agent_id_when_missing() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "stateful-sandbox-agent-id-required-test-{}",
-            std::process::id()
-        ));
-        if temp_root.exists() {
-            fs::remove_dir_all(&temp_root).expect("old temp root should remove");
-        }
-        fs::create_dir_all(&temp_root).expect("temp root should create");
-
-        let paths = GlobalPaths::new(temp_root.join("home"));
-        let runtime = ServerRuntime::new("http://127.0.0.1:9", "secret-token", "workspace-a", 42);
-        let error = agent_context_for_sandbox_profile(
-            &temp_root,
-            &paths,
-            &runtime,
-            None,
-            None,
-            "sandbox write-targets requires --agent-id",
-        )
-        .expect_err("missing agent id should fail");
-
-        assert!(
-            error
-                .to_string()
-                .contains("sandbox write-targets requires --agent-id"),
-            "unexpected error: {error}"
-        );
-        assert!(
-            !temp_root
-                .join(".stateful_core/runtime/session.json")
-                .exists()
-        );
-        assert!(!temp_root.join(".stateful_core/runtime/sessions").exists());
-
-        fs::remove_dir_all(&temp_root).expect("temp root should remove");
-    }
-
-    #[test]
-    fn sandbox_agent_context_uses_explicit_agent_identity() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "stateful-sandbox-agent-id-explicit-test-{}",
-            std::process::id()
-        ));
-        if temp_root.exists() {
-            fs::remove_dir_all(&temp_root).expect("old temp root should remove");
-        }
-        fs::create_dir_all(&temp_root).expect("temp root should create");
-
-        let paths = GlobalPaths::new(temp_root.join("home"));
-        let runtime = ServerRuntime::new("http://127.0.0.1:9", "secret-token", "workspace-a", 42);
-        let session = agent_context_for_sandbox_profile(
-            &temp_root,
-            &paths,
-            &runtime,
-            Some("agent-a"),
-            Some("workspace-b"),
-            "sandbox write-targets requires --agent-id",
-        )
-        .expect("explicit agent identity should resolve");
-
-        assert_eq!(session, AgentContext::new("agent-a", "workspace-b"));
-        assert!(
-            !temp_root
-                .join(".stateful_core/runtime/session.json")
-                .exists()
-        );
-        assert!(!temp_root.join(".stateful_core/runtime/sessions").exists());
-
-        fs::remove_dir_all(&temp_root).expect("temp root should remove");
-    }
-
-    #[test]
-    fn sandbox_run_cli_exit_code_maps_non_exited_results_to_one() {
-        assert_eq!(
-            sandbox_run_cli_exit_code(&sandbox_output("exited", Some(0))),
-            None
-        );
-        assert_eq!(
-            sandbox_run_cli_exit_code(&sandbox_output("exited", Some(7))),
-            Some(7)
-        );
-        assert_eq!(
-            sandbox_run_cli_exit_code(&sandbox_output("exited", None)),
-            Some(1)
-        );
-        assert_eq!(
-            sandbox_run_cli_exit_code(&sandbox_output("timed_out", Some(0))),
-            Some(1)
-        );
-        assert_eq!(
-            sandbox_run_cli_exit_code(&sandbox_output("timed_out", Some(9))),
-            Some(1)
-        );
-    }
-
-    #[test]
-    fn sandbox_target_uses_core_relative_path_normalization() {
-        let normalized = normalize_sandbox_target_path("write_targets", r".\src\.\auth.ts")
-            .expect("target should normalize");
-
-        assert_eq!(
-            normalized,
-            stateful_core::normalize_relative_path("src/auth.ts")
-        );
-    }
-
-    #[test]
-    fn process_find_request_requires_a_selector() {
-        let request = SandboxProcessFindRequest {
-            names: Vec::new(),
-            contains: Vec::new(),
-            pids: Vec::new(),
-            parent_pids: Vec::new(),
-            process_groups: Vec::new(),
-            fields: Vec::new(),
+    fn failed_create_leaves_no_workspace_residue() {
+        let repo = tempfile::tempdir().expect("temp repo");
+        let stage = PrivateStage::new(repo.path()).expect("stage");
+        let operation = MutationOperation::Create {
+            path: "created.txt".to_string(),
         };
-
-        let error = validate_process_find_request(&request)
-            .expect_err("process find should require a selector");
-
-        assert!(
-            error
-                .to_string()
-                .contains("stateful sandbox process find requires at least one selector"),
-            "unexpected error: {error}"
-        );
+        stage.populate(&operation).expect("prepare stage");
+        assert!(stage.validate(&operation).is_err());
+        assert!(!repo.path().join("created.txt").exists());
     }
 
     #[test]
-    fn process_find_filters_rows_without_exposing_args() {
-        let request = SandboxProcessFindRequest {
-            names: Vec::new(),
-            contains: vec!["denovo_codex_agent".to_string()],
-            pids: Vec::new(),
-            parent_pids: Vec::new(),
-            process_groups: Vec::new(),
-            fields: Vec::new(),
+    fn exact_update_only_applies_the_declared_target() {
+        let repo = tempfile::tempdir().expect("temp repo");
+        fs::write(repo.path().join("allowed.txt"), "old").expect("allowed input");
+        fs::write(repo.path().join("sibling.txt"), "keep").expect("sibling input");
+        let stage = PrivateStage::new(repo.path()).expect("stage");
+        let operation = MutationOperation::Update {
+            path: "allowed.txt".to_string(),
         };
-        let rows = parse_process_find_ps_output(
-            "101 1 101 root 0 S 10:29 00:01 00:00:00 0.0 0.0 0 0 0 31 ?? codex /opt/bin/codex exec\n\
-             202 1 202 arthur 501 S 10:30 00:02 00:00:01 37.5 1.2 123456 789012 0 31 ttys001 python3 python3 crates/stateful-bench/scripts/denovo_codex_agent.py\n",
-        )
-        .expect("ps output should parse");
-
-        let matches = filter_process_find_rows(&request, rows);
-
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].pid, 202);
-        assert_eq!(matches[0].comm, "python3");
-        assert_eq!(matches[0].pcpu, "37.5");
-    }
-
-    #[test]
-    fn process_find_default_output_includes_safe_ps_metadata() {
-        let request = SandboxProcessFindRequest {
-            names: Vec::new(),
-            contains: vec!["denovo_codex_agent".to_string()],
-            pids: Vec::new(),
-            parent_pids: Vec::new(),
-            process_groups: Vec::new(),
-            fields: Vec::new(),
-        };
-        let rows = parse_process_find_ps_output(
-            "202 1 202 arthur 501 S 10:30 00:02 00:00:01 37.5 1.2 123456 789012 0 31 ttys001 python3 python3 crates/stateful-bench/scripts/denovo_codex_agent.py\n",
-        )
-        .expect("ps output should parse");
-
-        let output = process_find_output_for_rows(&request, rows).expect("output should serialize");
-        let process = output.processes[0]
-            .as_object()
-            .expect("process should be an object");
-
-        assert_eq!(process.get("pid").and_then(|v| v.as_u64()), Some(202));
-        assert_eq!(process.get("user").and_then(|v| v.as_str()), Some("arthur"));
-        assert_eq!(process.get("uid").and_then(|v| v.as_u64()), Some(501));
-        assert_eq!(process.get("tty").and_then(|v| v.as_str()), Some("ttys001"));
-        assert_eq!(process.get("pmem").and_then(|v| v.as_str()), Some("1.2"));
-        assert_eq!(process.get("rss").and_then(|v| v.as_u64()), Some(123456));
-        assert!(!process.contains_key("command"));
-        assert!(!process.contains_key("argv"));
-        assert!(!process.contains_key("env"));
-    }
-
-    #[test]
-    fn process_find_parses_negative_uid() {
-        let request = SandboxProcessFindRequest {
-            names: Vec::new(),
-            contains: vec!["distnoted".to_string()],
-            pids: Vec::new(),
-            parent_pids: Vec::new(),
-            process_groups: Vec::new(),
-            fields: Vec::new(),
-        };
-        let rows = parse_process_find_ps_output(
-            "303 1 303 _distnote -2 S 10:31 00:03 00:00:02 0.0 0.1 1234 5678 0 31 ?? distnoted /usr/sbin/distnoted\n",
-        )
-        .expect("ps output with negative uid should parse");
-
-        let output = process_find_output_for_rows(&request, rows).expect("output should serialize");
-        let process = output.processes[0]
-            .as_object()
-            .expect("process should be an object");
-
-        assert_eq!(process.get("uid").and_then(|v| v.as_i64()), Some(-2));
-    }
-
-    #[test]
-    fn process_find_selected_fields_omit_unselected_safe_fields() {
-        let request = SandboxProcessFindRequest {
-            names: Vec::new(),
-            contains: vec!["denovo_codex_agent".to_string()],
-            pids: Vec::new(),
-            parent_pids: Vec::new(),
-            process_groups: Vec::new(),
-            fields: vec!["pid".to_string(), "user".to_string()],
-        };
-        let rows = parse_process_find_ps_output(
-            "202 1 202 arthur 501 S 10:30 00:02 00:00:01 37.5 1.2 123456 789012 0 31 ttys001 python3 python3 crates/stateful-bench/scripts/denovo_codex_agent.py\n",
-        )
-        .expect("ps output should parse");
-
-        let output = process_find_output_for_rows(&request, rows).expect("output should serialize");
-        let process = output.processes[0]
-            .as_object()
-            .expect("process should be an object");
-
-        assert_eq!(process.len(), 2);
-        assert_eq!(process.get("pid").and_then(|v| v.as_u64()), Some(202));
-        assert_eq!(process.get("user").and_then(|v| v.as_str()), Some("arthur"));
-    }
-
-    #[test]
-    fn process_find_rejects_forbidden_output_fields() {
-        let request = SandboxProcessFindRequest {
-            names: Vec::new(),
-            contains: vec!["denovo_codex_agent".to_string()],
-            pids: Vec::new(),
-            parent_pids: Vec::new(),
-            process_groups: Vec::new(),
-            fields: vec!["command".to_string()],
-        };
-
-        let error = validate_process_find_request(&request)
-            .expect_err("forbidden process field should be rejected");
-
-        assert!(
-            error
-                .to_string()
-                .contains("stateful sandbox process find cannot expose field `command`"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn process_find_excludes_current_finder_process() {
-        let request = SandboxProcessFindRequest {
-            names: Vec::new(),
-            contains: vec!["denovo_codex_agent".to_string()],
-            pids: Vec::new(),
-            parent_pids: Vec::new(),
-            process_groups: Vec::new(),
-            fields: Vec::new(),
-        };
-        let current_pid = std::process::id();
-        let rows = parse_process_find_ps_output(&format!(
-            "{current_pid} 1 {current_pid} root 0 S 10:29 00:01 00:00:00 0.0 0.0 0 0 0 31 ?? stateful stateful sandbox process find --contains denovo_codex_agent\n\
-             202 1 202 arthur 501 S 10:30 00:02 00:00:01 2.5 1.2 123456 789012 0 31 ttys001 python3 python3 crates/stateful-bench/scripts/denovo_codex_agent.py\n",
-        ))
-        .expect("ps output should parse");
-
-        let matches = filter_process_find_rows(&request, rows);
-
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].pid, 202);
-    }
-
-    #[test]
-    fn sandbox_run_sequence_resolves_to_single_shell_script() {
-        let command = resolve_sandbox_run_command(
-            None,
-            vec!["export FOO=bar".to_string(), "printf \"$FOO\"".to_string()],
-            Some("/bin/zsh".to_string()),
-        )
-        .expect("sequence should resolve");
-
+        stage.populate(&operation).expect("prepare stage");
+        fs::write(stage.staged("allowed.txt"), "new").expect("stage output");
+        stage.validate(&operation).expect("exact manifest");
+        stage.apply(&operation).expect("apply staged target");
         assert_eq!(
-            command,
-            "'/bin/zsh' -c 'set -e\nexport FOO=bar\nprintf \"$FOO\"\n'"
-        );
-    }
-
-    #[test]
-    fn sandbox_run_sequence_quotes_single_quotes_inside_steps() {
-        let command = resolve_sandbox_run_command(None, vec!["printf 'ok'".to_string()], None)
-            .expect("sequence should resolve");
-
-        assert_eq!(command, "'/bin/sh' -c 'set -e\nprintf '\\''ok'\\''\n'");
-    }
-
-    #[test]
-    fn sandbox_run_sequence_rejects_command_and_sequence_together() {
-        let error = resolve_sandbox_run_command(
-            Some("printf ok".to_string()),
-            vec!["printf later".to_string()],
-            None,
-        )
-        .expect_err("command plus sequence should fail");
-
-        assert_eq!(
-            error,
-            "stateful sandbox run accepts either --command or --sequence, not both"
-        );
-    }
-
-    #[test]
-    fn sandbox_run_sequence_rejects_sequence_shell_without_sequence() {
-        let error = resolve_sandbox_run_command(None, Vec::new(), Some("/bin/zsh".to_string()))
-            .expect_err("sequence-shell without sequence should fail");
-
-        assert_eq!(
-            error,
-            "stateful sandbox run --sequence-shell requires --sequence"
-        );
-    }
-
-    #[test]
-    fn sandbox_run_sequence_rejects_non_absolute_shell() {
-        let error = resolve_sandbox_run_command(
-            None,
-            vec!["printf ok".to_string()],
-            Some("zsh".to_string()),
-        )
-        .expect_err("relative shell should fail");
-
-        assert_eq!(
-            error,
-            "stateful sandbox run --sequence-shell requires an absolute shell path"
-        );
-    }
-
-    #[test]
-    fn sandbox_run_bash_parser_accepts_json_output_flag() {
-        let invocation = parse_sandbox_run_bash_invocation(
-            "stateful sandbox run --json --fs read-only --network disabled --command 'printf ok'",
-        )
-        .expect("sandbox run --json should parse for trusted Bash authorization");
-
-        assert_eq!(invocation.request.fs, SandboxFsProfile::ReadOnly);
-        assert_eq!(invocation.request.network, SandboxNetworkPolicy::Disabled);
-        assert_eq!(invocation.request.command, "printf ok");
-    }
-
-    #[test]
-    fn git_profile_commit_message_flag_consumes_unquoted_remainder() {
-        let words = parse_git_profile_command(
-            "git commit -m docs: clarify methodology validation boundaries",
-        )
-        .expect("git profile should parse commit message");
-
-        assert_eq!(
-            words,
-            vec![
-                "git",
-                "commit",
-                "-m",
-                "docs: clarify methodology validation boundaries",
-            ]
-        );
-    }
-
-    #[test]
-    fn sandbox_run_rejects_raw_ps_process_inspection() {
-        let request = SandboxRunRequest {
-            fs: SandboxFsProfile::ReadOnly,
-            network: SandboxNetworkPolicy::Disabled,
-            purpose: None,
-            agent_id: None,
-            workspace_id: None,
-            reservation_id: None,
-            write_targets: Vec::new(),
-            create_targets: Vec::new(),
-            write_dirs: Vec::new(),
-            connect_sockets: Vec::new(),
-            allow_signal: false,
-            command: "ps -o pid,comm -p 1".to_string(),
-            timeout_seconds: None,
-            stream_events: false,
-        };
-
-        let error = validate_sandbox_run_request_shape(&request)
-            .expect_err("sandbox run should reject raw ps inspection");
-
-        assert!(
-            error
-                .to_string()
-                .contains("process inspection must use stateful sandbox process find"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn sandbox_run_rejects_raw_pgrep_process_inspection() {
-        let request = SandboxRunRequest {
-            fs: SandboxFsProfile::ReadOnly,
-            network: SandboxNetworkPolicy::Disabled,
-            purpose: None,
-            agent_id: None,
-            workspace_id: None,
-            reservation_id: None,
-            write_targets: Vec::new(),
-            create_targets: Vec::new(),
-            write_dirs: Vec::new(),
-            connect_sockets: Vec::new(),
-            allow_signal: false,
-            command: "pgrep -f denovo_codex_agent".to_string(),
-            timeout_seconds: None,
-            stream_events: false,
-        };
-
-        let error = validate_sandbox_run_request_shape(&request)
-            .expect_err("sandbox run should reject raw pgrep inspection");
-
-        assert!(
-            error
-                .to_string()
-                .contains("process inspection must use stateful sandbox process find"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn sandbox_run_rejects_raw_process_inspection_shell_forms() {
-        for command in [
-            "env -i pgrep -f denovo_codex_agent",
-            "command -p ps -o pid",
-            "exec ps -o pid",
-            "if true; then ps -ef; fi",
-            "(pgrep -f denovo_codex_agent)",
-            "sh -c 'pgrep -f denovo_codex_agent'",
-            "echo $(ps -axo command)",
-            "echo `pgrep -af denovo_codex_agent`",
-            "env -S 'pgrep -f denovo_codex_agent'",
-            "env --split-string='pgrep -f denovo_codex_agent'",
-            "echo $(echo $(echo $(echo $(echo $(pgrep -f denovo_codex_agent)))))",
-            r"p\s -ef",
-        ] {
-            let request = SandboxRunRequest {
-                fs: SandboxFsProfile::ReadOnly,
-                network: SandboxNetworkPolicy::Disabled,
-                purpose: None,
-                agent_id: None,
-                workspace_id: None,
-                reservation_id: None,
-                write_targets: Vec::new(),
-                create_targets: Vec::new(),
-                write_dirs: Vec::new(),
-                connect_sockets: Vec::new(),
-                allow_signal: false,
-                command: command.to_string(),
-                timeout_seconds: None,
-                stream_events: false,
-            };
-
-            let Err(error) = validate_sandbox_run_request_shape(&request) else {
-                panic!("sandbox run should reject raw process inspection in `{command}`");
-            };
-
-            assert!(
-                error
-                    .to_string()
-                    .contains("process inspection must use stateful sandbox process find"),
-                "unexpected result for `{command}`: {error}"
-            );
-        }
-    }
-
-    #[test]
-    fn sandbox_run_allows_non_process_command_with_process_text_argument() {
-        let request = SandboxRunRequest {
-            fs: SandboxFsProfile::ReadOnly,
-            network: SandboxNetworkPolicy::Disabled,
-            purpose: None,
-            agent_id: None,
-            workspace_id: None,
-            reservation_id: None,
-            write_targets: Vec::new(),
-            create_targets: Vec::new(),
-            write_dirs: Vec::new(),
-            connect_sockets: Vec::new(),
-            allow_signal: false,
-            command: "rg ps crates".to_string(),
-            timeout_seconds: None,
-            stream_events: false,
-        };
-
-        validate_sandbox_run_request_shape(&request)
-            .expect("literal ps argument should not be treated as process inspection");
-    }
-
-    #[test]
-    fn sandbox_run_timeout_resolution_defaults_overrides_and_clamps_zero() {
-        assert_eq!(
-            sandbox_run_timeout_duration(None),
-            Duration::from_secs(3600)
+            fs::read_to_string(repo.path().join("allowed.txt"))
+                .expect("allowed target should remain readable"),
+            "new"
         );
         assert_eq!(
-            sandbox_run_timeout_duration(Some(17)),
-            Duration::from_secs(17)
-        );
-        assert_eq!(
-            sandbox_run_timeout_duration(Some(0)),
-            Duration::from_secs(1)
+            fs::read_to_string(repo.path().join("sibling.txt"))
+                .expect("sibling target should remain readable"),
+            "keep"
         );
     }
 
-    fn sandbox_output(status: &'static str, exit_code: Option<i32>) -> SandboxRunOutput {
-        SandboxRunOutput {
-            status,
-            exit_code,
-            stdout: String::new(),
-            stderr: String::new(),
-            allowed_write_targets: Vec::new(),
-            denied_write_targets: Vec::new(),
-        }
+    #[test]
+    fn delete_move_mkdir_and_rmdir_apply_declared_manifests() {
+        let repo = tempfile::tempdir().expect("temp repo");
+        fs::write(repo.path().join("delete.txt"), "delete").expect("test operation should succeed");
+        fs::write(repo.path().join("old.txt"), "move").expect("test operation should succeed");
+        fs::create_dir(repo.path().join("empty")).expect("test operation should succeed");
+        let delete = MutationOperation::Delete {
+            path: "delete.txt".to_string(),
+            entry_only: false,
+        };
+        let stage = PrivateStage::new(repo.path()).expect("test operation should succeed");
+        stage
+            .populate(&delete)
+            .expect("test operation should succeed");
+        fs::remove_file(stage.staged("delete.txt")).expect("test operation should succeed");
+        stage
+            .validate(&delete)
+            .expect("test operation should succeed");
+        stage.apply(&delete).expect("test operation should succeed");
+        let move_operation = MutationOperation::Move {
+            old_path: "old.txt".to_string(),
+            new_path: "new.txt".to_string(),
+            entry_only: false,
+        };
+        let stage = PrivateStage::new(repo.path()).expect("test operation should succeed");
+        stage
+            .populate(&move_operation)
+            .expect("test operation should succeed");
+        fs::rename(stage.staged("old.txt"), stage.staged("new.txt"))
+            .expect("test operation should succeed");
+        stage
+            .validate(&move_operation)
+            .expect("test operation should succeed");
+        stage
+            .apply(&move_operation)
+            .expect("test operation should succeed");
+        let mkdir = MutationOperation::Mkdir {
+            path: "made".to_string(),
+        };
+        let stage = PrivateStage::new(repo.path()).expect("test operation should succeed");
+        stage
+            .populate(&mkdir)
+            .expect("test operation should succeed");
+        fs::create_dir(stage.staged("made")).expect("test operation should succeed");
+        stage
+            .validate(&mkdir)
+            .expect("test operation should succeed");
+        stage.apply(&mkdir).expect("test operation should succeed");
+        let rmdir = MutationOperation::Rmdir {
+            path: "empty".to_string(),
+        };
+        let stage = PrivateStage::new(repo.path()).expect("test operation should succeed");
+        stage
+            .populate(&rmdir)
+            .expect("test operation should succeed");
+        fs::remove_dir(stage.staged("empty")).expect("test operation should succeed");
+        stage
+            .validate(&rmdir)
+            .expect("test operation should succeed");
+        stage.apply(&rmdir).expect("test operation should succeed");
+        assert!(!repo.path().join("delete.txt").exists());
+        assert!(!repo.path().join("old.txt").exists());
+        assert_eq!(
+            fs::read_to_string(repo.path().join("new.txt"))
+                .expect("moved target should be readable"),
+            "move"
+        );
+        assert!(repo.path().join("made").is_dir());
+        assert!(!repo.path().join("empty").exists());
+    }
+
+    #[test]
+    fn undeclared_sibling_is_never_applied() {
+        let repo = tempfile::tempdir().expect("temp repo");
+        fs::write(repo.path().join("allowed.txt"), "old").expect("test operation should succeed");
+        let stage = PrivateStage::new(repo.path()).expect("test operation should succeed");
+        let operation = MutationOperation::Update {
+            path: "allowed.txt".to_string(),
+        };
+        stage
+            .populate(&operation)
+            .expect("test operation should succeed");
+        fs::write(stage.staged("sibling.txt"), "escape").expect("test operation should succeed");
+        stage
+            .validate(&operation)
+            .expect("test operation should succeed");
+        stage
+            .apply(&operation)
+            .expect("test operation should succeed");
+        assert!(!repo.path().join("sibling.txt").exists());
+    }
+
+    #[test]
+    fn outside_and_entry_symlink_operations_are_denied() {
+        assert!(normalize_sandbox_target_path("operation", "../outside").is_err());
+        let mut operation = MutationOperation::Delete {
+            path: "link".to_string(),
+            entry_only: true,
+        };
+        assert!(normalize_mutation_operation(&mut operation).is_err());
     }
 
     #[cfg(unix)]
     #[test]
-    fn cancelled_wrapper_cleans_background_descendants_before_joining_readers() {
-        if std::env::var_os(STATEFUL_SANDBOX_RUN_ACTIVE_ENV).is_some() {
-            return;
-        }
-
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let thread_cancelled = Arc::clone(&cancelled);
-        let setter = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(100));
-            thread_cancelled.store(true, Ordering::SeqCst);
-        });
-        let mut command = Command::new("/bin/sh");
-        command
-            .arg("-c")
-            .arg("(trap '' TERM HUP INT; sleep 5) & wait");
-
-        let started = Instant::now();
-        let output =
-            run_command_with_timeout_and_cancel(command, Duration::from_secs(10), false, || {
-                cancelled.load(Ordering::SeqCst)
-            })
-            .expect("sandbox command should cancel and terminate");
-        setter.join().expect("cancellation setter should join");
-
-        assert_eq!(output.status, "cancelled");
-        assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "cancel cleanup should not wait for ignored-TERM descendants"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn timeout_kills_process_group_descendants_before_joining_readers() {
-        if std::env::var_os(STATEFUL_SANDBOX_RUN_ACTIVE_ENV).is_some() {
-            return;
-        }
-
-        let mut command = Command::new("/bin/sh");
-        command
-            .arg("-c")
-            .arg("(trap '' TERM HUP INT; sleep 5) & wait");
-
-        let started = Instant::now();
-        let output = run_command_with_timeout(command, Duration::from_millis(100), false)
-            .expect("sandbox command should time out and terminate");
-
-        assert_eq!(output.status, "timed_out");
-        assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "timeout cleanup should not wait for ignored-TERM descendants"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn exited_wrapper_cleans_background_descendants_before_joining_readers() {
-        if std::env::var_os(STATEFUL_SANDBOX_RUN_ACTIVE_ENV).is_some() {
-            return;
-        }
-
-        let mut command = Command::new("/bin/sh");
-        command
-            .arg("-c")
-            .arg("(trap '' TERM HUP INT; sleep 5) & printf done");
-
-        let started = Instant::now();
-        let output = run_command_with_timeout(command, Duration::from_secs(10), false)
-            .expect("sandbox command should exit and clean descendants");
-
-        assert_eq!(output.status, "exited");
-        assert_eq!(output.stdout, "done");
-        assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "normal exit cleanup should not wait for background descendants"
-        );
-    }
-
-    #[test]
-    fn bubblewrap_read_only_uses_unshare_net_and_device_policy() {
-        let args = bubblewrap_args(
-            "rg auth src",
-            Path::new("/repo"),
-            &[],
-            &[],
-            false,
-            SandboxNetworkPolicy::Disabled,
-        );
-        let args = args
-            .into_iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-
-        assert!(args.contains(&"--unshare-net".to_string()));
-        assert!(!args.contains(&"--share-net".to_string()));
-        assert!(
-            args.windows(3)
-                .any(|window| { window == ["--dev-bind", "/dev/null", "/dev/null"] })
-        );
-        assert!(
-            args.windows(3)
-                .any(|window| { window == ["--dev-bind", "/dev/zero", "/dev/zero"] })
-        );
-        assert!(!args.windows(5).any(|window| {
-            window
-                == [
-                    "--dev-bind",
-                    "/dev/zero",
-                    "/dev/zero",
-                    "--remount-ro",
-                    "/dev/zero",
-                ]
-        }));
-        assert!(
-            args.windows(3)
-                .any(|window| { window == ["--dev-bind", "/dev/urandom", "/dev/urandom"] })
-        );
-        assert!(!args.windows(5).any(|window| {
-            window
-                == [
-                    "--dev-bind",
-                    "/dev/urandom",
-                    "/dev/urandom",
-                    "--remount-ro",
-                    "/dev/urandom",
-                ]
-        }));
-        assert!(
-            !args
-                .windows(3)
-                .any(|window| { window == ["--ro-bind", "/dev/zero", "/dev/zero"] })
-        );
-        assert!(
-            !args
-                .windows(3)
-                .any(|window| { window == ["--ro-bind", "/dev/urandom", "/dev/urandom"] })
-        );
-        assert!(args.ends_with(&[
-            "--".to_string(),
-            "/bin/sh".to_string(),
-            "-c".to_string(),
-            "rg auth src".to_string(),
-        ]));
-    }
-
-    #[test]
-    fn bubblewrap_network_enabled_uses_share_net_and_omits_unshare_net() {
-        let args = bubblewrap_args(
-            "git ls-remote origin",
-            Path::new("/repo"),
-            &[],
-            &[],
-            false,
-            SandboxNetworkPolicy::Enabled,
-        );
-        let args = args
-            .into_iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-
-        assert!(args.contains(&"--share-net".to_string()));
-        assert!(!args.contains(&"--unshare-net".to_string()));
-    }
-
-    #[test]
-    fn bubblewrap_write_targets_bind_authorized_files_and_devices() {
-        let writable_paths = vec![
-            SandboxWritablePath::file(PathBuf::from("/repo/src/allowed.ts")),
-            SandboxWritablePath::file(PathBuf::from("/repo/src/new.ts")),
-            SandboxWritablePath::directory(PathBuf::from("/repo/tmp")),
-        ];
-        let args = bubblewrap_args(
-            "printf ok > src/allowed.ts",
-            Path::new("/repo"),
-            &writable_paths,
-            &[],
-            false,
-            SandboxNetworkPolicy::Disabled,
-        );
-        let args = args
-            .into_iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-
-        assert!(args.windows(3).any(|window| {
-            window == ["--bind", "/repo/src/allowed.ts", "/repo/src/allowed.ts"]
-        }));
-        assert!(
-            args.windows(3)
-                .any(|window| { window == ["--bind", "/repo/src/new.ts", "/repo/src/new.ts"] })
-        );
-        assert!(
-            args.windows(3)
-                .any(|window| { window == ["--bind", "/repo/tmp", "/repo/tmp"] })
-        );
-        assert!(
-            args.windows(3)
-                .any(|window| { window == ["--dev-bind", "/dev/null", "/dev/null"] })
-        );
-        assert!(
-            args.windows(3)
-                .any(|window| { window == ["--dev-bind", "/dev/zero", "/dev/zero"] })
-        );
-        assert!(!args.windows(5).any(|window| {
-            window
-                == [
-                    "--dev-bind",
-                    "/dev/zero",
-                    "/dev/zero",
-                    "--remount-ro",
-                    "/dev/zero",
-                ]
-        }));
-        assert!(
-            args.windows(3)
-                .any(|window| { window == ["--dev-bind", "/dev/urandom", "/dev/urandom"] })
-        );
-        assert!(!args.windows(5).any(|window| {
-            window
-                == [
-                    "--dev-bind",
-                    "/dev/urandom",
-                    "/dev/urandom",
-                    "--remount-ro",
-                    "/dev/urandom",
-                ]
-        }));
-        assert!(
-            !args
-                .windows(3)
-                .any(|window| { window == ["--ro-bind", "/dev/zero", "/dev/zero"] })
-        );
-        assert!(
-            !args
-                .windows(3)
-                .any(|window| { window == ["--ro-bind", "/dev/urandom", "/dev/urandom"] })
-        );
-        assert!(args.contains(&"--unshare-net".to_string()));
-        assert!(!args.contains(&"--share-net".to_string()));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn bubblewrap_read_only_profile_can_read_required_devices() {
-        if std::env::var_os(STATEFUL_SANDBOX_RUN_ACTIVE_ENV).is_some() {
-            return;
-        }
-        if Command::new("bwrap").arg("--version").status().is_err() {
-            return;
-        }
-
-        let output = run_command_with_timeout(
-            bubblewrap_command(
-                "dd if=/dev/zero of=/dev/null bs=1 count=1 >/dev/null 2>&1 && dd if=/dev/urandom of=/dev/null bs=1 count=1 >/dev/null 2>&1",
-                Path::new("/"),
-                &[],
-                &[],
-                false,
-                None,
-                SandboxNetworkPolicy::Disabled,
-            ),
-            Duration::from_secs(10),
-            false,
-        )
-        .expect("bubblewrap command should run");
-
-        assert_eq!(output.status, "exited");
-        assert_eq!(
-            output.exit_code,
-            Some(0),
-            "device reads should succeed: stdout={} stderr={}",
-            output.stdout,
-            output.stderr
-        );
-    }
-
-    #[test]
-    fn bubblewrap_git_profile_binds_repo_root_writable() {
-        let writable_paths = git_profile_writable_paths(Path::new("/repo"));
-        let words = vec![
-            "git".to_string(),
-            "checkout".to_string(),
-            "main".to_string(),
-        ];
-        let args = bubblewrap_git_args(
-            &words,
-            Path::new("/repo"),
-            &writable_paths,
-            SandboxNetworkPolicy::Disabled,
-        );
-        let args = args
-            .into_iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-
-        assert!(
-            args.windows(3)
-                .any(|window| { window == ["--bind", "/repo", "/repo"] })
-        );
-        assert!(args.ends_with(&[
-            "--".to_string(),
-            "git".to_string(),
-            "checkout".to_string(),
-            "main".to_string(),
-        ]));
-        assert!(
-            !args
-                .windows(2)
-                .any(|window| { window == ["/bin/sh", "-c"] })
-        );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn bubblewrap_github_pr_profile_invokes_gh_by_argv() {
-        let writable_paths = github_pr_profile_writable_paths(Path::new("/repo"));
-        let words = vec![
-            "gh".to_string(),
-            "pr".to_string(),
-            "view".to_string(),
-            "123".to_string(),
-        ];
-        let command = bubblewrap_github_pr_command(
-            &words,
-            Path::new("/repo"),
-            &writable_paths,
-            Path::new("/repo/.git/stateful/github-pr/.stateful-tmp"),
-            SandboxNetworkPolicy::Enabled,
-        );
-        let args = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-
-        assert_eq!(command.get_program(), "bwrap");
-        assert!(args.ends_with(&[
-            "--".to_string(),
-            "gh".to_string(),
-            "pr".to_string(),
-            "view".to_string(),
-            "123".to_string(),
-        ]));
-        assert!(
-            !args
-                .windows(2)
-                .any(|window| { window == ["/bin/sh", "-c"] })
-        );
-    }
-
-    #[test]
-    fn bubblewrap_git_profile_rebinds_persistent_git_metadata_read_only() {
-        let repo_root = std::env::temp_dir().join(format!(
-            "stateful-sandbox-git-readonly-overrides-{}",
-            std::process::id()
-        ));
-        if repo_root.exists() {
-            fs::remove_dir_all(&repo_root).expect("old temp root should be removable");
-        }
-        fs::create_dir_all(repo_root.join(".git/hooks"))
-            .expect("git hooks dir should be creatable");
-        fs::write(
-            repo_root.join(".git/config"),
-            "[core]\n\trepositoryformatversion = 0\n",
-        )
-        .expect("git config should be writable");
-        let config = repo_root.join(".git/config").to_string_lossy().into_owned();
-        let hooks = repo_root.join(".git/hooks").to_string_lossy().into_owned();
-
-        let writable_paths = git_profile_writable_paths(&repo_root);
-        let words = vec!["git".to_string(), "status".to_string()];
-        let args = bubblewrap_git_args(
-            &words,
-            &repo_root,
-            &writable_paths,
-            SandboxNetworkPolicy::Disabled,
-        );
-        let args = args
-            .into_iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-
-        let command_separator_index = args
-            .iter()
-            .position(|arg| arg == "--")
-            .expect("bubblewrap args should include a command separator");
-        let config_rebind_index = args
-            .windows(3)
-            .position(|window| {
-                window[0] == "--ro-bind" && window[1] == config && window[2] == config
-            })
-            .expect("git config should be rebound read-only");
-        let hooks_rebind_index = args
-            .windows(3)
-            .position(|window| window[0] == "--ro-bind" && window[1] == hooks && window[2] == hooks)
-            .expect("git hooks should be rebound read-only");
-
-        assert!(args.windows(3).any(|window| {
-            window[0] == "--bind"
-                && window[1] == repo_root.to_string_lossy()
-                && window[2] == repo_root.to_string_lossy()
-        }));
-        assert!(config_rebind_index < command_separator_index);
-        assert!(hooks_rebind_index < command_separator_index);
-
-        fs::remove_dir_all(&repo_root).expect("temp root should be removable");
-    }
-
-    #[test]
-    fn prepare_writable_files_validates_all_targets_before_creating_files() {
-        let repo_root = std::env::temp_dir().join(format!(
-            "stateful-sandbox-create-target-order-{}",
-            std::process::id()
-        ));
-        if repo_root.exists() {
-            fs::remove_dir_all(&repo_root).expect("old temp root should be removable");
-        }
-        fs::create_dir_all(repo_root.join("src")).expect("repo src dir should be creatable");
-
-        let error = prepare_sandbox_writable_paths(
-            &repo_root,
-            &["src/missing.txt".to_string()],
-            &["src/new.txt".to_string()],
-            &["tmp".to_string()],
-        )
-        .expect_err("missing write target should fail before create target is materialized");
-
-        assert!(
-            error
-                .to_string()
-                .contains("must already exist or be listed in create_targets"),
-            "unexpected error: {error}"
-        );
-        assert!(
-            !repo_root.join("src/new.txt").exists(),
-            "failed sandbox run should not leave create target behind"
-        );
-        assert!(
-            !repo_root.join("tmp").exists(),
-            "failed sandbox run should not leave write dir behind"
-        );
-
-        fs::remove_dir_all(&repo_root).expect("temp root should be removable");
-    }
-
-    #[test]
-    fn prepare_writable_paths_creates_write_dirs() {
-        let repo_root =
-            std::env::temp_dir().join(format!("stateful-sandbox-write-dir-{}", std::process::id()));
-        if repo_root.exists() {
-            fs::remove_dir_all(&repo_root).expect("old temp root should be removable");
-        }
-        fs::create_dir_all(&repo_root).expect("repo root should be creatable");
-
-        let writable_paths =
-            prepare_sandbox_writable_paths(&repo_root, &[], &[], &["tmp".to_string()])
-                .expect("write dir should prepare");
-
-        assert!(repo_root.join("tmp").is_dir());
-        assert!(repo_root.join("tmp/.stateful-tmp").is_dir());
-        assert_eq!(
-            writable_paths,
-            vec![SandboxWritablePath::directory(
-                repo_root
-                    .join("tmp")
-                    .canonicalize()
-                    .expect("tmp write dir should be canonicalizable")
-            )]
-        );
-
-        fs::remove_dir_all(&repo_root).expect("temp root should be removable");
-    }
-
-    #[test]
-    fn sandbox_temp_dir_uses_first_writable_directory() {
-        let writable_paths = vec![
-            SandboxWritablePath::file(PathBuf::from("/repo/README.md")),
-            SandboxWritablePath::directory(PathBuf::from("/repo/tmp")),
-        ];
-
-        assert_eq!(
-            sandbox_temp_dir(&writable_paths),
-            Some(PathBuf::from("/repo/tmp/.stateful-tmp"))
-        );
-    }
-
-    #[test]
-    fn write_dir_unsupported_action_denial_points_to_server_restart() {
-        let body = enrich_sandbox_write_dir_denial(serde_json::json!({
-            "decision": "deny",
-            "message": "Action is not supported by the v1 authorization API.",
-            "reason_code": "unsupported_action",
-            "required_next_action": "Use a supported action such as write_file."
-        }));
-
-        assert_eq!(
-            body.get("message").and_then(Value::as_str),
-            Some("The running stateful server does not support sandbox write directories.")
-        );
-        assert_eq!(
-            body.get("required_next_action").and_then(Value::as_str),
-            Some(
-                "Restart the stateful server with the newly built stateful binary, then retry the sandbox run."
-            )
-        );
-    }
-
-    #[test]
-    fn apply_sandbox_temp_env_sets_standard_temp_vars() {
-        let mut command = Command::new("true");
-
-        apply_sandbox_temp_env(&mut command, Some(Path::new("/repo/tmp/.stateful-tmp")));
-
-        let envs = command
-            .get_envs()
-            .map(|(key, value)| {
-                (
-                    key.to_string_lossy().into_owned(),
-                    value.map(|value| value.to_string_lossy().into_owned()),
-                )
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
-        assert_eq!(
-            envs.get(STATEFUL_SANDBOX_RUN_ACTIVE_ENV),
-            Some(&Some("1".to_string()))
-        );
-        assert_eq!(
-            envs.get("TMPDIR"),
-            Some(&Some("/repo/tmp/.stateful-tmp".to_string()))
-        );
-        assert_eq!(
-            envs.get("TEMP"),
-            Some(&Some("/repo/tmp/.stateful-tmp".to_string()))
-        );
-        assert_eq!(
-            envs.get("TMP"),
-            Some(&Some("/repo/tmp/.stateful-tmp".to_string()))
-        );
-        assert_eq!(
-            envs.get("CARGO_TARGET_DIR"),
-            Some(&Some("/repo/tmp/target".to_string()))
-        );
-    }
-
-    #[test]
-    fn sandbox_tmp_fragment_sanitizes_agent_ids_for_path_components() {
-        assert_eq!(sandbox_tmp_fragment("session/id"), "session-id");
-        assert_eq!(sandbox_tmp_fragment(".."), "session");
-        assert_eq!(sandbox_tmp_fragment(""), "session");
-    }
-
-    #[test]
-    fn seatbelt_profile_allows_device_reads_dev_null_writes_and_targets() {
-        let profile = seatbelt_profile(
-            &[
-                SandboxWritablePath::file(PathBuf::from("/repo/src/allowed.ts")),
-                SandboxWritablePath::file(PathBuf::from("/repo/src/quoted\"path.ts")),
-                SandboxWritablePath::directory(PathBuf::from("/repo/tmp")),
-            ],
-            SandboxNetworkPolicy::Disabled,
-        );
-
-        assert!(profile.contains("(deny default)"));
-        assert!(profile.contains("(allow file-read*)"));
-        assert!(profile.contains("(allow sysctl-read)"));
-        assert!(profile.contains(
-            "(allow file-read* (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/urandom\"))"
-        ));
-        let write_rules = profile
-            .lines()
-            .filter(|line| line.starts_with("(allow file-write*"))
-            .collect::<Vec<_>>();
-        assert!(
-            write_rules
-                .iter()
-                .any(|line| line.contains("(literal \"/dev/null\")"))
-        );
-        assert!(!write_rules.iter().any(|line| line.contains("/dev/zero")));
-        assert!(!write_rules.iter().any(|line| line.contains("/dev/urandom")));
-        assert!(profile.contains("(literal \"/repo/src/allowed.ts\")"));
-        assert!(profile.contains("(literal \"/repo/src/quoted\\\"path.ts\")"));
-        assert!(profile.contains("(subpath \"/repo/tmp\")"));
-        assert!(!profile.contains("subpath \"/repo/src\""));
-        assert!(!profile.contains("subpath \"/dev\""));
-        assert!(!profile.contains("(allow network*)"));
-    }
-
-    #[test]
-    fn seatbelt_profile_allows_exact_connect_socket_without_full_network() {
-        let profile = seatbelt_profile_with_connect_sockets(
-            &[],
-            &[PathBuf::from("/private/tmp/tmux-501/default")],
-            false,
-            SandboxNetworkPolicy::Disabled,
-        );
-
-        assert!(
-            profile
-                .contains("(allow network-outbound (literal \"/private/tmp/tmux-501/default\"))")
-        );
-        assert!(!profile.contains("(allow network*)"));
-        assert!(!profile.contains("(subpath \"/private/tmp/tmux-501\")"));
-    }
-
-    #[test]
-    fn seatbelt_profile_allows_signal_only_when_requested() {
-        let default_profile = seatbelt_profile(&[], SandboxNetworkPolicy::Disabled);
-        let signal_profile =
-            seatbelt_profile_with_connect_sockets(&[], &[], true, SandboxNetworkPolicy::Disabled);
-
-        assert!(!default_profile.contains("(allow signal)"));
-        assert!(signal_profile.contains("(allow signal)"));
-    }
-
-    #[test]
-    fn seatbelt_git_profile_allows_repo_root_subpath() {
-        let writable_paths = git_profile_writable_paths(Path::new("/repo"));
-        let profile = seatbelt_git_profile(
-            &writable_paths,
-            Path::new("/repo"),
-            SandboxNetworkPolicy::Enabled,
-        );
-
-        assert!(profile.contains("(subpath \"/repo\")"));
-        assert!(profile.contains("(allow network*)"));
-    }
-
-    #[test]
-    fn seatbelt_git_profile_denies_persistent_git_metadata_writes() {
-        let writable_paths = git_profile_writable_paths(Path::new("/repo"));
-        let profile = seatbelt_git_profile(
-            &writable_paths,
-            Path::new("/repo"),
-            SandboxNetworkPolicy::Enabled,
-        );
-
-        assert!(profile.contains("(deny file-write*"));
-        assert!(profile.contains("(literal \"/repo/.git/config\")"));
-        assert!(profile.contains("(literal \"/repo/.git/config.worktree\")"));
-        assert!(profile.contains("(literal \"/repo/.git/hooks\")"));
-        assert!(profile.contains("(subpath \"/repo/.git/hooks\")"));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn seatbelt_git_command_profile_allows_macos_identity_and_trust_services() {
-        let writable_paths = git_profile_writable_paths(Path::new("/repo"));
-        let words = vec![
-            "git".to_string(),
-            "push".to_string(),
-            "origin".to_string(),
-            "dev".to_string(),
-        ];
-        let command = seatbelt_git_command(
-            &words,
-            Path::new("/repo"),
-            &writable_paths,
-            Path::new("/repo/.git/stateful/.stateful-tmp"),
-            Path::new("/repo/.git/stateful/hooks-disabled"),
-            &GitProfileConfig::default(),
-            SandboxNetworkPolicy::Enabled,
-        );
-        let args = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        let profile = args
-            .windows(2)
-            .find_map(|window| {
-                if window[0] == "-p" {
-                    Some(window[1].clone())
-                } else {
-                    None
-                }
-            })
-            .expect("seatbelt git command should pass a profile after -p");
-
-        assert_profile_allows_macos_identity_and_trust_services(&profile, "git");
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn seatbelt_external_command_profile_allows_macos_identity_and_trust_services() {
-        let command = seatbelt_command(
-            "gh api rate_limit",
-            Path::new("/repo"),
-            &[],
-            &[],
-            false,
-            true,
-            None,
-            SandboxNetworkPolicy::Enabled,
-        );
-        let args = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        let profile = args
-            .windows(2)
-            .find_map(|window| {
-                if window[0] == "-p" {
-                    Some(window[1].clone())
-                } else {
-                    None
-                }
-            })
-            .expect("seatbelt external command should pass a profile after -p");
-
-        assert_profile_allows_macos_identity_and_trust_services(&profile, "external");
-    }
-
-    #[cfg(target_os = "macos")]
-    fn assert_profile_allows_macos_identity_and_trust_services(profile: &str, profile_name: &str) {
-        assert!(profile.contains("(allow mach-lookup"));
-        for global_name in [
-            "com.apple.system.opendirectoryd.libinfo",
-            "com.apple.system.DirectoryService.libinfo_v1",
-            "com.apple.trustd",
-            "com.apple.trustd.agent",
-        ] {
-            assert!(
-                profile.contains(&format!("(global-name \"{global_name}\")")),
-                "{profile_name} profile should allow {global_name}: {profile}"
-            );
-        }
-    }
-
-    #[test]
-    fn seatbelt_profile_does_not_allow_macos_identity_or_trust_services_by_default() {
-        let profile = seatbelt_profile(&[], SandboxNetworkPolicy::Enabled);
-
-        for global_name in [
-            "com.apple.system.opendirectoryd.libinfo",
-            "com.apple.system.DirectoryService.libinfo_v1",
-            "com.apple.trustd",
-            "com.apple.trustd.agent",
-        ] {
-            assert!(!profile.contains(global_name));
-        }
-    }
-
-    #[test]
-    fn read_only_profile_rejects_network_enabled() {
-        let error = validate_profile_network_policy(
-            SandboxFsProfile::ReadOnly,
-            SandboxNetworkPolicy::Enabled,
-        )
-        .expect_err("read-only profile should reject network enabled");
-
-        assert!(
-            error
-                .to_string()
-                .contains("read-only sandbox run requires --network disabled")
-        );
-    }
-
-    #[test]
-    fn external_profile_requires_purpose_and_valid_target_forms() {
-        let mut request = SandboxRunRequest {
-            fs: SandboxFsProfile::External,
-            network: SandboxNetworkPolicy::Enabled,
-            purpose: None,
-            agent_id: None,
-            workspace_id: None,
-            reservation_id: None,
-            write_targets: vec!["/tmp/stateful-outside.txt".to_string()],
-            create_targets: Vec::new(),
-            write_dirs: Vec::new(),
-            connect_sockets: Vec::new(),
-            allow_signal: false,
-            command: "true".to_string(),
-            timeout_seconds: None,
-            stream_events: false,
-        };
-
-        let error = validate_sandbox_run_request_shape(&request)
-            .expect_err("external profile should require purpose");
-        assert!(
-            error.to_string().contains("requires --purpose"),
-            "unexpected error: {error}"
-        );
-
-        request.purpose = Some("inspect external environment".to_string());
-        request.write_targets.clear();
-        validate_sandbox_run_request_shape(&request)
-            .expect("external profile should allow read-only scope");
-
-        request.allow_signal = true;
-        validate_sandbox_run_request_shape(&request)
-            .expect("external profile should accept signal-only scope");
-        request.allow_signal = false;
-        request.write_targets = vec!["relative/path".to_string()];
-        validate_sandbox_run_request_shape(&request)
-            .expect("external profile should allow repo-relative write targets");
-
-        request.write_targets.clear();
-        request.connect_sockets = vec!["relative.sock".to_string()];
-        let error = validate_sandbox_run_request_shape(&request)
-            .expect_err("external profile should reject relative socket paths");
-        assert!(
-            error.to_string().contains("absolute paths"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn external_profile_rejects_repo_internal_targets_after_normalization() {
-        let repo_root = std::env::temp_dir().join(format!(
-            "stateful-sandbox-external-internal-target-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&repo_root);
-        fs::create_dir_all(&repo_root).expect("repo root should be created");
-        let internal_target = repo_root.join("README.md");
-        fs::write(&internal_target, "docs").expect("repo file should be created");
-
-        let error = prepare_external_sandbox_scope(
-            &repo_root,
-            &[internal_target.to_string_lossy().into_owned()],
-            &[],
-            &[],
-            &[],
-        )
-        .expect_err("external profile should reject repo-internal targets");
-
-        assert!(
-            error.to_string().contains("resolves inside the repo"),
-            "unexpected error: {error}"
-        );
-
-        let _ = fs::remove_dir_all(&repo_root);
-    }
-
-    #[test]
-    fn external_profile_splits_repo_relative_targets_for_authorization() {
-        let repo_root = std::env::temp_dir().join(format!(
-            "stateful-sandbox-external-repo-target-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&repo_root);
-        fs::create_dir_all(&repo_root).expect("repo root should be created");
-
-        let scope = prepare_external_sandbox_scope(
-            &repo_root,
-            &["README.md".to_string()],
-            &["generated.txt".to_string()],
-            &["reports".to_string()],
-            &[],
-        )
-        .expect("repo-relative external targets should be deferred to Stateful authorization");
-
-        assert_eq!(scope.repo_write_targets, vec!["README.md"]);
-        assert_eq!(scope.repo_create_targets, vec!["generated.txt"]);
-        assert_eq!(scope.repo_write_dirs, vec!["reports"]);
-        assert!(scope.writable_paths.is_empty());
-        assert!(scope.allowed_write_targets.is_empty());
-
-        let _ = fs::remove_dir_all(&repo_root);
-    }
-
-    #[test]
-    fn build_profile_rejects_explicit_write_targets() {
-        validate_profile_targets(
-            SandboxFsProfile::Build,
-            &[],
-            &[],
-            &["build".to_string()],
-            &[],
-            false,
-        )
-        .expect("build profile should accept one scratch purpose");
-
-        let repo_tmp_write_dir = validate_profile_targets(
-            SandboxFsProfile::Build,
-            &[],
-            &[],
-            &["tmp/build".to_string()],
-            &[],
-            false,
-        )
-        .expect_err("build profile should reject repo tmp write dirs");
-        assert!(
-            repo_tmp_write_dir.to_string().contains("/tmp/stateful"),
-            "unexpected error: {repo_tmp_write_dir}"
-        );
-
-        for unsafe_purpose in [
-            "../other",
-            "/tmp/stateful/other",
-            "nested/build",
-            ".",
-            "..",
-            "nested\\build",
-        ] {
-            let error = validate_profile_targets(
-                SandboxFsProfile::Build,
-                &[],
-                &[],
-                &[unsafe_purpose.into()],
-                &[],
-                false,
-            )
-            .expect_err("build profile should reject path-shaped scratch purposes");
-            assert!(
-                error.to_string().contains("one scratch purpose name"),
-                "unexpected error for {unsafe_purpose}: {error}"
-            );
-        }
-
-        let missing_write_dir =
-            validate_profile_targets(SandboxFsProfile::Build, &[], &[], &[], &[], false)
-                .expect_err("build profile should require a scratch purpose");
-        assert!(
-            missing_write_dir
-                .to_string()
-                .contains("--write-dir <scratch-purpose>")
-        );
-
-        let error = validate_profile_targets(
-            SandboxFsProfile::Build,
-            &["README.md".to_string()],
-            &[],
-            &[],
-            &[],
-            false,
-        )
-        .expect_err("build profile should reject explicit write targets");
-
-        assert!(
-            error
-                .to_string()
-                .contains("build profile rejects explicit write targets")
-        );
-    }
-
-    #[test]
-    fn git_profile_rejects_explicit_write_targets() {
-        validate_profile_targets(SandboxFsProfile::Git, &[], &[], &[], &[], false)
-            .expect("git profile should manage write scope automatically");
-
-        let error = validate_profile_targets(
-            SandboxFsProfile::Git,
-            &["README.md".to_string()],
-            &[],
-            &[],
-            &[],
-            false,
-        )
-        .expect_err("git profile should reject explicit write targets");
-
-        assert!(
-            error
-                .to_string()
-                .contains("git profile manages repo writes automatically")
-        );
-    }
-
-    #[test]
-    fn github_pr_profile_requires_network_enabled() {
-        let error = validate_profile_network_policy(
-            SandboxFsProfile::GithubPr,
-            SandboxNetworkPolicy::Disabled,
-        )
-        .expect_err("github-pr profile should require network enabled");
-
-        assert!(
-            error
-                .to_string()
-                .contains("github-pr sandbox run requires --network enabled"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn github_pr_profile_rejects_explicit_write_targets() {
-        let error = validate_profile_targets(
-            SandboxFsProfile::GithubPr,
-            &["README.md".to_string()],
-            &[],
-            &[],
-            &[],
-            false,
-        )
-        .expect_err("github-pr profile should reject explicit targets");
-
-        assert!(
-            error
-                .to_string()
-                .contains("github-pr profile manages transient PR state automatically"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn github_pr_profile_writable_paths_are_private() {
-        assert_eq!(
-            github_pr_profile_writable_paths(Path::new("/repo")),
-            vec![SandboxWritablePath::directory(PathBuf::from(
-                "/repo/.git/stateful/github-pr"
-            ))]
-        );
-    }
-
-    #[test]
-    fn github_pr_profile_writable_paths_use_stateful_git_for_linked_worktrees() {
-        let repo_root = std::env::temp_dir().join(format!(
-            "stateful-github-pr-linked-worktree-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&repo_root);
-        fs::create_dir_all(&repo_root).expect("temp repo root should be created");
-        fs::write(
-            repo_root.join(".git"),
-            "gitdir: ../main/.git/worktrees/linked\n",
-        )
-        .expect(".git file should be writable");
-
-        assert_eq!(
-            github_pr_profile_writable_paths(&repo_root),
-            vec![SandboxWritablePath::directory(
-                repo_root.join(".stateful-git/github-pr")
-            )]
-        );
-
-        let _ = fs::remove_dir_all(&repo_root);
-    }
-
-    #[test]
-    fn github_pr_profile_env_is_non_interactive_and_clears_launcher_overrides() {
-        let mut command = Command::new("gh");
-        command
-            .env("GH_PAGER", "sh -c nope")
-            .env("GH_EDITOR", "sh -c nope")
-            .env("VISUAL", "sh -c nope")
-            .env("EDITOR", "sh -c nope")
-            .env("GH_BROWSER", "sh -c nope")
-            .env("BROWSER", "sh -c nope")
-            .env("GH_FORCE_TTY", "1");
-        apply_github_pr_profile_env(
-            &mut command,
-            Path::new("/repo/.git/stateful/github-pr/.stateful-tmp"),
-        );
-        let envs = command
-            .get_envs()
-            .filter_map(|(key, value)| {
-                value.map(|value| {
-                    (
-                        key.to_string_lossy().into_owned(),
-                        value.to_string_lossy().into_owned(),
-                    )
-                })
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
-
-        assert_eq!(envs.get("GH_PROMPT_DISABLED"), Some(&"1".to_string()));
-        assert_eq!(envs.get("GH_NO_UPDATE_NOTIFIER"), Some(&"1".to_string()));
-        assert_eq!(
-            envs.get("GH_NO_EXTENSION_UPDATE_NOTIFIER"),
-            Some(&"1".to_string())
-        );
-        assert_eq!(envs.get("GH_SPINNER_DISABLED"), Some(&"1".to_string()));
-        assert_eq!(envs.get("GIT_TERMINAL_PROMPT"), Some(&"0".to_string()));
-        assert_eq!(envs.get("GIT_EDITOR"), Some(&":".to_string()));
-        assert_eq!(envs.get("GIT_PAGER"), Some(&"cat".to_string()));
-        assert_eq!(envs.get("PAGER"), Some(&"cat".to_string()));
-        for key in [
-            "GH_PAGER",
-            "GH_EDITOR",
-            "VISUAL",
-            "EDITOR",
-            "GH_BROWSER",
-            "BROWSER",
-            "GH_FORCE_TTY",
-        ] {
-            assert!(!envs.contains_key(key), "{key} should not be inherited");
-        }
-    }
-
-    #[test]
-    fn direct_github_pr_command_invokes_gh_by_argv() {
-        let words = vec![
-            "gh".to_string(),
-            "pr".to_string(),
-            "view".to_string(),
-            "123".to_string(),
-            "--json".to_string(),
-            "title,url".to_string(),
-        ];
-        let command = direct_github_pr_command(&words, Path::new("/repo"));
-        let args = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-
-        assert_eq!(command.get_program(), "gh");
-        assert_eq!(
-            args,
-            vec![
-                "pr".to_string(),
-                "view".to_string(),
-                "123".to_string(),
-                "--json".to_string(),
-                "title,url".to_string(),
-            ]
-        );
-        assert!(
-            !args
-                .windows(2)
-                .any(|window| { window == ["/bin/sh", "-c"] })
-        );
-    }
-
-    #[test]
-    fn git_profile_env_disables_implicit_branch_tracking_config() {
-        let mut command = Command::new("git");
-        apply_git_profile_env(
-            &mut command,
-            Path::new("/repo/.git/stateful/.stateful-tmp"),
-            Path::new("/repo/.git/stateful/hooks-disabled"),
-            &GitProfileConfig::default(),
-        );
-        let envs = command
-            .get_envs()
-            .filter_map(|(key, value)| {
-                value.map(|value| {
-                    (
-                        key.to_string_lossy().into_owned(),
-                        value.to_string_lossy().into_owned(),
-                    )
-                })
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
-
-        assert_eq!(envs.get("GIT_CONFIG_COUNT"), Some(&"7".to_string()));
-        assert_eq!(
-            envs.get("GIT_CONFIG_KEY_5"),
-            Some(&"branch.autoSetupMerge".to_string())
-        );
-        assert_eq!(envs.get("GIT_CONFIG_VALUE_5"), Some(&"false".to_string()));
-        assert_eq!(
-            envs.get("GIT_CONFIG_KEY_6"),
-            Some(&"branch.autoSetupRebase".to_string())
-        );
-        assert_eq!(envs.get("GIT_CONFIG_VALUE_6"), Some(&"never".to_string()));
-        assert!(!envs.contains_key("GIT_EXTERNAL_DIFF"));
-    }
-
-    #[test]
-    fn git_profile_env_injects_discovered_commit_identity() {
-        let mut command = Command::new("git");
-        let config = GitProfileConfig {
-            identity: Some(GitProfileIdentity {
-                name: "Stateful User".into(),
-                email: "stateful@example.invalid".into(),
-            }),
-            credential_helpers: vec![],
-        };
-        apply_git_profile_env(
-            &mut command,
-            Path::new("/repo/.git/stateful/.stateful-tmp"),
-            Path::new("/repo/.git/stateful/hooks-disabled"),
-            &config,
-        );
-        let envs = command
-            .get_envs()
-            .filter_map(|(key, value)| {
-                value.map(|value| {
-                    (
-                        key.to_string_lossy().into_owned(),
-                        value.to_string_lossy().into_owned(),
-                    )
-                })
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
-
-        assert_eq!(envs.get("GIT_CONFIG_COUNT"), Some(&"9".to_string()));
-        assert_eq!(envs.get("GIT_CONFIG_KEY_7"), Some(&"user.name".to_string()));
-        assert_eq!(
-            envs.get("GIT_CONFIG_VALUE_7"),
-            Some(&"Stateful User".to_string())
-        );
-        assert_eq!(
-            envs.get("GIT_CONFIG_KEY_8"),
-            Some(&"user.email".to_string())
-        );
-        assert_eq!(
-            envs.get("GIT_CONFIG_VALUE_8"),
-            Some(&"stateful@example.invalid".to_string())
-        );
-    }
-
-    #[test]
-    fn git_profile_env_injects_allowed_credential_helpers() {
-        let mut command = Command::new("git");
-        let config = GitProfileConfig {
-            identity: None,
-            credential_helpers: vec!["store".into(), "!gh auth git-credential".into()],
-        };
-        apply_git_profile_env(
-            &mut command,
-            Path::new("/repo/.git/stateful/.stateful-tmp"),
-            Path::new("/repo/.git/stateful/hooks-disabled"),
-            &config,
-        );
-        let envs = command
-            .get_envs()
-            .filter_map(|(key, value)| {
-                value.map(|value| {
-                    (
-                        key.to_string_lossy().into_owned(),
-                        value.to_string_lossy().into_owned(),
-                    )
-                })
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
-
-        assert_eq!(envs.get("GIT_CONFIG_COUNT"), Some(&"9".to_string()));
-        assert_eq!(
-            envs.get("GIT_CONFIG_KEY_7"),
-            Some(&"credential.helper".to_string())
-        );
-        assert_eq!(envs.get("GIT_CONFIG_VALUE_7"), Some(&"store".to_string()));
-        assert_eq!(
-            envs.get("GIT_CONFIG_KEY_8"),
-            Some(&"credential.helper".to_string())
-        );
-        assert_eq!(
-            envs.get("GIT_CONFIG_VALUE_8"),
-            Some(&"!gh auth git-credential".to_string())
-        );
-    }
-
-    #[test]
-    fn git_profile_credential_helper_filter_allows_only_safe_helpers() {
-        assert_eq!(
-            allowed_git_profile_credential_helper("store"),
-            Some("store".to_string())
-        );
-        assert_eq!(
-            allowed_git_profile_credential_helper("osxkeychain"),
-            Some("osxkeychain".to_string())
-        );
-        assert_eq!(
-            allowed_git_profile_credential_helper("!gh auth git-credential"),
-            Some("!gh auth git-credential".to_string())
-        );
-        assert_eq!(
-            allowed_git_profile_credential_helper("! gh auth git-credential"),
-            Some("!gh auth git-credential".to_string())
-        );
-        assert_eq!(
-            allowed_git_profile_credential_helper("!curl example.test"),
-            None
-        );
-        assert_eq!(allowed_git_profile_credential_helper("/tmp/helper"), None);
-        assert_eq!(
-            allowed_git_profile_credential_helper("store --file=/tmp/x"),
-            None
-        );
-    }
-
-    #[test]
-    fn git_profile_identity_discovers_normal_git_config() {
-        let root = std::env::temp_dir().join(format!(
-            "stateful-git-profile-identity-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).expect("temp repo should be created");
-        let run_git = |args: &[&str]| {
-            let status = Command::new("git")
-                .args(args)
-                .current_dir(&root)
-                .status()
-                .expect("git should run");
-            assert!(status.success(), "git {args:?} should succeed");
-        };
-        run_git(&["init"]);
-        run_git(&["config", "user.name", "Config User"]);
-        run_git(&["config", "user.email", "config@example.invalid"]);
-
-        let identity =
-            discover_git_profile_identity(&root).expect("identity should be read from git config");
-
-        assert_eq!(
-            identity,
-            GitProfileIdentity {
-                name: "Config User".to_string(),
-                email: "config@example.invalid".to_string(),
-            }
-        );
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn git_profile_config_discovers_allowed_credential_helpers() {
-        let root = std::env::temp_dir().join(format!(
-            "stateful-git-profile-credentials-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).expect("temp repo should be created");
-        let run_git = |args: &[&str]| {
-            let status = Command::new("git")
-                .args(args)
-                .current_dir(&root)
-                .status()
-                .expect("git should run");
-            assert!(status.success(), "git {args:?} should succeed");
-        };
-        run_git(&["init"]);
-        run_git(&["config", "user.name", "Config User"]);
-        run_git(&["config", "user.email", "config@example.invalid"]);
-        run_git(&["config", "--add", "credential.helper", "store"]);
-        run_git(&[
-            "config",
-            "--add",
-            "credential.helper",
-            "!gh auth git-credential",
-        ]);
-        run_git(&["config", "--add", "credential.helper", "!curl example.test"]);
-
-        let config = discover_git_profile_config(&root);
-
-        assert!(config.credential_helpers.contains(&"store".to_string()));
-        assert!(
-            config
-                .credential_helpers
-                .contains(&"!gh auth git-credential".to_string())
-        );
-        assert!(
-            !config
-                .credential_helpers
-                .contains(&"!curl example.test".to_string())
-        );
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn git_profile_rejects_git_alias_config_dispatch() {
-        let cases = [
-            "git -c alias.x='!curl https://example.test' x",
-            "git -calias.x='!curl https://example.test' x",
-            "git --config-env=alias.x=STATEFUL_ALIAS x",
-            "git x",
-        ];
-
-        for command in cases {
-            let error = validate_git_profile_command(command)
-                .expect_err("git profile should reject alias dispatch surfaces");
-
-            assert!(
-                error.to_string().contains("git profile"),
-                "unexpected error for `{command}`: {error}"
-            );
-        }
-    }
-
-    #[test]
-    fn git_profile_rejects_shell_dispatching_git_subcommands() {
-        let cases = [
-            "git submodule foreach 'printf nope'",
-            "git filter-branch --tree-filter 'printf nope'",
-            "git difftool --tool vimdiff",
-            "git mergetool --tool vimdiff",
-            "git rebase --exec 'printf nope'",
-            "git bisect run printf nope",
-            "git grep --open-files-in-pager='sh -c id' TODO",
-            "git grep --open-files-in-pager TODO",
-            "git grep -Ocat TODO",
-            "git grep -O TODO",
-            "git archive --exec=sh HEAD",
-            "git archive --remote=origin --exec sh HEAD",
-            "git fetch --upload-pack=sh origin",
-            "git fetch --upload-pack sh origin",
-            "git pull --upload-pack=sh origin main",
-            "git push --receive-pack=sh origin main",
-            "git push --exec=sh origin main",
-        ];
-
-        for command in cases {
-            let error = validate_git_profile_command(command)
-                .expect_err("git profile should reject shell-dispatching git commands");
-
-            assert!(
-                error.to_string().contains("git profile"),
-                "unexpected error for `{command}`: {error}"
-            );
-        }
-    }
-
-    #[test]
-    fn git_profile_rejects_persistent_metadata_mutation() {
-        let cases = [
-            "git remote add origin https://example.test/repo.git",
-            "git remote set-url origin https://example.test/repo.git",
-            "git remote rename origin backup",
-            "git remote remove origin",
-            "git remote rm origin",
-            "git remote set-head origin main",
-            "git remote set-branches origin main",
-            "git remote update origin",
-            "git remote prune origin",
-        ];
-
-        for command in cases {
-            let error = validate_git_profile_command(command)
-                .expect_err("git profile should reject persistent metadata mutation");
-
-            assert!(
-                error.to_string().contains("git profile"),
-                "unexpected error for `{command}`: {error}"
-            );
-        }
-    }
-
-    #[test]
-    fn git_profile_rejects_local_config_persistence_options() {
-        let cases = [
-            "git init",
-            "git init --template /tmp/template",
-            "git branch --set-upstream-to=origin/main",
-            "git branch --set-upstream-to origin/main",
-            "git branch -u origin/main",
-            "git branch --track new origin/main",
-            "git branch -t new origin/main",
-            "git branch --unset-upstream",
-            "git push --set-upstream origin main",
-            "git push -u origin main",
-            "git push --follow-tags --set-upstream origin main",
-            "git checkout --track origin/main",
-            "git checkout -t origin/main",
-            "git switch --track origin/main",
-            "git switch -t origin/main",
-        ];
-
-        for command in cases {
-            let error = validate_git_profile_command(command)
-                .expect_err("git profile should reject local config persistence options");
-
-            assert!(
-                error.to_string().contains("git profile"),
-                "unexpected error for `{command}`: {error}"
-            );
-        }
-    }
-
-    #[test]
-    fn git_profile_allows_read_only_remote_queries() {
-        let cases = [
-            "git remote",
-            "git remote -v",
-            "git remote get-url origin",
-            "git remote get-url --push origin",
-            "git remote get-url --all origin",
-            "git remote show -n origin",
-        ];
-
-        for command in cases {
-            validate_git_profile_command(command)
-                .unwrap_or_else(|error| panic!("expected `{command}` to be allowed: {error}"));
-        }
-    }
-
-    #[test]
-    fn github_pr_profile_command_validation_accepts_allowed_pr_surface() {
-        for command in [
-            "gh pr list",
-            "gh pr view 123 --json title,url",
-            "gh pr status",
-            "gh pr create --title 'Update policy' --body 'Adds github-pr profile' --base dev --head feature --draft",
-        ] {
-            parse_github_pr_profile_command(command)
-                .unwrap_or_else(|error| panic!("expected `{command}` to be accepted: {error}"));
-        }
-    }
-
-    #[test]
-    fn github_pr_profile_command_validation_rejects_non_pr_and_interactive_surfaces() {
-        for (command, expected) in [
-            ("gh api repos/owner/repo", "requires a single gh pr command"),
-            ("gh auth status", "requires a single gh pr command"),
-            ("gh pr merge 123", "does not allow gh pr subcommand `merge`"),
-            ("gh pr close 123", "does not allow gh pr subcommand `close`"),
-            ("gh pr edit 123", "does not allow gh pr subcommand `edit`"),
-            (
-                "gh pr review 123",
-                "does not allow gh pr subcommand `review`",
-            ),
-            (
-                "gh pr checks 123",
-                "does not allow gh pr subcommand `checks`",
-            ),
-            ("gh pr ready 123", "does not allow gh pr subcommand `ready`"),
-            (
-                "gh pr create --web",
-                "does not allow interactive/browser flag `--web`",
-            ),
-            (
-                "gh pr view --web=true",
-                "does not allow interactive/browser flag `--web`",
-            ),
-            (
-                "gh pr create --editor",
-                "does not allow interactive/browser flag `--editor`",
-            ),
-            (
-                "gh pr create --editor=true",
-                "does not allow interactive/browser flag `--editor`",
-            ),
-            (
-                "gh pr create --recover abc",
-                "does not allow interactive/browser flag `--recover`",
-            ),
-            (
-                "gh pr create --recover=abc",
-                "does not allow interactive/browser flag `--recover`",
-            ),
-            (
-                "gh pr view -w",
-                "does not allow interactive/browser flag `-w`",
-            ),
-            (
-                "gh pr create -e",
-                "does not allow interactive/browser flag `-e`",
-            ),
-            (
-                "gh pr create -we",
-                "does not allow interactive/browser flag `-w`",
-            ),
-            (
-                "gh pr create -ew",
-                "does not allow interactive/browser flag `-e`",
-            ),
-            ("gh pr list | cat", "shell control syntax is not supported"),
-            (
-                "gh pr view $(echo 1)",
-                "command substitution is not supported",
-            ),
-        ] {
-            let error = parse_github_pr_profile_command(command)
-                .expect_err("github-pr profile should reject unsafe command");
-            assert!(
-                error.contains(expected),
-                "for `{command}`, expected `{expected}`, got `{error}`"
-            );
-        }
-    }
-
-    #[test]
-    fn git_profile_temp_dir_uses_private_git_dir() {
-        let writable_paths = git_profile_writable_paths(Path::new("/repo"));
-
-        assert_eq!(
-            sandbox_temp_dir(&writable_paths),
-            Some(PathBuf::from("/repo/.git/stateful/.stateful-tmp"))
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn seatbelt_github_pr_profile_invokes_gh_by_argv() {
-        let writable_paths = github_pr_profile_writable_paths(Path::new("/repo"));
-        let words = vec![
-            "gh".to_string(),
-            "pr".to_string(),
-            "view".to_string(),
-            "123".to_string(),
-        ];
-        let command = seatbelt_github_pr_command(
-            &words,
-            Path::new("/repo"),
-            &writable_paths,
-            Path::new("/repo/.git/stateful/github-pr/.stateful-tmp"),
-            SandboxNetworkPolicy::Enabled,
-        );
-        let args = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-
-        assert_eq!(command.get_program(), "/usr/bin/sandbox-exec");
-        assert!(args.ends_with(&[
-            "gh".to_string(),
-            "pr".to_string(),
-            "view".to_string(),
-            "123".to_string(),
-        ]));
-        assert!(
-            !args
-                .windows(2)
-                .any(|window| { window == ["/bin/sh", "-c"] })
-        );
-        let profile = args
-            .windows(2)
-            .find_map(|window| {
-                if window[0] == "-p" {
-                    Some(window[1].clone())
-                } else {
-                    None
-                }
-            })
-            .expect("seatbelt github-pr command should pass a profile after -p");
-        assert_profile_allows_macos_identity_and_trust_services(&profile, "github-pr");
-    }
-
-    #[test]
-    fn seatbelt_profile_allows_network_only_when_enabled() {
-        let disabled = seatbelt_profile(&[], SandboxNetworkPolicy::Disabled);
-        let enabled = seatbelt_profile(&[], SandboxNetworkPolicy::Enabled);
-
-        assert!(!disabled.contains("(allow network*)"));
-        assert!(enabled.contains("(allow network*)"));
+    fn symlink_and_hardlink_directory_trees_fail_closed() {
+        let repo = tempfile::tempdir().expect("temp repo");
+        let tree = repo.path().join("tree");
+        fs::create_dir(&tree).expect("test operation should succeed");
+        std::os::unix::fs::symlink("/tmp", tree.join("link"))
+            .expect("test operation should succeed");
+        assert!(validate_directory_tree(&tree).is_err());
+        fs::remove_file(tree.join("link")).expect("test operation should succeed");
+        fs::write(tree.join("source"), "x").expect("test operation should succeed");
+        fs::hard_link(tree.join("source"), tree.join("alias"))
+            .expect("test operation should succeed");
+        assert!(validate_directory_tree(&tree).is_err());
     }
 }

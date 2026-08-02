@@ -1,0 +1,51 @@
+{
+  "codex": {
+    "source": "handwritten",
+    "runtime": "codex",
+    "version": "unavailable",
+    "note": "No Codex executable is installed in the verification environment. These official hook envelopes identify one turn but never authorize native reads or writes.",
+    "user_prompt_submit": { "session_id": "codex-session-1", "turn_id": "turn-1" },
+    "pre_read": { "session_id": "codex-session-1", "turn_id": "turn-1", "tool_name": "read", "tool_use_id": "call-read-1", "tool_input": { "path": "src/lib.rs" } },
+    "post_read": { "session_id": "codex-session-1", "turn_id": "turn-1", "tool_name": "read", "tool_use_id": "call-read-1", "tool_input": { "path": "src/lib.rs" }, "tool_response": "pub fn value() -> u32 { 1 }\n" },
+    "pre_write": { "session_id": "codex-session-1", "turn_id": "turn-1", "tool_name": "apply_patch", "tool_use_id": "call-write-1", "tool_input": { "patch": "*** Begin Patch\n*** End Patch\n" } },
+    "post_write": { "session_id": "codex-session-1", "turn_id": "turn-1", "tool_name": "apply_patch", "tool_use_id": "call-write-1", "tool_input": { "patch": "*** Begin Patch\n*** End Patch\n" }, "tool_response": "Done!" },
+    "stop": { "session_id": "codex-session-1", "turn_id": "turn-1" }
+  },
+  "omp": {
+    "source": "captured",
+    "runtime": "omp",
+    "version": "17.2.3",
+    "capture_command": "omp -p -e capture.js --tools=read|write --auto-approve --no-session",
+    "tool_call_read": {
+      "source": "captured", "runtime": "omp", "version": "17.2.3", "type": "tool_call", "cwd": "/tmp/stateful-omp-conformance",
+      "event": { "type": "tool_call", "toolName": "read", "toolCallId": "call_0S3gcM9ux2rGBTsSdgldxWJH|fc_07018a517c9cfc91016a6ecbf5bc788191ac1ac15ce96165f2", "input": { "path": "fixture.txt:raw" } }
+    },
+    "tool_result_read": {
+      "source": "captured", "runtime": "omp", "version": "17.2.3", "type": "tool_result", "cwd": "/tmp/stateful-omp-conformance",
+      "event": {
+        "type": "tool_result", "toolName": "read", "toolCallId": "call_0S3gcM9ux2rGBTsSdgldxWJH|fc_07018a517c9cfc91016a6ecbf5bc788191ac1ac15ce96165f2", "input": { "path": "fixture.txt:raw" }, "content": [{ "type": "text", "text": "stateful conformance fixture\n" }],
+        "details": { "displayContent": { "text": "stateful conformance fixture\n", "startLine": 1, "lineNumbers": [1, 2] }, "fileSize": 29, "meta": { "source": { "type": "path", "value": "/tmp/stateful-omp-conformance/fixture.txt" } } }, "isError": false
+      }
+    },
+    "tool_call_write": {
+      "source": "captured", "runtime": "omp", "version": "17.2.3", "type": "tool_call", "cwd": "/tmp/stateful-omp-conformance",
+      "event": { "type": "tool_call", "toolName": "write", "toolCallId": "call_Kvj5nKpH9vSOxO0EH3UwBdG8|fc_0cef94f94f72b3a5016a6ecc26697881918d190104eee05b40", "input": { "path": "output.txt", "content": "stateful write fixture\n" } }
+    },
+    "tool_result_write": {
+      "source": "captured", "runtime": "omp", "version": "17.2.3", "type": "tool_result", "cwd": "/tmp/stateful-omp-conformance",
+      "event": { "type": "tool_result", "toolName": "write", "toolCallId": "call_Kvj5nKpH9vSOxO0EH3UwBdG8|fc_0cef94f94f72b3a5016a6ecc26697881918d190104eee05b40", "input": { "path": "output.txt", "content": "stateful write fixture\n" }, "content": [{ "type": "text", "text": "Successfully wrote 23 bytes to output.txt" }], "details": { "resolvedPath": "/tmp/stateful-omp-conformance/output.txt" }, "isError": false }
+    },
+    "lifecycle": {
+      "source": "handwritten",
+      "note": "These records are extension-normalized from OMP 17.2.3 lifecycle events. sessionId and leafAgentId come from ctx.sessionManager; they are deliberately not mislabeled as captured raw events.",
+      "agent_start": { "source": "handwritten", "runtime": "omp", "version": "17.2.3", "type": "agent_start", "cwd": "/tmp/stateful-omp-conformance", "event": { "type": "agent_start", "sessionId": "f460cc7c-c0d2-4a9d-8231-01475074bd2b", "leafAgentId": "root" } },
+      "agent_end_continue": { "source": "handwritten", "runtime": "omp", "version": "17.2.3", "type": "agent_end", "cwd": "/tmp/stateful-omp-conformance", "event": { "type": "agent_end", "sessionId": "f460cc7c-c0d2-4a9d-8231-01475074bd2b", "leafAgentId": "root", "task_id": "omp-task-root", "willContinue": true } },
+      "agent_end_finalize": { "source": "handwritten", "runtime": "omp", "version": "17.2.3", "type": "agent_end", "cwd": "/tmp/stateful-omp-conformance", "event": { "type": "agent_end", "sessionId": "f460cc7c-c0d2-4a9d-8231-01475074bd2b", "leafAgentId": "root", "task_id": "omp-task-root", "willContinue": false } },
+      "session_shutdown": { "source": "handwritten", "runtime": "omp", "version": "17.2.3", "type": "session_shutdown", "cwd": "/tmp/stateful-omp-conformance", "event": { "type": "session_shutdown", "sessionId": "f460cc7c-c0d2-4a9d-8231-01475074bd2b", "leafAgentId": "root", "task_id": "omp-task-root" } }
+    },
+    "forwarded_tool_result": {
+      "source": "handwritten", "runtime": "omp", "version": "17.2.3", "type": "tool_result", "cwd": "/tmp/stateful-omp-conformance",
+      "event": { "type": "tool_result", "toolName": "write", "toolCallId": "call_Kvj5nKpH9vSOxO0EH3UwBdG8|fc_0cef94f94f72b3a5016a6ecc26697881918d190104eee05b40", "input": { "path": "output.txt", "content": "stateful write fixture\n" }, "isError": false, "content": [{ "type": "text", "text": "Successfully wrote 23 bytes to output.txt" }], "details": { "resolvedPath": "/tmp/stateful-omp-conformance/output.txt", "providerMetadata": { "attempt": 1 } }, "task_id": "omp-task-root", "leafAgentId": "root" }
+    }
+  }
+}

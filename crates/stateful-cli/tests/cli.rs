@@ -1,188 +1,19 @@
 use clap::Parser;
 use stateful_cli::{
-    Cli, CodexSandboxMode, Command, GlobalPaths, HookCommand, HookRuntime, InstallAgent,
-    NotificationsCommand, OmpInstallOptions, ReposCommand, ResumeCommand, SandboxCommand,
-    SandboxFsProfile, SandboxNetworkPolicy, SandboxProcessCommand, ServerCommand, ToolsCommand,
-    allow_tool_for_repo, apply_omp_install, doctor_report_with_global, enable_repo,
-    record_unclassified_tool_for_repo,
+    Cli, Command, HookCommand, HookRuntime, InstallAgent, LeaseCommand, ReposCommand,
+    SandboxCommand, SandboxFsProfile, SandboxNetworkPolicy, SandboxProcessCommand, ServerCommand,
 };
-use std::{fs, path::PathBuf, process::Command as ProcessCommand};
 
 #[test]
-fn parses_sandbox_run_read_only_defaults() {
-    let cli = Cli::try_parse_from(["stateful", "sandbox", "run", "--command", "rg auth src"])
-        .expect("sandbox run should parse");
-
-    match cli.command {
-        Command::Sandbox(SandboxCommand::Run {
-            fs,
-            network,
-            purpose,
-            reservation_id,
-            agent_id,
-            workspace_id,
-            write_targets,
-            create_targets,
-            write_dirs,
-            connect_sockets,
-            allow_signal,
-            json,
-            command,
-            sequences,
-            sequence_shell,
-            timeout_seconds,
-            stream_events,
-        }) => {
-            assert_eq!(fs, SandboxFsProfile::ReadOnly);
-            assert_eq!(network, SandboxNetworkPolicy::Disabled);
-            assert_eq!(purpose, None);
-            assert_eq!(agent_id, None);
-            assert_eq!(workspace_id, None);
-            assert_eq!(reservation_id, None);
-            assert!(write_targets.is_empty());
-            assert!(create_targets.is_empty());
-            assert!(write_dirs.is_empty());
-            assert!(connect_sockets.is_empty());
-            assert!(!allow_signal);
-            assert!(!json);
-            assert!(!stream_events);
-            assert_eq!(command, Some("rg auth src".to_string()));
-            assert!(sequences.is_empty());
-            assert_eq!(sequence_shell, None);
-            assert_eq!(timeout_seconds, None);
-        }
-        other => panic!("expected sandbox run command, got {other:?}"),
-    }
-}
-
-#[test]
-fn parses_sandbox_run_sequence() {
+fn parses_typed_sandbox_operation() {
     let cli = Cli::try_parse_from([
         "stateful",
         "sandbox",
         "run",
-        "--fs",
-        "external",
-        "--purpose",
-        "launch benchmark",
-        "--sequence-shell",
-        "/bin/zsh",
-        "--sequence",
-        "set -euo pipefail",
-        "--sequence",
-        "printf ok",
-    ])
-    .expect("sandbox run sequence should parse");
-
-    match cli.command {
-        Command::Sandbox(SandboxCommand::Run {
-            command,
-            sequences,
-            sequence_shell,
-            ..
-        }) => {
-            assert_eq!(command, None);
-            assert_eq!(sequence_shell, Some("/bin/zsh".to_string()));
-            assert_eq!(
-                sequences,
-                vec!["set -euo pipefail".to_string(), "printf ok".to_string()]
-            );
-        }
-        other => panic!("expected sandbox run command, got {other:?}"),
-    }
-}
-
-#[test]
-fn parses_sandbox_run_json_flag() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "sandbox",
-        "run",
-        "--json",
+        "--operation",
+        r#"{"kind":"update","path":"README.md"}"#,
         "--command",
         "printf ok",
-    ])
-    .expect("sandbox run --json should parse");
-
-    match cli.command {
-        Command::Sandbox(SandboxCommand::Run { json, command, .. }) => {
-            assert!(json);
-            assert_eq!(command, Some("printf ok".to_string()));
-        }
-        other => panic!("expected sandbox run command, got {other:?}"),
-    }
-}
-
-#[test]
-fn parses_sandbox_process_find_json_flag() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "sandbox",
-        "process",
-        "find",
-        "--json",
-        "--contains",
-        "denovo_codex_agent",
-    ])
-    .expect("sandbox process find --json should parse");
-
-    match cli.command {
-        Command::Sandbox(SandboxCommand::Process {
-            command: SandboxProcessCommand::Find { contains, .. },
-        }) => {
-            assert_eq!(contains, vec!["denovo_codex_agent"]);
-        }
-        other => panic!("expected sandbox process find command, got {other:?}"),
-    }
-}
-
-#[test]
-fn doctor_labels_legacy_hooks_json_without_counting_it_as_installed() {
-    let temp_dir = tempfile::tempdir().expect("temp dir should create");
-    let temp = temp_dir.path();
-    let repo = temp.join("repo");
-    let hooks_dir = repo.join(".codex");
-    fs::create_dir_all(&hooks_dir).expect("hooks dir should create");
-    fs::create_dir_all(repo.join(".git")).expect("fixture git dir should create");
-    fs::create_dir_all(repo.join(".stateful")).expect("stateful dir should create");
-    fs::write(hooks_dir.join("hooks.json"), "{}").expect("legacy hooks should write");
-    fs::create_dir_all(repo.join(".stateful_core")).expect("legacy state dir should create");
-    fs::write(repo.join(".stateful_core/state.db"), "legacy")
-        .expect("legacy repo state db should write");
-    fs::write(
-        repo.join(".stateful/config.yml"),
-        "protocol_version: stateful.v1\n",
-    )
-    .expect("repo config should write");
-
-    let paths = GlobalPaths::new(temp.join("home"));
-    let report = doctor_report_with_global(&repo, &paths);
-
-    assert!(report.legacy_hooks_json);
-    assert!(report.legacy_repo_state_db);
-    assert!(!report.installed);
-}
-
-#[test]
-fn parses_sandbox_run_write_targets_network_enabled() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "sandbox",
-        "run",
-        "--fs",
-        "write-targets",
-        "--network",
-        "enabled",
-        "--write-target",
-        "README.md",
-        "--create-target",
-        "docs/new.md",
-        "--write-dir",
-        "tmp",
-        "--timeout-seconds",
-        "12",
-        "--command",
-        "printf x > README.md",
     ])
     .expect("sandbox run should parse");
 
@@ -190,1287 +21,188 @@ fn parses_sandbox_run_write_targets_network_enabled() {
         Command::Sandbox(SandboxCommand::Run {
             fs,
             network,
-            purpose,
-            reservation_id,
-            agent_id,
-            workspace_id,
-            write_targets,
-            create_targets,
-            write_dirs,
-            connect_sockets,
-            allow_signal,
-            json,
+            operations,
             command,
-            sequences,
-            sequence_shell,
-            timeout_seconds,
-            stream_events,
-        }) => {
-            assert_eq!(fs, SandboxFsProfile::WriteTargets);
-            assert_eq!(network, SandboxNetworkPolicy::Enabled);
-            assert_eq!(purpose, None);
-            assert_eq!(reservation_id, None);
-            assert_eq!(agent_id, None);
-            assert_eq!(workspace_id, None);
-            assert_eq!(write_targets, vec!["README.md"]);
-            assert_eq!(create_targets, vec!["docs/new.md"]);
-            assert_eq!(write_dirs, vec!["tmp"]);
-            assert!(connect_sockets.is_empty());
-            assert!(!allow_signal);
-            assert!(!json);
-            assert!(!stream_events);
-            assert_eq!(command, Some("printf x > README.md".to_string()));
-            assert!(sequences.is_empty());
-            assert_eq!(sequence_shell, None);
-            assert_eq!(timeout_seconds, Some(12));
-        }
-        other => panic!("expected sandbox run command, got {other:?}"),
-    }
-}
-
-#[test]
-fn parses_sandbox_run_git_profile() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "sandbox",
-        "run",
-        "--fs",
-        "git",
-        "--network",
-        "enabled",
-        "--timeout-seconds",
-        "30",
-        "--command",
-        "git fetch --all",
-    ])
-    .expect("sandbox git profile should parse");
-
-    match cli.command {
-        Command::Sandbox(SandboxCommand::Run {
-            fs,
-            network,
-            purpose,
-            reservation_id,
-            agent_id,
-            workspace_id,
-            write_targets,
-            create_targets,
-            write_dirs,
-            connect_sockets,
-            allow_signal,
-            json,
-            command,
-            sequences,
-            sequence_shell,
-            timeout_seconds,
-            stream_events,
-        }) => {
-            assert_eq!(fs, SandboxFsProfile::Git);
-            assert_eq!(network, SandboxNetworkPolicy::Enabled);
-            assert_eq!(purpose, None);
-            assert_eq!(reservation_id, None);
-            assert_eq!(agent_id, None);
-            assert_eq!(workspace_id, None);
-            assert!(write_targets.is_empty());
-            assert!(create_targets.is_empty());
-            assert!(write_dirs.is_empty());
-            assert!(connect_sockets.is_empty());
-            assert!(!allow_signal);
-            assert!(!json);
-            assert!(!stream_events);
-            assert_eq!(command, Some("git fetch --all".to_string()));
-            assert!(sequences.is_empty());
-            assert_eq!(sequence_shell, None);
-            assert_eq!(timeout_seconds, Some(30));
-        }
-        other => panic!("expected sandbox run command, got {other:?}"),
-    }
-}
-
-#[test]
-fn parses_sandbox_run_github_pr_profile() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "sandbox",
-        "run",
-        "--fs",
-        "github-pr",
-        "--network",
-        "enabled",
-        "--timeout-seconds",
-        "30",
-        "--command",
-        "gh pr status",
-    ])
-    .expect("sandbox github-pr profile should parse");
-
-    match cli.command {
-        Command::Sandbox(SandboxCommand::Run {
-            fs,
-            network,
-            purpose,
-            reservation_id,
-            agent_id,
-            workspace_id,
-            write_targets,
-            create_targets,
-            write_dirs,
-            connect_sockets,
-            allow_signal,
-            json,
-            command,
-            sequences,
-            sequence_shell,
-            timeout_seconds,
-            stream_events,
-        }) => {
-            assert_eq!(fs, SandboxFsProfile::GithubPr);
-            assert_eq!(network, SandboxNetworkPolicy::Enabled);
-            assert_eq!(purpose, None);
-            assert_eq!(reservation_id, None);
-            assert_eq!(agent_id, None);
-            assert_eq!(workspace_id, None);
-            assert!(write_targets.is_empty());
-            assert!(create_targets.is_empty());
-            assert!(write_dirs.is_empty());
-            assert!(connect_sockets.is_empty());
-            assert!(!allow_signal);
-            assert!(!json);
-            assert!(!stream_events);
-            assert_eq!(command, Some("gh pr status".to_string()));
-            assert!(sequences.is_empty());
-            assert_eq!(sequence_shell, None);
-            assert_eq!(timeout_seconds, Some(30));
-        }
-        other => panic!("expected sandbox run command, got {other:?}"),
-    }
-}
-
-#[test]
-fn parses_sandbox_run_build_profile() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "sandbox",
-        "run",
-        "--fs",
-        "build",
-        "--network",
-        "enabled",
-        "--timeout-seconds",
-        "60",
-        "--command",
-        "npm test",
-    ])
-    .expect("sandbox build profile should parse");
-
-    match cli.command {
-        Command::Sandbox(SandboxCommand::Run {
-            fs,
-            network,
-            purpose,
-            reservation_id,
-            agent_id,
-            workspace_id,
-            write_targets,
-            create_targets,
-            write_dirs,
-            connect_sockets,
-            allow_signal,
-            json,
-            command,
-            sequences,
-            sequence_shell,
-            timeout_seconds,
-            stream_events,
-        }) => {
-            assert_eq!(fs, SandboxFsProfile::Build);
-            assert_eq!(network, SandboxNetworkPolicy::Enabled);
-            assert_eq!(purpose, None);
-            assert_eq!(reservation_id, None);
-            assert_eq!(agent_id, None);
-            assert_eq!(workspace_id, None);
-            assert!(write_targets.is_empty());
-            assert!(create_targets.is_empty());
-            assert!(write_dirs.is_empty());
-            assert!(connect_sockets.is_empty());
-            assert!(!allow_signal);
-            assert!(!json);
-            assert!(!stream_events);
-            assert_eq!(command, Some("npm test".to_string()));
-            assert!(sequences.is_empty());
-            assert_eq!(sequence_shell, None);
-            assert_eq!(timeout_seconds, Some(60));
-        }
-        other => panic!("expected sandbox run command, got {other:?}"),
-    }
-}
-
-#[test]
-fn parses_sandbox_run_without_command_for_runtime_validation() {
-    let cli = Cli::try_parse_from(["stateful", "sandbox", "run"])
-        .expect("sandbox run command resolution validates missing command");
-
-    match cli.command {
-        Command::Sandbox(SandboxCommand::Run {
-            command,
-            sequences,
-            sequence_shell,
             ..
         }) => {
-            assert_eq!(command, None);
-            assert!(sequences.is_empty());
-            assert_eq!(sequence_shell, None);
-        }
-        other => panic!("expected sandbox run command, got {other:?}"),
-    }
-}
-
-#[test]
-fn parses_nested_codex_benchmark_sandbox_command() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "sandbox",
-        "run-nested-codex-benchmark",
-        "--purpose",
-        "run nested Codex chaos benchmark",
-        "--agent-id",
-        "agent-a",
-        "--write-dir",
-        "target",
-        "--codex-home-root",
-        "target/nested-codex-homes/run-1",
-        "--timeout-seconds",
-        "120",
-        "--command",
-        "cargo run -p stateful-bench -- run",
-    ])
-    .expect("nested Codex benchmark sandbox command should parse");
-
-    match cli.command {
-        Command::Sandbox(SandboxCommand::RunNestedCodexBenchmark {
-            purpose,
-            agent_id,
-            workspace_id,
-            write_dir,
-            codex_home_root,
-            docker_socket,
-            command,
-            timeout_seconds,
-        }) => {
-            assert_eq!(purpose, "run nested Codex chaos benchmark");
-            assert_eq!(agent_id, "agent-a");
-            assert_eq!(workspace_id, None);
-            assert_eq!(write_dir, "target");
-            assert_eq!(codex_home_root, "target/nested-codex-homes/run-1");
-            assert_eq!(docker_socket, None);
-            assert_eq!(command, "cargo run -p stateful-bench -- run");
-            assert_eq!(timeout_seconds, Some(120));
-        }
-        other => panic!("expected nested Codex benchmark sandbox command, got {other:?}"),
-    }
-}
-
-#[test]
-fn parses_nested_codex_benchmark_sandbox_command_with_docker_socket() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "sandbox",
-        "run-nested-codex-benchmark",
-        "--purpose",
-        "run nested Codex chaos benchmark",
-        "--agent-id",
-        "agent-a",
-        "--write-dir",
-        "target",
-        "--codex-home-root",
-        "target/nested-codex-homes/run-1",
-        "--docker-socket",
-        "/tmp/colima/default/docker.sock",
-        "--command",
-        "cargo run -p stateful-bench -- run",
-    ]);
-
-    assert!(
-        cli.is_ok(),
-        "nested Codex benchmark sandbox should accept an explicit Docker socket"
-    );
-}
-
-#[test]
-fn nested_codex_benchmark_sandbox_requires_purpose_home_root_and_command() {
-    for args in [
-        vec![
-            "stateful",
-            "sandbox",
-            "run-nested-codex-benchmark",
-            "--write-dir",
-            "target",
-            "--codex-home-root",
-            "target/nested-codex-homes/run-1",
-            "--command",
-            "cargo test",
-        ],
-        vec![
-            "stateful",
-            "sandbox",
-            "run-nested-codex-benchmark",
-            "--purpose",
-            "run nested Codex chaos benchmark",
-            "--write-dir",
-            "target",
-            "--command",
-            "cargo test",
-        ],
-        vec![
-            "stateful",
-            "sandbox",
-            "run-nested-codex-benchmark",
-            "--purpose",
-            "run nested Codex chaos benchmark",
-            "--write-dir",
-            "target",
-            "--codex-home-root",
-            "target/nested-codex-homes/run-1",
-        ],
-    ] {
-        let error = Cli::try_parse_from(args)
-            .expect_err("nested Codex benchmark command should require explicit scope");
-        let message = error.to_string();
-        assert!(
-            message.contains("required") || message.contains("Usage:"),
-            "unexpected parse error: {message}"
-        );
-    }
-}
-
-#[test]
-fn parses_sandbox_run_external_profile() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "sandbox",
-        "run",
-        "--fs",
-        "external",
-        "--purpose",
-        "install rebuilt binaries",
-        "--write-target",
-        "/opt/stateful/bin/stateful",
-        "--create-target",
-        "/opt/stateful/bin/stateful-bench",
-        "--write-dir",
-        "/opt/stateful/bin",
-        "--connect-socket",
-        "/private/tmp/tmux-501/default",
-        "--allow-signal",
-        "--network",
-        "enabled",
-        "--timeout-seconds",
-        "10",
-        "--command",
-        "install -m 755 target/release/stateful /opt/stateful/bin/stateful",
-    ])
-    .expect("sandbox external run should parse");
-
-    match cli.command {
-        Command::Sandbox(SandboxCommand::Run {
-            fs,
-            network,
-            purpose,
-            reservation_id,
-            agent_id,
-            workspace_id,
-            write_targets,
-            create_targets,
-            write_dirs,
-            connect_sockets,
-            allow_signal,
-            json,
-            timeout_seconds,
-            command,
-            sequences,
-            sequence_shell,
-            stream_events,
-        }) => {
-            assert_eq!(fs, SandboxFsProfile::External);
-            assert_eq!(purpose, Some("install rebuilt binaries".to_string()));
-            assert_eq!(reservation_id, None);
-            assert_eq!(agent_id, None);
-            assert_eq!(workspace_id, None);
-            assert_eq!(write_targets, vec!["/opt/stateful/bin/stateful"]);
-            assert_eq!(create_targets, vec!["/opt/stateful/bin/stateful-bench"]);
-            assert_eq!(write_dirs, vec!["/opt/stateful/bin"]);
-            assert_eq!(connect_sockets, vec!["/private/tmp/tmux-501/default"]);
-            assert!(allow_signal);
-            assert!(!json);
-            assert_eq!(network, SandboxNetworkPolicy::Enabled);
-            assert_eq!(timeout_seconds, Some(10));
-            assert!(!stream_events);
+            assert_eq!(fs, SandboxFsProfile::ReadOnly);
+            assert_eq!(network, SandboxNetworkPolicy::Disabled);
             assert_eq!(
-                command,
-                Some(
-                    "install -m 755 target/release/stateful /opt/stateful/bin/stateful".to_string()
-                )
+                operations,
+                vec![r#"{"kind":"update","path":"README.md"}"#.to_string()]
             );
-            assert!(sequences.is_empty());
-            assert_eq!(sequence_shell, None);
+            assert_eq!(command.as_deref(), Some("printf ok"));
         }
-        other => panic!("expected sandbox external run command, got {other:?}"),
+        other => panic!("expected sandbox run command, got {other:?}"),
     }
 }
 
 #[test]
-fn rejects_external_run_command() {
-    for args in [
-        vec![
-            "stateful",
-            "external-run",
-            "request",
-            "--purpose",
-            "install rebuilt binaries",
-            "--write-dir",
-            "/opt/stateful/bin",
-            "--command",
-            "true",
-        ],
-        vec![
-            "stateful",
-            "external-run",
-            "approve",
-            "request-123",
-            "--run",
-        ],
-        vec!["stateful", "external-run", "run", "request-123"],
-    ] {
-        let error = Cli::try_parse_from(args).expect_err("external-run command should be removed");
+fn parses_codex_passthrough_arguments() {
+    let cli = Cli::try_parse_from(["stateful", "codex", "exec", "--json"])
+        .expect("codex command should parse");
 
-        assert!(
-            error.to_string().contains("unrecognized subcommand"),
-            "unexpected parse error: {error}"
-        );
-    }
-}
-
-#[test]
-fn git_related_stateful_subcommands_are_removed() {
-    for command in ["commit", "pull", "push"] {
-        let error = Cli::try_parse_from(["stateful", command])
-            .expect_err("git-related stateful subcommands should be removed");
-
-        assert!(
-            error.to_string().contains("unrecognized subcommand"),
-            "unexpected parse error for {command}: {error}"
-        );
-    }
-}
-
-#[test]
-fn parses_enable_command() {
-    let cli = Cli::try_parse_from(["stateful", "enable", "--repo", "/work/repo"])
-        .expect("enable command should parse");
-
-    assert!(matches!(
-        cli.command,
-        Command::Enable { ref repo } if repo == &Some(PathBuf::from("/work/repo"))
-    ));
-}
-
-#[test]
-fn parses_disable_command() {
-    let cli = Cli::try_parse_from(["stateful", "disable", "--repo", "/work/repo"])
-        .expect("disable command should parse");
-
-    assert!(matches!(
-        cli.command,
-        Command::Disable { ref repo } if repo == &Some(PathBuf::from("/work/repo"))
-    ));
-}
-
-#[test]
-fn rejects_codex_wrapper_command_with_read_only_tmp_sandbox() {
-    let error = Cli::try_parse_from([
-        "stateful",
-        "codex",
-        "--codex-bin",
-        "/opt/codex/bin/codex",
-        "--sandbox",
-        "read-only-tmp",
-        "exec",
-        "--json",
-        "-",
-    ])
-    .expect_err("read-only-tmp sandbox mode should be removed");
-
-    assert!(
-        error.to_string().contains("read-only-tmp"),
-        "error should name the rejected sandbox mode: {error}"
-    );
-}
-
-#[test]
-fn parses_codex_wrapper_command_with_passthrough_sandbox_by_default() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "codex",
-        "--codex-bin",
-        "/opt/codex/bin/codex",
-        "exec",
-        "--json",
-        "-",
-    ])
-    .expect("codex wrapper command should parse");
-
-    assert!(matches!(
-        cli.command,
-        Command::Codex {
-            ref codex_bin,
-            sandbox: CodexSandboxMode::Passthrough,
-            no_stateful: false,
-            ref args,
-        } if codex_bin == "/opt/codex/bin/codex"
-            && args == &vec!["exec".to_string(), "--json".to_string(), "-".to_string()]
-    ));
-}
-
-#[test]
-fn parses_codex_wrapper_no_stateful_command() {
-    let cli = Cli::try_parse_from(["stateful", "codex", "--no-stateful", "exec", "-"])
-        .expect("codex wrapper no-stateful command should parse");
-
-    assert!(matches!(
-        cli.command,
-        Command::Codex {
-            no_stateful: true,
-            ref args,
-            ..
-        } if args == &vec!["exec".to_string(), "-".to_string()]
-    ));
-}
-
-#[test]
-fn parses_install_yes_command() {
-    let cli = Cli::try_parse_from(["stateful", "install", "--yes"])
-        .expect("install command should parse");
-
-    assert!(matches!(
-        cli.command,
-        Command::Install {
-            yes: true,
-            ref agents,
-            codex_config: None,
-            binary: None,
-            update: false,
+    match cli.command {
+        Command::Codex { codex_bin, args } => {
+            assert_eq!(codex_bin, "codex");
+            assert_eq!(args, vec!["exec".to_string(), "--json".to_string()]);
         }
-        if agents.is_empty()
-    ));
+        other => panic!("expected codex command, got {other:?}"),
+    }
 }
 
 #[test]
-fn parses_install_agent_codex_command() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "install",
-        "--agent",
-        "codex",
-        "--yes",
-        "--codex-config",
-        "codex-home/.codex/config.toml",
-        "--binary",
-        "/opt/stateful/bin/stateful",
-    ])
-    .expect("install --agent codex command should parse");
-
+fn parses_retained_lifecycle_commands() {
+    let start = Cli::try_parse_from(["stateful", "server", "start", "--foreground"])
+        .expect("server start should parse");
     assert!(matches!(
-        cli.command,
-        Command::Install {
-            yes: true,
-            ref agents,
-            ref codex_config,
-            ref binary,
-            update: false,
-        } if codex_config == &Some(PathBuf::from("codex-home/.codex/config.toml"))
-            && binary.as_deref() == Some("/opt/stateful/bin/stateful")
-            && agents == &vec![InstallAgent::Codex]
-    ));
-}
-
-#[test]
-fn parses_install_agent_omp_command() {
-    let cli = Cli::try_parse_from(["stateful", "install", "--agent", "omp", "--yes", "--update"])
-        .expect("install --agent omp command should parse");
-
-    assert!(matches!(
-        cli.command,
-        Command::Install {
-            yes: true,
-            ref agents,
-            update: true,
-            ..
-        } if agents == &vec![InstallAgent::Omp]
-    ));
-}
-
-#[test]
-fn omp_extension_uses_strict_agent_id_identity() {
-    let temp_dir = tempfile::tempdir().expect("temp dir should create");
-    let temp = temp_dir.path();
-    let agent_dir = temp.join("agent");
-
-    apply_omp_install(OmpInstallOptions {
-        yes: true,
-        paths: GlobalPaths::new(temp.join("home")),
-        binary_path: "/usr/local/bin/stateful".to_string(),
-        project_config_path: None,
-        omp_agent_dir: Some(agent_dir.clone()),
-        update: true,
-    })
-    .expect("OMP install should write generated extension");
-
-    let extension = fs::read_to_string(agent_dir.join("extensions/stateful-omp-extension.js"))
-        .expect("generated OMP extension should be readable");
-
-    assert!(extension.contains("function agentIdFragmentFromString"));
-    assert!(extension.contains("function sessionManagerString"));
-    assert!(extension.contains("function detectAgentId(_event, ctx)"));
-    assert!(extension.contains("sessionManagerString(ctx, \"getSessionId\", sessionIdFromString)"));
-    assert!(
-        extension.contains("sessionManagerString(ctx, \"getLeafId\", agentIdFragmentFromString)")
-    );
-    assert!(extension.contains("`omp-${sessionId}-${leafId}`"));
-    assert!(extension.contains("agent_id"));
-    assert!(!extension.contains("event?.agentId"));
-    assert!(!extension.contains("event?.agent_id"));
-    assert!(!extension.contains("event?.agent?.id"));
-    assert!(!extension.contains("ctx?.agentId"));
-    assert!(!extension.contains("ctx?.agent_id"));
-    assert!(!extension.contains("ctx?.agent?.id"));
-    assert!(!extension.contains("event?.sessionId"));
-    assert!(!extension.contains("event?.session_id"));
-    assert!(!extension.contains("event?.session?.id"));
-    assert!(!extension.contains("ctx?.sessionId"));
-    assert!(!extension.contains("ctx?.session_id"));
-    assert!(!extension.contains("ctx?.session?.id"));
-    assert!(!extension.contains("ctx?.runtime?.sessionId"));
-    assert!(!extension.contains("ctx?.runtime?.session?.id"));
-    assert!(!extension.contains("process.env.STATEFUL_SESSION_ID"));
-    assert!(!extension.contains("sessionIdFromSessionManager"));
-    assert!(!extension.contains("function processAgentId"));
-    assert!(!extension.contains("omp-pid-"));
-    assert!(extension.contains("missingAgentIdReason"));
-}
-
-#[test]
-fn rejects_install_codex_subcommand() {
-    assert!(Cli::try_parse_from(["stateful", "install", "codex", "--yes"]).is_err());
-}
-
-#[test]
-fn parses_repos_list_command() {
-    let cli = Cli::try_parse_from(["stateful", "repos", "list"])
-        .expect("repos list command should parse");
-
-    assert!(matches!(cli.command, Command::Repos(ReposCommand::List)));
-}
-
-#[test]
-fn parses_tools_allow_list_and_deny_commands() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "tools",
-        "allow",
-        "mcp__codex_apps__github__merge_pull_request",
-        "--repo",
-        "/workspace/repo",
-    ])
-    .expect("tools allow command should parse");
-    assert!(matches!(
-        cli.command,
-        Command::Tools(ToolsCommand::Allow {
-            ref tool_name,
-            ref repo,
-        }) if tool_name == "mcp__codex_apps__github__merge_pull_request"
-            && repo.as_deref() == Some(std::path::Path::new("/workspace/repo"))
-    ));
-
-    let cli = Cli::try_parse_from(["stateful", "tools", "list"])
-        .expect("tools list command should parse");
-    assert!(matches!(
-        cli.command,
-        Command::Tools(ToolsCommand::List { repo: None })
-    ));
-
-    let cli = Cli::try_parse_from(["stateful", "tools", "deny", "spawn_agent"])
-        .expect("tools deny command should parse");
-    assert!(matches!(
-        cli.command,
-        Command::Tools(ToolsCommand::Deny {
-            ref tool_name,
-            repo: None,
-        }) if tool_name == "spawn_agent"
-    ));
-}
-
-#[test]
-fn tools_list_prints_allowed_and_unclassified_tools() {
-    let temp = tempfile::tempdir().expect("temp dir should create");
-    let root = temp.path();
-    let paths = GlobalPaths::new(root.join("home"));
-    let repo = root.join("repo");
-    fs::create_dir_all(repo.join(".git")).expect("git directory should be creatable");
-    enable_repo(&paths, &repo).expect("repo should enable");
-    allow_tool_for_repo(&paths, &repo, "KnownTool").expect("tool should be allowed");
-    record_unclassified_tool_for_repo(&paths, &repo, "FutureWriteTool")
-        .expect("unclassified tool should record");
-
-    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_stateful"))
-        .args(["tools", "list", "--repo"])
-        .arg(&repo)
-        .env_clear()
-        .env("STATEFUL_HOME", &paths.home)
-        .output()
-        .expect("tools list should run");
-
-    assert!(
-        output.status.success(),
-        "tools list failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let json: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("tools list should print json");
-    assert_eq!(
-        json["allowed_tools"],
-        serde_json::json!([
-            "multi_agent_v1spawn_agent",
-            "multi_agent_v1wait_agent",
-            "multi_agent_v1close_agent",
-            "multi_agent_v1resume_agent",
-            "mcp__openaiDeveloperDocs__fetch_openai_doc",
-            "mcp__openaiDeveloperDocs__search_openai_docs",
-            "multi_agent_v1send_input",
-            "task",
-            "yield",
-            "parallel_tool_calls",
-            "lsp",
-            "glob",
-            "ask",
-            "ast_grep",
-            "browser",
-            "find",
-            "generate_image",
-            "grep",
-            "irc",
-            "job",
-            "read",
-            "report_tool_issue",
-            "search",
-            "search_tool_bm25",
-            "todo",
-            "web_search",
-            "KnownTool"
-        ])
-    );
-    assert_eq!(
-        json["unclassified_tools"],
-        serde_json::json!(["FutureWriteTool"])
-    );
-}
-
-#[test]
-fn parses_notifications_poll_command() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "notifications",
-        "poll",
-        "--agent-id",
-        "s1",
-        "--workspace-id",
-        "w1",
-    ])
-    .expect("notifications poll command should parse");
-
-    assert!(matches!(
-        cli.command,
-        Command::Notifications(NotificationsCommand::Poll {
-            ref agent_id,
-            ref workspace_id,
-        }) if agent_id.as_deref() == Some("s1")
-            && workspace_id.as_deref() == Some("w1")
-    ));
-}
-
-#[test]
-fn parses_resume_next_command() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "resume",
-        "next",
-        "--agent-id",
-        "s1",
-        "--workspace-id",
-        "w1",
-    ])
-    .expect("resume next command should parse");
-
-    assert!(matches!(
-        cli.command,
-        Command::Resume(ResumeCommand::Next {
-            ref agent_id,
-            ref workspace_id,
-        }) if agent_id.as_deref() == Some("s1")
-            && workspace_id.as_deref() == Some("w1")
-    ));
-}
-
-#[test]
-fn hook_codex_pre_tool_use_command_parses() {
-    let cli = Cli::try_parse_from(["stateful", "hook", "codex", "pre-tool-use"])
-        .expect("hook codex pre-tool-use command should parse");
-
-    assert!(matches!(
-        cli.command,
-        Command::Hook(HookRuntime::Codex {
-            command: HookCommand::PreToolUse,
-        })
-    ));
-}
-
-#[test]
-fn hook_omp_pre_tool_use_command_parses() {
-    let cli = Cli::try_parse_from(["stateful", "hook", "omp", "pre-tool-use"])
-        .expect("hook omp pre-tool-use command should parse");
-
-    assert!(matches!(
-        cli.command,
-        Command::Hook(HookRuntime::Omp {
-            command: HookCommand::PreToolUse,
-        })
-    ));
-}
-
-#[test]
-fn hook_legacy_pre_tool_use_command_is_rejected() {
-    assert!(Cli::try_parse_from(["stateful", "hook", "pre-tool-use"]).is_err());
-}
-
-#[test]
-fn reservation_declare_command_parses_file_scopes() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "reservation",
-        "declare",
-        "--agent-id",
-        "s1",
-        "--workspace-id",
-        "w1",
-        "--purpose",
-        "Fix auth validation behavior.",
-        "src/auth.ts",
-        "src/session/",
-    ])
-    .expect("reservation declare command should parse");
-
-    assert!(matches!(
-        cli.command,
-        Command::Reservation(stateful_cli::ReservationCommand::Declare {
-            ref agent_id,
-            ref workspace_id,
-            ref purpose,
-            ref files_planned,
-        }) if agent_id.as_deref() == Some("s1")
-            && workspace_id.as_deref() == Some("w1")
-            && purpose == "Fix auth validation behavior."
-            && files_planned == &vec!["src/auth.ts".to_string(), "src/session/".to_string()]
-    ));
-}
-
-#[test]
-fn reservation_declare_command_can_default_agent_and_workspace() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "reservation",
-        "declare",
-        "--purpose",
-        "Fix auth validation behavior.",
-        "src/auth.ts",
-    ])
-    .expect("reservation declare command should parse without explicit identity flags");
-
-    assert!(matches!(
-        cli.command,
-        Command::Reservation(stateful_cli::ReservationCommand::Declare {
-            agent_id: None,
-            workspace_id: None,
-            ref purpose,
-            ref files_planned,
-        }) if purpose == "Fix auth validation behavior."
-            && files_planned == &vec!["src/auth.ts".to_string()]
-    ));
-}
-
-#[test]
-fn reservation_declare_command_requires_at_least_one_file() {
-    let error = Cli::try_parse_from([
-        "stateful",
-        "reservation",
-        "declare",
-        "--purpose",
-        "Fix auth validation behavior.",
-    ])
-    .expect_err("reservation declare without files should fail");
-
-    assert!(
-        error.to_string().contains("files_planned") || error.to_string().contains("FILES_PLANNED"),
-        "unexpected error: {error}"
-    );
-}
-
-#[test]
-fn reservation_claim_command_parses_wait_id() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "reservation",
-        "claim",
-        "--agent-id",
-        "agent-a",
-        "--workspace-id",
-        "w1",
-        "--wait-id",
-        "wait-1",
-    ])
-    .expect("reservation claim command should parse");
-
-    assert!(matches!(
-        cli.command,
-        Command::Reservation(stateful_cli::ReservationCommand::Claim {
-            ref agent_id,
-            ref workspace_id,
-            ref wait_id,
-            ..
-        }) if agent_id.as_deref() == Some("agent-a")
-            && workspace_id.as_deref() == Some("w1")
-            && wait_id == "wait-1"
-    ));
-}
-
-#[test]
-fn reservation_claim_command_parses_reservation_id() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "reservation",
-        "claim",
-        "--reservation-id",
-        "reservation-a",
-        "--wait-id",
-        "wait-1",
-    ])
-    .expect("claim command should parse");
-
-    assert!(matches!(
-        cli.command,
-        Command::Reservation(stateful_cli::ReservationCommand::Claim {
-            ref reservation_id,
-            ref wait_id,
-            ..
-        }) if reservation_id.as_deref() == Some("reservation-a") && wait_id == "wait-1"
-    ));
-}
-
-#[test]
-fn reservation_request_command_parses_request_id_action_and_path() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "reservation",
-        "request",
-        "--agent-id",
-        "s1",
-        "--workspace-id",
-        "w1",
-        "--request-id",
-        "request-1",
-        "--action",
-        "write_file",
-        "--path",
-        "src/auth.ts",
-        "--purpose",
-        "Queue auth file changes.",
-    ])
-    .expect("reservation request command should parse");
-
-    assert!(matches!(
-        cli.command,
-        Command::Reservation(stateful_cli::ReservationCommand::Request {
-            ref agent_id,
-            ref workspace_id,
-            ref request_id,
-            reservation_id: _,
-            ref action,
-            ref path,
-            ref purpose,
-        }) if agent_id.as_deref() == Some("s1")
-            && workspace_id.as_deref() == Some("w1")
-            && request_id == "request-1"
-            && action == "write_file"
-            && path == "src/auth.ts"
-            && purpose == "Queue auth file changes."
-    ));
-}
-
-#[test]
-fn reservation_cancel_command_parses_request_id() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "reservation",
-        "cancel",
-        "--agent-id",
-        "s1",
-        "--workspace-id",
-        "w1",
-        "--request-id",
-        "request-1",
-    ])
-    .expect("reservation cancel command should parse");
-
-    assert!(matches!(
-        cli.command,
-        Command::Reservation(stateful_cli::ReservationCommand::Cancel {
-            ref agent_id,
-            ref workspace_id,
-            ref request_id,
-        }) if agent_id.as_deref() == Some("s1")
-            && workspace_id.as_deref() == Some("w1")
-            && request_id == "request-1"
-    ));
-}
-
-#[test]
-fn server_command_parses_runtime_options() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "server",
-        "start",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        "43873",
-        "--token",
-        "secret-token",
-        "--workspace-id",
-        "w1",
-    ])
-    .expect("server command should parse");
-
-    assert!(matches!(
-        cli.command,
+        start.command,
         Command::Server {
             command: Some(ServerCommand::Start {
-                ref host,
-                port,
-                ref token,
-                ref workspace_id,
+                foreground: true,
                 ..
             }),
             ..
-        } if host == "127.0.0.1"
-            && port == 43873
-            && token.as_deref() == Some("secret-token")
-            && workspace_id == "w1"
-    ));
-}
-
-#[test]
-fn parses_server_start_subcommand() {
-    let cli = Cli::try_parse_from(["stateful", "server", "start", "--foreground"])
-        .expect("server start should parse");
-
-    match cli.command {
-        Command::Server {
-            command: Some(ServerCommand::Start { foreground, .. }),
-            ..
-        } => assert!(foreground),
-        other => panic!("expected server start command, got {other:?}"),
-    }
-}
-
-#[test]
-fn parses_server_start_subcommand_as_detached_by_default() {
-    let cli =
-        Cli::try_parse_from(["stateful", "server", "start"]).expect("server start should parse");
-
-    match cli.command {
-        Command::Server {
-            command: Some(ServerCommand::Start { foreground, .. }),
-            ..
-        } => assert!(!foreground),
-        other => panic!("expected server start command, got {other:?}"),
-    }
-}
-
-#[test]
-fn parses_legacy_server_runtime_options() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "server",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        "43874",
-        "--token",
-        "secret-token",
-        "--workspace-id",
-        "w1",
-    ])
-    .expect("legacy server command should parse");
-
-    assert!(matches!(
-        cli.command,
-        Command::Server {
-            command: None,
-            ref host,
-            port,
-            ref token,
-            ref workspace_id,
-        } if host == "127.0.0.1"
-            && port == 43874
-            && token.as_deref() == Some("secret-token")
-            && workspace_id == "w1"
-    ));
-}
-
-#[test]
-fn rejects_removed_lan_subcommand() {
-    assert!(Cli::try_parse_from(["stateful", "lan", "serve"]).is_err());
-    assert!(
-        Cli::try_parse_from([
-            "stateful",
-            "lan",
-            "join",
-            "http://192.168.0.23:43873",
-            "--token",
-            "secret-token",
-        ])
-        .is_err()
-    );
-}
-
-#[test]
-fn parses_server_join_without_repo_enablement() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "server",
-        "join",
-        "http://192.168.0.23:43873",
-        "--token",
-        "secret-token",
-    ])
-    .expect("server join should parse");
-
-    match cli.command {
-        Command::Server {
-            command:
-                Some(ServerCommand::Join {
-                    base_url,
-                    token,
-                    workspace_id,
-                    allow_plain_http,
-                    enable_repo,
-                    binary,
-                    codex_config,
-                }),
-            ..
-        } => {
-            assert_eq!(base_url, "http://192.168.0.23:43873");
-            assert_eq!(token, "secret-token");
-            assert_eq!(workspace_id, "shared");
-            assert!(!allow_plain_http);
-            assert!(!enable_repo);
-            assert_eq!(binary, None);
-            assert_eq!(codex_config, None);
         }
-        other => panic!("expected server join command, got {other:?}"),
-    }
-}
+    ));
 
-#[test]
-fn parses_server_join_allow_plain_http() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "server",
-        "join",
-        "http://192.168.0.23:43873",
-        "--token",
-        "secret-token",
-        "--allow-plain-http",
-    ])
-    .expect("server join should parse allow-plain-http");
-
-    match cli.command {
-        Command::Server {
-            command: Some(ServerCommand::Join {
-                allow_plain_http, ..
-            }),
-            ..
-        } => assert!(allow_plain_http),
-        other => panic!("expected server join command, got {other:?}"),
-    }
-}
-
-#[test]
-fn parses_server_join_with_repo_enablement_and_install_overrides() {
-    let cli = Cli::try_parse_from([
-        "stateful",
-        "server",
-        "join",
-        "http://192.168.0.23:43873",
-        "--token",
-        "secret-token",
-        "--workspace-id",
-        "w1",
-        "--enable-repo",
-        "--binary",
-        "/opt/stateful/bin/stateful",
-        "--codex-config",
-        "codex-home/.codex/config.toml",
-    ])
-    .expect("server join should parse");
-
-    match cli.command {
-        Command::Server {
-            command:
-                Some(ServerCommand::Join {
-                    base_url,
-                    token,
-                    workspace_id,
-                    allow_plain_http,
-                    enable_repo,
-                    binary,
-                    codex_config,
-                }),
-            ..
-        } => {
-            assert_eq!(base_url, "http://192.168.0.23:43873");
-            assert_eq!(token, "secret-token");
-            assert_eq!(workspace_id, "w1");
-            assert!(!allow_plain_http);
-            assert!(enable_repo);
-            assert_eq!(binary.as_deref(), Some("/opt/stateful/bin/stateful"));
-            assert_eq!(
-                codex_config,
-                Some(std::path::PathBuf::from("codex-home/.codex/config.toml"))
-            );
-        }
-        other => panic!("expected server join command, got {other:?}"),
-    }
-}
-
-#[test]
-fn parses_server_restart_subcommand() {
-    let cli = Cli::try_parse_from(["stateful", "server", "restart"])
+    let restart = Cli::try_parse_from(["stateful", "server", "restart"])
         .expect("server restart should parse");
-
-    match cli.command {
+    assert!(matches!(
+        restart.command,
         Command::Server {
             command: Some(ServerCommand::Restart),
             ..
-        } => {}
-        other => panic!("expected server restart command, got {other:?}"),
-    }
+        }
+    ));
+}
+
+#[test]
+fn server_start_rejects_public_tokens_and_accepts_internal_token_stdin() {
+    assert!(Cli::try_parse_from(["stateful", "server", "--token", "secret"]).is_err());
+    assert!(Cli::try_parse_from(["stateful", "server", "start", "--token", "secret"]).is_err());
+
+    let internal = Cli::try_parse_from([
+        "stateful",
+        "server",
+        "start",
+        "--foreground",
+        "--token-stdin",
+    ])
+    .expect("detached child command should parse");
+    assert!(matches!(
+        internal.command,
+        Command::Server {
+            command: Some(ServerCommand::Start {
+                foreground: true,
+                token_stdin: true,
+                ..
+            }),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn parses_retained_adapter_commands() {
+    let process = Cli::try_parse_from([
+        "stateful",
+        "sandbox",
+        "process",
+        "find",
+        "--contains",
+        "stateful",
+        "--json",
+    ])
+    .expect("process query should parse");
+    assert!(matches!(
+        process.command,
+        Command::Sandbox(SandboxCommand::Process {
+            command: SandboxProcessCommand::Find { .. }
+        })
+    ));
+
+    let hook = Cli::try_parse_from(["stateful", "hook", "omp", "pre-tool-use"])
+        .expect("OMP hook should parse");
+    assert!(matches!(
+        hook.command,
+        Command::Hook(HookRuntime::Omp {
+            command: HookCommand::PreToolUse
+        })
+    ));
+}
+
+#[test]
+fn parses_retained_install_and_registry_commands() {
+    let install = Cli::try_parse_from(["stateful", "install", "--agent", "codex"])
+        .expect("install should parse");
+    assert!(matches!(
+        install.command,
+        Command::Install { agents, .. } if agents == vec![InstallAgent::Codex]
+    ));
+
+    let repos =
+        Cli::try_parse_from(["stateful", "repos", "list"]).expect("repo listing should parse");
+    assert!(matches!(repos.command, Command::Repos(ReposCommand::List)));
+}
+
+#[test]
+fn parses_v2_status_commit_and_lease_release_commands() {
+    assert!(matches!(
+        Cli::try_parse_from(["stateful", "status"])
+            .expect("status should parse")
+            .command,
+        Command::Status
+    ));
+
+    let commit = Cli::try_parse_from([
+        "stateful",
+        "commit",
+        "--task-id",
+        "task-1",
+        "--agent-id",
+        "agent-1",
+        "-m",
+        "update docs",
+        "README.md",
+    ])
+    .expect("commit should parse");
+    assert!(matches!(
+        commit.command,
+        Command::Commit {
+            message,
+            task_id,
+            agent_id,
+            paths,
+        } if message == "update docs"
+            && task_id == "task-1"
+            && agent_id == "agent-1"
+            && paths == vec!["README.md"]
+    ));
+
+    let release = Cli::try_parse_from([
+        "stateful",
+        "lease",
+        "release",
+        "batch-1",
+        "--task-id",
+        "task-1",
+        "--agent-id",
+        "agent-1",
+    ])
+    .expect("lease release should parse");
+    assert!(matches!(
+        release.command,
+        Command::Lease(LeaseCommand::Release {
+            batch_id,
+            task_id,
+            agent_id,
+        }) if batch_id == "batch-1" && task_id == "task-1" && agent_id == "agent-1"
+    ));
+}
+
+#[test]
+fn rejects_removed_current_and_events_commands() {
+    assert!(Cli::try_parse_from(["stateful", "current"]).is_err());
+    assert!(Cli::try_parse_from(["stateful", "events"]).is_err());
 }
