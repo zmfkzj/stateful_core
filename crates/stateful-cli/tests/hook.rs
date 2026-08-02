@@ -798,12 +798,25 @@ fn codex_exec_hook_keeps_heartbeating_past_the_inactivity_timeout() {
         .recv_timeout(Duration::from_secs(2))
         .expect("task start request should arrive");
     assert!(request.starts_with("POST /v2/tasks/start HTTP/1.1"));
-    thread::sleep(Duration::from_millis(5_500));
+    let deadline = started_at + Duration::from_secs(10);
+    let heartbeat_outlived_timeout = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break false;
+        }
+        match requests.recv_timeout(remaining) {
+            Ok((received_at, request))
+                if request.starts_with("POST /v2/tasks/heartbeat HTTP/1.1")
+                    && received_at.duration_since(started_at) > Duration::from_secs(5) =>
+            {
+                break true;
+            }
+            Ok(_) => {}
+            Err(_) => break false,
+        }
+    };
     assert!(
-        requests.try_iter().any(|(received_at, request)| {
-            request.starts_with("POST /v2/tasks/heartbeat HTTP/1.1")
-                && received_at.duration_since(started_at) > Duration::from_secs(5)
-        }),
+        heartbeat_outlived_timeout,
         "heartbeat helper did not outlive the five-second timeout"
     );
     std::fs::remove_file(owner_path).expect("owner record should remove");
